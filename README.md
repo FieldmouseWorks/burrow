@@ -341,7 +341,8 @@ Each has an entry below, and each can be imported on its own.
   watches. With `units.enable` (on with the watchdog), what's broken on the
   machine itself is a source too (`burrow-units`): a failed unit, and a
   program that dumped core, whoever ran it, is a stall `units.graceMinutes`
-  after it's seen, and a crash counts for `units.crashHours`; `units.ignore`
+  after it's seen (but a crash in a Nix build, or in a proj job's slice,
+  `units.ownedSlices`, which what ran it sees for itself), and a crash counts for `units.crashHours`; `units.ignore`
   takes globs of the units and programs that fail by design. A watcher
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The

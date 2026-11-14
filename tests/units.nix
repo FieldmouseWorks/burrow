@@ -6,7 +6,8 @@
 # a unit that runs again leaves it once burrow-units is asked to look
 # again, and a crash once it's cleared, until the next. Only the service
 # passes (a pass that can't read the whole journal is refused), so a clear
-# by a user who can't keeps everyone else's crashes. What an item says, and when it's due, are
+# by a user who can't keeps everyone else's crashes. A crash in a Nix build,
+# or in a proj job's slice, is theirs and never lands. What an item says, and when it's due, are
 # crates/burrow-units' tests.
 #
 #   nix build .#checks.x86_64-linux.units -L
@@ -39,6 +40,8 @@ pkgs.testers.runNixOSTest {
     };
     environment.etc."burrow-webhook".text = "hook-secret\n";
     burrow.watchdog.units.enable = true;
+    # proj's slice, without proj: a crash in a unit there is its own.
+    burrow.watchdog.units.ownedSlices = [ "claude-jobs.slice" ];
     # The state lives under /home, through a symlink: the clear handler
     # must still reach it.
     systemd.tmpfiles.settings."00-burrow-home-state" = {
@@ -103,11 +106,18 @@ pkgs.testers.runNixOSTest {
         assert item["due"] == item["since"] + 600, item
         machine.wait_until_succeeds(f"[ $(wc -l </var/lib/watchdog-kicks/kicks) -gt {before} ]", timeout=60)
 
-    with subtest("a program that dumps core is in it too, whoever ran it"):
+    with subtest("a program that dumps core is in it too, whoever ran it, but a build's or a job's"):
+        # A build user's crash fails its build, and a job's is the job's:
+        # logged first, so every pass after the two below reads them.
+        machine.succeed("bash -c 'ulimit -c unlimited; setpriv --reuid=nixbld1 --regid=nixbld --clear-groups ${pkgs.dash}/bin/dash -c \"kill -SEGV \\$\\$\"' || true")
+        machine.succeed("systemd-run --wait --slice=claude-jobs.slice -p LimitCORE=infinity ${pkgs.mksh}/bin/mksh -c 'kill -SEGV 0' || true")
+        machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.dash}/bin/dash", timeout=60)
+        machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.mksh}/bin/mksh", timeout=60)
         dev_crash()
         root_crash()
         machine.wait_until_succeeds(f"[ $(grep -o '\"core:[^\"]*\"' {watch_file} | sort -u | wc -l) -eq 2 ]", timeout=120)
         cores = [k for k in watch() if k.startswith("core:")]
+        assert not any(k.endswith(("/bin/dash", "/bin/mksh")) for k in cores), cores
         bash = next(k for k in cores if k.endswith("/bin/bash"))
         # sleep's own program: coreutils, where it's one binary for all.
         root = next(k for k in cores if k != bash)

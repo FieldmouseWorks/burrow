@@ -155,26 +155,71 @@ pub fn shown(text: &str, now: f64) -> Vec<Failed> {
         .collect()
 }
 
-/// The core dumps in `coredumpctl list --json=short` TEXT, or why it can't
-/// be read: a dump read wrong could drop a crash that's still there.
-pub fn cores(text: &str) -> Result<Vec<Core>, String> {
-    let dumps: Vec<serde_json::Value> =
-        serde_json::from_str(text).map_err(|e| format!("coredumpctl's list: {e}"))?;
-    dumps
-        .iter()
-        .map(|d| {
-            let core = || {
-                Some(Core {
-                    exe: d["exe"].as_str()?.to_owned(),
-                    pid: d["pid"].as_u64()?,
-                    sig: d["sig"].as_u64().unwrap_or(0),
-                    // In microseconds.
-                    at: d["time"].as_f64()? / 1e6,
-                })
-            };
-            core().ok_or_else(|| format!("coredumpctl listed a dump it can't read: {d}"))
-        })
-        .collect()
+/// Crashes that aren't the machine's: what ran them sees them fail, and
+/// owns finding out why.
+#[derive(Clone, Debug, Default)]
+pub struct Owned {
+    /// The Nix build users' group: a crash in a build fails that build,
+    /// for whoever asked for it (a job trying a package, CI, an update).
+    pub build_gid: Option<u64>,
+    /// Slices whose units run someone's own work (proj's jobs): a crash
+    /// in one, a proof of concept or a test binary, is that job's to see.
+    pub slices: Vec<String>,
+}
+
+impl Owned {
+    /// Whether a process of GID, in CGROUP, ran someone's own work.
+    fn owns(&self, gid: Option<u64>, cgroup: &str) -> bool {
+        (gid.is_some() && gid == self.build_gid)
+            || cgroup
+                .split('/')
+                .any(|part| self.slices.iter().any(|s| s == part))
+    }
+}
+
+/// The machine's core dumps in TEXT, `journalctl -o json` of
+/// systemd-coredump's entries (an object a line), leaving out what OWNED
+/// says ran someone's own work; or why it can't be read: a dump read wrong
+/// could drop a crash that's still there.
+pub fn cores(text: &str, owned: &Owned) -> Result<Vec<Core>, String> {
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let d: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("the journal's dumps: {e}"))?;
+        let field = |name: &str| journal_field(&d[name]);
+        let number = |name: &str| field(name).and_then(|v| v.parse::<u64>().ok());
+        let core = || {
+            Some(Core {
+                exe: field("COREDUMP_EXE")?,
+                pid: number("COREDUMP_PID")?,
+                sig: number("COREDUMP_SIGNAL").unwrap_or(0),
+                // In microseconds: the crash's own time, else when it was logged.
+                at: number("COREDUMP_TIMESTAMP").or_else(|| number("__REALTIME_TIMESTAMP"))? as f64
+                    / 1e6,
+            })
+        };
+        let core = core().ok_or_else(|| format!("the journal has a dump it can't read: {d}"))?;
+        let cgroup = field("COREDUMP_CGROUP").unwrap_or_default();
+        if !owned.owns(number("COREDUMP_GID"), &cgroup) {
+            out.push(core);
+        }
+    }
+    Ok(out)
+}
+
+/// A journal field's value: a string, or the bytes it couldn't send as one.
+fn journal_field(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(bytes) => {
+            let bytes: Option<Vec<u8>> = bytes
+                .iter()
+                .map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
+                .collect();
+            Some(String::from_utf8_lossy(&bytes?).into_owned())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -327,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn systemctl_and_coredumpctl_read() {
+    fn systemctl_and_the_journal_read() {
         let names = failed_names(
             "backup.service loaded failed failed Backup\nx@a\\x2db.service loaded failed failed X\n",
         );
@@ -351,23 +396,84 @@ mod tests {
                 },
             ]
         );
+        let owned = Owned {
+            build_gid: Some(30000),
+            slices: vec!["claude-jobs.slice".into()],
+        };
         let dumps = cores(
-            r#"[{"time":1793000000123456,"pid":42,"uid":1001,"gid":1001,"sig":6,"corefile":"present","exe":"/nix/store/x/bin/worker","size":1}]"#,
+            concat!(
+                r#"{"COREDUMP_EXE":"/nix/store/x/bin/worker","COREDUMP_PID":"42","COREDUMP_SIGNAL":"6","COREDUMP_TIMESTAMP":"1793000000123456","COREDUMP_GID":"1001","COREDUMP_CGROUP":"/system.slice/worker.service"}"#,
+                "\n",
+                // Not UTF-8, so the journal sends its bytes.
+                r#"{"COREDUMP_EXE":[47,98,105,110,47,255],"COREDUMP_PID":"7","__REALTIME_TIMESTAMP":"1793000001000000"}"#,
+                "\n",
+            ),
+            &owned,
         )
         .unwrap();
         assert_eq!(
             dumps,
-            [Core {
-                exe: "/nix/store/x/bin/worker".into(),
-                pid: 42,
-                sig: 6,
-                at: 1_793_000_000.123456,
-            }]
+            [
+                Core {
+                    exe: "/nix/store/x/bin/worker".into(),
+                    pid: 42,
+                    sig: 6,
+                    at: 1_793_000_000.123456,
+                },
+                Core {
+                    exe: "/bin/\u{fffd}".into(),
+                    pid: 7,
+                    sig: 0,
+                    at: 1_793_000_001.0,
+                },
+            ]
         );
-        // Anything else than a list of dumps it can read is an error, never
-        // none: that would clear crashes still there.
-        assert_eq!(cores("[]"), Ok(Vec::new()));
-        assert!(cores("No coredumps found.").is_err());
-        assert!(cores(r#"[{"time":1,"pid":2}]"#).is_err());
+        // Anything else than dumps it can read is an error, never none:
+        // that would clear crashes still there. No entries is none.
+        assert_eq!(cores("", &owned), Ok(Vec::new()));
+        assert!(cores("No coredumps found.", &owned).is_err());
+        assert!(cores(r#"{"COREDUMP_PID":"2"}"#, &owned).is_err());
+    }
+
+    #[test]
+    fn a_crash_in_a_build_or_a_job_is_theirs_not_the_machines() {
+        let owned = Owned {
+            build_gid: Some(30000),
+            slices: vec!["claude-jobs.slice".into()],
+        };
+        let dump = |exe: &str, gid: u64, cgroup: &str| {
+            format!(
+                r#"{{"COREDUMP_EXE":"{exe}","COREDUMP_PID":"1","COREDUMP_TIMESTAMP":"1793000000000000","COREDUMP_GID":"{gid}","COREDUMP_CGROUP":"{cgroup}"}}"#
+            )
+        };
+        let text = [
+            // A package's own version check, in a build.
+            dump("/nix/store/b/bin/.claude-wrapped", 30000, "/builds.slice/nix-daemon.service"),
+            // A job's proof of concept.
+            dump(
+                "/nix/store/x/bin/xsltproc",
+                1001,
+                "/user.slice/user-1001.slice/user@1001.service/claude.slice/claude-jobs.slice/proj-remi\\\\x2d1.service",
+            ),
+            // The daemon itself, and the same user outside a job: the machine's.
+            dump("/nix/store/n/bin/nix-daemon", 0, "/builds.slice/nix-daemon.service"),
+            dump(
+                "/nix/store/c/bin/claude",
+                1001,
+                "/user.slice/user-1001.slice/user@1001.service/claude.slice/claude-rc.service",
+            ),
+        ]
+        .join("\n");
+        let exes: Vec<String> = cores(&text, &owned)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.exe)
+            .collect();
+        assert_eq!(
+            exes,
+            ["/nix/store/n/bin/nix-daemon", "/nix/store/c/bin/claude"]
+        );
+        // Owning nothing, every crash is the machine's.
+        assert_eq!(cores(&text, &Owned::default()).unwrap().len(), 4);
     }
 }

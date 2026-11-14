@@ -32,7 +32,7 @@ use serde::Deserialize;
 
 mod clear_door;
 
-use burrow_units::{Found, cores, failed_names, items, shown};
+use burrow_units::{Found, Owned, cores, failed_names, items, shown};
 use burrow_watchdog::now;
 use burrow_watchdog::watch::{File as Watch, read};
 
@@ -68,8 +68,11 @@ struct Config {
     grace: f64,
     /// How far back a crash counts, in seconds.
     window: f64,
+    /// The Nix build users' group, whose crashes are their builds'.
+    build_gid: Option<u64>,
+    /// Slices whose units run someone's own work, whose crashes are theirs.
+    owned_slices: Vec<String>,
     systemctl: PathBuf,
-    coredumpctl: PathBuf,
     journalctl: PathBuf,
     /// Where to ask for a pass: burrow-units' own burrow-events handler.
     own: String,
@@ -284,26 +287,29 @@ fn pass(cfg: &Config) -> Result<(), String> {
         args.extend(names.iter().map(String::as_str));
         shown(&output(&cfg.systemctl, &args)?, now)
     };
-    // coredumpctl fails when it finds nothing, and says so: anything else
-    // it says, failing, is a failed pass, which keeps the last watch file
-    // (and goes stale, if it lasts) rather than drop a crash still there.
+    // systemd-coredump's word of each crash, with the cgroup and group
+    // that say whose it was. Anything journalctl says, failing, is a
+    // failed pass, which keeps the last watch file (and goes stale, if it
+    // lasts) rather than drop a crash still there.
     let since = format!("--since=@{}", (now - cfg.window).floor());
-    let dumps = Command::new(&cfg.coredumpctl)
-        .args(["list", "--json=short", "--no-pager", &since])
-        .output()
-        .map_err(|e| format!("{}: {e}", cfg.coredumpctl.display()))?;
-    let said = String::from_utf8_lossy(&dumps.stderr);
-    let cores = if dumps.status.success() {
-        cores(&String::from_utf8_lossy(&dumps.stdout))?
-    } else if said.contains("No coredumps found") {
-        Vec::new()
-    } else {
-        return Err(format!(
-            "{} list: {}",
-            cfg.coredumpctl.display(),
-            said.trim()
-        ));
+    let owned = Owned {
+        build_gid: cfg.build_gid,
+        slices: cfg.owned_slices.clone(),
     };
+    let cores = cores(
+        &output(
+            &cfg.journalctl,
+            &[
+                "--quiet",
+                "--no-pager",
+                "--output=json",
+                "--output-fields=COREDUMP_EXE,COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_GID,COREDUMP_CGROUP",
+                &since,
+                "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+            ],
+        )?,
+        &owned,
+    )?;
 
     let last = read(&cfg.file).map(|(_, items)| items).unwrap_or_default();
     let found = Found {

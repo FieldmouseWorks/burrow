@@ -91,7 +91,7 @@ mod tests {
     fn config(root: &Path) -> Config {
         serde_json::from_value(serde_json::json!({
             "file":root.join("watch.json"), "ignore":[], "grace":600,
-            "window":86400, "systemctl":"false", "coredumpctl":"false",
+            "window":86400, "systemctl":"false", "buildGid":null, "ownedSlices":[],
             "journalctl":"false", "own":"http://127.0.0.1:1/units", "kick":null,
             "clearSocket":root.join("clear.sock")
         }))
