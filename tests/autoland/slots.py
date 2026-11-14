@@ -3,7 +3,7 @@ time, the PRs labelled first ahead of the rest and the oldest first within
 each, the rest waiting their turn rather than their timeout; a job's end
 kicks the pass that starts the next. A slot is held by a job until it ends,
 whatever its PR does meanwhile but move to a new head (superseded.py), and
-a turn in the line only by a PR waiting in this same pass."""
+a turn in the line by a PR waiting at its last look, this pass or before."""
 
 import itertools
 import json
@@ -64,6 +64,19 @@ assert ahead(1) in line(2, 1100, sha=other) and JOBS == [], JOBS
 ends(3)
 P.begin("sam/r", {2, 3})
 assert "running remi-proof again" in line(2, 1200, sha=other) and len(JOBS) == 1, JOBS
+
+# A pass needn't take the line in its order, nor every PR in it: a batch
+# takes the PRs it hasn't looked at first, and leaves out those unchanged
+# since. One that waited its turn at its last look, not looked at again
+# yet, is still ahead: a slot freed meanwhile isn't taken past it.
+fresh_pr_state()
+P.begin("sam/r", {1, 2, 3})
+assert RUNNING in line(1) and len(JOBS) == 1, JOBS
+assert ahead(1) in line(2) and ahead(2) in line(3)
+ends(1)
+P.begin("sam/r", {2, 3})  # the first one landed; this pass looks at 3 first
+assert ahead(1) in line(3, 800) and JOBS == [], JOBS
+assert RUNNING in line(2, 800) and len(JOBS) == 1, JOBS
 
 # Every job a PR started holds a slot until it ends, however many heads
 # since: one on its last head that proj couldn't stop yet and its new

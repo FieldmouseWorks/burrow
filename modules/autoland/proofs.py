@@ -60,10 +60,13 @@ already. Then the steward brings it up to date instead of building it
 A job holds what it holds until it ends, whatever its PR does meanwhile
 (marked a draft, say), but for a new head: a verdict on a head the PR no
 longer has proves nothing, so the steward stops it (superseded), unless
-it's building what the new head's proof wants. A turn in the line is only
-this pass's: a PR is ahead while it's waiting in the same pass (they go in
-their line's order, place), so one held, drafted or done since holds
-nobody up."""
+it's building what the new head's proof wants. A PR is ahead in the line
+while its last look had it waiting its turn (turn): this pass's look, once
+the pass has taken it, so one held, drafted or done since holds nobody up,
+else the one before, kept in its state. A pass needn't take the line in
+its order, nor every PR in it: a batch takes those it hasn't looked at
+first, and leaves out those unchanged since, so a slot freed meanwhile
+isn't taken past one still waiting."""
 
 import os
 import re
@@ -81,6 +84,7 @@ from common import CFG, STATE, load, log, save
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
+LOOKED = {}  # the PRs of each repo this pass has settled, waiting or not
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
@@ -99,6 +103,7 @@ def begin(repo, numbers, first=()):
     OPEN[repo] = set(numbers)
     FIRST[repo] = set(first)
     WAITING[repo] = set()
+    LOOKED[repo] = set()
 
 
 def place(repo, n):
@@ -321,12 +326,15 @@ def ahead(repo, n, st, slots, outs=None):
                 for rec in [state.get("proofPaths", {}).get(j) or {}]]
 
     jobs_now = held(st, live(st))
+    waiting = 0
     mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
     for f in os.listdir(STATE):
         m = re.fullmatch(mine, f)
-        if m and int(m[1]) != n and (repo not in OPEN or int(m[1]) in OPEN[repo]):
+        if m and (k := int(m[1])) != n and (repo not in OPEN or k in OPEN[repo]):
             other = load(f, {})
             jobs_now += held(other, [j for j in jobs(other) if running(j)])
+            looked = k in LOOKED.get(repo, ())
+            waiting += place(repo, k) < place(repo, n) and (k in WAITING.get(repo, ()) if looked else bool(other.get("proofTurn")))
     todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(outs or ()))
     # In the order they started: a job is a build when it has paths still
     # to build that those before it aren't building, or when they're
@@ -336,7 +344,6 @@ def ahead(repo, n, st, slots, outs=None):
         rest = todo.intersection(ps) if ps is not None else None
         builds += rest is None or not rest <= building
         building |= rest or set()
-    waiting = sum(place(repo, other) < place(repo, n) for other in WAITING.get(repo, ()))
     if builds + waiting < slots:
         return None
     if outs is not None and todo.intersection(outs) <= building:
@@ -731,9 +738,17 @@ def still(st, said, rc):
     return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}
 
 
-def wait(repo, n):
-    """PR n waits its turn this pass: the ones after it wait behind it."""
-    WAITING.setdefault(repo, set()).add(n)
+def turn(repo, n, st, waiting):
+    """PR n's look this pass ends: waiting its turn or not, which the ones
+    after it in line wait behind, this pass and, kept in its state (st),
+    later ones that don't look at it again."""
+    LOOKED.setdefault(repo, set()).add(n)
+    if waiting:
+        WAITING.setdefault(repo, set()).add(n)
+        st["proofTurn"] = True
+    else:
+        WAITING.get(repo, set()).discard(n)
+        st.pop("proofTurn", None)
 
 
 def started(st, outs=None):

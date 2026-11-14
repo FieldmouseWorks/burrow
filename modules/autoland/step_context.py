@@ -3,6 +3,7 @@
 import re
 import time
 import common as C
+import proofs as P
 import stages as S
 import stopping
 import train as T
@@ -159,10 +160,12 @@ class Context:
         self.after(since, wait)  # ends: a Claude job takes it then
         return since + wait * MIN
 
-    def settle(self, state, desc, why=None, *, stage, wait=waits.STEWARD):
+    def settle(self, state, desc, why=None, *, stage, wait=waits.STEWARD, turn=False):
         """The PR's status, what it waits on for the watchdog (waits.py), and
-        the label of its stage (stages.py), which every status names. False
-        if GitHub didn't take the status."""
+        the label of its stage (stages.py), which every status names, and
+        whether it's waiting its turn in the proof line (turn, proofs.turn).
+        False if GitHub didn't take the status."""
+        P.turn(self.repo, self.n, self.st, turn)
         ok = post_status(self.repo, self.pr, state, desc)
         # A draft or a held PR is out of the pipeline, and GitHub's draft
         # mark or the hold label says so: no stage's label, whatever said it.
