@@ -68,7 +68,7 @@ fn decisions(b: &Box, expected: bool) {
     assert_eq!(
         matches!(
             inbox::resumption::admission(&b.cfg, &Job::new(&b.cfg, "candidate")).unwrap(),
-            inbox::resumption::Resume::Waiting
+            inbox::resumption::Resume::Waiting(_)
         ),
         expected,
         "resume admission"
@@ -331,7 +331,7 @@ fn consumer(b: &Box, which: &str, expected: bool) {
             assert_eq!(
                 matches!(
                     inbox::resumption::admission(&b.cfg, &Job::new(&b.cfg, "candidate")).unwrap(),
-                    inbox::resumption::Resume::Waiting
+                    inbox::resumption::Resume::Waiting(_)
                 ),
                 expected,
                 "{which}"

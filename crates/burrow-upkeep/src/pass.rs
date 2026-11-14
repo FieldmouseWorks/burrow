@@ -117,6 +117,16 @@ impl Lifecycle {
             _ => !h.trim().is_empty(),
         })
     }
+
+    /// Whether what it holds open includes `own`, the PR it was handed:
+    /// its turn is over, but proj resumes it on that PR's next change. A
+    /// fix job's claim follows it from turn to turn so (claims.rs).
+    pub fn awaits(&self, own: &str) -> bool {
+        self.holds.iter().any(|h| {
+            matches!(h.trim().split_once(' '),
+                Some(("await", target)) if target.trim().eq_ignore_ascii_case(own))
+        })
+    }
 }
 
 /// How a Claude job stands.

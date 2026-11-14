@@ -309,9 +309,8 @@ class Pass(Context, Jobs, Actions):
                 self.settle("pending", "; ".join(waiting + stuck), stage=S.REVIEWER if out_of_service else S.REVIEW)
         elif what and capped:
             self.hand_off(
-                f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
-                "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
-                "A Claude job judges it after, without the reviewers",
+                f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again, "
+                "and a Claude job judges it after, without the reviewers",
                 f"Past the review-round limit ({rounds}): " + ", ".join(what),
                 ours=not swept,
             )

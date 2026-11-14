@@ -66,7 +66,11 @@ class Gone(RuntimeError):
 # GitHub not answering just now. GraphQL says its own server errors in the
 # body, not as an HTTP status: "Something went wrong while executing your
 # query" is a 5xx by another name.
-UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|unexpected end of JSON input|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
+# Of those, GitHub giving up on the query itself: its gateway's error, an
+# answer cut off part way, or its own word that the query failed. Asking for
+# less can get an answer where asking again for the same can't (prs.open_prs).
+HEAVY = re.compile(r"HTTP 50[24]|unexpected end of JSON input|something went wrong while executing your query", re.I)
 
 
 # When the rate limit that turned one of this pass's calls away resets, once
@@ -811,7 +815,9 @@ def job_lifecycle(jid, key=None, snapshot=None):
     reversible one's deadline, with its default), the owner's to a one-way
     one whose deadline passed, or a PR or issue it awaits other than key
     (OWNER/REPO#N, the PR it was handed: awaiting only that is ending its
-    turn). None when it holds nothing: it ended. This is the one word on
+    turn, but for a fix job whose turn's answers just went up, which
+    step_jobs.look takes for one between turns). None when it holds
+    nothing: it ended. This is the one word on
     whether a job ended, for every kind of job and every path that asks
     (at_work; burrow-upkeep's Lifecycle::at_work reads proj the same): one
     that holds a question and is taken for ended gets a second job on its
