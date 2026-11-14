@@ -789,7 +789,8 @@ fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
 /// took its baseline, and proj-inbox for a ready issue its drain holds
-/// for a slot.
+/// for a slot. A sorting job's verdict is kept and its slot freed here, with
+/// no GitHub call (`inbox::settle`).
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
@@ -838,6 +839,9 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     }
     job.capture().map_err(|e| Fail::new(1, e))?;
     job.mark_ended();
+    // A sorting job's verdict is kept and its slot freed before anything
+    // waits on GitHub, and before the queue is woken to fill the slot.
+    crate::inbox::settle::ended(cfg, id);
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
