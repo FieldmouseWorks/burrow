@@ -165,6 +165,9 @@ mod tests {
     fn registration_fixture(script: &str) -> (tempfile::TempDir, Config) {
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");
+        // A stand-in killed by a short budget before its first line runs
+        // never records its pid: none started that could still be alive.
+        fs::write(d.path().join("pids"), "").unwrap();
         burrow_test::executable(
             &gh,
             format!(
