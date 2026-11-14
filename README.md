@@ -160,7 +160,8 @@ Each has an entry below, and each can be imported on its own.
   or awaiting inbox job's handed brief alone until that job ends. One that also
   has `inbox.unstickLabel` (the steward's stuck issue) is run `--unstick`. Every
   turn says what comes next before it answers: `proj await` a PR or issue (the
-  job holds no slot and is resumed when it changes; one already merged or
+  job holds no slot and is resumed when it changes, or with `--ci` only on its
+  CI verdict and `--review` only on review findings; one already merged or
   closed is refused, so the job goes on), `proj ask --default "TEXT" [--one-way]`
   a person, or `proj done`. A bare ask is refused. The recommended answer runs
   after `proj.askTimeout` (seconds, default 6h) without a reply; a one-way

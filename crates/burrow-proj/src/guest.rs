@@ -18,6 +18,9 @@ struct Declaration {
     targets: Vec<String>,
     #[serde(default)]
     recommendation: Option<crate::ask::Recommendation>,
+    /// What ends the wait on each target that isn't any change.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    ends: std::collections::BTreeMap<String, crate::ends::Ends>,
 }
 
 /// The guest's deliberately small `proj`: no host config or credentials.
@@ -34,11 +37,20 @@ pub fn declare(path: &Path, args: &[String]) -> Result<(), String> {
         .unwrap_or_default();
     match args.first().map(String::as_str) {
         Some("await") if args.len() > 1 => {
-            if args[1..].iter().any(|s| target(s).is_none()) {
+            let (ends, targets) = crate::ends::Ends::parse(&args[1..]);
+            if targets.is_empty() {
+                return Err(crate::cmd::AWAIT_USAGE.into());
+            }
+            if targets.iter().any(|s| target(s).is_none()) {
                 return Err("expected GitHub PR or issue URLs".into());
             }
             declaration.end = "await".into();
-            declaration.targets.extend_from_slice(&args[1..]);
+            for t in targets {
+                if !ends.any_change() {
+                    declaration.ends.entry(t.clone()).or_insert_with(|| ends.clone());
+                }
+            }
+            declaration.targets.extend_from_slice(targets);
         }
         Some(how @ ("ask" | "done")) => {
             declaration.recommendation = if how == "ask" {
@@ -51,8 +63,9 @@ pub fn declare(path: &Path, args: &[String]) -> Result<(), String> {
             };
             declaration.end = how.into();
             declaration.targets.clear();
+            declaration.ends.clear();
         }
-        _ => return Err("usage: proj await URL... | proj ask --default TEXT [--one-way] | proj done | proj probe QUESTION...".into()),
+        _ => return Err("usage: proj await [--ci] [--review] URL... | proj ask --default TEXT [--one-way] | proj done | proj probe QUESTION...".into()),
     }
     let next = path.with_extension("next");
     fs::write(
@@ -137,12 +150,16 @@ fn register(cfg: &Config, job: &Job, bytes: &[u8], until: Instant) -> Result<(),
                 .iter()
                 .map(|s| target(s).ok_or("invalid GitHub target"))
                 .collect::<Result<Vec<_>, _>>()?;
-            crate::cmd::record_wait(cfg, job, &found, &declaration.targets, Some(until)).map_err(
-                |e| {
+            let ends: Vec<crate::ends::Ends> = declaration
+                .targets
+                .iter()
+                .map(|t| declaration.ends.get(t).cloned().unwrap_or_default())
+                .collect();
+            crate::cmd::record_wait(cfg, job, &found, &declaration.targets, &ends, Some(until))
+                .map_err(|e| {
                     e.say
                         .unwrap_or_else(|| "couldn't register sandbox wait".into())
-                },
-            )
+                })
         }
         _ => Err("invalid sandbox next step".into()),
     }
@@ -218,6 +235,7 @@ mod tests {
                     retry_at: 1,
                     turn: "1".into(),
                     baselines: String::new(),
+                    ends: Default::default(),
                 })
                 .unwrap(),
             )
@@ -577,13 +595,20 @@ esac
         let say =
             |args: &[&str]| declare(&p, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         say(&["await", "a/b#1"]).unwrap();
-        say(&["await", "a/b#2"]).unwrap();
+        say(&["await", "--ci", "a/b#2"]).unwrap();
         let read = || serde_json::from_slice::<Declaration>(&fs::read(&p).unwrap()).unwrap();
         assert_eq!(read().targets.len(), 2);
+        // What ends each wait goes with it to the host's registration.
+        assert_eq!(
+            serde_json::to_value(&read().ends).unwrap(),
+            serde_json::json!({"a/b#2": ["ci"]})
+        );
+        assert!(say(&["await", "--ci"]).is_err());
         assert!(say(&["await", "bad"]).is_err());
         assert_eq!(read().targets.len(), 2);
         say(&["ask", "--default", "continue"]).unwrap();
         assert!(read().targets.is_empty());
+        assert!(read().ends.is_empty());
         assert_eq!(read().end, "ask");
         say(&["done"]).unwrap();
         assert_eq!(read().end, "done");

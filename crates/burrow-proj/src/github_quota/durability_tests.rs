@@ -89,6 +89,7 @@ fn all_safe_cleanup_intermediate_states_remain_retired_during_recovery() {
                         retry_at: 1,
                         turn: "1".into(),
                         baselines: String::new(),
+                        ends: Default::default(),
                     })
                     .unwrap(),
                 )

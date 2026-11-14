@@ -136,6 +136,7 @@
         git -C /data/dev/src/web worktree add -q --detach "$PROJ_SCRATCH/web" && touch "$PROJ_SCRATCH/web/built"
         case $prompt in *ask) proj ask --default "continue" >/dev/null ;; esac ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
+      ciawait*) proj await --ci "''${prompt#ciawait }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) init eat; head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;

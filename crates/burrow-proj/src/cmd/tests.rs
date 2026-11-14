@@ -48,7 +48,14 @@ fn an_await_needs_every_baseline() {
     v["tools"]["gh"] = "/nowhere/gh".into();
     let cfg: Config = serde_json::from_value(v).unwrap();
     let found = [("o/r".to_owned(), "5".to_owned())];
-    let fail = baselines(&cfg, &found, &["o/r#5".to_owned()], None).unwrap_err();
+    let fail = baselines(
+        &cfg,
+        &found,
+        &["o/r#5".to_owned()],
+        &Default::default(),
+        None,
+    )
+    .unwrap_err();
     assert_eq!(fail.code, 1);
     assert!(
         fail.say
@@ -116,7 +123,8 @@ esac
             .map(|n| ("o/r".to_owned(), (*n).to_owned()))
             .collect();
         let targets: Vec<String> = ns.iter().map(|n| format!("o/r#{n}")).collect();
-        baselines(&cfg, &found, &targets, None).map_err(|f| (f.code, f.say.unwrap_or_default()))
+        baselines(&cfg, &found, &targets, &Default::default(), None)
+            .map_err(|f| (f.code, f.say.unwrap_or_default()))
     };
 
     let open = await_on(&["8"]).unwrap();

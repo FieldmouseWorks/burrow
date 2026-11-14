@@ -11,7 +11,7 @@ use std::process::{Child, Command};
 pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
 
 /// How a turn says what comes next: what resumes the job, if anything.
-pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask --default \"TEXT\" [--one-way]` when your answer is a question only a person can settle (their reply resumes it; after the deadline a reversible default is taken, a one-way default is left for the owner), or `proj done` when the work is finished";
+pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed; `proj await --ci URL` resumes it only on the PR's CI verdict, all green or any red, and `--review` only on new review findings or threads, either also on its merge or close), `proj ask --default \"TEXT\" [--one-way]` when your answer is a question only a person can settle (their reply resumes it; after the deadline a reversible default is taken, a one-way default is left for the owner), or `proj done` when the work is finished";
 
 pub const FACTS: &str = "Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.";
 const SPLIT: &str = " An inbox task is one self-contained PR. If it is too big, publish progress and write 2 to 16 smaller self-contained tasks as a JSON array with title, body and check, run `proj split FILE`, then end the session. Preserve the original authorization boundaries, outstanding work and PR links in those tasks; never carry a lane indefinitely.";
@@ -138,7 +138,7 @@ pub fn spawn(
         )
     } else {
         format!(
-            "This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped."
+            "This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed; with `--ci`, only the PR's CI verdict, all green or any red, and with `--review`, only new review findings or threads, either also its merge or close). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped."
         )
     };
     let split =

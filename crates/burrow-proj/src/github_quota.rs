@@ -13,6 +13,10 @@ pub(crate) struct Pending {
     pub turn: String,
     #[serde(default)]
     pub baselines: String,
+    /// What ends the wait on each target that isn't any change
+    /// ([`crate::ends`]), by its target as given.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ends: BTreeMap<String, crate::ends::Ends>,
 }
 
 pub fn meters(cfg: &Config) -> Vec<Meter> {
@@ -364,11 +368,13 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
                 return Ok(text);
             }
             owner = found.0.split('/').next().unwrap_or_default().to_owned();
+            let ends = pending.ends.get(target).cloned().unwrap_or_default();
             let baseline = crate::github::for_job(job, || {
                 crate::cmd::baselines(
                     cfg,
                     std::slice::from_ref(found),
                     std::slice::from_ref(target),
+                    &ends,
                     None,
                 )
             })?;
@@ -516,8 +522,15 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         let targets = vec!["sam/r#7".to_owned()];
         // This assertion fails with the former record_wait: it returned an
         // error and saved neither intent nor an end declaration (#614).
-        crate::cmd::record_wait(&cfg, &job, &[("sam/r".into(), "7".into())], &targets, None)
-            .unwrap();
+        crate::cmd::record_wait(
+            &cfg,
+            &job,
+            &[("sam/r".into(), "7".into())],
+            &targets,
+            &[Default::default()],
+            None,
+        )
+        .unwrap();
         assert!(job.path(PENDING).exists());
         // Even an engine that asks to retry the quota cannot publish that ask.
         crate::ask::record(
@@ -575,6 +588,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
                 &job,
                 &[("sam/r".into(), "7".into())],
                 &["sam/r#7".into()],
+                &[Default::default()],
                 None
             )
             .is_err()

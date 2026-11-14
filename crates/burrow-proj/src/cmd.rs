@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::time::Instant;
 
 use crate::config::Config;
+use crate::ends::Ends;
 use crate::engine::{is_error, last_result};
 use crate::github::{fingerprint_until, over, target};
 use crate::host_jobs::View;
@@ -573,32 +574,42 @@ pub fn unstick(cfg: &Config, id: &str) -> Result<(), Fail> {
     Ok(())
 }
 
-/// `proj await TARGET...`, from inside a job. The baseline is taken now, so
-/// whatever changes from here on, even before the turn has ended, is news.
-/// It's watched once the turn ends.
-fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
+/// `proj await [--ci] [--review] TARGET...`, from inside a job. The
+/// baseline is taken now, so whatever ends the wait from here on
+/// ([`crate::ends`]), even before the turn has ended, is news. It's watched
+/// once the turn ends.
+fn wait_on(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_JOB",
         "proj await is for a proj job, about what it waits on",
     )?;
-    if targets.is_empty() {
-        return Err(Fail::new(2, "usage: proj await PR-OR-ISSUE-URL..."));
+    let (ends, targets) = Ends::parse(args);
+    if targets.is_empty() || targets.iter().any(|t| t.starts_with("--")) {
+        return Err(Fail::new(2, AWAIT_USAGE));
     }
     let mut found = Vec::new();
     for t in targets {
         found
             .push(target(t).ok_or_else(|| Fail::new(2, format!("not a GitHub PR or issue: {t}")))?);
     }
-    record_wait(cfg, &Job::new(cfg, &id), &found, targets, None)
+    let ends = vec![ends; targets.len()];
+    record_wait(cfg, &Job::new(cfg, &id), &found, targets, &ends, None)
 }
 
+pub(crate) const AWAIT_USAGE: &str = "usage: proj await [--ci] [--review] PR-OR-ISSUE-URL... (--ci: only its CI verdict, all green or any red; --review: only new review findings or threads; either way also its merge or close)";
+
+/// Registers the wait on `targets`, each ending as its `ends` says (one
+/// each); a target saved from an await GitHub's quota held up keeps the
+/// condition it was saved with.
 pub(crate) fn record_wait(
     cfg: &Config,
     job: &Job,
     found: &[(String, String)],
     targets: &[String],
+    ends: &[Ends],
     until: Option<Instant>,
 ) -> Result<(), Fail> {
+    debug_assert_eq!(ends.len(), targets.len(), "a condition for each target");
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     crate::github::take_limit();
     let pending = job.path(crate::github_quota::PENDING);
@@ -621,37 +632,52 @@ pub(crate) fn record_wait(
         .collect();
     let mut all = targets.to_vec();
     let mut found = found.to_vec();
-    for saved_target in saved.map(|p| p.targets).unwrap_or_default() {
+    let mut conditions = ends.to_vec();
+    let (saved_targets, mut saved_ends) = saved.map(|p| (p.targets, p.ends)).unwrap_or_default();
+    for saved_target in saved_targets {
         if !all.contains(&saved_target) {
             found.push(
                 target(&saved_target).ok_or_else(|| Fail::new(1, "invalid saved GitHub target"))?,
             );
+            conditions.push(saved_ends.remove(&saved_target).unwrap_or_default());
             all.push(saved_target);
         }
     }
     let targets = &all;
     let mut limited_owner = String::new();
     let mut text = String::new();
-    let result = found.iter().zip(targets).try_for_each(|(found, target)| {
-        if known.contains(&format!("{}#{}", found.0, found.1)) {
-            return Ok(());
-        }
-        limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
-        text.push_str(&crate::github::for_job(job, || {
-            baselines(
-                cfg,
-                std::slice::from_ref(found),
-                std::slice::from_ref(target),
-                until,
-            )
-        })?);
-        Ok(())
-    });
+    let result =
+        found
+            .iter()
+            .zip(targets)
+            .zip(&conditions)
+            .try_for_each(|((found, target), ends)| {
+                if known.contains(&format!("{}#{}", found.0, found.1)) {
+                    return Ok(());
+                }
+                limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
+                text.push_str(&crate::github::for_job(job, || {
+                    baselines(
+                        cfg,
+                        std::slice::from_ref(found),
+                        std::slice::from_ref(target),
+                        ends,
+                        until,
+                    )
+                })?);
+                Ok(())
+            });
     match result {
         Ok(()) => {}
         Err(error) => {
             if let Some(due) = crate::github::take_limit() {
                 let intent = crate::github_quota::Pending {
+                    ends: targets
+                        .iter()
+                        .zip(&conditions)
+                        .filter(|(_, ends)| !ends.any_change())
+                        .map(|(t, ends)| (t.clone(), ends.clone()))
+                        .collect(),
                     targets: targets.clone(),
                     retry_at: due.max(prior_due),
                     turn: job.turns().unwrap_or_default(),
@@ -691,9 +717,14 @@ pub(crate) fn record_wait(
         .map_err(|e| io_fail(&next, e))?;
     crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
     let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
+    let once: Vec<String> = targets
+        .iter()
+        .zip(&conditions)
+        .map(|(t, ends)| format!("{t} {}", ends.says()))
+        .collect();
     put(&format!(
-        "Noted. End your turn now: this job is resumed once {} changes.\n",
-        targets.join(" ")
+        "Noted. End your turn now: this job is resumed once {}.\n",
+        once.join(", or once ")
     ));
     Ok(())
 }
@@ -707,6 +738,7 @@ pub(crate) fn baselines(
     cfg: &Config,
     found: &[(String, String)],
     targets: &[String],
+    ends: &Ends,
     until: Option<Instant>,
 ) -> Result<String, Fail> {
     let mut text = String::new();
@@ -722,6 +754,12 @@ pub(crate) fn baselines(
                 ),
             ));
         }
+        let fp = ends.baseline(&fp).map_err(|e| {
+            Fail::new(
+                2,
+                format!("proj: {t}: {e}, so nothing is awaited: run proj await without them"),
+            )
+        })?;
         text += &format!("{repo}#{n}\t{}\t{fp}\n", now());
     }
     Ok(text)
