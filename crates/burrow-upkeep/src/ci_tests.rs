@@ -14,6 +14,12 @@ struct Hub {
     status: u16,
     lost: bool,
     annotation_failure: bool,
+    /// The runs' event: GitHub reruns no `dynamic` one, whoever asks.
+    event: &'static str,
+    /// What update-branch answers: 202, unless set.
+    update: u16,
+    /// The bodies of the update-branch asks.
+    updates: Vec<Value>,
 }
 
 impl Api for Hub {
@@ -21,11 +27,26 @@ impl Api for Hub {
         &mut self,
         method: &str,
         path: &str,
-        _: Option<&Value>,
+        body: Option<&Value>,
         _: Option<&str>,
     ) -> Result<Response, Failed> {
         self.asked.push((method.into(), path.into()));
-        let (status, body) = if path.contains("/annotations") {
+        let (status, body) = if method == "PUT" {
+            assert!(path.ends_with("/pulls/5/update-branch"), "{path}");
+            self.updates.push(body.cloned().unwrap_or_default());
+            match self.update {
+                0 => (202, json!({"message": "Updating pull request branch."})),
+                s => (
+                    s,
+                    json!({"message": "There are no new commits on the base branch."}),
+                ),
+            }
+        } else if method == "POST" && self.event == "dynamic" {
+            (
+                403,
+                json!({"message": "This workflow run cannot be retried"}),
+            )
+        } else if path.contains("/annotations") {
             if self.annotation_failure {
                 return Err(Failed {
                     why: "connection lost".into(),
@@ -52,7 +73,7 @@ impl Api for Hub {
             (
                 200,
                 json!({"run_attempt": self.attempt.max(1), "status": if self.going { "queued" } else { "completed" },
-                "conclusion": if self.going { Value::Null } else { json!("cancelled") }}),
+                "conclusion": if self.going { Value::Null } else { json!("cancelled") }, "event": self.event}),
             )
         };
         Ok(Response {
@@ -72,7 +93,7 @@ fn check_run(name: &str, id: u64, run: u64, conclusion: &str) -> Value {
 
 fn ask(checks: Vec<Value>) -> Ask {
     Ask {
-        pr: json!({"baseRefName": "main", "commits": {"nodes": [{"commit": {
+        pr: json!({"number": 5, "headRefOid": "a".repeat(40), "baseRefName": "main", "commits": {"nodes": [{"commit": {
         "statusCheckRollup": {"contexts": {"nodes": checks}}}}]}}),
         proofs: vec![],
         moved: None,
@@ -100,6 +121,10 @@ fn run(h: &mut Hub, a: &Ask, dry: bool) -> Result<Verdict, Error> {
 
 fn posts(h: &Hub) -> usize {
     h.asked.iter().filter(|(m, _)| m == "POST").count()
+}
+
+fn puts(h: &Hub) -> usize {
+    h.asked.iter().filter(|(m, _)| m == "PUT").count()
 }
 
 #[test]
@@ -165,19 +190,107 @@ fn annotation_failure_keeps_its_retry_type() {
 }
 
 #[test]
-fn permission_refusal_recovers_next_pass_and_conflicts_are_not_permissions() {
+fn a_refused_rerun_quotes_github_and_is_asked_again_next_pass() {
     let a = ask(vec![check_run("build", 11, 7, "CANCELLED")]);
     let mut h = Hub {
         attempt: 1,
         status: 403,
         ..Hub::default()
     };
-    assert!(run(&mut h, &a, false).unwrap().names[0].contains("Actions write"));
+    // GitHub's words, never a guess at why (a permission it may not lack).
+    assert_eq!(
+        run(&mut h, &a, false).unwrap().names,
+        ["build (cancelled; not run again: HTTP 403: refused)"]
+    );
     h.status = 409;
-    assert!(!run(&mut h, &a, false).unwrap().names[0].contains("Actions write"));
+    assert_eq!(
+        run(&mut h, &a, false).unwrap().names,
+        ["build (cancelled; not run again: HTTP 409: refused)"]
+    );
     h.status = 201;
     assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
     assert!(h.going);
+    assert_eq!(posts(&h), 3);
+}
+
+#[test]
+fn a_cancelled_dynamic_run_brings_the_branch_up_to_date_instead_of_a_rerun() {
+    // CodeQL's default setup: GitHub answers any rerun of it with a 403
+    // (the Hub's, for a dynamic run), so none is asked for at all.
+    let mut h = Hub {
+        attempt: 1,
+        event: "dynamic",
+        ..Hub::default()
+    };
+    let a = ask(vec![
+        check_run("Analyze (rust)", 11, 7, "CANCELLED"),
+        check_run("Analyze (python)", 12, 7, "CANCELLED"),
+    ]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "pending");
+    assert_eq!(
+        got.names,
+        [
+            "Analyze (rust) (cancelled; GitHub reruns no dynamic run: its branch is being updated)",
+            "Analyze (python) (cancelled; GitHub reruns no dynamic run: its branch is being updated)",
+        ]
+    );
+    assert_eq!(posts(&h), 0);
+    // One ask for the head the verdict is of, never one pushed since.
+    assert_eq!(h.updates, [json!({"expected_head_sha": "a".repeat(40)})]);
+
+    // Not behind its base: GitHub's no is quoted, and asked again next pass.
+    h.update = 422;
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "pending");
+    assert_eq!(
+        got.names[0],
+        "Analyze (rust) (cancelled; GitHub reruns no dynamic run; updating its branch said \
+         HTTP 422: There are no new commits on the base branch.)"
+    );
+    assert_eq!((posts(&h), puts(&h)), (0, 2));
+
+    // Dry, or only classifying: nothing written.
+    run(&mut h, &a, true).unwrap();
+    let mut only = ask(
+        a.pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]
+            .as_array()
+            .unwrap()
+            .clone(),
+    );
+    only.recover = false;
+    run(&mut h, &only, false).unwrap();
+    assert_eq!((posts(&h), puts(&h)), (0, 2));
+}
+
+#[test]
+fn a_dynamic_run_beside_a_genuine_failure_is_left_to_the_failure() {
+    let mut h = Hub {
+        attempt: 1,
+        event: "dynamic",
+        ..Hub::default()
+    };
+    let a = ask(vec![
+        check_run("Analyze (rust)", 11, 7, "CANCELLED"),
+        check_run("Analyze (python)", 12, 7, "FAILURE"),
+    ]);
+    assert_eq!(run(&mut h, &a, false).unwrap().state, "red");
+    assert_eq!((posts(&h), puts(&h)), (0, 0));
+}
+
+#[test]
+fn a_never_started_dynamic_run_brings_the_branch_up_to_date() {
+    let mut h = Hub {
+        attempt: 1,
+        event: "dynamic",
+        ..Hub::default()
+    };
+    let got = run(&mut h, &unstarted(), false).unwrap();
+    assert_eq!(
+        got.names,
+        ["CI (never started; GitHub reruns no dynamic run: its branch is being updated)"]
+    );
+    assert_eq!((posts(&h), puts(&h)), (0, 1));
 }
 
 #[test]
