@@ -103,6 +103,18 @@ fn capped_selection_preserves_shares_and_project_limits() {
 #[test]
 fn queue_identity_changes_wait_for_the_census_lock() {
     for promotion in [true, false] {
+        census_holds_the_identity(promotion);
+    }
+}
+
+/// Every rename of a place happens under the census lock, so the name read
+/// with the lock held is the one the census sees, and it must last the hold.
+/// A name read before taking the lock can change before the test holds it: a
+/// "soon" waiter is due its promotion seconds after it starts, so a loaded
+/// machine can let it promote first. That attempt proves nothing and starts
+/// again with a fresh waiter; the assertion itself is unchanged.
+fn census_holds_the_identity(promotion: bool) {
+    for _ in 0..5 {
         let tmp = TempDir::new().unwrap();
         let jobs = jobs_dir(&tmp);
         let slot = File::create(jobs.join(".slots/1")).unwrap();
@@ -115,6 +127,8 @@ fn queue_identity_changes_wait_for_the_census_lock() {
             1,
         );
         until("waiter published", || in_queue(&jobs) == 1);
+        let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
+        census.lock().unwrap();
         let queue = jobs.join(".queue");
         let old = fs::read_dir(&queue)
             .unwrap()
@@ -122,9 +136,11 @@ fn queue_identity_changes_wait_for_the_census_lock() {
             .unwrap()
             .unwrap()
             .path();
+        if promotion && !old.file_name().unwrap().to_string_lossy().starts_with("2-") {
+            eprintln!("promoted before the census lock was held; again");
+            continue;
+        }
         let made = fs::metadata(&old).unwrap().modified().unwrap();
-        let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
-        census.lock().unwrap();
         if !promotion {
             fs::write(jobs.join("w0/pipeline"), "").unwrap();
         }
@@ -139,7 +155,9 @@ fn queue_identity_changes_wait_for_the_census_lock() {
             .unwrap()
             .path();
         assert_eq!(fs::metadata(new).unwrap().modified().unwrap(), made);
+        return;
     }
+    panic!("the waiter promoted before the census lock every time");
 }
 
 #[test]
