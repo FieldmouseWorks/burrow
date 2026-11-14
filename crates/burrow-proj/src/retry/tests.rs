@@ -576,7 +576,7 @@ fn transferred_pipeline_retries_keep_both_reserved_shares_ahead_of_lead_backlog(
         let path = r.tmp.path().join(name).to_string_lossy().into_owned();
         start(&mut r, id, "old", &path);
         if name != "web" {
-            fs::write(r.cfg.jobs.join(id).join("pipeline"), "").unwrap();
+            crate::job::Schedule::amend(&Job::new(&r.cfg, id), |s| s.pipeline = true);
         }
     }
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() == 6);

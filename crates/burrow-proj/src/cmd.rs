@@ -11,7 +11,7 @@ use crate::github::{fingerprint_until, over, target};
 use crate::host_jobs::View;
 use crate::job::{Job, awaits, kick};
 use crate::snapshot::{self, Snapshot};
-use crate::turn::{exec, lines};
+use crate::turn::exec;
 use crate::waits::rewatch;
 use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
@@ -236,7 +236,8 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             let job = Job::new(cfg, &id);
             if !job.path("inbox-issue").exists()
                 || !cfg.inbox.as_ref().is_some_and(|i| i.planning)
-                || read(&job.path("link"))
+                || crate::job::Schedule::of(&job)
+                    .link
                     .as_deref()
                     .and_then(target)
                     .is_none()
@@ -578,8 +579,7 @@ pub fn unstick(cfg: &Config, id: &str) -> Result<(), Fail> {
     if !job.dir.is_dir() {
         return Err(Fail::new(1, format!("no job {id}")));
     }
-    crate::state_reads::write(job.path("unstick"), "")
-        .map_err(|e| io_fail(&job.path("unstick"), e))?;
+    crate::job::Schedule::unstick(&job).map_err(|e| Fail::new(1, e))?;
     rewatch(cfg, &[id]);
     Ok(())
 }
@@ -840,7 +840,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     job.mark_ended();
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
-    let mut names = lines(&job.path("kick"));
+    let mut names = crate::job::Schedule::of(&job).kick;
     if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
     {
         names.extend(["proj-watch".into(), "autoland".into()]);

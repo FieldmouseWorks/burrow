@@ -102,8 +102,7 @@ pub(super) fn bind_fixture(jobs: &Path, max_jobs: usize) {
         let job = Job::new(&cfg, &id);
         if !crate::policy::path(&job, "admission").exists() {
             let identity =
-                crate::policy::identify(&cfg, &crate::pick::project(&job.dir), false, true)
-                    .unwrap();
+                crate::policy::identify(&cfg, &crate::pick::project(&job), false, true).unwrap();
             crate::policy::bind(&job, identity, crate::policy::Kind::Automated).unwrap();
         }
     }
@@ -212,7 +211,7 @@ fn a_paused_waiter_holds_no_place_in_the_line() {
         .collect();
     assert!(!ids.contains(&"job1"), "{got}");
     assert!(ids.contains(&"job2"), "{got}");
-    let seen = look(&cfg, "none", &jobs.join("job0"), Class::Normal).unwrap();
+    let seen = look(&cfg, "none", &Job::new(&cfg, "job0"), Class::Normal).unwrap();
     assert!(seen.line.iter().all(|w| !w.name.ends_with("job1")));
     assert!(seen.line.iter().any(|w| w.name.ends_with("job2")));
     assert_eq!(in_queue(&jobs), 4, "its place is kept");

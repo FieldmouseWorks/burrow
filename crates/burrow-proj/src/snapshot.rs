@@ -522,7 +522,7 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
         },
         vm: lines(&job.path("agent")),
         apps: lines(&job.path("app")),
-        demoted: demoted(job.cfg, &job.dir),
+        demoted: demoted(job.cfg, job),
         waiting_in_line,
         awaits: awaits(&read(&job.path("await")).unwrap_or_default())
             .into_iter()

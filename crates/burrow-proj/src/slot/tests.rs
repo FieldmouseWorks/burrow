@@ -237,19 +237,26 @@ fn line_of_size(tmp: &TempDir, jobs: &Path, n: usize) -> Kid {
         args.extend(["_exec".to_owned(), j.clone(), "1".into(), "normal".into()]);
         fs::create_dir_all(jobs.join(&j)).unwrap();
         let p = ["burrow", "box", "web"][i % 3];
+        let cfg = config(jobs, 1);
+        let job = Job::new(&cfg, &j);
+        crate::job::Request {
+            project: tmp.path().join(p).display().to_string(),
+            ..Default::default()
+        }
+        .save(&job)
+        .unwrap();
+        crate::job::Schedule {
+            pipeline: true,
+            ..Default::default()
+        }
+        .save(&job)
+        .unwrap();
         crate::policy::bind(
-            &Job::new(&config(jobs, 1), &j),
+            &job,
             crate::policy::Identity::Repository(format!("sam/{p}")),
             crate::policy::Kind::Automated,
         )
         .unwrap();
-        let project = tmp.path().join(p);
-        fs::write(
-            jobs.join(&j).join("project"),
-            format!("{}\n", project.display()),
-        )
-        .unwrap();
-        File::create(jobs.join(&j).join("pipeline")).unwrap();
     }
     let kid = spawn_child("hold", jobs, 1, &args);
     let pid = kid.0.id();
@@ -308,7 +315,7 @@ fn counted_look() {
     let mut cfg = config(&jobs, 6);
     cfg.tools.git = stub;
     let _holder = line_of_size(&tmp, &jobs, 60);
-    let seen = look(&cfg, "none", &jobs.join("none"), Class::Normal).unwrap();
+    let seen = look(&cfg, "none", &Job::new(&cfg, "none"), Class::Normal).unwrap();
     let runs = fs::read_to_string(&log).unwrap().lines().count();
     assert_eq!(runs, 3, "a look's git runs for 3 projects");
     assert_eq!(seen.line.len(), 60);
@@ -333,7 +340,7 @@ fn a_look_clears_dead_places() {
     .unwrap();
     fs::write(queue.join("2-3001-job8"), "999999999\n").unwrap();
     fs::write(queue.join("2-3002-job7"), "").unwrap();
-    let seen = look(&cfg, "none", &jobs.join("none"), Class::Normal).unwrap();
+    let seen = look(&cfg, "none", &Job::new(&cfg, "none"), Class::Normal).unwrap();
     assert_eq!(seen.line.len(), 2);
     assert_eq!(in_queue(&jobs), 2, "dead places stayed");
 }
@@ -352,7 +359,7 @@ fn a_look_reads_the_slots() {
     a.try_lock().unwrap();
     b.try_lock().unwrap();
     fs::write(slots.join("1.who"), "normal\t/src/my web\n").unwrap();
-    let seen = look(&cfg, "none", &jobs.join("none"), Class::Normal).unwrap();
+    let seen = look(&cfg, "none", &Job::new(&cfg, "none"), Class::Normal).unwrap();
     assert_eq!(
         seen.slots[0],
         Slot::Held {
@@ -375,7 +382,7 @@ fn a_look_reads_the_slots() {
     a.unlock().unwrap();
     b.unlock().unwrap();
     c.unlock().unwrap();
-    let seen = look(&cfg, "none", &jobs.join("none"), Class::Normal).unwrap();
+    let seen = look(&cfg, "none", &Job::new(&cfg, "none"), Class::Normal).unwrap();
     assert!(seen.slots.iter().all(|s| *s == Slot::Free));
     assert!(!seen.busy);
 }

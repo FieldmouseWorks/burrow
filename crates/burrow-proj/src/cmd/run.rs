@@ -445,36 +445,23 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             })
             .unwrap_or("unknown"),
     )?;
-    if !new.kicks.is_empty() {
-        write(
-            "kick",
-            &new.kicks
-                .iter()
-                .map(|k| format!("{k}\n"))
-                .collect::<String>(),
-        )?;
+    // How every turn of it is scheduled and bounded, kept beside its request.
+    crate::job::Schedule {
+        unstick: new.unstick,
+        pipeline: new.pipeline,
+        timeout: new.limit.clone(),
+        idle: new.idle.clone(),
+        kick: new.kicks.clone(),
+        link: new.link.clone(),
     }
-    if let Some(t) = &new.limit {
-        write("timeout", &format!("{t}\n"))?;
-    }
-    if let Some(t) = &new.idle {
-        write("idle", &format!("{t}\n"))?;
-    }
+    .save(&job)
+    .map_err(|e| Fail::new(1, e))?;
     // Work on the pipeline holds the pipeline's slots only in its own
     // repos' projects (pick::class), and says so when it won't.
-    if new.pipeline {
-        write("pipeline", "")?;
-        if let Some(why) = demoted(cfg, &job.dir) {
-            eprintln!("proj: {id} {why}");
-        }
-    }
-    if new.unstick {
-        write("unstick", "")?;
+    if let Some(why) = demoted(cfg, &job) {
+        eprintln!("proj: {id} {why}");
     }
     crate::ask::initialize(&job, new.link.as_deref()).map_err(|e| Fail::new(1, e))?;
-    if let Some(l) = &new.link {
-        write("link", &format!("{l}\n"))?;
-    }
     if let Some(t) = &new.since {
         write("since", &format!("{t}\n"))?;
     }

@@ -45,7 +45,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::engine::Engine;
-use crate::job::Job;
+use crate::job::{Job, Schedule};
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
@@ -180,7 +180,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     let slot = held(slot)?;
     fs::write(
         slots.join("unstick.who"),
-        format!("unstick\t{}\n", project(&job.dir)),
+        format!("unstick\t{}\n", project(&job)),
     )?;
     took_slot(&job, n, "unstick", "unstick")?;
     Ok(Some(slot))
@@ -280,7 +280,7 @@ struct Look {
 /// A look, for the waiter named `me`, of job `dir`, class `own`, under the
 /// lock: the slots, then the line, once the places of turns that are gone are
 /// cleared.
-fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
+fn look(cfg: &Config, me: &str, job: &Job, own: Class) -> io::Result<Look> {
     let queue = cfg.jobs.join(".queue");
     let dirs = cfg.jobs.join(".slots");
     let mut classes = Classes::default();
@@ -359,13 +359,12 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             line.push(Waiter {
                 name,
                 class: own,
-                project: project(dir),
+                project: project(job),
             });
         } else {
-            let dir = cfg.jobs.join(fid);
             line.push(Waiter {
-                class: classes.place(cfg, &name, &dir).0,
-                project: project(&dir),
+                class: classes.place(cfg, &name, &other).0,
+                project: project(&other),
                 name,
             });
         }
@@ -494,7 +493,7 @@ pub fn take(
         usage::metered(cfg);
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if !paused && job.path("unstick").exists() {
+        if !paused && Schedule::of(&job).unstick {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             if fs::remove_file(queue.join(&me)).is_ok() {
@@ -556,7 +555,7 @@ pub fn take(
             me = to;
         }
         if spent {
-            if !job.path("unstick").exists() && !publish(cfg, &queue, &me, original)? {
+            if !Schedule::of(&job).unstick && !publish(cfg, &queue, &me, original)? {
                 drop(lk);
                 sleep(Duration::from_secs(2));
                 continue;
@@ -573,7 +572,7 @@ pub fn take(
         }
         // Where it stands now, and in the journal if that changed while it
         // waits.
-        let (class, new) = Classes::default().place(cfg, &me, &job.dir);
+        let (class, new) = Classes::default().place(cfg, &me, &job);
         if new != me {
             if fs::rename(queue.join(&me), queue.join(&new)).is_ok() {
                 eprintln!("proj: it goes as {} now", class.name());
@@ -603,7 +602,7 @@ pub fn take(
             sleep(Duration::from_secs(2));
             continue;
         }
-        let seen = look(cfg, &me, &job.dir, class)?;
+        let seen = look(cfg, &me, &job, class)?;
         looked = now();
         let cutoff = match usage::admission_cutoff(cfg) {
             Ok(cutoff) => cutoff,
@@ -646,7 +645,7 @@ pub fn take(
                 let slot = held(slot)?;
                 fs::write(
                     slots.join(format!("{n_slot}.who")),
-                    format!("{}\t{}\n", class.name(), project(&job.dir)),
+                    format!("{}\t{}\n", class.name(), project(&job)),
                 )?;
                 // The note named this one: the next to go needn't wait it
                 // out, and any others it named find theirs in the next look.
@@ -732,12 +731,12 @@ pub fn line(cfg: &Config) -> Vec<Waiting> {
         let Some(made) = mtime(&queue.join(name)) else {
             continue;
         };
-        let dir = cfg.jobs.join(fid);
-        let (class, _) = classes.place(cfg, name, &dir);
+        let other = Job::new(cfg, fid);
+        let (class, _) = classes.place(cfg, name, &other);
         rows.push(Waiting {
             job: fid.to_owned(),
             class: class.name().to_owned(),
-            project: project(&dir),
+            project: project(&other),
             since: made,
             wait: at - made,
         });

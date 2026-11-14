@@ -126,7 +126,7 @@ fn queue_identity_changes_wait_for_the_census_lock() {
         let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
         census.lock().unwrap();
         if !promotion {
-            fs::write(jobs.join("w0/pipeline"), "").unwrap();
+            crate::job::Schedule::amend(&Job::new(&config(&jobs, 1), "w0"), |s| s.pipeline = true);
         }
         sleep(Duration::from_secs(6));
         assert!(old.exists(), "queue renamed during the census");
@@ -273,7 +273,7 @@ fn queue_to_unstick_and_usage_retry_escape_a_blocked_census() {
     let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     out_of_usage(&jobs);
-    fs::write(jobs.join("escape/unstick"), "").unwrap();
+    crate::job::Schedule::unstick(&Job::new(&config(&jobs, 1), "escape")).unwrap();
     until(
         "emergency waiter leaves Claude queue even during usage hold",
         || in_queue(&jobs) == 0,
@@ -453,7 +453,7 @@ fn usage_contention_yields_to_emergency_promotion() {
             census
                 .try_lock()
                 .expect("usage contention retained census lock");
-            fs::write(jobs.join("promoted/unstick"), "").unwrap();
+            crate::job::Schedule::unstick(&Job::new(&config(&jobs, 1), "promoted")).unwrap();
             until("promoted waiter escapes usage contention", || {
                 took(&jobs, "promoted").is_some()
             });
