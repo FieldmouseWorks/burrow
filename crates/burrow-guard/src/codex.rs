@@ -27,8 +27,7 @@ use regex::{Regex, RegexBuilder};
 
 use crate::curl::{self, Curl};
 use crate::push::runs_git;
-use crate::walk;
-use crate::{any_line, pattern, shell};
+use crate::{any_line, gh, pattern, walk};
 
 /// Why a Codex job's command is refused.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,7 +137,7 @@ fn git<'a>(mut words: impl Iterator<Item = &'a String>) -> Option<Refusal> {
             continue;
         }
         // An option, or an expansion, which may be one or nothing.
-        if w.starts_with('-') || w.contains(['$', shell::UNKNOWN]) {
+        if w.starts_with('-') || gh::expands(w) {
             continue;
         }
         break w.as_str();
@@ -287,112 +286,49 @@ pub(crate) fn endpoint(url: &str) -> &str {
 
 /// What `gh` with these words does that GitHub writes commits or refs for:
 /// `gh api`'s REST writes and GraphQL mutations, and `gh pr merge`,
-/// `update-branch` and `revert`, and `gh repo sync`. Its own options may
-/// come before its command, `-R` with a value.
-fn gh<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
-    let mut command = Vec::new();
-    while command.len() < 2 {
-        let Some(w) = words.next() else { break };
-        match w.as_str() {
-            "-R" | "--repo" => {
-                words.next();
-            }
-            o if o.starts_with('-') => {}
-            o => command.push(o),
-        }
-        if command.first().is_some_and(|c| *c == "api") {
-            return gh_api(words);
-        }
+/// `update-branch` and `revert`, and `gh repo sync`.
+fn gh<'a>(words: impl Iterator<Item = &'a String>) -> bool {
+    let gh = gh::read(words);
+    match gh.command.as_slice() {
+        ["api"] => gh_api(&gh.rest),
+        ["pr", "merge" | "update-branch" | "revert"] | ["repo", "sync"] => true,
+        _ => false,
     }
-    matches!(
-        command.as_slice(),
-        ["pr", "merge" | "update-branch" | "revert"] | ["repo", "sync"]
-    )
 }
 
-/// Whether a word holds an expansion or a substitution, which the guard
-/// can't read to its value (and which, unquoted, may split into several
-/// words, options among them).
-fn expands(word: &str) -> bool {
-    word.contains(['$', shell::UNKNOWN])
-}
-
-/// Whether `gh api`'s words write commits or refs: a REST write (an
-/// explicit method other than GET, or fields or input, which make it a
-/// POST) at git data, or a GraphQL mutation that writes them. Whatever the
-/// guard can't read to its end is refused, since it could be a write: an
-/// expansion anywhere in the call (unquoted, it may split into words that
-/// change which one is the endpoint, or carry the method or the query; the
-/// shell reading keeps no quotes, so a literal `$` reads as one too, as in
-/// curl.rs), an unquoted glob (the shell reading marks one as an expansion,
-/// so a quoted `?` in a query string reads as plain text), a query from a
-/// file or input. A brace list comes expanded into the words it makes, and
-/// may make more than one endpoint, so each is read as the endpoint (gh
-/// takes one, and stops on more).
-fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
-    let words: Vec<&str> = words.map(String::as_str).collect();
-    let unreadable = words.iter().copied().any(expands);
-    let mut words = words.into_iter();
-    let mut method = None;
-    let mut body = false;
-    let mut urls = Vec::new();
-    let mut values = Vec::new();
-    let mut unread_query = false;
-    while let Some(w) = words.next() {
-        let (name, joined) = match w.split_once('=') {
-            Some((n, v)) if n.starts_with("--") => (n, Some(v)),
-            _ => match w.get(..2) {
-                Some(n @ ("-X" | "-f" | "-F" | "-H" | "-q" | "-t" | "-p")) if w.len() > 2 => {
-                    (n, Some(&w[2..]))
-                }
-                _ => (w, None),
-            },
-        };
-        let mut value = || joined.or_else(|| words.next());
-        match name {
-            "-X" | "--method" => method = value(),
-            "-f" | "--raw-field" => {
-                body = true;
-                values.extend(value());
-            }
-            "-F" | "--field" => {
-                body = true;
-                if let Some(v) = value() {
-                    unread_query |= v.starts_with("query=@");
-                    values.push(v);
-                }
-            }
-            "--input" => {
-                body = true;
-                unread_query = true;
-                value();
-            }
-            "-H" | "--header" | "-q" | "--jq" | "-t" | "--template" | "--hostname" | "-p"
-            | "--preview" | "--cache" => {
-                value();
-            }
-            o if o.starts_with('-') => {}
-            _ => urls.push(w),
-        }
-    }
-    if unreadable {
+/// Whether `gh api`'s words write commits or refs: a REST write at git
+/// data, or a GraphQL mutation that writes them. Whatever the guard can't
+/// read to its end is refused, since it could be a write: an expansion
+/// anywhere in the call, an unquoted glob, a query from a file or input.
+fn gh_api(words: &[&str]) -> bool {
+    let api = gh::Api::read(words);
+    if api.unreadable {
         return true;
     }
-    let write = match method {
-        Some(m) => !(m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD")),
-        None => body,
-    };
-    urls.into_iter().any(|url| {
+    api.urls.iter().any(|url| {
         if endpoint(url).ends_with("graphql") {
-            unread_query || values.iter().any(|v| MUTATION.is_match(v))
+            api.unread_query() || api.fields.iter().any(|f| MUTATION.is_match(f.text))
         } else {
-            write && GIT_DATA.is_match(endpoint(url))
+            api.writes() && GIT_DATA.is_match(endpoint(url))
         }
     })
 }
 
+/// Whether a write to GitHub's API (curl.rs's [`curl::Counts`]) writes
+/// commits or refs: at git data, or a GraphQL mutation that does. Where
+/// it goes unread, or a GraphQL body unread, it may.
+fn writes_git(endpoint: Option<&str>, body: &[&str], unread_body: bool) -> bool {
+    match endpoint {
+        None => true,
+        Some(path) if path.ends_with("graphql") => {
+            unread_body || body.iter().any(|b| MUTATION.is_match(b))
+        }
+        Some(path) => GIT_DATA.is_match(path),
+    }
+}
+
 /// The program a word names, whatever path it's run by.
-fn program(word: &str) -> &str {
+pub(crate) fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
@@ -410,7 +346,7 @@ pub fn refusals(cmd: &str) -> Vec<String> {
                 "gh" => gh(rest.iter(budget)).then_some(Refusal::Api),
                 "curl" => {
                     let words: Vec<&str> = rest.iter(budget).map(String::as_str).collect();
-                    match curl::read(&words) {
+                    match curl::read(&words, &writes_git) {
                         Curl::Writes => Some(Refusal::Api),
                         Curl::Config => Some(Refusal::CurlConfig),
                         Curl::Fine => (!curl::skips_default_config(words.first().copied())

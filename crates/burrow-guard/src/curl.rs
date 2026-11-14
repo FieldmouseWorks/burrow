@@ -1,5 +1,6 @@
-//! curl, read as curl reads its command line, for codex.rs: whether any
-//! request it makes writes a repo's commits or refs through GitHub's API.
+//! curl, read as curl reads its command line, for codex.rs and first.rs:
+//! whether any request it makes is a GitHub API write the caller counts
+//! ([`Counts`]).
 //!
 //! One curl may make many requests: each URL, `--url`'s too, and each
 //! operation after `--next` (`-:`) with options of its own. Every request
@@ -9,7 +10,8 @@
 //! (`-G` then `--no-get` sends the body as a POST). What curl would read
 //! that the guard can't (a config file, URLs from a file, a URL, method,
 //! header or body only an expansion gives, the shell's or curl's own
-//! `--expand-…` variables, a glob) counts as the write it may be.
+//! `--expand-…` variables, a glob) is handed on as unknown, for the caller
+//! to count as the write it may be.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -17,8 +19,14 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::codex::{GIT_DATA, MUTATION, endpoint};
+use crate::codex::endpoint;
 use crate::{pattern, shell};
+
+/// Whether a write to GitHub's API counts, for the caller: given its
+/// endpoint (no query, no trailing slash; None when the guard can't read
+/// where it goes), its body's values, and whether some of the body comes
+/// from where the guard can't read it.
+pub type Counts<'c> = dyn Fn(Option<&str>, &[&str], bool) -> bool + 'c;
 
 /// curl's short options that take a value: the rest of their word, or the
 /// next word (`curl --help all`).
@@ -267,14 +275,16 @@ impl<'a> Operation<'a> {
         })
     }
 
-    /// Whether this operation's requests write commits or refs on GitHub.
-    fn writes(&self, unread_everywhere: bool) -> bool {
+    /// Whether this operation's requests make a write on GitHub that
+    /// `counts`.
+    fn writes(&self, unread_everywhere: bool, counts: &Counts<'_>) -> bool {
         let method = self.method();
         let write = !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD");
         if !write {
             return false;
         }
         let unread_body = self.body_unread || self.upload || unread_everywhere;
+        let unknown = || counts(None, &self.body, unread_body);
         let mut paths: Vec<String> = Vec::new();
         for url in &self.urls {
             // Where an expansion or a glob may send it, or a file of URLs.
@@ -282,7 +292,7 @@ impl<'a> Operation<'a> {
                 || url.starts_with('@')
                 || (!self.globoff && url.contains(['{', '[']))
             {
-                return true;
+                return unknown();
             }
             let (host, path) = split(url);
             if host == "api.github.com"
@@ -298,18 +308,13 @@ impl<'a> Operation<'a> {
         }
         if let Some(target) = self.target {
             if target.contains(['$', shell::UNKNOWN]) {
-                return true;
+                return unknown();
             }
             paths = vec![squash(target)];
         }
-        paths.iter().any(|path| {
-            let path = endpoint(path);
-            if path.ends_with("graphql") {
-                unread_body || self.body.iter().any(|b| MUTATION.is_match(b))
-            } else {
-                GIT_DATA.is_match(path)
-            }
-        })
+        paths
+            .iter()
+            .any(|path| counts(Some(endpoint(path)), &self.body, unread_body))
     }
 }
 
@@ -354,21 +359,22 @@ fn squash(path: &str) -> String {
     format!("{}{query}", out.join("/"))
 }
 
-/// What curl with some words does, as far as codex.rs cares.
+/// What curl with some words does, as far as its caller cares.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Curl {
-    /// Nothing that writes commits or refs.
+    /// No write that counts.
     Fine,
-    /// Writes commits or refs through GitHub's API, or may: a request
-    /// whose destination or body the guard can't read.
+    /// A write through GitHub's API that counts, or may: a request whose
+    /// destination or body the guard can't read, as the caller counts it.
     Writes,
     /// Reads options from a file (`--config`), which may be any of them.
     Config,
 }
 
 /// What curl with these `words` does: each of its requests read with its
-/// own operation's options.
-pub fn read(words: &[&str]) -> Curl {
+/// own operation's options, and its writes to GitHub's API as `counts`
+/// counts them.
+pub fn read(words: &[&str], counts: &Counts<'_>) -> Curl {
     let mut ops = vec![Operation::default()];
     // Variables (`--variable`, `--expand-…`) build values the guard can't
     // read, in any operation.
@@ -446,7 +452,7 @@ pub fn read(words: &[&str]) -> Curl {
             });
         }
     }
-    if ops.iter().any(|op| op.writes(variables)) {
+    if ops.iter().any(|op| op.writes(variables, counts)) {
         Curl::Writes
     } else {
         Curl::Fine

@@ -33,10 +33,12 @@ fn says(cmd: &str, codex: bool) -> Option<String> {
         systemd_run: PathBuf::from("/no-such-systemd-run"),
         snapshot_datasets: Vec::new(),
         ask_after_seconds: 8,
+        first_label: None,
     };
     let guard = Guard {
         config: &config,
         codex,
+        job: codex,
         mark: dir.path().join("mark"),
         namespace: Namespace::Machine,
     };

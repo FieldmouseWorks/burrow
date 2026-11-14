@@ -15,6 +15,10 @@ let
     systemdRun = "${config.systemd.package}/bin/systemd-run";
     snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
     askAfterSeconds = timeout - 2;
+    # The label only the owner puts on: a proj job's command that would put
+    # it on is asked about, which a job can't answer (the crate's first.rs).
+    # None where the steward, which reads it, isn't on.
+    firstLabel = if config.burrow.autoland.enable or false then config.burrow.autoland.labels.first else null;
   });
   guardWith = name: flags: pkgs.runCommand name {
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];

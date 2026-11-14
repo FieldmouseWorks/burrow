@@ -8,12 +8,22 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-/// What `burrow-guard CONFIG` prints for `input`.
+/// What `burrow-guard CONFIG` prints for `input`, outside a proj job.
 fn hook(config: &str, input: &str) -> String {
+    hook_in(None, config, input)
+}
+
+/// What `burrow-guard CONFIG` prints for `input`, in the proj job `job`.
+fn hook_in(job: Option<&str>, config: &str, input: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-guard"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_burrow-guard"));
+    command.env_remove("PROJ_JOB");
+    if let Some(job) = job {
+        command.env("PROJ_JOB", job);
+    }
+    let mut child = command
         .arg(&path)
         .env("XDG_RUNTIME_DIR", dir.path())
         .stdin(Stdio::piped())
@@ -52,6 +62,25 @@ fn a_question_is_the_hooks_ask_decision() {
             "permissionDecisionReason": "Changes UEFI boot entries (R2: a bad one can stop the box booting).",
         }})
     );
+}
+
+/// A Claude Code under proj (PROJ_JOB) is a job's, whose `first` label
+/// the guard asks about; anyone else's isn't.
+#[test]
+fn a_jobs_claude_is_asked_before_it_puts_first_on() {
+    let config = r#"{"git": "git", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 8, "firstLabel": "first"}"#;
+    let input = r#"{"tool_name": "Bash", "tool_input": {"command": "gh issue edit 5 --add-label first"}, "cwd": "/"}"#;
+    let out: serde_json::Value =
+        serde_json::from_str(&hook_in(Some("web-1"), config, input)).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
+    let reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.starts_with("Puts the `first` label on"), "{reason}");
+    assert_eq!(hook_in(Some(""), config, input), "");
+    assert_eq!(hook(config, input), "");
+    // No label to keep: nothing to ask.
+    assert_eq!(hook_in(Some("web-1"), CONFIG, input), "");
 }
 
 /// A guard that can't read what it guards asks, rather than let the

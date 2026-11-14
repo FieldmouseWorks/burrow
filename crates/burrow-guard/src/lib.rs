@@ -28,6 +28,8 @@ mod codex;
 pub mod config;
 mod curl;
 mod doors;
+mod first;
+mod gh;
 mod push;
 mod shell;
 mod undo;
@@ -64,6 +66,9 @@ pub struct Guard<'a> {
     pub config: &'a Config,
     /// Whether it guards a Codex job, which gets codex.rs's refusals too.
     pub codex: bool,
+    /// Whether it guards a proj job (every Codex it guards is one), which
+    /// gets first.rs's refusal too.
+    pub job: bool,
     /// When the last undo snapshot was taken, as its mtime: one round per
     /// five seconds is plenty for a burst of commands.
     pub mark: PathBuf,
@@ -106,6 +111,9 @@ impl Guard<'_> {
             asks.extend(doors::asks(cmd));
             if self.codex {
                 asks.extend(codex::refusals(cmd));
+            }
+            if let Some(label) = self.config.first_label.as_deref().filter(|_| self.job) {
+                asks.extend(first::refusals(cmd, label));
             }
         }
         asks.dedup();

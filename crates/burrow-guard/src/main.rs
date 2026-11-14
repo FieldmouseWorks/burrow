@@ -90,6 +90,9 @@ fn check(args: &[String]) -> Result<Option<String>, String> {
     let guard = Guard {
         config: &config,
         codex: user.is_some(),
+        // Codex's hook guards only the jobs' user's Codex, which runs only
+        // as a job; Claude Code runs as one under proj, which names it.
+        job: user.is_some() || std::env::var_os("PROJ_JOB").is_some_and(|j| !j.is_empty()),
         mark: runtime.join("claude-guard-last-snapshot"),
         namespace: Namespace::here(),
     };
