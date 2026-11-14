@@ -107,6 +107,8 @@
       daemon = true;
       # A change to docs alone lands on green CI with no review round.
       policy.docs = [ "^docs/" "(^|/)README\\.md$" ];
+      # cn flow's config and policy, rendered from the steward's settings.
+      flow.enable = true;
       # `undo` issues in the probe's repo, from its authors.
       door.enable = true;
     };
