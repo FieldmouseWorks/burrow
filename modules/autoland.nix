@@ -772,7 +772,8 @@ in
         proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
-        oldest PR first; a job running a check without a build of its own
+        oldest PR first, among those due the steward's look in the same round
+        (every open PR's look before any one's second); a job running a check without a build of its own
         holds a slot of its own; a build first builds what its derivations
         are built from, in a heavy slot but outside the line, so a slot is
         held only while those derivations themselves build, a VM test's run
