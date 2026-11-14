@@ -4,6 +4,16 @@
 #
 #   nix build .#checks.x86_64-linux.agents -L
 { self, pkgs }:
+let
+  # How long burrow-agent itself gives a sandbox: BOOT to boot, BANNER for
+  # sshd's banner (crates/burrow-agent/src/ssh.rs). The test waits on a
+  # nested boot as long as the agent does, never less: on a loaded machine
+  # one takes minutes, and a shorter wait only fails the test for it.
+  agentSecs = name: pkgs.lib.toInt (builtins.head (builtins.match
+    ".*pub const ${name}: Duration = Duration::from_secs\\(([0-9]+)\\);.*"
+    (builtins.readFile ../crates/burrow-agent/src/ssh.rs)));
+  boot = agentSecs "BOOT" + agentSecs "BANNER";
+in
 pkgs.testers.runNixOSTest {
   name = "agents";
 
@@ -86,6 +96,9 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json, time
+
+    # The longest the agent waits for one sandbox to boot and answer.
+    BOOT = ${toString boot}
 
     host.wait_for_unit("multi-user.target")
     host.wait_for_unit("agents-dataset.service")
@@ -191,8 +204,8 @@ pkgs.testers.runNixOSTest {
         host.fail("test -e /data/dev/src/demo/b")
         host.succeed(f"test -e {clone}/b")
         # And it comes back by itself, however long a loaded machine takes
-        # to boot it (BOOT in crates/burrow-agent/src/ssh.rs).
-        host.wait_until_succeeds(f"su - dev -c 'agent sh {a} true </dev/null'", timeout=960)
+        # to boot it.
+        host.wait_until_succeeds(f"su - dev -c 'agent sh {a} true </dev/null'", timeout=BOOT)
 
     with subtest("fetch brings its work back as refs, without running its git config"):
         vm(a, "git checkout -qb feat && echo two >a && git commit -qam two && echo wip >e")
@@ -222,13 +235,16 @@ pkgs.testers.runNixOSTest {
         sandbox = host.succeed(f"cat /data/dev/jobs/{job}/agent").strip()
         assert sandbox == "demo-3", sandbox
         assert "[vm demo-3]" in dev("proj status")
-        def ended(job, turn=1):
-            host.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=240)
+        # A turn ends once every sandbox it boots has booted, so it gets the
+        # agent's wait for each of them.
+        def ended(job, turn=1, boots=1):
+            host.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=boots * BOOT)
             return host.succeed(f"cat /data/dev/jobs/{job}/{turn}.end").strip()
 
         # Told once, in the same turn and conversation, it awaits an issue:
-        # the declaration holds its URL, and the host reads the issue.
-        assert ended(job) == "await"
+        # the declaration holds its URL, and the host reads the issue. The
+        # turn boots twice: the silent run's sandbox, then the nudge's.
+        assert ended(job, boots=2) == "await"
         nudge = host.succeed(f"cat /data/dev/jobs/{job}/1.cut")
         assert "Your answer didn't say what comes next" in nudge
         assert all(x in nudge for x in ["proj await URL", "proj ask", "proj done"])
