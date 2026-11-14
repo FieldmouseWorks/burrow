@@ -152,7 +152,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     );
     assert!(repo_file("crates/burrow-keep/src/main.rs").is_file());
     assert!(
-        save["if"] == "${{ !cancelled() && steps.keep.outcome == 'success' }}"
+        save["if"]
+            == "${{ !cancelled() && steps.keep.outcome == 'success' && steps.keep-newer.outputs.superseded != 'true' }}"
             && save["continue-on-error"] == true,
         "{save:?}"
     );
@@ -184,9 +185,11 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         ("workflow_dispatch", main, "success", false, false),
     ] {
         for (step, id) in [(keep, "keep-tool"), (save, "keep")] {
+            // keep-newer said nothing: no newer commit's entry, or it failed.
             let c = ctx(&[
                 ("cancelled()", cancelled.into()),
                 (&format!("steps.{id}.outcome"), "success".into()),
+                ("steps.keep-newer.outputs.superseded", "".into()),
             ]);
             assert_eq!(value(text(&step["if"]), &c).truthy(), !cancelled);
         }
@@ -421,7 +424,7 @@ fn a_prs_exact_key_is_its_bases_push_save() {
 }
 
 #[test]
-fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
+fn the_waiters_and_pruners_token_has_actions_access_through_every_local_caller() {
     let check = job();
     assert!(
         check.get("permissions").is_none(),
@@ -443,8 +446,15 @@ fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
                 .as_str()
                 .is_some_and(|u| u.contains("/flake-check.yml"))
             {
+                // burrow's own push to main prunes the kept builds (#1011),
+                // and its other calls grant what that one does.
+                let actions = if path.starts_with(".github/") {
+                    "write"
+                } else {
+                    "read"
+                };
                 for (scope, level) in [
-                    ("actions", "read"),
+                    ("actions", actions),
                     ("contents", "read"),
                     ("id-token", "write"),
                     ("attestations", "write"),
@@ -453,5 +463,78 @@ fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
                 }
             }
         }
+    }
+}
+
+/// One entry a leg (#1011): a push to the default branch's leg checks for a
+/// newer commit's entry before its save, and saves only without one; once
+/// its save is listed it deletes what its commit supersedes, with
+/// burrow-keep-prune (whose tests say which), built by the keep step, and
+/// the caller's token. Either failing is a degradation, not a red gate.
+#[test]
+fn a_leg_skips_a_superseded_save_and_prunes_what_its_own_supersedes() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert!(at("keep") < at("keep-newer") && at("keep-newer") < at("keep-save"));
+    assert!(at("saved-lookup") < at("keep-prune"));
+    let (newer, save, prune) = (
+        step(&job, "keep-newer"),
+        step(&job, "keep-save"),
+        step(&job, "keep-prune"),
+    );
+    let kept_key = text(&save["with"]["key"]).trim_end_matches("${{ github.sha }}");
+    for (s, mode) in [(newer, "before"), (prune, "after")] {
+        assert_eq!(s["continue-on-error"], true, "{s:?}");
+        assert_eq!(s["shell"], "bash");
+        assert_eq!(script(s), format!("\"$PRUNE\" {mode}"));
+        assert_eq!(s["env"]["GH_TOKEN"], "${{ github.token }}");
+        assert_eq!(s["env"]["KEPT_KEY"], kept_key);
+        assert_eq!(
+            s["env"]["DEFAULT_BRANCH"],
+            "${{ github.event.repository.default_branch }}"
+        );
+        // The binary the keep step's cargo build left in its target dir.
+        let keep = step(&job, "keep");
+        assert_eq!(
+            s["env"]["PRUNE"],
+            format!(
+                "{}/release/burrow-keep-prune",
+                text(&keep["env"]["CARGO_TARGET_DIR"])
+            )
+        );
+    }
+    assert!(repo_file("crates/burrow-keep/src/bin/burrow-keep-prune.rs").is_file());
+    // Saved unless a newer commit's entry was there, or the run cancelled.
+    for (cancelled, kept, superseded, saves) in [
+        (false, "success", "", true),
+        (false, "success", "true", false),
+        (false, "failure", "", false),
+        (true, "success", "", false),
+    ] {
+        let c = ctx(&[
+            ("cancelled()", cancelled.into()),
+            ("steps.keep.outcome", kept.into()),
+            ("steps.keep-newer.outputs.superseded", superseded.into()),
+        ]);
+        assert_eq!(value(text(&save["if"]), &c).truthy(), saves, "{c:?}");
+        assert_eq!(
+            value(text(&newer["if"]), &c).truthy(),
+            !cancelled && kept == "success"
+        );
+    }
+    // Pruned only once this push's own entry exists: never its
+    // predecessor without a successor.
+    for (cancelled, hit, prunes) in [
+        (false, "true", true),
+        (false, "false", false),
+        (false, "", false),
+        (true, "true", false),
+    ] {
+        let c = ctx(&[
+            ("cancelled()", cancelled.into()),
+            ("steps.saved-lookup.outputs.cache-hit", hit.into()),
+        ]);
+        assert_eq!(value(text(&prune["if"]), &c).truthy(), prunes, "{c:?}");
     }
 }
