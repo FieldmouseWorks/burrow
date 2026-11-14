@@ -360,7 +360,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                     Stop::Failed(e.why)
                 }
             })?;
-            json!({"ci": verdict, "limited": p.out.limited})
+            json!({"ci": verdict, "limited": p.out.until()})
         }
         ("settle", _) => {
             let repo = Repo {
@@ -368,7 +368,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 empty: f.empty,
             };
             burrow_upkeep::settle(&mut p, &repo, || secret(&creds()?));
-            json!({"failed": p.out.failed, "limited": p.out.limited})
+            json!({"failed": p.out.failed, "limited": p.out.until()})
         }
         ("post", _) => {
             let Some(look) = &look else {
@@ -382,7 +382,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
             };
             let covers = verdict::covers(look.description.as_deref(), &look.now);
-            json!({"outcome": outcome, "covers": covers, "why": why, "limited": p.out.limited})
+            json!({"outcome": outcome, "covers": covers, "why": why, "limited": p.out.until()})
         }
         ("verdict", _) => {
             let Some(asked) = &asked else {
@@ -410,7 +410,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 Ok(entry) => (Some(entry), None),
                 Err(why) => (None, Some(why)),
             };
-            json!({"queued": queued, "why": why, "limited": p.out.limited})
+            json!({"queued": queued, "why": why, "limited": p.out.until()})
         }
         ("claims", _) => {
             let Some(l) = &claimed else {
@@ -419,7 +419,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
             let seen = claims::claims(&mut p, l);
             let mut out = serde_json::to_value(&seen).map_err(|e| Stop::Failed(e.to_string()))?;
             out["wake"] = json!(p.out.wake);
-            out["limited"] = json!(p.out.limited);
+            out["limited"] = json!(p.out.until());
             out
         }
         ("commits", _) => {
@@ -433,7 +433,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 Ok(Commits::Short(why)) => (None, Some(why), None),
                 Err(why) => (None, None, Some(why)),
             };
-            json!({"commits": commits, "short": short, "why": why, "limited": p.out.limited})
+            json!({"commits": commits, "short": short, "why": why, "limited": p.out.until()})
         }
         ("branches", Some(open)) => {
             let default = f
@@ -448,7 +448,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 branches::watch(&mut p, b, &repo, &mut Git { bin: "git".into() });
             }
             let o = &p.out;
-            json!({"stuck": o.stuck, "wake": o.wake, "failed": o.failed, "limited": o.limited})
+            json!({"stuck": o.stuck, "wake": o.wake, "failed": o.failed, "limited": o.until()})
         }
         _ => {
             burrow_upkeep::watch(&mut p);
@@ -600,7 +600,7 @@ fn hooks(config: &str, rest: &[String]) -> Result<(), Stop> {
     h.run(&repos);
     println!(
         "{}",
-        json!({"failed": h.out.failed, "limited": h.out.limited})
+        json!({"failed": h.out.failed, "limited": h.out.until()})
     );
     Ok(())
 }

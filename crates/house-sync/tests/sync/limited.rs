@@ -125,3 +125,32 @@ fn a_full_pass_leaves_only_the_owners_the_rate_limit_holds_off() {
     assert!(ran.told.is_empty(), "{:?}", ran.told);
     assert_eq!(booked(&s.wake), json!({"": SOON}));
 }
+
+#[test]
+fn a_pass_after_another_met_the_limit_asks_that_installation_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Setup {
+        wake: dir.path().join("wake.json"),
+        meters: Some(burrow_github::quota::Kept {
+            dir: dir.path().join("meters"),
+            app: "workers".into(),
+        }),
+        ..setup()
+    };
+    let held = [failing("Sam/A", Fails::Limited(SOON))];
+    let ran = sync_with(&held, Some("Sam/A"), &s);
+    assert_eq!(ran.ok, Ok(true));
+    assert_eq!(booked(&s.wake), json!({"sam/a": SOON}));
+    // Another pass, as another program would start, on the same
+    // installation: held by its meter, it asks GitHub nothing there, and
+    // is booked for the same time.
+    let s2 = Setup {
+        wake: dir.path().join("second.json"),
+        ..s
+    };
+    let ran = sync_with(&[repo("Sam/B", Some(&stale()))], None, &s2);
+    assert_eq!(ran.ok, Ok(true));
+    assert!(ran.asked.is_empty(), "{:?}", ran.asked);
+    assert!(ran.listed.is_empty(), "{:?}", ran.listed);
+    assert_eq!(booked(&s2.wake), json!({"": SOON}));
+}

@@ -157,7 +157,10 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir(root.join("fake")).unwrap();
-        let m = Machine { _dir: dir, root };
+        let m = Machine {
+            _dir: dir,
+            root: root.clone(),
+        };
         let b = bin();
         let app = app.map(|owners| {
             serde_json::json!({
@@ -165,6 +168,7 @@ impl Machine {
                 // has is none.
                 "env": {"GH_TOKEN_SOCKET": "/run/gh-token/workers.sock", "GH_TOKEN": ""},
                 "owners": owners, "ghToken": b.join("gh-token"),
+                "meters": {"dir": root.join("meters"), "app": "workers"},
             })
         });
         m.config(serde_json::json!({
@@ -614,9 +618,11 @@ fn a_repo_github_rate_limits_is_booked_again_for_when_it_lifts_not_failed() {
         assert_eq!(m.noted(), Vec::<String>::new());
         assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
 
-        // The pass burrow-events starts for it once it's due uses it up, and
-        // leaves the rest.
+        // The pass burrow-events starts for it once it's due (the
+        // installation's hold, on its meter, lifted with it) uses it up,
+        // and leaves the rest.
         fs::remove_file(m.path("fake/sam_r-limited")).unwrap();
+        let _ = fs::remove_dir_all(m.path("meters"));
         fs::write(m.path("wake.json"), r#"{"sam/r": 1, "kim/q": 5}"#).unwrap();
         assert_eq!(m.run(&["sam/r"]), ok(""));
         assert_eq!(m.runs(), [filter("Sam/R")]);
@@ -676,6 +682,39 @@ fn a_full_run_books_what_the_rate_limit_held_off_and_runs_the_rest() {
     fs::write(m.path("wake.json"), r#"{"": 1}"#).unwrap();
     assert_eq!(m.run(&[]), ok(""));
     assert_eq!(m.booked(), serde_json::json!({}));
+}
+
+#[test]
+fn an_installation_another_program_found_held_is_asked_nothing() {
+    let m = Machine::new(Some(&["sam", "lee"]));
+    let at = in_an_hour();
+    m.set("sam-repos", "sam/a\n");
+    m.set("lee-repos", "lee/d\n");
+    // Another program on the App met sam's installation's limit.
+    let mut hold = burrow_github::quota::Meter::new("workers", "sam", at - 3600);
+    hold.retry_at = Some(at);
+    hold.record_public(&m.path("meters")).unwrap();
+    let (code, out, err) = m.run(&[]);
+    assert_eq!((code, err.as_str()), (Some(0), ""), "{out}");
+    assert!(out.starts_with(&booked_again("every repo", at)), "{out}");
+    let calls = m.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("owner=sam") || c.contains("sam/")),
+        "{calls:#?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with(&format!("renovate {}", filter("lee/d")))),
+        "{calls:#?}"
+    );
+    assert_eq!(m.booked(), serde_json::json!({"": at}));
+    // One repo of sam's, asked for on its own: held too, asked nothing.
+    assert_eq!(m.run(&["sam/a"]).0, Some(0));
+    assert_eq!(m.booked(), serde_json::json!({"": at, "sam/a": at}));
+    assert_eq!(m.calls(), Vec::<String>::new());
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{Config, Overrides};
 use crate::pass::Out;
-use crate::testing::{Hub, States, T, answer, config, look};
+use crate::testing::{Hub, States, T, answer, config, limited, look};
 use serde_json::json;
 
 const LABELS: [&str; 8] = [
@@ -950,18 +950,9 @@ fn github_not_saying_what_the_repo_is_fails_its_settings_and_keeps_its_labels() 
         (json!(LABELS), None)
     );
     // A rate limit is noted, for the pass.
-    let limit = json!({"message": "API rate limit exceeded for installation"});
-    hub.on("GET", "repos/sam/r$", answer(403, limit));
-    hub.on(
-        "GET",
-        "rate_limit$",
-        answer(
-            200,
-            json!({"resources": {"core": {"remaining": 0, "reset": T + 60.0}}}),
-        ),
-    );
+    hub.on("GET", "repos/sam/r$", limited(T + 60.0));
     let (_, out) = settle_at(&cfg, &mut hub, &public(), 60.0);
-    assert_eq!(out.limited, Some(T + 60.0));
+    assert_eq!(out.until(), Some(T + 60.0));
 }
 
 #[test]

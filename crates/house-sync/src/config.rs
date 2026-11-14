@@ -28,6 +28,10 @@ pub struct Config {
     pub wake: PathBuf,
     /// Only say what a pass would do, as `status` does.
     pub dry_run: bool,
+    /// The meters of the installations it acts on, when it acts as an App:
+    /// what holds a pass off before it asks, and what it records.
+    #[serde(default)]
+    pub meters: Option<burrow_github::quota::Kept>,
 }
 
 impl Config {

@@ -132,14 +132,7 @@ pub fn answer(
     if path != "/graphql" && path != "/api/graphql" && response.status < 400 {
         response.body.clear();
     }
-    let mut meter = Meter::new(&quota.app, &target.owner, now.max(0) as u64);
-    meter.remaining = response
-        .header("x-ratelimit-remaining")
-        .and_then(|s| s.parse().ok());
-    meter.reset = response
-        .header("x-ratelimit-reset")
-        .and_then(|s| s.parse().ok());
-    meter.response(&response);
+    let mut meter = Meter::reading(&quota.app, &target.owner, &response, now.max(0) as u64);
     // Every persisted extension is published, before and after a free probe.
     // State/probe failures must not turn a completed mutation into a retry.
     if let Err(e) = publish(quota, &meter) {

@@ -398,7 +398,7 @@ fn github_not_listing_the_branches_or_the_closed_prs_changes_nothing() {
             assert!(out.failed.is_empty(), "{out:?}");
             // A rate limit is noted for the pass, as any call's is.
             let limited = why.1.contains("rate limit").then_some(T + 7200.0);
-            assert_eq!(out.limited, limited, "{why:?}");
+            assert_eq!(out.until(), limited, "{why:?}");
         }
     }
 }

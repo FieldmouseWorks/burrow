@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::settle;
-use crate::testing::{Hub, States, T, answer, config, look};
+use crate::testing::{Hub, States, T, answer, config, limited, look};
 
 const SECRET: &str = "hook-secret";
 const URL: &str = "https://example.org/burrow/hook";
@@ -554,23 +554,13 @@ fn github_not_answering_changes_nothing_known() {
     // GitHub's rate limit on the lookup of one that's gone, noted for the
     // pass.
     put(&cfg, "repo-sam_gone.json", json!({"unreached": GONE}));
-    world.hub("sam").on(
-        "GET",
-        "repos/sam/gone$",
-        answer(403, json!({"message": "API rate limit exceeded"})),
-    );
-    world.hub("sam").on(
-        "GET",
-        "rate_limit",
-        answer(
-            200,
-            json!({"resources": {"core": {"remaining": 0, "reset": T + 900.0}}}),
-        ),
-    );
+    world
+        .hub("sam")
+        .on("GET", "repos/sam/gone$", limited(T + 900.0));
     let projects = ["kim/p", "sam/gone"].map(String::from);
     let mut h = hooks(&cfg, &mut world, &app, 0.0);
     h.projects(&BTreeSet::new(), &projects);
-    assert_eq!(h.out.limited, Some(T + 900.0));
+    assert_eq!(h.out.until(), Some(T + 900.0));
     assert_eq!(h.said.len(), 2, "{:?}", h.said);
     assert!(h.said[0].starts_with("kim/p: its webhook: /app/installations"));
     assert!(h.said[1].contains("rate limit"), "{:?}", h.said);

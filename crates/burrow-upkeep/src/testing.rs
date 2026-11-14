@@ -123,6 +123,8 @@ pub struct Answer {
     pub why: String,
     /// The next page's path, for the Link header.
     pub next: Option<String>,
+    /// Any other headers it answers with.
+    pub headers: Vec<(String, String)>,
 }
 
 pub fn answer(status: u16, body: Value) -> Answer {
@@ -132,7 +134,29 @@ pub fn answer(status: u16, body: Value) -> Answer {
         etag: None,
         why: String::new(),
         next: None,
+        headers: vec![],
     }
+}
+
+/// GitHub's rate limit, with the installation's allowance spent until
+/// `reset` (seconds since the epoch), as its headers say.
+pub fn limited(reset: f64) -> Answer {
+    Answer {
+        headers: limit_headers(reset),
+        ..answer(
+            403,
+            json!({"message": "API rate limit exceeded for installation"}),
+        )
+    }
+}
+
+/// The headers GitHub's rate limit answers with: the allowance spent until
+/// `reset`.
+pub fn limit_headers(reset: f64) -> Vec<(String, String)> {
+    vec![
+        ("x-ratelimit-remaining".into(), "0".into()),
+        ("x-ratelimit-reset".into(), format!("{reset}")),
+    ]
 }
 
 impl Hub {
@@ -206,6 +230,7 @@ impl Api for Hub {
             return Ok(response(304, &Value::Null, a.etag.as_deref()));
         }
         let mut r = response(a.status, &a.body, a.etag.as_deref());
+        r.headers.extend(a.headers.iter().cloned());
         if let Some(next) = &a.next {
             let link = format!("<https://api.github.com/{next}>; rel=\"next\"");
             r.headers.push(("Link".into(), link));

@@ -188,6 +188,7 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = probeWake;
+      environment.BURROW_DOOR_METER = config.burrow.github.doorMeter (config.burrow.github.appOf cfg.gh) cfg.repo;
       environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";

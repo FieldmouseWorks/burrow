@@ -2,7 +2,7 @@
 //! deadline; neither the engine nor the owner needs a correction turn for it.
 use crate::state_reads::write as swap;
 use crate::{config::Config, job::Job, now, read};
-use burrow_github::quota::Meter;
+use burrow_github::quota::{Hold, Meter, Meters};
 use std::{collections::BTreeMap, fs};
 pub(crate) const LIMIT: &str = "github-limit";
 pub(crate) const PENDING: &str = "github-await";
@@ -35,13 +35,16 @@ pub fn meters(cfg: &Config) -> Vec<Meter> {
 }
 
 pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Option<i64> {
-    admission_reset(cfg, job, engine).filter(|t| *t > now())
+    admission_hold(cfg, job, engine, now().max(0) as u64).map(|h| h.until as i64)
 }
-pub(crate) fn admission_reset(
+/// The hold on the installation JOB's next turn acts on, as of AT, as its
+/// meter has it (burrow-github's quota::Meters).
+pub(crate) fn admission_hold(
     cfg: &Config,
     job: &Job,
     engine: crate::engine::Engine,
-) -> Option<i64> {
+    at: u64,
+) -> Option<Hold> {
     let request = crate::job::Request::load(job).ok()?;
     let app = crate::turn::github_app(cfg, request.app, engine)
         .ok()
@@ -50,25 +53,17 @@ pub(crate) fn admission_reset(
         .and_then(|link| crate::github::target(&link).map(|(r, _)| r))
         .unwrap_or_else(|| crate::pick::github_repo(cfg, &request.project));
     let owner = repo.split('/').next()?;
-    meters(cfg)
-        .into_iter()
-        .filter(|m| m.app == app && m.owner.eq_ignore_ascii_case(owner))
-        .filter_map(|m| m.deadline())
-        .max()
-        .map(|t| t as i64)
+    Meters::new(cfg.github_meters.clone(), &app).held(owner, at)
 }
 
-pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(), String> {
+pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) {
     // Host-owned direct calls are trusted, but their writes still use a
     // separate host root. Native jobs cannot publish global evidence here.
     if let (Some(app), Some(dir)) = (&cfg.host_github_app, &cfg.github_meters) {
-        let mut meter = Meter::new(app, owner, now().max(0) as u64);
-        meter.retry_at = Some(due);
-        meter.record_public(dir).map_err(|e| e.to_string())?;
+        Meters::new(Some(dir.clone()), app).hold(owner, due, now().max(0) as u64);
         crate::job::kick(cfg, ["proj-watch".into()]);
     }
     let _ = job;
-    Ok(())
 }
 
 /// Only actual failed API calls write refusal, never quoted tool results.
@@ -408,9 +403,7 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
                     .max()
                     .unwrap_or(due);
                 park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
-                if let Err(e) = note(cfg, job, &owner, installation_due) {
-                    eprintln!("proj: quota meter unavailable: {e}");
-                }
+                note(cfg, job, &owner, installation_due);
                 return Ok(Some(due as i64));
             }
             return Err(RecoveryError::Request(error));
