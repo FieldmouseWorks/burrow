@@ -55,6 +55,17 @@ impl List {
     fn next(&self) -> Option<usize> {
         self.children.iter().position(|c| c.merged_pr.is_none())
     }
+    /// The parent and its children, as `OWNER/REPO#N`: none of them is a
+    /// child's successor.
+    fn refs(&self, repo: &str, parent: &str) -> Vec<String> {
+        std::iter::once(format!("{repo}#{parent}"))
+            .chain(
+                self.children
+                    .iter()
+                    .filter_map(|c| c.number.map(|n| format!("{repo}#{n}"))),
+            )
+            .collect()
+    }
     fn checklist(&self, repo: &str, parent: &str) -> String {
         let mut text = format!(
             "Task list for {repo}#{parent}. Each implementation child is one fresh session and one PR.\n"
@@ -807,7 +818,7 @@ impl Pass<'_> {
             };
             match landed {
                 Some(pr) => Some(pr),
-                None => match self.successor(repo, child) {
+                None => match self.successor(repo, &issue, &list.refs(repo, n)) {
                     Successor::Landed(pr) => Some(pr),
                     Successor::None => None,
                     Successor::Unknown => {
@@ -837,6 +848,13 @@ impl Pass<'_> {
                 },
             }
         } else {
+            // Reopened: its own work again, whatever it was continued as.
+            if list.children[index].continued.take().is_some()
+                && !(self.save_list(repo, n, &list) && self.render_list(repo, n, &mut list))
+            {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
             self.recorded_landing(repo, child)
         };
         if let Some(pr) = landed {
@@ -846,6 +864,7 @@ impl Pass<'_> {
             }
             list.children[index].merged_pr = Some(pr);
             list.children[index].waits = false;
+            list.children[index].continued = None;
             if !self.save_list(repo, n, &list) {
                 self.retry(repo);
                 return Hold::Unknown;

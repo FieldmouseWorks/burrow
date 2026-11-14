@@ -593,10 +593,16 @@ fn a_list_whose_child_is_still_open_is_unchanged() {
     assert!(!b.log().contains("issues/8 -f state=closed"));
 }
 
-/// Comments on #8, as GitHub gives them: `body` by `login`.
-fn said_on_child(b: &Box, login: &str, body: &str) {
-    let c = json!({"id": 5, "user": burrow_github::fake::actor(login), "body": body,
+/// Comments on #8, as GitHub gives them: `body` by `login`, last edited by
+/// `editor` when there is one.
+fn said_on_child(b: &Box, login: &str, body: &str, editor: Option<&str>) {
+    let mut c = json!({"id": 5, "user": burrow_github::fake::actor(login), "body": body,
         "created_at": "2026-11-13T17:22:33Z"});
+    if let Some(editor) = editor {
+        let by = burrow_github::fake::actor(editor);
+        c["userContentEdits"] =
+            json!({"totalCount": 1, "nodes": [{"editor": by, "deletedBy": null}]});
+    }
     fs::write(
         b.path("repos_sam_box_issues_8_comments"),
         json!([[c]]).to_string(),
@@ -604,11 +610,26 @@ fn said_on_child(b: &Box, login: &str, body: &str) {
     .unwrap();
 }
 
-/// The successor, sam/machine#948, as GitHub has it now.
+/// The successor, sam/burrow#948, as GitHub has it now.
 fn successor(b: &Box, state: &str) {
     let mut it = issue(948, "sam", &[]);
     it["state"] = json!(state);
-    fs::write(b.path("repos_sam_machine_issues_948"), it.to_string()).unwrap();
+    fs::write(b.path("repos_sam_burrow_issues_948"), it.to_string()).unwrap();
+}
+
+/// A merged PR in sam/burrow closes sam/burrow#948, and only that issue.
+fn successor_landed(b: &Box) {
+    fs::write(
+        b.path("merged-sam_burrow-948"),
+        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+            {"merged":true,"url":"https://github.com/sam/burrow/pull/979"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn sequence(b: &Box, parent: &Value) {
+    b.pass().sequence("sam/box", std::slice::from_ref(parent));
 }
 
 #[test]
@@ -619,7 +640,8 @@ fn a_child_continued_elsewhere_waits_on_its_successor_and_lands_with_it() {
     said_on_child(
         &b,
         "sam",
-        "Continued as sam/machine#948, opened in the repo the work lives in.",
+        "Continued as sam/burrow#948, opened in the repo the work lives in.",
+        None,
     );
     successor(&b, "open");
     let mut p = b.pass();
@@ -632,48 +654,55 @@ fn a_child_continued_elsewhere_waits_on_its_successor_and_lands_with_it() {
     );
     let list = stored(&b).checklist("sam/box", "7");
     assert!(
-        list.contains("[ ] #8: task 0 — continued as sam/machine#948"),
+        list.contains("[ ] #8: task 0 — continued as sam/burrow#948"),
         "{list}"
     );
     assert!(!list.contains("the list waits"), "{list}");
 
     successor(&b, "closed");
-    fs::write(
-        b.path("merged-948"),
-        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
-            {"merged":true,"url":"https://github.com/sam/machine/pull/979"}]}}}}})
-        .to_string(),
-    )
-    .unwrap();
-    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    successor_landed(&b);
+    sequence(&b, &parent);
     assert!(advanced(&b));
     assert!(
         stored(&b)
             .checklist("sam/box", "7")
-            .contains("[x] #8: task 0 — https://github.com/sam/machine/pull/979")
+            .contains("[x] #8: task 0 — https://github.com/sam/burrow/pull/979")
     );
 }
 
 #[test]
-fn only_an_authors_comment_continues_a_child() {
-    let (mut b, parent, _) = parent_fixture();
-    notifier(&mut b);
-    child(&b, "closed");
-    said_on_child(&b, "mallory", "Continued as sam/machine#948.");
-    successor(&b, "open");
-    fs::write(
-        b.path("merged-948"),
-        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
-            {"merged":true,"url":"https://github.com/sam/machine/pull/979"}]}}}}})
-        .to_string(),
-    )
-    .unwrap();
-    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-    assert!(!advanced(&b));
-    assert!(
-        notice_open(&b),
-        "closed by hand with no successor: the owner hears"
-    );
+fn only_an_authors_unedited_comment_continues_a_child() {
+    for (by, editor) in [("mallory", None), ("sam", Some("mallory"))] {
+        let (mut b, parent, _) = parent_fixture();
+        notifier(&mut b);
+        child(&b, "closed");
+        said_on_child(&b, by, "Continued as sam/burrow#948.", editor);
+        successor(&b, "closed");
+        successor_landed(&b);
+        sequence(&b, &parent);
+        assert!(!advanced(&b), "{by} {editor:?}");
+        assert!(
+            notice_open(&b),
+            "closed by hand with no successor: the owner hears"
+        );
+    }
+}
+
+#[test]
+fn a_successor_off_this_machine_or_on_its_own_list_is_none() {
+    for named in [
+        "Continued as elsewhere/repo#948.",
+        "Continued as #9.",
+        "Continued as #7.",
+    ] {
+        let (mut b, parent, _) = parent_fixture();
+        notifier(&mut b);
+        child(&b, "closed");
+        said_on_child(&b, "sam", named, None);
+        sequence(&b, &parent);
+        assert!(!advanced(&b), "{named}");
+        assert!(notice_open(&b), "{named}: the list waits and says so");
+    }
 }
 
 #[test]
@@ -681,16 +710,16 @@ fn a_successor_closed_without_a_landing_leaves_the_child_waiting() {
     let (mut b, parent, _) = parent_fixture();
     notifier(&mut b);
     child(&b, "closed");
-    said_on_child(&b, "sam", "Continued as #948.");
-    let mut gone = issue(948, "sam", &[]);
-    gone["state"] = json!("closed");
-    fs::write(b.path("repos_sam_box_issues_948"), gone.to_string()).unwrap();
-    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    said_on_child(&b, "sam", "Continued as sam/burrow#948.", None);
+    successor(&b, "open");
+    sequence(&b, &parent);
+    assert!(!notice_open(&b));
+    // It closes with nothing landed: the child waits as a hand close does.
+    successor(&b, "closed");
+    sequence(&b, &parent);
     assert!(!advanced(&b));
     assert!(notice_open(&b));
-    assert!(
-        stored(&b)
-            .checklist("sam/box", "7")
-            .contains("the list waits")
-    );
+    let list = stored(&b).checklist("sam/box", "7");
+    assert!(list.contains("the list waits"), "{list}");
+    assert!(!list.contains("continued as"), "{list}");
 }

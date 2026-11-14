@@ -65,15 +65,18 @@ OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
 pass lock. It refuses inside a job, a GitHub account outside
 `inbox.authors`, a repo that isn't one of the machine's projects and a PR
 that hasn't merged; the next pass advances the list and closes the child
-if it's still open. A child whose work went on in another issue, in any
-repo, hands its place to that issue: an author comments on the closed
-child with a line starting `Continued as OWNER/REPO#N` (or `#N` in the
-same repo), the newest such comment counting. The list then waits on the
-successor, its checklist saying "continued as" it, with no notice and
-nothing to record by hand, looking again hourly. The child is done when a
-merged PR closes the successor. A successor closed without one passes the
-place on to the issue its own author comment names, and with none the
-child waits as a hand close does.
+if it's still open. A child whose work went on in another issue hands
+its place to that issue: an author comments on the closed child with a
+line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
+newest comment with such a line counts, and only as `written` verifies it,
+every writer and editor an author. The successor must be an issue in one
+of the machine's projects, and not the parent or a child on the same list.
+The list then waits on it, its checklist saying "continued as" it, with no
+notice and nothing to record by hand, looking again hourly. The child is
+done when the successor is, by the same rules as a child. A successor
+closed without that passes the place on to the one it names in turn; with
+none, one that's gone, or one that can't be followed, the child waits as a
+hand close does.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes

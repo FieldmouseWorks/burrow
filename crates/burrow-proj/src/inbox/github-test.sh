@@ -17,8 +17,10 @@ if [ "$path" = graphql ]; then
   if printf '%s' "$body" | jq -e '.query | contains("closedByPullRequestsReferences")' >/dev/null; then
     if [ -f "$TEST/fail" ] && grep -qF merged-query "$TEST/fail"; then exit 1; fi
     n=$(printf '%s' "$body" | jq -r .variables.n)
+    at=$(printf '%s' "$body" | jq -r '.variables.owner + "_" + .variables.name')
     printf 'HTTP/2.0 200 OK\n\n'
-    cat "$TEST/merged-$n" 2>/dev/null || printf '{"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}}'
+    # One repo's issue when the test named its repo, else any repo's.
+    cat "$TEST/merged-$at-$n" 2>/dev/null || cat "$TEST/merged-$n" 2>/dev/null || printf '{"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}}'
     exit 0
   fi
   if [ -f "$TEST/fail" ] && printf '%s' "api graphql" | grep -qF -f "$TEST/fail"; then exit 1; fi

@@ -197,43 +197,72 @@ impl Pass<'_> {
         }
     }
 
-    /// Where closed child N's work went on: the successor the newest
-    /// author's comment on it names, followed through a successor that
-    /// closed without a merged PR to the one it names in turn. While one is
-    /// open the repo is looked at again in a while, since a merge elsewhere
-    /// sends no event here.
-    pub(super) fn successor(&mut self, repo: &str, n: u64) -> Successor {
-        let mut from = (repo.to_owned(), n);
-        let mut seen = std::collections::BTreeSet::new();
-        while seen.insert(format!("{}#{}", from.0, from.1).to_lowercase()) && seen.len() <= HOPS {
-            let Some(comments) = crate::github::every(
-                self.cfg,
-                &format!("repos/{}/issues/{}/comments", from.0, from.1),
-            ) else {
+    /// Where closed child `issue` (as REST gives it) went on: the successor
+    /// its newest author's comment naming one names, in one of this
+    /// machine's projects and off its own list (`list`, the parent and its
+    /// children, as `OWNER/REPO#N`). Done as a child is ([`Pass::landed_child`]);
+    /// one closed without that passes on to the successor it names in turn.
+    /// Comments count as [`Pass::written`] verifies them: every writer and
+    /// editor an author. While one is open the repo is looked at again in a
+    /// while, since a merge elsewhere sends no event here.
+    pub(super) fn successor(&mut self, repo: &str, issue: &Value, list: &[String]) -> Successor {
+        let mut from = (repo.to_owned(), issue.clone());
+        let mut seen: std::collections::BTreeSet<String> =
+            list.iter().map(|r| r.to_lowercase()).collect();
+        for _ in 0..HOPS {
+            let Some(written) = self.written(&from.0, &from.1) else {
                 return Successor::Unknown;
             };
-            let Some((at, m)) = comments
+            // The newest comment that names one is the one that counts,
+            // whether or not what it names can be read.
+            let Some((at, m)) = written
+                .comments
                 .iter()
                 .rev()
-                .filter(|c| self.heard(c))
-                .find_map(|c| continued_as(&from.0, c["body"].as_str().unwrap_or_default()))
+                .map(|c| c["body"].as_str().unwrap_or_default())
+                .find(|b| b.lines().any(|l| l.trim().starts_with(CONTINUED)))
+                .and_then(|b| continued_as(&from.0, b))
             else {
                 return Successor::None;
             };
-            match self.closing_reference(&at, m) {
-                Some(Some(pr)) => return Successor::Landed(pr),
-                Some(None) => {}
-                None => return Successor::Unknown,
-            }
-            let Some(issue) = crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}"))
+            let Some(at) = self
+                .project
+                .keys()
+                .find(|r| r.eq_ignore_ascii_case(&at))
+                .cloned()
             else {
+                return Successor::None;
+            };
+            if !seen.insert(format!("{at}#{m}").to_lowercase()) {
+                return Successor::None;
+            }
+            let got = crate::github::reported(burrow_github::call_allowing(
+                &mut crate::github::client(self.cfg),
+                "GET",
+                &format!("repos/{at}/issues/{m}"),
+                None,
+                None,
+                &[404, 410],
+            ));
+            let Some(got) = got else {
                 return Successor::Unknown;
             };
-            if issue["state"] != "closed" {
-                self.book(repo, crate::now() + AWAITED_LOOK);
-                return Successor::Open(format!("{at}#{m}"));
+            if got.status != 200 {
+                return Successor::None;
             }
-            from = (at, m);
+            let Ok(next) = got.json() else {
+                return Successor::Unknown;
+            };
+            let closed = next["state"] == "closed";
+            match self.landed_child(&at, m, closed.then_some(&next)) {
+                Some(Some(pr)) => return Successor::Landed(pr),
+                None => return Successor::Unknown,
+                Some(None) if !closed => {
+                    self.book(repo, crate::now() + AWAITED_LOOK);
+                    return Successor::Open(format!("{at}#{m}"));
+                }
+                Some(None) => from = (at, next),
+            }
         }
         Successor::None
     }
