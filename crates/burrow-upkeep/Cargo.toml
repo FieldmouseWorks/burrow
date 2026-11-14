@@ -14,6 +14,7 @@ flaky = { path = "../flaky" }
 gh-token = { path = "../gh-token" }
 jiff.workspace = true
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "time"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

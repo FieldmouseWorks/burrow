@@ -26,6 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
+from checkouts import checkout
 import proof_state
 from proof_state import build_unit, user_systemctl, build_state
 
@@ -92,12 +93,24 @@ def pass_deadline(seconds):
         REMOTE_DEADLINE = previous
 
 
+def within(timeout):
+    """timeout (None: none of its own), cut to what is left of the pass's
+    remote-call deadline. Raises Unavailable once nothing is left: the call
+    would outlive the reserve the pass keeps to publish its progress."""
+    if REMOTE_DEADLINE is None:
+        return timeout
+    remaining = REMOTE_DEADLINE - time.monotonic()
+    timeout = remaining if timeout is None else min(timeout, remaining)
+    if timeout <= 0:
+        raise Unavailable("pass remote-call deadline reached")
+    return timeout
+
+
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
-    if REMOTE_DEADLINE is not None:
-        remaining = REMOTE_DEADLINE - time.monotonic()
-        timeout = remaining if timeout is None else min(timeout, remaining)
-        if timeout <= 0:
-            raise Unavailable("pass remote-call deadline reached")
+    """A call that reaches GitHub, held to the pass's deadline. A command
+    that must keep what it printed before a timeout passes within() as its
+    own timeout instead (repos.undo_red); every other one comes here."""
+    timeout = within(timeout)
     try:
         return subprocess.run(command, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
@@ -682,28 +695,6 @@ def taken_line(repo, had):
     theirs = f"a clone of {had['origin']}" if had["origin"] else "something with no GitHub origin"
     return (TAKEN, repo, f"`{had['folder']}` holds {theirs}, which GitHub doesn't answer as {repo}: "
             f"it needs its checkout there. Its jobs wait until that folder is moved out")
-
-
-def checkout(repo):
-    """Clone repo into projectsDir for a job, unless a clone under an old name
-    turns out to be it. A folder another repo's clone holds is recorded for
-    taken(), once, rather than cloned into; returns None then."""
-    follow_renames()
-    if retiring(repo):  # what that just found may be this repo's to wait for
-        return None
-    d = project_dir(repo)
-    if d:
-        return d
-    path = destination(repo)
-    if blocked(path):
-        had = {"folder": path, "origin": origin(path)}
-        log(f"{repo}: {taken_line(repo, had)[2]}")
-        save(TAKEN_FILE, {**load(TAKEN_FILE, {}), repo: had})
-        return None
-    # The project's clone is the machine user's, for its jobs to push from as
-    # them: cloned as them, not as the App.
-    subprocess.run(["gh", "repo", "clone", repo, path], check=False)
-    return project_dir(repo)
 
 
 def rank(repo):

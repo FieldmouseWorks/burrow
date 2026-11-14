@@ -40,8 +40,8 @@ under way, does it all again on the next.
 
 Steward passes stop taking new PR steps after eight minutes once they have
 advanced durable work. Slow preparation gets a useful work slice rather than restarting without
-processing PRs; remote calls share an eighteen-minute deadline to leave publication time
-before systemd's hard timeout. A contending pass requeues on its own event
+processing PRs; remote calls (GitHub, `cn`, burrow-upkeep, a job's first clone) share an
+eighteen-minute deadline to leave publication time before systemd's hard timeout. A contending pass requeues on its own event
 line instead of spending that deadline waiting for the other pass's lock.
 
 `pass-progress.json` keeps traversal receipts after their waits and wake-ups

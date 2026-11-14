@@ -387,12 +387,14 @@ def undo_red(repo, red):
     # The writer's own token, never the steward's: its PR is the machinery's.
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "CONARY_TOKEN_COMMAND")}
     try:
-        p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True, timeout=600)
+        # Ten minutes, or what's left of the pass's deadline.
+        p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True,
+                           timeout=C.within(600))
         rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
     except subprocess.TimeoutExpired as e:
         # What it printed before then counts all the same: a PR it opened.
         out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        rc, said = None, "it ran past ten minutes"
+        rc, said = None, f"it ran past {e.timeout:g} seconds"
     url = f"https://github.com/{repo}/pull/".lower()
     ours, theirs, rows = set(red.get("undos", [])), set(red.get("theirs", [])), []
     for row in out.splitlines():

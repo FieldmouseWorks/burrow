@@ -207,6 +207,11 @@ def upkeep(repo, mine):
             jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"], key=j["key"], role=j["role"])
         except C.JobPaused:
             continue
+        except C.Unavailable as e:  # no pass time for its clone: its jobs wait for the next look
+            log(f"{repo}: its {j['part']} job: {e}")
+            mine.extend(tuple(x) for x in j["unstarted"])
+            C.wake(repo, C.NOW + 5 * MIN)  # ends: this look again
+            continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
             failing(repo, f"its {j['part']} job didn't start: {e}")
             mine.extend(tuple(x) for x in j["unstarted"])
@@ -302,13 +307,25 @@ def run_pass(kick, continuing=False):
                     continue
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
                         and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo) and not C.paused(repo)):
-                    jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True, role="baseline")
-                    started += 1
+                    clone_later = False
+                    try:
+                        jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True, role="baseline")
+                    except C.Unavailable as e:
+                        # Pass time ran out during its clone: not the repo's
+                        # failure, so no day's wait; the next pass tries again.
+                        log(f"{repo}: baseline job: {e}")
+                        clone_later = True
+                        operations_complete = False
+                        batch.retry(repo, C.NOW + 5 * MIN)
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass starts its baseline job
+                        jid = None
+                    else:
+                        started += 1
                     if jid:
                         log(f"{repo}: baseline job {jid}")
                         known.add(repo)
                         failed.pop(repo, None)
-                    elif not C.taken(repo):  # which goes on the stuck issue, below
+                    elif not clone_later and not C.taken(repo):  # which goes on the stuck issue, below
                         log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
                         failed[repo] = C.NOW
                 elif new and not CFG["baselineJobs"]:
