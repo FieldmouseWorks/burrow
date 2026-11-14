@@ -14,6 +14,10 @@ struct Hub {
     status: u16,
     lost: bool,
     annotation_failure: bool,
+    /// The failed jobs' steps, and the conclusion a finished run ends with
+    /// (cancelled when unset).
+    steps: Value,
+    ended: Option<&'static str>,
 }
 
 impl Api for Hub {
@@ -33,6 +37,8 @@ impl Api for Hub {
                 });
             }
             (200, json!([]))
+        } else if path.contains("/actions/jobs/") {
+            (200, json!({"steps": self.steps}))
         } else if method == "POST" {
             if self.status == 0 || self.status == 201 || self.lost {
                 self.attempt += 1;
@@ -52,7 +58,7 @@ impl Api for Hub {
             (
                 200,
                 json!({"run_attempt": self.attempt.max(1), "status": if self.going { "queued" } else { "completed" },
-                "conclusion": if self.going { Value::Null } else { json!("cancelled") }}),
+                "conclusion": if self.going { Value::Null } else { json!(self.ended.unwrap_or("cancelled")) }}),
             )
         };
         Ok(Response {
@@ -330,4 +336,80 @@ fn a_later_completed_run_replaces_earlier_work_but_a_skip_or_older_one_does_not(
     other["checkSuite"]["workflowRun"]["workflow"]["id"] = json!("other");
     other["checkSuite"]["workflowRun"]["file"]["path"] = json!(".github/workflows/other.yml");
     assert_eq!(ids(&[house_run(10, "s1", "FAILURE"), other]), [10, 11]);
+}
+
+fn steps(failed: &[&str]) -> Value {
+    let mut all = vec![json!({"name": "Run bash \"$TOOLS/negative.sh\"", "conclusion": "success"})];
+    all.extend(
+        failed
+            .iter()
+            .map(|n| json!({"name": n, "conclusion": "failure"})),
+    );
+    all.push(json!({"name": "Complete job", "conclusion": "success"}));
+    Value::Array(all)
+}
+
+const ATTEST_RUN: &str = "Run actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6";
+
+#[test]
+fn a_failed_attestation_upload_alone_is_run_again_once() {
+    let mut h = Hub {
+        attempt: 1,
+        steps: steps(&[ATTEST_RUN]),
+        ended: Some("failure"),
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "pending");
+    assert!(
+        h.asked
+            .iter()
+            .any(|(m, p)| m == "POST" && p == "repos/sam/r/actions/runs/7/rerun-failed-jobs"),
+        "{:?}",
+        h.asked
+    );
+    assert_eq!(posts(&h), 1);
+    // The rerun failed the same way: attempt 2 is red, with no second rerun.
+    h.going = false;
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "red");
+    assert_eq!(
+        got.names,
+        ["train / negative (attestation upload failed again after a rerun)"]
+    );
+    assert_eq!(posts(&h), 1);
+}
+
+#[test]
+fn any_other_failed_step_keeps_a_failure_red() {
+    for failed in [
+        &["Run bash \"$TOOLS/negative.sh\""][..],
+        &["Run bash \"$TOOLS/negative.sh\"", ATTEST_RUN],
+        &[],
+    ] {
+        let mut h = Hub {
+            attempt: 1,
+            steps: steps(failed),
+            ended: Some("failure"),
+            ..Hub::default()
+        };
+        let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+        let got = run(&mut h, &a, false).unwrap();
+        assert_eq!(got.state, "red", "{failed:?}");
+        assert_eq!(got.names, ["train / negative"], "{failed:?}");
+        assert_eq!(posts(&h), 0, "{failed:?}");
+    }
+    // A genuine failure elsewhere in the run reruns nothing.
+    let mut h = Hub {
+        attempt: 1,
+        steps: steps(&[ATTEST_RUN]),
+        ended: Some("failure"),
+        ..Hub::default()
+    };
+    let mut lint = check_run("lint", 12, 7, "FAILURE");
+    lint["databaseId"] = json!(0);
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE"), lint]);
+    assert_eq!(run(&mut h, &a, false).unwrap().state, "red");
+    assert_eq!(posts(&h), 0);
 }
