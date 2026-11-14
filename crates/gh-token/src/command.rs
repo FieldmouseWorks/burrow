@@ -122,7 +122,8 @@ impl Help {
     /// Its flags, from the FLAGS sections:
     /// `  -b, --body text   The comment body text` takes a value,
     /// `  -R, --repo strings   Filter on repository` a list of them, and
-    /// `  -w, --web         Open the web browser` nothing. A section's heading
+    /// `  -w, --web[=true|false]   Open the web browser` (or, before gh 2.104,
+    /// `  -w, --web   Open the web browser`) nothing. A section's heading
     /// is a line that isn't indented.
     fn read_sections(&mut self, help: &str) {
         let mut in_flags = false;
@@ -144,10 +145,17 @@ impl Help {
             let Some(long) = long.strip_prefix("--") else {
                 continue;
             };
-            let (name, takes) = match long.split_once(' ') {
-                Some((name, "strings")) => (name, Takes::List),
-                Some((name, _type)) => (name, Takes::One),
-                None => (long, Takes::Nothing),
+            let (head, kind) = match long.split_once(' ') {
+                Some((head, kind)) => (head, Some(kind)),
+                None => (long, None),
+            };
+            // `--web[=true|false]` (gh 2.104 on): a value only after `=`, so
+            // pflag never takes the next argument for it.
+            let (name, takes) = match (head.split_once("[="), kind) {
+                (Some((name, _)), _) => (name, Takes::Nothing),
+                (None, Some("strings")) => (head, Takes::List),
+                (None, Some(_)) => (head, Takes::One),
+                (None, None) => (head, Takes::Nothing),
             };
             if let Some(c) = short {
                 self.short.insert(c, name.to_owned());
@@ -374,7 +382,7 @@ fn slots(usage: &str) -> Vec<Slot> {
 
 #[cfg(test)]
 pub mod fake {
-    //! gh's help, in gh 2.103.2's layout, for the commands the tests call.
+    //! gh's help, in gh 2.104.0's layout, for the commands the tests call.
 
     use super::*;
 
@@ -384,7 +392,7 @@ pub mod fake {
             "",
             &[],
             "<command> <subcommand> [flags]",
-            "  --help      Show help for command\n  --version   Show gh version\n",
+            "  --help[=true|false]      Show help for command\n  --version[=true|false]   Show gh version\n",
         ),
         (
             "pr",
@@ -396,13 +404,13 @@ pub mod fake {
             "pr view",
             &[],
             "[<number> | <url> | <branch>] [flags]",
-            "  -c, --comments          View pull request comments\n  -q, --jq expression     Filter JSON output using a jq expression\n      --json fields       Output JSON with the specified fields\n  -w, --web               Open a pull request in the browser\n",
+            "  -c, --comments[=true|false]          View pull request comments\n  -q, --jq expression     Filter JSON output using a jq expression\n      --json fields       Output JSON with the specified fields\n  -w, --web[=true|false]               Open a pull request in the browser\n",
         ),
         (
             "pr checkout",
             &["co"],
             "[<number> | <url> | <branch>] [flags]",
-            "  -b, --branch string        Local branch name to use (default [the name of the head branch])\n  -f, --force                Reset the existing local branch to the latest state of the pull request\n",
+            "  -b, --branch string        Local branch name to use (default [the name of the head branch])\n  -f, --force[=true|false]                Reset the existing local branch to the latest state of the pull request\n",
         ),
         (
             "issue",
@@ -414,7 +422,7 @@ pub mod fake {
             "issue comment",
             &[],
             "{<number> | <url>} [flags]",
-            "  -b, --body text        The comment body text\n  -F, --body-file file   Read body text from file (use \"-\" to read from standard input)\n  -e, --editor           Skip prompts and open the text editor to write the body in\n  -w, --web              Open the web browser to write the comment\n",
+            "  -b, --body text        The comment body text\n  -F, --body-file file   Read body text from file (use \"-\" to read from standard input)\n  -e, --editor[=true|false]           Skip prompts and open the text editor to write the body in\n  -w, --web[=true|false]              Open the web browser to write the comment\n",
         ),
         (
             "issue transfer",
@@ -434,7 +442,7 @@ pub mod fake {
             "repo list",
             &["ls"],
             "[<owner>] [flags]",
-            "  -q, --jq expression       Filter JSON output using a jq expression\n  -L, --limit int           Maximum number of repositories to list (default 30)\n      --source              Show only non-forks\n",
+            "  -q, --jq expression       Filter JSON output using a jq expression\n      --json fields             Output JSON with the specified fields\n  -L, --limit int           Maximum number of repositories to list (default 30)\n      --no-archived[=true|false]   Omit archived repositories\n      --source[=true|false]              Show only non-forks\n",
         ),
         (
             "repo clone",
@@ -446,19 +454,19 @@ pub mod fake {
             "repo view",
             &[],
             "[<repository>] [flags]",
-            "  -b, --branch string     View a specific branch of the repository\n      --json fields       Output JSON with the specified fields\n  -w, --web               Open a repository in the browser\n",
+            "  -b, --branch string     View a specific branch of the repository\n      --json fields       Output JSON with the specified fields\n  -w, --web[=true|false]               Open a repository in the browser\n",
         ),
         (
             "repo create",
             &["new"],
             "[<name>] [flags]",
-            "      --private                Make the new repository private\n  -p, --template repository    Make the new repository based on a template repository\n",
+            "      --private[=true|false]                Make the new repository private\n  -p, --template repository    Make the new repository based on a template repository\n",
         ),
         (
             "repo fork",
             &[],
             "[<repository>] [-- <gitflags>...] [flags]",
-            "      --clone                 Clone the fork\n      --org string            Create the fork in an organization\n",
+            "      --clone[=true|false]                 Clone the fork\n      --org string            Create the fork in an organization\n",
         ),
         (
             "label",
@@ -470,7 +478,7 @@ pub mod fake {
             "label clone",
             &[],
             "<source-repository> [flags]",
-            "  -f, --force   Overwrite labels in the destination repository\n",
+            "  -f, --force[=true|false]   Overwrite labels in the destination repository\n",
         ),
         ("project", &[], "<command>", ""),
         (
@@ -489,7 +497,7 @@ pub mod fake {
             "api",
             &[],
             "<endpoint> [flags]",
-            "  -F, --field key=value          Add a typed parameter in key=value format\n      --hostname string          The GitHub hostname for the request (default \"github.com\")\n  -i, --include                  Include HTTP response status line and headers in the output\n  -X, --method string            The HTTP method for the request (default \"GET\")\n      --paginate                 Make additional HTTP requests to fetch all pages of results\n  -f, --raw-field key=value      Add a string parameter in key=value format\n",
+            "  -F, --field key=value          Add a typed parameter in key=value format\n      --hostname string          The GitHub hostname for the request (default \"github.com\")\n  -i, --include[=true|false]                  Include HTTP response status line and headers in the output\n  -X, --method string            The HTTP method for the request (default \"GET\")\n      --paginate[=true|false]                 Make additional HTTP requests to fetch all pages of results\n  -f, --raw-field key=value      Add a string parameter in key=value format\n",
         ),
         (
             "secret",
@@ -501,7 +509,7 @@ pub mod fake {
             "secret set",
             &[],
             "<secret-name> [flags]",
-            "  -b, --body string          The value for the secret (reads from standard input if not specified)\n  -o, --org organization     Set organization secret\n  -u, --user                 Set a secret for your user\n",
+            "  -b, --body string          The value for the secret (reads from standard input if not specified)\n  -o, --org organization     Set organization secret\n  -u, --user[=true|false]                 Set a secret for your user\n",
         ),
         ("search", &[], "<command>", ""),
         (
@@ -558,7 +566,7 @@ pub mod fake {
             out += &format!("FLAGS\n{flags}\n");
         }
         if !path.is_empty() {
-            out += "INHERITED FLAGS\n      --help   Show help for command\n";
+            out += "INHERITED FLAGS\n      --help[=true|false]   Show help for command\n";
             let mut p = *path;
             while let Some((parent, _)) = p.rsplit_once(' ') {
                 out += COMMANDS.iter().find(|c| c.0 == parent).unwrap().3;
@@ -612,6 +620,9 @@ mod tests {
         let h = Help::of("USAGE\n  gh x\n\nFLAGS\n  -a, --aa x   y\n\n  -b, --bb x   y\n\nEXAMPLES\n  -c, --cc x   y\n", &[]).unwrap();
         assert_eq!(h.long.len(), 2);
         assert!(h.long.contains_key("aa") && h.long.contains_key("bb"));
+        // A flag that takes nothing, as gh before 2.104 printed it.
+        let h = Help::of("USAGE\n  gh x\n\nFLAGS\n  -w, --web   y\n", &[]).unwrap();
+        assert_eq!(h.long.get("web"), Some(&Takes::Nothing));
         // gh printed nothing, or no usage: refused.
         assert!(Help::of("", &[]).is_err());
         assert!(Help::of("Some topic.\n", &[]).is_err());
@@ -652,6 +663,16 @@ mod tests {
         assert_eq!(values("pr view 5 -R=sam/r"), [v("repo", "sam/r")]);
         assert_eq!(values("pr view 5 -wcRsam/r"), [v("repo", "sam/r")]);
         assert_eq!(values("pr view 5 -w=true"), []);
+        // A flag whose help gives the value it may take after `=`
+        // (`--no-archived[=true|false]`) takes nothing after it.
+        assert_eq!(
+            read("repo list FieldmouseWorks --no-archived --limit 1000 --json name")
+                .unwrap()
+                .path,
+            ["repo", "list"]
+        );
+        assert_eq!(read("repo list --no-archived sam").unwrap().args.len(), 1);
+        assert_eq!(values("repo list --no-archived=false"), []);
         assert_eq!(
             values("issue -R sam/r comment 5 --body https://github.com/eve/x"),
             [v("repo", "sam/r"), v("body", "https://github.com/eve/x")]
