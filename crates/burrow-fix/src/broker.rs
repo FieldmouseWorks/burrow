@@ -2,14 +2,17 @@
 //! connection, from the flow's controller alone (burrow-producer's socket).
 //!
 //! - It checks the request's head against the PR's on GitHub.
-//! - It starts the fix as a proj job on the fixing role, under a key of the
-//!   PR's, so at most one live fix runs a PR: here, and across a restart,
-//!   since proj refuses a key a live job holds.
+//! - It checks the fixing role would run as the flow chose, on the engine
+//!   the plugin names itself by, before anything starts.
+//! - It starts the fix as a proj job on the fixing role, under a key of its
+//!   own beneath the PR's. At most one live fix runs a PR: one held here,
+//!   and none left over from before a restart ([`Broker::reconcile`]).
 //! - It waits on the job through its record, books its own deadline from
 //!   the record's `overdue_at`, and stops the job when the request ends
 //!   first (the plugin killed, past its deadline, cancelled).
 //! - It answers with what the job said, held to the problems it was handed
-//!   and to the head the PR has on GitHub after it.
+//!   and to the head the PR has on GitHub after it: a push is a new commit
+//!   on the head it was handed.
 //!
 //! The fixes it's waiting on are kept, by their keys, until each ends: a
 //! restart stops the jobs whose connections it lost ([`Broker::reconcile`]).
@@ -21,7 +24,7 @@ use crate::{Config, brief};
 use burrow_github::{Api, call};
 use burrow_producer::serve::Work;
 use conary_core::plugin::{
-    Answer, Context, Executed, FixResult, Identity, Request, Response, Task, version,
+    Answer, Choice, Context, Executed, FixResult, Identity, Request, Response, Task, version,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -40,30 +43,51 @@ pub struct Broker {
     pub github: GitHub,
     /// How often it reads a job's record while it waits.
     pub look: Duration,
-    /// The PRs with a live fix here, by their keys.
+    /// The PRs with a live fix here, by [`key`].
     live: Mutex<HashSet<String>>,
 }
 
-/// A PR's live fix, here: let go when its request ends, however it ends.
+/// A PR's live fix, here, and the proj key its job is held under: let go
+/// when its request ends, however it ends, unless its job may still be at
+/// work ([`Held::keep`]).
 struct Held<'a> {
     broker: &'a Broker,
-    key: String,
+    pr: String,
+    job: String,
+}
+
+impl Held<'_> {
+    /// Its job wouldn't stop: the PR stays held, and its job's key kept for
+    /// a restart to stop it, so no second fix starts beside it.
+    fn keep(self) {
+        std::mem::forget(self);
+    }
 }
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.broker.kept(&self.key));
+        let _ = fs::remove_file(self.broker.kept(&self.job));
         if let Ok(mut live) = self.broker.live.lock() {
-            live.remove(&self.key);
+            live.remove(&self.pr);
         }
     }
 }
 
-/// The key a PR's fix job is held under: proj's key alphabet (letters,
-/// digits and `._/:-`), one key a PR. GitHub's names have no `:`, so an
-/// `_` written as one can't make two PRs' keys the same.
+/// A PR's own key, in proj's key alphabet (letters, digits and `._/:-`).
+/// GitHub's names have no `:`, so an `_` written as one can't make two
+/// PRs' keys the same.
 pub fn key(repo: &str, pr: u64) -> String {
     format!("fix/{}/{pr}", repo.to_ascii_lowercase().replace('_', ":"))
+}
+
+/// The proj key one request's job is held under: the PR's, and a part of
+/// its own, since proj never lets go of a key a job that ran holds, and a
+/// PR is fixed again and again.
+fn job_key(repo: &str, pr: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}/{now:x}", key(repo, pr))
 }
 
 impl Broker {
@@ -125,12 +149,16 @@ impl Broker {
         {
             return Err("a fix job starts fresh: it resumes no session".into());
         }
+        self.runnable(
+            repo,
+            request.execution.as_ref().and_then(|e| e.choice.as_ref()),
+        )?;
         let held = self.hold(repo, *pr)?;
         let branch = self.handed(repo, *pr, head)?;
         let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
-        let kept = self.kept(&held.key);
-        fs::write(&kept, &held.key).map_err(|e| format!("{}: {e}", kept.display()))?;
-        let id = self.jobs.start(repo, &held.key, &task)?;
+        let kept = self.kept(&held.job);
+        fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
+        let id = self.jobs.start(repo, &held.job, &task)?;
         let record = match self.wait(&id, work) {
             Ok(record) => record,
             Err(why) => {
@@ -138,7 +166,10 @@ impl Broker {
                 // at work for a request that's over.
                 return Err(match self.jobs.stop(&id) {
                     Ok(()) => why,
-                    Err(e) => format!("{why}; and its job {id} wouldn't stop: {e}"),
+                    Err(e) => {
+                        held.keep();
+                        format!("{why}; and its job {id} wouldn't stop: {e}")
+                    }
                 });
             }
         };
@@ -154,6 +185,7 @@ impl Broker {
                     "the fix job says it pushed {pushed}, and the PR's head is {now}"
                 ));
             }
+            FixResult::Pushed { head: pushed } => self.pushed_on(repo, head, pushed)?,
             FixResult::Unchanged if now != *head => {
                 return Err(format!(
                     "the fix job pushed nothing, and the PR's head moved from {head} to {now}"
@@ -196,7 +228,74 @@ impl Broker {
         if !live.insert(key.clone()) {
             return Err(format!("a fix of {repo}#{pr} is at work already"));
         }
-        Ok(Held { broker: self, key })
+        Ok(Held {
+            broker: self,
+            pr: key,
+            job: job_key(repo, pr),
+        })
+    }
+
+    /// Whether a fix job in `repo` would run as the flow asks, before one
+    /// starts: proj runs it on the fixing role's route and tuning, and
+    /// Conary refuses an answer on another engine than the plugin names
+    /// (the role's route anywhere), a model it didn't offer, or another
+    /// model or effort than the flow chose. So the role's route for the
+    /// repo is that engine, moves to no other, names its model, and is
+    /// what the flow chose.
+    fn runnable(&self, repo: &str, choice: Option<&Choice>) -> Result<(), String> {
+        let role = &self.cfg.role;
+        let settings = self.cfg.settings.role_view()?.in_force;
+        let named = &settings.route(role, None).engine;
+        let route = settings.route(role, Some(repo));
+        if route.engine != *named || route.over.is_some() {
+            return Err(format!(
+                "the {role} role can run in {repo} on another engine than {named}, which the plugin names itself by"
+            ));
+        }
+        let tuning = settings.tuning(role, Some(repo), named);
+        let offers = settings.offers.get(named).cloned().unwrap_or_default();
+        if tuning.model.is_none() && !offers.models.is_empty() {
+            return Err(format!(
+                "the {role} role names no model on {named}, so its answer couldn't say what ran"
+            ));
+        }
+        if let Some(c) = choice
+            && (c.engine != *named
+                || c.model
+                    .as_ref()
+                    .is_some_and(|m| Some(m) != tuning.model.as_ref())
+                || c.effort
+                    .as_ref()
+                    .is_some_and(|e| Some(e) != tuning.effort.as_ref()))
+        {
+            return Err(format!(
+                "the flow chose {} {:?} {:?}, and the {role} role in {repo} runs {named} {:?} {:?}",
+                c.engine, c.model, c.effort, tuning.model, tuning.effort
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `pushed` is a new commit on top of `head`, the head the fix
+    /// was handed: not that head itself, nor one that replaced it.
+    fn pushed_on(&self, repo: &str, head: &str, pushed: &str) -> Result<(), String> {
+        let mut api = (self.github)();
+        let got = call(
+            &mut *api,
+            "GET",
+            &format!("repos/{repo}/compare/{head}...{pushed}"),
+            None,
+            None,
+        )
+        .and_then(|r| r.json())
+        .map_err(|e| format!("{head}...{pushed} in {repo} can't be compared: {e}"))?;
+        if got["status"] != "ahead" {
+            return Err(format!(
+                "the fix job's push {pushed} isn't a new commit on {head}: GitHub says it's {}",
+                got["status"]
+            ));
+        }
+        Ok(())
     }
 
     /// The PR's branch, once its head is `head`, it's open, and its branch

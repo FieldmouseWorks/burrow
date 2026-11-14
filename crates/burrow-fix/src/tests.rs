@@ -44,8 +44,11 @@ struct Runner {
     records: VecDeque<Record>,
     stopped: Vec<String>,
     answers: Option<Value>,
-    /// Keys proj still holds a job under.
+    /// Keys proj still holds a job under: never let go of, as proj never
+    /// lets go of a key once its job ran a turn.
     held: Vec<(String, String)>,
+    /// Whether a stop fails.
+    stop_fails: bool,
 }
 
 #[derive(Clone, Default)]
@@ -54,6 +57,9 @@ struct Fake(Arc<Mutex<Runner>>);
 impl Jobs for Fake {
     fn start(&self, repo: &str, key: &str, task: &str) -> Result<String, String> {
         let mut r = self.0.lock().unwrap();
+        if r.held.iter().any(|(k, _)| k == key) {
+            return Err(format!("{key} is held"));
+        }
         let id = format!("job-{}", r.started.len() + 1);
         r.started.push((repo.into(), key.into(), task.into()));
         r.held.push((key.into(), id.clone()));
@@ -76,7 +82,11 @@ impl Jobs for Fake {
         next.ok_or_else(|| "no record".into())
     }
     fn stop(&self, id: &str) -> Result<(), String> {
-        self.0.lock().unwrap().stopped.push(id.into());
+        let mut r = self.0.lock().unwrap();
+        if r.stop_fails {
+            return Err("proj stop failed".into());
+        }
+        r.stopped.push(id.into());
         Ok(())
     }
     fn answers(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
@@ -90,9 +100,13 @@ impl Jobs for Fake {
     }
 }
 
-/// A GitHub whose PR has the heads scripted, one a read; the last stays.
+/// A GitHub whose PR has the heads scripted, one a read (the last stays),
+/// and whose compare of two commits says what's scripted.
 #[derive(Clone)]
-struct Pr(Arc<Mutex<VecDeque<String>>>);
+struct Pr {
+    heads: Arc<Mutex<VecDeque<String>>>,
+    compare: Arc<Mutex<String>>,
+}
 
 impl Api for Pr {
     fn request(
@@ -102,20 +116,30 @@ impl Api for Pr {
         _: Option<&Value>,
         _: Option<&str>,
     ) -> Result<GhResponse, Failed> {
-        assert_eq!(path, format!("repos/{REPO}/pulls/7"));
-        let mut heads = self.0.lock().unwrap();
-        let head = if heads.len() > 1 {
-            heads.pop_front().unwrap()
+        let body = if path.starts_with(&format!("repos/{REPO}/compare/{HEAD}...")) {
+            json!({"status": *self.compare.lock().unwrap()})
         } else {
-            heads.front().cloned().unwrap()
+            assert_eq!(path, format!("repos/{REPO}/pulls/7"));
+            self.pr()
         };
-        let body = json!({"state": "open",
-            "head": {"sha": head, "ref": "topic", "repo": {"full_name": "Sam/Box"}}});
         Ok(GhResponse {
             status: 200,
             headers: Default::default(),
             body: body.to_string(),
         })
+    }
+}
+
+impl Pr {
+    fn pr(&self) -> Value {
+        let mut heads = self.heads.lock().unwrap();
+        let head = if heads.len() > 1 {
+            heads.pop_front().unwrap()
+        } else {
+            heads.front().cloned().unwrap()
+        };
+        json!({"state": "open",
+            "head": {"sha": head, "ref": "topic", "repo": {"full_name": "Sam/Box"}}})
     }
 }
 
@@ -138,13 +162,22 @@ fn record(stage: &str) -> Record {
 }
 
 /// Settings that route every role to claude, which offers one model at
-/// one effort.
+/// one effort, and run the fixing role on that model and effort.
 fn settings(dir: &std::path::Path) -> burrow_settings::Config {
+    route(
+        dir,
+        json!({"models": {"fix claude": {"model": "a-model", "effort": "high"}}}),
+    )
+}
+
+/// Settings with `routing` over the schema's defaults.
+fn route(dir: &std::path::Path, routing: Value) -> burrow_settings::Config {
     let overlay = dir.join("overlay.json");
     std::fs::write(
         overlay.with_extension("roles.json"),
-        json!({"offers": {"claude": {"models": ["a-model"], "efforts": ["high"]}}, "migrated": 1})
-            .to_string(),
+        json!({"routing": routing,
+            "offers": {"claude": {"models": ["a-model"], "efforts": ["high"]}}, "migrated": 1})
+        .to_string(),
     )
     .unwrap();
     serde_json::from_value(json!({"overlay": overlay})).unwrap()
@@ -171,6 +204,7 @@ struct Rig {
     cfg: Config,
     runner: Fake,
     heads: Arc<Mutex<VecDeque<String>>>,
+    compare: Arc<Mutex<String>>,
     broker: Arc<Broker>,
 }
 
@@ -179,8 +213,12 @@ fn rig() -> Rig {
     let cfg = config(dir.path());
     let runner = Fake::default();
     let heads = Arc::new(Mutex::new(VecDeque::from([HEAD.to_owned()])));
-    let h = heads.clone();
-    let github: GitHub = Box::new(move || Box::new(Pr(h.clone())));
+    let compare = Arc::new(Mutex::new("ahead".to_owned()));
+    let pr = Pr {
+        heads: heads.clone(),
+        compare: compare.clone(),
+    };
+    let github: GitHub = Box::new(move || Box::new(pr.clone()));
     let mut broker = Broker::new(cfg.clone(), Box::new(runner.clone()), github).unwrap();
     broker.look = Duration::from_millis(20);
     Rig {
@@ -188,6 +226,7 @@ fn rig() -> Rig {
         cfg,
         runner,
         heads,
+        compare,
         broker: Arc::new(broker),
     }
 }
@@ -284,7 +323,8 @@ fn a_fix_runs_as_one_job_and_answers_what_github_shows_it_pushed() {
     assert_eq!(got["execution"]["model"], "a-model");
     let runner = r.runner.0.lock().unwrap();
     let (repo, k, task) = &runner.started[0];
-    assert_eq!((repo.as_str(), k.as_str()), (REPO, key(REPO, 7).as_str()));
+    assert_eq!(repo, REPO);
+    assert!(k.starts_with(&format!("{}/", key(REPO, 7))), "{k}");
     assert!(task.contains("0. A review finding") && task.contains("1. The check tests is red"));
     assert!(task.contains(burrow_brief::FINDINGS.trim_end()));
     assert!(runner.stopped.is_empty(), "a done job needs no stopping");
@@ -460,4 +500,89 @@ fn a_prs_key_is_its_own() {
     assert_eq!(key("Sam/My_Box", 7), "fix/sam/my:box/7");
     assert_ne!(key("sam/my_box", 7), key("sam/my-box", 7));
     assert_ne!(key("sam/my_box", 7), key("sam/my.box", 7));
+}
+
+#[test]
+fn a_push_that_isnt_a_new_commit_on_the_handed_head_is_refused() {
+    // The job names the head it was handed, or one that replaced it: the
+    // PR's head is what it says, and GitHub's compare says it's no new
+    // commit on top.
+    for (said, status) in [
+        (HEAD, "identical"),
+        (PUSHED, "diverged"),
+        (PUSHED, "behind"),
+    ] {
+        let r = rig();
+        r.script(&[record("done")], answered(Some(said)), &[HEAD, said]);
+        *r.compare.lock().unwrap() = status.into();
+        let t = r.serve(1);
+        let err = r.ask(&fix(HEAD)).unwrap_err();
+        t.join().unwrap();
+        assert!(err.contains("isn't a new commit"), "{said} {status}: {err}");
+    }
+}
+
+#[test]
+fn a_fix_the_fixing_role_wouldnt_run_as_asked_starts_nothing() {
+    let choice = |model: &str, effort: &str| {
+        let mut f = fix(HEAD);
+        f["execution"]["choice"] = json!({"engine": "claude", "model": model, "effort": effort});
+        f
+    };
+    let fine = json!({"models": {"fix claude": {"model": "a-model", "effort": "high"}}});
+    for (routing, request, why) in [
+        // The flow chose another model, or another effort.
+        (fine.clone(), choice("b-model", "high"), "the flow chose"),
+        (fine.clone(), choice("a-model", "low"), "the flow chose"),
+        // The role names no model, so what ran couldn't be said.
+        (json!({}), fix(HEAD), "names no model"),
+        // In this repo it runs on another engine, or moves to one.
+        (
+            json!({"roles": {"fix@sam/box": {"engine": "codex", "over": null}},
+                "models": {"fix claude": {"model": "a-model"}}}),
+            fix(HEAD),
+            "another engine",
+        ),
+        (
+            json!({"roles": {"fix": {"engine": "claude", "over": {"pct": 90.0, "engine": "codex"}}},
+                "models": {"fix claude": {"model": "a-model"}}}),
+            fix(HEAD),
+            "another engine",
+        ),
+    ] {
+        let mut r = rig();
+        r.cfg.settings = route(r.dir.path(), routing);
+        let mut broker = Broker::new(
+            r.cfg.clone(),
+            Box::new(r.runner.clone()),
+            Box::new(|| unreachable!("nothing is read of GitHub")),
+        )
+        .unwrap();
+        broker.look = Duration::from_millis(20);
+        r.broker = Arc::new(broker);
+        r.script(&[record("done")], answered(None), &[HEAD]);
+        let t = r.serve(1);
+        let err = r.ask(&request).unwrap_err();
+        t.join().unwrap();
+        assert!(err.contains(why), "{request}: {err}");
+        assert!(r.runner.0.lock().unwrap().started.is_empty());
+    }
+}
+
+#[test]
+fn a_job_that_wont_stop_keeps_its_pr_held() {
+    let mut overdue = record("running");
+    overdue.overdue_at = Some(1);
+    let r = rig();
+    r.script(&[overdue], answered(None), &[HEAD]);
+    r.runner.0.lock().unwrap().stop_fails = true;
+    let t = r.serve(2);
+    let err = r.ask(&fix(HEAD)).unwrap_err();
+    assert!(err.contains("wouldn't stop"), "{err}");
+    // No second fix starts beside it, and a restart can find it.
+    let err = r.ask(&fix(HEAD)).unwrap_err();
+    t.join().unwrap();
+    assert!(err.contains("at work already"), "{err}");
+    assert_eq!(r.runner.0.lock().unwrap().started.len(), 1);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 1);
 }
