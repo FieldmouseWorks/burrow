@@ -63,14 +63,16 @@ pub(crate) fn ended(cfg: &Config, id: &str) {
 /// The job settled when its last turn has ended for good with nothing still
 /// outstanding: its end on record (its outcome, or `_ended`'s mark), no
 /// question, retry or await, its units known to have stopped (its end unit's
-/// too, unless this is that unit), and not held by policy. Never waits for
-/// the job's lock.
+/// too, unless this is that unit), and not held by policy: neither parked nor
+/// a restoration its `_exec` hasn't accepted, which policy relaunches, or rolls
+/// back and reuses the number of, if it fails or dies first
+/// ([`crate::policy::pending`]). Never waits for the job's lock.
 fn settle(cfg: &Config, job: &Job, in_end: bool) {
     let Ok(Some(_held)) = job.try_read_lock() else {
         return;
     };
     let Some(n) = job.turns() else { return };
-    if settled(job).is_some() || crate::policy::parked(job) || crate::policy::denied(job) {
+    if settled(job).is_some() || crate::policy::pending(job) || crate::policy::denied(job) {
         return;
     }
     if !filled(&job.turn(&n, "outcome")) && !job.turn(&n, "ended").exists() {
@@ -96,10 +98,12 @@ fn settle(cfg: &Config, job: &Job, in_end: bool) {
     }
 }
 
-/// The job's settled answer, when it was settled from its last turn.
+/// The job's settled answer, when it was settled from its last turn and
+/// policy can't run that turn again: a settlement never outlives a relaunch.
 pub(super) fn settled(job: &Job) -> Option<Settled> {
     let kept: Settled = serde_json::from_slice(&fs::read(kept(job)).ok()?).ok()?;
-    (job.turns().as_deref() == Some(kept.turn.as_str())).then_some(kept)
+    (job.turns().as_deref() == Some(kept.turn.as_str()) && !crate::policy::pending(job))
+        .then_some(kept)
 }
 
 impl Pass<'_> {

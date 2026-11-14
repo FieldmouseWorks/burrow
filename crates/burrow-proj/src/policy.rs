@@ -132,6 +132,16 @@ pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
 }
 
+/// Whether policy may still run the job's last turn again: a restoration
+/// released but not yet accepted by its `_exec` (`restoring`), which
+/// reconciliation relaunches under the same turn number, or rolls back to the
+/// parked turn, if it fails or dies first; or a park waiting for release.
+/// `restoring` is read before `park`: the unlocked rename from one to the other
+/// is then never missed, and the rename back runs under the job's lock.
+pub(crate) fn pending(job: &Job) -> bool {
+    path(job, "restoring").exists() || parked(job)
+}
+
 pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
     let turn = job.turns().unwrap_or_default();
     if let Ok(bytes) = fs::read(path(job, "park")) {

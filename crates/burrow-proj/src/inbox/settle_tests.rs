@@ -303,3 +303,134 @@ fn a_late_end_never_settles_the_job_that_replaced_it() {
     assert_eq!(slots(&b).0, ["sam/box#7"]);
     assert!(settled(&Job::new(&b.cfg, "s1")).is_some());
 }
+
+/// Policy releases s1's parked turn `turn`, from `state`: its restoration is
+/// prepared, and not yet accepted by an `_exec`.
+fn restoring(job: &Job, state: &str, turn: &str) {
+    let rec = crate::policy::Park {
+        state: state.into(),
+        turn: turn.into(),
+        first: false,
+        at: 0,
+    };
+    fs::write(
+        crate::policy::path(job, "restoring"),
+        serde_json::to_string(&rec).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Turn `n`'s `_exec` failed, or was killed, before it accepted its
+/// restoration: its outcome and its end's mark are on record.
+fn failed_before_acceptance(job: &Job, n: &str) {
+    fs::write(job.turn(n, "outcome"), "failed\n").unwrap();
+    fs::write(job.turn(n, "ended"), "").unwrap();
+}
+
+/// Neither the end nor a pass settles s1 now.
+fn unsettled(b: &Box, job: &Job) {
+    super::settle::ended(&b.cfg, "s1");
+    b.pass().settle();
+    assert!(settled(job).is_none(), "settled an attempt policy reruns");
+}
+
+/// Turn `n` runs again, is accepted, and answers `said`.
+fn accepted_and_answers(job: &Job, n: &str, said: &str) {
+    crate::policy::accepted(job).unwrap();
+    let _ = fs::remove_file(job.turn(n, "ended"));
+    fs::write(job.turn(n, "outcome"), "done\n").unwrap();
+    fs::write(job.turn(n, "end"), "done\n").unwrap();
+    fs::write(
+        job.turn(n, "jsonl"),
+        format!("{}\n", json!({"type": "result", "result": said})),
+    )
+    .unwrap();
+}
+
+// A queued turn's restoration whose `_exec` fails before it's accepted is
+// relaunched by policy under the same number: that failure is never settled,
+// by the end or a pass, and a settlement kept from it is void, so the
+// relaunched turn keeps its slot and its own answer is the one kept.
+#[test]
+fn a_restoration_that_fails_before_acceptance_is_never_settled() {
+    let b = machine();
+    sorting(&b, "ready high\nA pipeline blocker.");
+    let job = Job::new(&b.cfg, "s1");
+    fs::write(job.path("prompt.2"), "A person answered.").unwrap();
+    job.set_turns(2).unwrap();
+    restoring(&job, "queued", "2");
+    failed_before_acceptance(&job, "2");
+    unsettled(&b, &job);
+    // One kept anyway (by an end that read before the restoration was
+    // released) is never read while the turn can run again.
+    let stale = crate::ask::host_path(&job, "sorting-ended");
+    fs::write(&stale, r#"{"turn":"2","answer":null}"#).unwrap();
+    assert!(
+        settled(&job).is_none(),
+        "a kept failure outlived a relaunch"
+    );
+    fs::remove_file(&stale).unwrap();
+    // Reconciliation parks it again to relaunch it: still unsettled.
+    fs::rename(
+        crate::policy::path(&job, "restoring"),
+        crate::policy::path(&job, "park"),
+    )
+    .unwrap();
+    unsettled(&b, &job);
+    // Released and accepted, it answers: that answer is the one kept.
+    fs::rename(
+        crate::policy::path(&job, "park"),
+        crate::policy::path(&job, "restoring"),
+    )
+    .unwrap();
+    accepted_and_answers(&job, "2", "later\nWaits on #4.");
+    b.pass().settle();
+    let kept = settled(&job).expect("settled once the relaunch ended");
+    assert_eq!(kept.turn, "2");
+    assert!(
+        kept.answer.unwrap().starts_with("later"),
+        "kept the failure"
+    );
+    assert_eq!(slots(&b).0, Vec::<String>::new());
+}
+
+// A running turn's restoration starts a new turn; if its `_exec` dies before
+// it's accepted, reconciliation rolls the job back to the parked turn and the
+// next release reuses the new turn's number. Neither the dead attempt nor the
+// rolled-back turn is settled, so the reused number's own answer is kept.
+#[test]
+fn a_rolled_back_restoration_never_settles_the_number_it_reuses() {
+    let b = machine();
+    sorting(&b, "ready high\nA pipeline blocker.");
+    let job = Job::new(&b.cfg, "s1");
+    restoring(&job, "running", "1");
+    fs::write(job.path("prompt.2"), "Resume where you left off.").unwrap();
+    job.set_turns(2).unwrap();
+    failed_before_acceptance(&job, "2");
+    unsettled(&b, &job);
+    // Reconciliation (`policy::reconcile_job`) rolls it back to the parked
+    // turn, parked again.
+    job.set_turns(1).unwrap();
+    fs::rename(
+        crate::policy::path(&job, "restoring"),
+        crate::policy::path(&job, "park"),
+    )
+    .unwrap();
+    unsettled(&b, &job);
+    // Released again, it reuses turn 2, is accepted and answers.
+    fs::rename(
+        crate::policy::path(&job, "park"),
+        crate::policy::path(&job, "restoring"),
+    )
+    .unwrap();
+    job.set_turns(2).unwrap();
+    accepted_and_answers(&job, "2", "later\nWaits on #4.");
+    super::settle::ended(&b.cfg, "s1");
+    let kept = settled(&job).expect("settled once the reused turn ended");
+    assert_eq!(kept.turn, "2");
+    assert!(
+        kept.answer.unwrap().starts_with("later"),
+        "kept the dead attempt"
+    );
+    assert_eq!(slots(&b).0, Vec::<String>::new());
+}
