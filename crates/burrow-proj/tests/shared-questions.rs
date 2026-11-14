@@ -57,6 +57,9 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         let out = Command::new(env!("CARGO_BIN_EXE_burrow-proj"))
             .env("PROJ_CONFIG", &config)
             .env("PROJ_SELF", env!("CARGO_BIN_EXE_burrow-proj"))
+            .env_remove("PROJ_JOB")
+            .env_remove("PROJ_HOST_JOBS_SOCKET")
+            .env_remove("PROJ_PROBE_SOCKET")
             .args(args)
             .output()
             .unwrap();

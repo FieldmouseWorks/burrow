@@ -80,7 +80,12 @@ Each has an entry below, and each can be imported on its own.
   default; unless confirmed within 10 minutes the old one comes back by
   itself. So a change that cuts off SSH, the network or Claude undoes itself.
   An activation that hangs is killed before the window expires to let the
-  revert run. Enabled services must have bounded stop timeouts (including the
+  revert run. One never waits on a job queued behind a run already going (a
+  sweep ordered after a two-hour renovate): switch-to-configuration is
+  patched to leave it queued, to run after that run
+  ([held.rs](patches/switch-to-configuration-ng/held.rs)). The setup
+  sysinit-reactivation.target reruns is still waited for, as the rest counts
+  on it. Enabled services must have bounded stop timeouts (including the
   manager default and `TimeoutSec`): the module rejects zero, infinity and
   time spans it cannot establish as positive integer seconds, minutes, hours
   or days within systemd's microsecond range. Boolean and list values are
@@ -112,7 +117,10 @@ Each has an entry below, and each can be imported on its own.
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
-  repo, and all of them run hourly), `advisory-watch` (CISA KEV, vulnix,
+  repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
+  the machinery's App unless it names one of its own, so its GitHub allowance
+  stalls only Renovate, and its commits are that App's bot, whose PRs the
+  steward knows as Renovate's), `advisory-watch` (CISA KEV, vulnix,
   osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check`
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
