@@ -10,6 +10,7 @@ use std::fs;
 use serde_json::Value;
 
 use crate::config::{Config, Fresh, Runner};
+use crate::registration::{Lists, Registered};
 use crate::rules::short;
 use crate::world::{Unit, World};
 
@@ -50,6 +51,11 @@ pub struct Seen {
     pub unit: Unit,
     /// The jobs queued that it could take, oldest first.
     pub queued: Vec<Job>,
+    /// Whether GitHub still has its registration.
+    pub registered: Registered,
+    /// The units that start it, as they are, when its registration is gone:
+    /// what would start it again once it's stopped.
+    pub triggers: BTreeMap<String, Unit>,
 }
 
 /// The runners started fresh for one job each, and the jobs queued for
@@ -124,6 +130,7 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
     if let Some(f) = &cfg.fresh {
         snap.fresh = Some(pool(world, f, &queues));
     }
+    let mut lists = Lists::default();
     for (unit, r) in &cfg.runners {
         let Some(q) = queues.get(r.repo.as_str()) else {
             continue;
@@ -134,12 +141,27 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .map(|j| j.job.clone())
             .collect();
         takes.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let seen = world.unit(unit);
+        let registered = r
+            .registration
+            .as_deref()
+            .map_or(Registered::Unchecked, |p| lists.check(world, p));
+        let triggers = match registered {
+            Registered::Gone(_) => seen
+                .triggered_by
+                .iter()
+                .map(|t| (t.clone(), world.unit(t)))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
         snap.runners.insert(
             unit.clone(),
             Seen {
                 repo: r.repo.clone(),
-                unit: world.unit(unit),
+                unit: seen,
                 queued: takes,
+                registered,
+                triggers,
             },
         );
     }
@@ -323,11 +345,12 @@ fn fits(labels: &[String], r: &Runner) -> bool {
 /// Every entry of one of GitHub's paged lists (`key` in each page), all of
 /// it or an error: a page that can't be read fails the whole list, so what
 /// it would have held is never taken for nothing.
-fn every(world: &dyn World, path: &str, key: &str) -> Result<Vec<Value>, String> {
+pub(crate) fn every(world: &dyn World, path: &str, key: &str) -> Result<Vec<Value>, String> {
     const PER: usize = 100;
     let mut out = Vec::new();
+    let sep = if path.contains('?') { '&' } else { '?' };
     for page in 1.. {
-        let got = world.github(&format!("{path}&per_page={PER}&page={page}"))?;
+        let got = world.github(&format!("{path}{sep}per_page={PER}&page={page}"))?;
         let entries = list(&got, key);
         out.extend_from_slice(entries);
         let total = got.get("total_count").and_then(Value::as_u64);

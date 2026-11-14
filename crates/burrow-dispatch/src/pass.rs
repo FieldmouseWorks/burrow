@@ -10,6 +10,7 @@ use burrow_watchdog::watch::{self, File};
 use burrow_watchdog::words::{clock, line};
 
 use crate::config::Config;
+use crate::registration::{Lists, Registered};
 use crate::rules::{Decision, Move, decide};
 use crate::snapshot::{self, Snapshot};
 use crate::state::{Done, State};
@@ -45,7 +46,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut state,
     } = decide(cfg, &snap, &st, &was, now);
     for m in moves {
-        let result = match still(world, &m) {
+        let result = match still(cfg, world, &m) {
             Err(why) => format!("not made: {why}"),
             Ok(()) => {
                 // Kept before it's made, whatever comes of it, so a pass cut
@@ -57,7 +58,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     Move::Cancel { repo, run, .. } => {
                         state.cancels.insert(format!("{repo}#{run}"), now);
                     }
-                    Move::PrivateFresh { .. } | Move::Fresh { .. } | Move::Retire { .. } => {}
+                    Move::PrivateFresh { .. }
+                    | Move::Fresh { .. }
+                    | Move::Retire { .. }
+                    | Move::Halt { .. } => {}
                 }
                 save(dir, "state.json", &state)?;
                 let done = match &m {
@@ -78,6 +82,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                         }
                     }
                     Move::Retire { unit, .. } => world.restart(unit, "stop"),
+                    // What starts it first: stopped while that's up, it's
+                    // started again.
+                    Move::Halt { stop, .. } => stop.iter().try_for_each(|u| {
+                        world.restart(u, "stop").map_err(|e| format!("{u}: {e}"))
+                    }),
                 };
                 done.map_or_else(|e| e, |()| "ok".to_owned())
             }
@@ -131,9 +140,26 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 /// Whether the move is still called for, looked at again just before it's
 /// made: what the pass saw may have moved on while it read the rest. A
 /// runner may have taken a job, or a switch begun; a run may have started,
-/// or been run again. What can't be read again isn't moved on.
-fn still(world: &dyn World, m: &Move) -> Result<(), String> {
+/// or been run again; a runner registered again. What can't be read again
+/// isn't moved on.
+fn still(cfg: &Config, world: &dyn World, m: &Move) -> Result<(), String> {
     match m {
+        Move::Halt { unit, .. } => {
+            let path = cfg
+                .runners
+                .get(unit)
+                .and_then(|r| r.registration.as_deref())
+                .ok_or("its registration isn't known")?;
+            if world.switching() {
+                return Err("a switch is in flight".into());
+            }
+            match Lists::default().check(world, path) {
+                Registered::Gone(_) => Ok(()),
+                Registered::Listed => Err("it's registered again".into()),
+                Registered::Unknown(e) => Err(e),
+                Registered::Unchecked => Err("its registration isn't known".into()),
+            }
+        }
         Move::Runner { unit, state, .. } => {
             let now = world.unit(unit);
             if world.switching() {
@@ -259,6 +285,22 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             if s.unit.busy { "at a job" } else { "idle" },
             s.queued.len()
         );
+        match &s.registered {
+            Registered::Gone(reg) => {
+                let _ = writeln!(
+                    out,
+                    "  its registration is gone at GitHub: {} lists no runner {} ({}); register it again ({})",
+                    reg.scope,
+                    reg.id,
+                    reg.name,
+                    reg.page()
+                );
+            }
+            Registered::Unknown(e) => {
+                let _ = writeln!(out, "  its registration can't be checked: {e}");
+            }
+            Registered::Unchecked | Registered::Listed => {}
+        }
     }
     for (f, pool) in &snap.private {
         match pool {
@@ -527,6 +569,141 @@ mod tests {
         assert!(w.did.borrow().iter().all(|d| !d.starts_with("stop")));
         let st: State = load(dir.path(), "state.json");
         assert_eq!(st.log.last().unwrap().result, "not made: it's at a job");
+    }
+
+    // remi's runner of 2026-11-13: GitHub deleted its registration, it
+    // exits as it starts and its path unit starts it again, jobs queued for
+    // it. It isn't restarted however long they wait: its path unit and it
+    // are stopped, and logged; the watchdog's wait and status say its
+    // registration is gone. A look again that finds it registered after all
+    // doesn't stop it.
+    #[test]
+    fn deleted_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        let dot = crate::registration::tests::dot_runner(
+            dir.path(),
+            "box",
+            21,
+            "https://github.com/sam/r",
+        );
+        cfg.runners.get_mut("ci").unwrap().registration = Some(dot);
+        let mut w = repo();
+        let (list, listed) = crate::registration::tests::listing("sam/r", &[22]);
+        w.github.insert(list.clone(), listed);
+        w.github.insert(page(QUEUED, 1), runs(&[1]));
+        w.github.insert(
+            page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [job("gate", "queued", "2026-10-29T16:00:00Z", &["sam"])]})),
+        );
+        w.units.insert(
+            "ci".into(),
+            Unit {
+                triggered_by: vec!["ci.path".into()],
+                ..idle(0.0)
+            },
+        );
+        w.units.insert("ci.path".into(), idle(0.0));
+        std::fs::write(
+            dir.path().join("state.json"),
+            json!({"idle": {"ci": 0.0}}).to_string(),
+        )
+        .unwrap();
+        let t = 1_793_293_200.0;
+
+        let report = super::status(&cfg, &w, t);
+        assert!(
+            report.contains(
+                "idle, 1 queued for it\n  its registration is gone at GitHub: sam/r lists no runner 21 (box); register it again (https://github.com/sam/r/settings/actions/runners)\n"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("would stop ci.path and ci"), "{report}");
+
+        run(&cfg, &w, t).unwrap();
+        assert_eq!(
+            *w.did.borrow(),
+            ["stop ci.path", "stop ci", "kick watchdog"]
+        );
+        let st: State = load(dir.path(), "state.json");
+        assert!(st.restarts.is_empty());
+        assert_eq!(
+            (st.log[0].what.as_str(), st.log[0].result.as_str()),
+            ("stop ci.path and ci", "ok")
+        );
+        let (_, items) = watch::read(&dir.path().join("watch.json")).unwrap();
+        assert!(
+            items["runner/ci"]
+                .phase
+                .starts_with("its registration is gone at GitHub"),
+            "{:?}",
+            items["runner/ci"]
+        );
+
+        // Registered again by the time it's looked at again: left be.
+        w.did.borrow_mut().clear();
+        let w = Relisted { w, list, from: 21 };
+        run(&cfg, &w, t + 600.0).unwrap();
+        assert!(
+            w.w.did.borrow().iter().all(|d| !d.starts_with("stop")),
+            "{:?}",
+            w.w.did.borrow()
+        );
+        let st: State = load(dir.path(), "state.json");
+        assert_eq!(
+            st.log.last().unwrap().result,
+            "not made: it's registered again"
+        );
+    }
+
+    /// A machine whose runner list has the runner `from` from its second
+    /// read on: registered again while the pass read the rest.
+    struct Relisted {
+        w: Fake,
+        list: String,
+        from: u64,
+    }
+
+    impl crate::world::World for Relisted {
+        fn github(&self, path: &str) -> Result<serde_json::Value, String> {
+            if path == self.list {
+                let n = self.w.looks.borrow().get(path).copied().unwrap_or(0);
+                self.w.looks.borrow_mut().insert(path.into(), n + 1);
+                if n > 0 {
+                    return Ok(json!({"runners": [{"id": self.from}]}));
+                }
+            }
+            self.w.github(path)
+        }
+        fn unit(&self, unit: &str) -> Unit {
+            self.w.unit(unit)
+        }
+        fn running(&self) -> Result<String, String> {
+            self.w.running()
+        }
+        fn switching(&self) -> bool {
+            self.w.switching()
+        }
+        fn restart(&self, unit: &str, verb: &str) -> Result<(), String> {
+            self.w.restart(unit, verb)
+        }
+        fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
+            self.w.cancel(repo, run)
+        }
+        fn kick(&self, path: &str) {
+            self.w.kick(path)
+        }
+        fn instances(&self, template: &str) -> Result<Vec<String>, String> {
+            self.w.instances(template)
+        }
+        fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
+            self.w.fresh(f, instance)
+        }
+        fn sweep(&self, f: &crate::config::Fresh) -> Vec<String> {
+            self.w.sweep(f)
+        }
     }
 
     /// A machine whose switch begins, when `from`, after its first look.

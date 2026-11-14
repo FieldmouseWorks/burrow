@@ -202,7 +202,7 @@ mod tests {
             state: state.into(),
             since: Some(since),
             busy,
-            pending: false,
+            ..Unit::default()
         }
     }
 

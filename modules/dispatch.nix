@@ -125,6 +125,22 @@ in
               `config.sh --no-default-labels`.
             '';
           };
+          registration = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "/var/lib/ci/runner/.runner";
+            description = ''
+              Its `.runner`, as `config.sh` wrote it. With it, a runner whose
+              registration GitHub has deleted (one GitHub's list of runners
+              where it was registered no longer has) is told apart from an
+              idle one: it's never restarted, its wait says its registration
+              is gone, and it and the path unit of its own name that starts
+              it again (`UNIT.path`) are stopped, since it exits as it starts
+              and loops. It's registered again by hand. Reading that list takes
+              Administration: read on the repo (an organization's runner:
+              Self-hosted runners: read) on the machinery's App.
+            '';
+          };
         };
       });
     };
@@ -146,7 +162,7 @@ in
         watchdog = if config.burrow.watchdog.enable or false then "watchdog" else null;
         handler = "dispatch";
         runners = lib.mapAttrs (_: r: {
-          inherit (r) repo;
+          inherit (r) repo registration;
           labels = lib.optionals r.defaultLabels [ "self-hosted" "Linux" arch ] ++ r.labels;
         }) cfg.runners;
         quiet = cfg.quietMinutes * 60;
@@ -251,15 +267,20 @@ in
     };
     systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
 
-    # It restarts and starts the runners, and nothing else.
+    # It restarts and starts the runners, and stops one GitHub has deleted
+    # the registration of, with the path unit that starts it again, and
+    # nothing else.
     security.polkit.enable = true;
     security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${user}") return polkit.Result.NOT_HANDLED;
         var verb = action.lookup("verb");
-        if (verb != "restart" && verb != "start") return polkit.Result.NOT_HANDLED;
+        var unit = action.lookup("unit");
         var units = ${builtins.toJSON (map (u: "${u}.service") (lib.attrNames cfg.runners))};
-        return units.indexOf(action.lookup("unit")) >= 0 ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
+        var paths = ${builtins.toJSON (map (u: "${u}.path") (lib.attrNames (lib.filterAttrs (_: r: r.registration != null) cfg.runners)))};
+        if ((verb == "restart" || verb == "start") && units.indexOf(unit) >= 0) return polkit.Result.YES;
+        if (verb == "stop" && (units.indexOf(unit) >= 0 || paths.indexOf(unit) >= 0)) return polkit.Result.YES;
+        return polkit.Result.NOT_HANDLED;
       });
     '';
 
@@ -277,7 +298,8 @@ in
       ## Runners and deploys
 
       `burrow-dispatch` restarts an Actions runner (${lib.concatStringsSep ", " (lib.attrNames cfg.runners)}) that sits idle
-      with jobs queued for it, at most twice in six hours; cancels a push run on a default branch that hasn't
+      with jobs queued for it, at most twice in six hours (one whose registration GitHub has deleted it never restarts: it stops it and
+      its path unit, and its wait says to register it again); cancels a push run on a default branch that hasn't
       started once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
       The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
     '' + lib.optionalString cfg.fresh.enable ''

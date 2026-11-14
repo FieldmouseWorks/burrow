@@ -16,6 +16,10 @@
 //!     has failed is started. Never while a switch is in flight, which
 //!     restarts what it changes itself, and at most RESTARTS times in
 //!     RECENT: past that, restarting isn't the fix.
+//!   - A runner whose registration GitHub has deleted (its `.runner`'s id
+//!     missing from the runners GitHub lists where it was registered) is
+//!     never restarted: it exits as it starts, so it and what starts it
+//!     again (its path unit) are stopped (registration.rs).
 //!   - A push run on a runner repo's default branch that no job of has
 //!     started, with a later run of its workflow on that branch live, is
 //!     cancelled, so the later one takes its place on the runner. One that
@@ -36,6 +40,9 @@
 //!     their time, kicking a pass for a fresh look first. It links the
 //!     oldest job and never names it: a job's name is its workflow's, which
 //!     anyone whose PR runs one writes, and the watchdog's jobs read this.
+//!     One whose registration is gone waits from the pass that first saw
+//!     it so, with or without jobs queued, due once a fresh look has had
+//!     its time: it's registered again by hand.
 //!   - fresh: jobs queued for the fresh runners while there's room for
 //!     more, from the pass that first saw it so, due once a start and the
 //!     looks after it have had their time twice over.
@@ -58,6 +65,7 @@ pub mod config;
 pub mod fresh;
 pub mod pass;
 pub mod private;
+pub mod registration;
 pub mod rules;
 pub mod snapshot;
 pub mod state;
