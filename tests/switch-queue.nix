@@ -4,7 +4,9 @@
 # a switch with nothing wrong in it. switch-to-configuration, patched by the
 # module, stops waiting on that job and leaves it queued as it is, so the
 # switch goes live and the unit restarts once the run ends. The revert's
-# activation does the same.
+# activation does the same. The wait for sysinit-reactivation.target is kept
+# whole: the setup it reruns is waited on before the rest of the system
+# restarts, however long the run it's behind goes.
 #
 #   nix build .#checks.x86_64-linux.switch-queue -L
 { self, pkgs }:
@@ -48,6 +50,38 @@ pkgs.testers.runNixOSTest {
       script = "echo ran >>/run/prep";
     };
 
+    # Setup sysinit-reactivation.target runs again (tmpfiles-resetup's
+    # kind: ordered before it alone), ordered after a run, and a service
+    # that counts on it with no ordering systemd's queue could carry. The
+    # barrier keeps them in turn.
+    systemd.services.gate = {
+      restartIfChanged = false;
+      unitConfig.DefaultDependencies = false;
+      serviceConfig.Type = "oneshot";
+      script = "sleep 20";
+    };
+    systemd.services.setup = {
+      wantedBy = [ "multi-user.target" ];
+      requiredBy = [ "sysinit-reactivation.target" ];
+      after = [ "gate.service" ];
+      before = [ "sysinit-reactivation.target" ];
+      unitConfig.DefaultDependencies = false;
+      environment.FLAVOUR = lib.mkDefault "base";
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      script = ''echo "$FLAVOUR" >/run/setup'';
+    };
+    systemd.services.consumer = {
+      wantedBy = [ "multi-user.target" ];
+      environment.FLAVOUR = lib.mkDefault "base";
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      script = "cat /run/setup >/run/consumer || true";
+    };
+
+    specialisation.barrier.configuration = {
+      systemd.services.setup.environment.FLAVOUR = "barrier";
+      systemd.services.consumer.environment.FLAVOUR = "barrier";
+    };
+
     specialisation.behind.configuration = {
       environment.etc.switch-test.text = "behind";
       systemd.services.sweep.environment.FLAVOUR = "behind";
@@ -68,6 +102,7 @@ pkgs.testers.runNixOSTest {
     base = machine.succeed("readlink -f /run/current-system").strip()
     machine.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {base} /nix/var/nix/profiles/system")
     behind = machine.succeed(f"readlink -f {base}/specialisation/behind").strip()
+    barrier = machine.succeed(f"readlink -f {base}/specialisation/barrier").strip()
 
 
     def long_runs():
@@ -123,5 +158,22 @@ pkgs.testers.runNixOSTest {
         machine.succeed("journalctl -t machine-switch | grep -q 'not confirmed, reverted to'")
         machine.succeed("systemctl stop long.service")
         flavour("base")
+
+    with subtest("setup sysinit-reactivation.target reruns is waited for whole, behind a run too"):
+        machine.wait_until_succeeds("grep -qx base /run/setup")
+        machine.succeed("systemctl start --no-block gate.service")
+        machine.wait_until_succeeds("systemctl list-jobs --no-legend | grep -q '^ *[0-9]* gate.service *start *running'")
+        rc, out = machine.execute(
+            f"BURROW_CONFIRM_WITHIN={window}s machine-switch --toplevel {barrier} 2>&1",
+            timeout=2 * window,
+        )
+        assert rc == 0 and f"live: {barrier}" in out, out
+        # The service that counts on the setup came up on the new one, and
+        # the run had ended before the activation went past the barrier.
+        consumer = machine.succeed("cat /run/consumer").strip()
+        assert consumer == "barrier", f"consumer saw {consumer!r}: {out}"
+        machine.succeed("grep -qx barrier /run/setup")
+        machine.fail("systemctl is-active gate.service")
+        assert "waits behind gate.service" not in out, out
   '';
 }

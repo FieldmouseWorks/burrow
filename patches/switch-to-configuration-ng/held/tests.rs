@@ -184,3 +184,18 @@ fn only_a_start_of_a_known_invocation_is_the_same_run() {
     assert!(!same_run(None, "start", Some(vec![0; 16])));
     assert_eq!(known(Some(vec![0, 3])), Some(vec![0, 3]));
 }
+
+#[test]
+fn a_barrier_lets_nothing_be_and_only_while_it_waits() {
+    assert!(!barrier());
+    assert!(whole(barrier));
+    assert!(whole(|| whole(barrier) && barrier()));
+    assert!(!barrier());
+}
+
+#[test]
+fn a_barrier_is_kept_whatever_its_wait_returns() {
+    let failed: Result<(), &str> = whole(|| Err("bus gone"));
+    assert!(failed.is_err());
+    assert!(!barrier());
+}

@@ -234,9 +234,11 @@ in
       # deadline, and the switch would revert with nothing wrong in it
       # (burrow#811). Patched to stop waiting on jobs that wait on nothing
       # but runs going since before the activation: they stay queued as they
-      # are and run once the run ends (held.rs says how it tells). The
-      # revert's activation is a system built with it too. The patch stops
-      # applying, and the build says so, if nixpkgs' main.rs moves under it.
+      # are and run once the run ends (held.rs says how it tells). The setup
+      # sysinit-reactivation.target reruns is still waited for whole: the
+      # rest of the system counts on it. The revert's activation is a system
+      # built with it too. The patch stops applying, and the build says so,
+      # if nixpkgs' main.rs moves under it.
       nixpkgs.overlays = [
         (_: prev: {
           switch-to-configuration-ng = prev.switch-to-configuration-ng.overrideAttrs (old: {

@@ -29,3 +29,13 @@
      let systemd = systemd1_proxy(&dbus_conn);
      let logind = login1_proxy(&dbus_conn);
  
+@@ -2449,7 +2457,8 @@
+     }
+ 
+     // Wait for the restart job of sysinit-reactivation.service to finish
+-    block_on_jobs(&dbus_conn, &submitted_jobs)?;
++    // burrow: a barrier: the rest of the system counts on what it sets up.
++    held::whole(|| block_on_jobs(&dbus_conn, &submitted_jobs))?;
+ 
+     // Before reloading we need to ensure that the units are still active. They may have been
+     // deactivated because one of their requirements got stopped. If they are inactive but should

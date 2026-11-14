@@ -18,8 +18,18 @@
 //! says what each job waits on (org.freedesktop.systemd1.Job.GetBefore), so
 //! nothing here models its ordering; anything that can't be read keeps the
 //! wait, as it was.
+//!
+//! The wait for sysinit-reactivation.target is a barrier, and `whole` keeps
+//! it as it was: the rest of the system counts on the setup it reruns
+//! (tmpfiles-resetup), ordered before that target alone, so no ordering in
+//! systemd's queue carries it to the services after. So a setup job behind
+//! a run from before holds the activation until the run ends. The later
+//! waits (reloads, restarts, starts) group units by how they changed, not by
+//! what they need: what one needs of another is its ordering, which systemd
+//! keeps for the jobs left queued, as it already does between the units of
+//! one phase.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -83,6 +93,22 @@ static BEFORE: OnceLock<HashMap<u32, Vec<u8>>> = OnceLock::new();
 thread_local! {
     /// The jobs already said to be let be.
     static SAID: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+    /// Set while a barrier is waited on (`whole`).
+    static WHOLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `wait`, a barrier's, waiting on every job whole, as it was: none
+/// is let be, whatever it waits behind.
+pub fn whole<T>(wait: impl FnOnce() -> T) -> T {
+    let was = WHOLE.with(|w| w.replace(true));
+    let out = wait();
+    WHOLE.with(|w| w.set(was));
+    out
+}
+
+/// Whether the wait going on is a barrier's.
+pub fn barrier() -> bool {
+    WHOLE.with(Cell::get)
 }
 
 /// Noted as the activation begins: the starts running now.
@@ -97,11 +123,14 @@ pub fn begin(conn: &LocalConnection) {
 }
 
 /// Whether all of `waited`, the jobs the activation still waits on, are to
-/// be let be: each said, once.
+/// be let be: each said, once. Never at a barrier.
 pub fn only_held<'p>(
     conn: &LocalConnection,
     waited: impl IntoIterator<Item = &'p dbus::Path<'static>>,
 ) -> bool {
+    if barrier() {
+        return false;
+    }
     let Some(before) = BEFORE.get().filter(|b| !b.is_empty()) else {
         return false;
     };
