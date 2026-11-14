@@ -11,6 +11,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
   fixed and held.
+- [docs/proj-design.md](docs/proj-design.md): proj's design (one record per
+  job and issue, waits that say what ends them, one pass) and its stages.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
   schema (crates/burrow-settings) and `proj settings show`.
 - [docs/settings-reference.md](docs/settings-reference.md): every option's

@@ -367,6 +367,15 @@ fn reconcile_job(
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
+        // Its place first, from files and the units that are up: a parked
+        // job with nowhere to run isn't released this pass, so GitHub isn't
+        // asked about its issue either. Asking for every parked job on every
+        // pass spent the installation's hourly allowance on jobs it couldn't
+        // start (two thousand reads an hour with 127 parked).
+        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
+        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
+            return Ok(());
+        }
         match crate::inbox::enrollment::check(&job)? {
             crate::inbox::enrollment::Admission::Ready => (),
             crate::inbox::enrollment::Admission::Stopped(message) => {
@@ -376,10 +385,6 @@ fn reconcile_job(
                 eprintln!("{message}");
                 return Ok(());
             }
-        }
-        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
-        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
-            return Ok(());
         }
         if &generation(cfg)? != release_generation {
             return Ok(());
