@@ -71,9 +71,13 @@
 //!                             where it came from (default, flake, live file)
 //! proj settings schema        the options' JSON Schema (burrow-settings)
 //! proj list                   projects you can run jobs in
-//! proj await TARGET...        from inside a job: resume it once a PR or
-//!                             issue (URL or OWNER/REPO#N) changes; one
-//!                             already merged or closed is refused
+//! proj await [--ci] [--review] TARGET...  from inside a job: resume it
+//!                             once a PR or issue (URL or OWNER/REPO#N)
+//!                             changes; with --ci only on a PR's CI verdict
+//!                             (all green or any red), with --review only on
+//!                             new review findings or threads, either also on
+//!                             its merge or close ([`ends`]); one already
+//!                             merged or closed is refused
 //! proj usage [back]           whether the machine is out of Claude usage, and
 //!                             until when (JSON; nothing when it isn't);
 //!                             back: it isn't, now (the limit was raised)
@@ -127,7 +131,9 @@
 //! it was stopped and answers again, in the same slot. A job waiting on GitHub
 //! says so with `proj await`, and `proj _watch` gives it its next turn once
 //! what it waits on changes: checks finish, a review, comment or push comes
-//! in, or it's merged or closed. Nothing changed in awaitHours, and it's told
+//! in, or it's merged or closed; or, for a wait that said what ends it, once
+//! that happens ([`ends`]): a CI wait isn't woken by a queue, nor told it
+//! expired while its checks are still to come. Nothing changed in awaitHours, and it's told
 //! that instead. burrow-events starts _watch on the repo's webhook deliveries,
 //! when a turn that awaits it ends, and at the deadline _watch books in its
 //! wake file.
@@ -165,6 +171,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod ask;
 pub mod cmd;
 pub mod config;
+pub mod ends;
 pub mod engine;
 pub mod github;
 pub mod github_quota;

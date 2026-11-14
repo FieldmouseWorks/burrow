@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::github::{changes, fingerprint, over, target};
+use crate::ends::{End, Ends, ci_running, ended};
+use crate::github::{fingerprint, over, target};
 use crate::job::{Job, USAGE_LIMIT, awaits};
 use crate::turn::{start, start_closed};
 use crate::{Fail, filled, io_fail, now, read, swap, usage};
@@ -242,14 +243,26 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             }
             let expired = now() - since >= hours * 3600;
             let t = &a.target;
+            // What the wait waits for (ends.rs), from the baseline it was
+            // registered with: any change, unless it declared otherwise.
+            let ending = match (&fp, &was) {
+                (Some(Value::Object(now)), Some(Some(Value::Object(was)))) => ended(was, now),
+                _ => None,
+            };
+            let ci_wait = matches!(&was, Some(Some(Value::Object(was))) if Ends::of(was).0.contains(&End::Ci));
             match (&fp, &was) {
-                (Some(fp @ Value::Object(now)), Some(Some(old @ Value::Object(was))))
-                    if now != was =>
-                {
-                    news.push_str(&format!("- {t}: {}\n", changes(was, now)));
+                (Some(fp), Some(Some(old))) if let Some(said) = &ending => {
+                    news.push_str(&format!("- {t}: {said}\n"));
                     if let (Some(how), None, None) = (over(fp), over(old), &closed) {
                         closed = Some(format!("{t} was {how}"));
                     }
+                }
+                // A CI wait whose checks are still queued or running isn't
+                // over for its deadline: a slow runner queue is no news, so
+                // it's watched for another awaitHours from now.
+                (Some(fp), Some(Some(_))) if expired && ci_wait && ci_running(fp) => {
+                    eprintln!("proj: {id} waits on {t}'s CI, still running after {hours}h; watched on");
+                    lines.push_str(&format!("{t}\t{}\t{}\n", now(), a.was));
                 }
                 (Some(_), _) if expired => {
                     news.push_str(&format!("- {t}: nothing changed in {hours}h; no longer watched\n"));
@@ -538,3 +551,7 @@ mod codex_tests {
         assert!(crate::usage::kept(&cfg).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "watch_replay_tests.rs"]
+mod replay_tests;

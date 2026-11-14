@@ -1,5 +1,5 @@
 //! What a job awaits on GitHub: a PR or issue ([`target`]), and what about
-//! it is news ([`fingerprint`]).
+//! it is news ([`fingerprint`]); what ends a wait on it is [`crate::ends`]'s.
 
 use burrow_github::{Gh, call};
 use std::collections::BTreeMap;
@@ -93,7 +93,8 @@ pub(crate) fn fingerprint_until(
     // Reviews are counted by state, so a dismissed one is news as well as a
     // new one.
     let mut reviews: BTreeMap<String, usize> = BTreeMap::new();
-    for r in pages(format!("repos/{repo}/pulls/{n}/reviews?per_page=100"))? {
+    let listed = pages(format!("repos/{repo}/pulls/{n}/reviews?per_page=100"))?;
+    for r in &listed {
         *reviews.entry(text(&r["state"])).or_default() += 1;
     }
     let status = gh(&format!("repos/{repo}/commits/{sha}/status"))?;
@@ -129,6 +130,10 @@ pub(crate) fn fingerprint_until(
         "review_comments": pr["review_comments"],
         "reviews": reviews,
         "checks": checks,
+        // What a wait on a condition reads (ends.rs); an any-change wait
+        // ignores these.
+        "ci": crate::ends::ci(&sha, &runs, &status),
+        "findings": crate::ends::findings(&listed),
     }))
 }
 

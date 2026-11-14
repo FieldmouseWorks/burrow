@@ -126,6 +126,34 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       assert "o/r#5: checks" in prompt and "ci=success" in prompt, prompt
       assert "awaits" not in proj("status"), proj("status")
 
+  with subtest("a job waiting on CI is resumed by its verdict alone"):
+      # proj await --ci: a clean review, a comment, its base merged in and
+      # its checks queued again are nothing to it (the 2026-11-13 queue);
+      # all green on the new head is.
+      github("repos/o/r/issues/9", '{"pull_request": {}, "state": "open"}')
+      github("repos/o/r/issues/9/comments", '[]')
+      github("repos/o/r/pulls/9", '{"state": "open", "merged": false, "head": {"sha": "c9"}, "review_comments": 0}')
+      github("repos/o/r/pulls/9/reviews", '[]')
+      github("repos/o/r/commits/c9/status", '{"state": "pending", "total_count": 0}')
+      github("repos/o/r/commits/c9/check-runs", '{"check_runs": [{"name": "ci", "status": "queued", "conclusion": null}]}')
+      e = proj('run web "ciawait https://github.com/o/r/pull/9"')
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+      line = machine.succeed(f"cat /data/dev/jobs/{e}/await")
+      assert '"ends":["ci"]' in line, line
+      github("repos/o/r/pulls/9/reviews", '[{"state": "COMMENTED", "body": "nothing found <!-- codex-review:v1 {\\"findings\\":0} -->"}]')
+      github("repos/o/r/issues/9/comments", '[{"id": 9, "body": "Settled; waiting for CI"}]')
+      github("repos/o/r/commits/d9/status", '{"state": "pending", "total_count": 0}')
+      github("repos/o/r/commits/d9/check-runs", '{"check_runs": [{"name": "ci", "status": "queued", "conclusion": null}]}')
+      github("repos/o/r/pulls/9", '{"state": "open", "merged": false, "head": {"sha": "d9"}, "review_comments": 0}')
+      proj("_watch o/r")
+      assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
+      github("repos/o/r/commits/d9/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
+      proj("_watch o/r")
+      machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+      prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
+      assert "CI on d9 is all green" in prompt, prompt
+
   with subtest("a review past the first page is news"):
       # A hundred reviews with bodies, past what one argument may hold all
       # together (and what one command to the VM may, so it's made there).

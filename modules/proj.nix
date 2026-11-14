@@ -375,7 +375,8 @@ in
       default = 24;
       description = ''
         How long a job waits on a PR or issue (`proj await`) that doesn't
-        change before it's resumed anyway, told so.
+        change before it's resumed anyway, told so. A `--ci` wait whose
+        checks are still queued or running is watched on instead.
       '';
     };
     hostGithubApp = lib.mkOption {
@@ -706,7 +707,7 @@ in
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       Each turn ends saying what comes next: `proj await PR-URL` when it waits
       on GitHub (CI, a review; it's resumed when the PR changes, holding no slot
-      meanwhile), `proj ask --default "TEXT" [--one-way]` when its answer is a question for you to settle or
+      meanwhile; `--ci` resumes it only on a CI verdict, `--review` only on review findings), `proj ask --default "TEXT" [--one-way]` when its answer is a question for you to settle or
       relay (`proj status` marks it [asks]; `proj reply` answers; a reversible default runs after ${toString cfg.askTimeout}s without an answer, a one-way default stays open for the owner), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.

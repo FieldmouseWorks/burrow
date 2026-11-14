@@ -33,6 +33,7 @@ fn quota(job: &Job) {
             retry_at: 1,
             turn: job.turns().unwrap(),
             baselines: String::new(),
+            ends: Default::default(),
         })
         .unwrap(),
     )
@@ -119,6 +120,7 @@ fn pending_recommendations_belong_to_their_turn_and_native_declaration() {
         &job,
         &[("sam/r".into(), "7".into())],
         &["sam/r#7".into()],
+        &[Default::default()],
         None,
     )
     .unwrap();

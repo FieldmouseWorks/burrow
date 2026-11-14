@@ -10,6 +10,7 @@ fn pending(job: &Job, due: u64, targets: Vec<String>) {
             retry_at: due,
             turn: job.turns().unwrap(),
             baselines: String::new(),
+            ends: Default::default(),
         })
         .unwrap(),
     )
@@ -228,6 +229,7 @@ fn saved_baselines_survive_later_direct_and_await_refusals() {
             &job,
             &[("sam/r".into(), "7".into())],
             &["sam/r#7".into()],
+            &[Default::default()],
             None,
         )
         .unwrap();
@@ -239,6 +241,7 @@ fn saved_baselines_survive_later_direct_and_await_refusals() {
                 &job,
                 &[("sam/r".into(), "8".into())],
                 &["sam/r#8".into()],
+                &[Default::default()],
                 None,
             )
             .unwrap();
@@ -331,6 +334,7 @@ fn host_registration_and_replay_attribute_the_configured_client() {
             &job,
             &[("sam/r".into(), "7".into())],
             &["sam/r#7".into()],
+            &[Default::default()],
             None,
         )
         .unwrap();
@@ -368,6 +372,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
         &job,
         &[("sam/r".into(), "7".into())],
         &["sam/r#7".into()],
+        &[Default::default()],
         None,
     )
     .unwrap();
@@ -419,6 +424,7 @@ case "$*" in */comments*) if [ -e '{0}/reset' ]; then echo '[{{"body":"news"}}]'
         &job,
         &[("sam/r".into(), "7".into()), ("sam/r".into(), "8".into())],
         &["sam/r#7".into(), "sam/r#8".into()],
+        &[Default::default(), Default::default()],
         None,
     )
     .unwrap();
@@ -702,6 +708,7 @@ esac
             &job,
             &found,
             &["sam/r#1".into(), "sam/r#2".into()],
+            &[Default::default(), Default::default()],
             None
         )
         .is_err()
