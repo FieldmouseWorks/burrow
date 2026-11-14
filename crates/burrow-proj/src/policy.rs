@@ -142,11 +142,27 @@ pub struct Park {
     /// kept.
     #[serde(default)]
     pub wait: Option<String>,
+    /// When it began waiting on the policy, where that's after `at`: a park
+    /// that waited for capacity first. See [`Park::paused_since`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_since: Option<i64>,
 }
 
 /// What a job parked by the policy (its repository paused or not allowed
 /// automated work) waits for.
 pub(crate) const DENIED: &str = "its repository to be allowed";
+
+impl Park {
+    /// Since when it's been waiting on the policy, if it is, not on
+    /// capacity: its question's deadline gets that time back. A park from
+    /// before its wait was kept was the policy's.
+    pub(crate) fn paused_since(&self) -> Option<i64> {
+        self.wait
+            .as_deref()
+            .is_none_or(|wait| wait == DENIED)
+            .then(|| self.paused_since.unwrap_or(self.at))
+    }
+}
 
 pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
@@ -182,6 +198,7 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
         first,
         at: now(),
         wait: waiting,
+        paused_since: None,
     };
     let mut order = None;
     if let Ok(entries) = fs::read_dir(job.cfg.jobs.join(".queue")) {
@@ -229,6 +246,14 @@ fn refresh(job: &Job, _held: &crate::job::JobLock, wait: &str) -> Result<(), Str
     let mut park: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if job.turns().as_deref() != Some(park.turn.as_str()) || park.wait.as_deref() == Some(wait) {
         return Ok(());
+    }
+    // Its question gets back only what it waited on the policy: a stretch
+    // of that ending is credited now, and one beginning is credited from now.
+    let at = now();
+    match (park.paused_since(), wait == DENIED) {
+        (Some(since), false) => crate::ask::restore(job, since, at)?,
+        (None, true) => park.paused_since = Some(at),
+        _ => (),
     }
     park.wait = Some(wait.to_owned());
     swap(
@@ -535,10 +560,19 @@ pub(crate) fn kill(cfg: &Config, unit: &str) -> Result<(), String> {
 /// Credit paused time with the question's current deadline authority. The
 /// authority retains interval receipts, so retries and overlapping members
 /// cannot credit the same time again, including across a move.
+///
+/// Only a pause is credited: the policy parks the repository's work. A turn
+/// waiting for the inbox's capacity leaves its question posted and
+/// answerable all along, so that wait is the owner's time like any other;
+/// credited, every update that resumed an asking job moved its deadline on
+/// and the default might never come (burrow#1100). What the job awaits
+/// moves either way: its turn didn't run.
 pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
     let at = now();
     let elapsed = at.saturating_sub(rec.at);
-    crate::ask::restore(job, rec.at, at)?;
+    if let Some(since) = rec.paused_since() {
+        crate::ask::restore(job, since, at)?;
+    }
     if let Some(text) = read(&job.path("await")) {
         let shifted: String = crate::job::awaits(&text)
             .into_iter()
@@ -552,6 +586,7 @@ pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
         swap(&job.path("await"), &shifted).map_err(|e| e.to_string())?;
     }
     rec.at = at;
+    rec.paused_since = None;
     Ok(())
 }
 

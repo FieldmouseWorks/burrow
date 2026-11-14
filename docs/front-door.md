@@ -140,13 +140,16 @@ commit membership and inherited policy atomically; an occupied subject keeps
 its deadline. A busy job makes the merge return a retryable error without
 retaining any locks or changing membership.
 `burrow.proj.askTimeout` is its deadline in seconds (6h by default),
-kept across unrelated updates. A reply resumes it normally. Without one, a
+kept across unrelated updates, however long one waits for a slot: only
+time its repository's work is paused moves it on. A reply resumes it normally. Without one, a
 reversible default resumes the job with “no answer by TIME” and instructions
 to take that recommendation and report it on the issue. A one-way default
 completes without executing the recommendation: its issue stays open under
 the owner label and its drain claim is released. Questions from drained,
 bot-started or stuck-issue jobs carry the owner's waiting label and are listed
-in the pipeline's owner issue, so they have a reader. Until a reply or a
+in the pipeline's owner issue, so they have a reader. The issue a job works
+never lists that job: its question is already there, and an edit or comment
+for it would resume the job it reports. Until a reply or a
 reversible default resumes it, or `proj stop` ends it, the job is still at work:
 `proj lifecycle ID` says how a job stands and what it holds open (its
 question, a one-way one left for the owner, the PRs and issues it awaits),
