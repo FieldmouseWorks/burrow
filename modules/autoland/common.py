@@ -208,7 +208,7 @@ UPKEEP_TIMEOUT = 300
 def upkeep(*args, input=None, as_app=True, bounded=True):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
     owner, as every GitHub call of a pass's, `input` on its stdin: what it
-    printed, read, with a rate limit it met noted for the pass (LIMITED).
+    printed, read, with the latest rate limit any call met noted (LIMITED).
     Not `as_app`, it's handed no token: `hooks` mints its own, for each
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
@@ -223,7 +223,6 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
         raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
     if out["limited"] is not None:
-        # The latest deadline any call met: one met first can't shorten it.
         LIMITED[:] = [max([*LIMITED, out["limited"]])]
     return out
 
