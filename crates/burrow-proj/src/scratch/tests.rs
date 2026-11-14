@@ -71,32 +71,36 @@ impl Box {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
+/// Git in `dir` as the tests run it: the machine's own config (an identity
+/// or not, a global ignore) never reaches it, so a test does the same here
+/// as in the build sandbox, which has none.
+fn git_in(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.arg("-C")
         .arg(dir)
-        .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .status()
-        .unwrap();
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    c
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = git_in(dir).args(args).status().unwrap();
     assert!(status.success(), "git {args:?}");
+}
+
+/// What a git command in `dir` prints, trimmed.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = git_in(dir).args(args).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
 /// The worktrees git lists for a repo.
 fn trees(repo: &Path) -> Vec<PathBuf> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .unwrap();
-    String::from_utf8(out.stdout)
-        .unwrap()
+    git_out(repo, &["worktree", "list", "--porcelain"])
         .lines()
         .filter_map(|l| l.strip_prefix("worktree ").map(PathBuf::from))
         .collect()
@@ -424,14 +428,12 @@ fn keeping_work_keeps_the_base_of_a_clone() {
     clear(&b.cfg, "u");
     let k = kept(&b, "clone.1");
     let head = fs::read_to_string(k.join("head")).unwrap();
-    let heads = Command::new("git")
-        .arg("-C")
-        .arg(b.path("origin"))
-        .args(["bundle", "list-heads"])
-        .arg(k.join("base.bundle"))
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&heads.stdout).contains(head.trim()));
+    let bundle = k.join("base.bundle");
+    let heads = git_out(
+        &b.path("origin"),
+        &["bundle", "list-heads", bundle.to_str().unwrap()],
+    );
+    assert!(heads.contains(head.trim()));
 }
 
 // What can't be looked at is not nothing: a directory that can't be read stops
@@ -620,22 +622,13 @@ fn keeping_work_keeps_a_staged_submodule_commit_that_is_not_checked_out() {
     fs::write(inner.join("x.txt"), "inside\n").unwrap();
     git(&inner, &["add", "x.txt"]);
     git(&inner, &["commit", "-q", "-m", "unpublished"]);
-    let out = |dir: &Path, args: &[&str]| {
-        let o = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&o.stdout).trim().to_owned()
-    };
-    let staged = out(&inner, &["rev-parse", "HEAD"]);
+    let staged = git_out(&inner, &["rev-parse", "HEAD"]);
     git(&at, &["add", "mod"]);
     git(&inner, &["checkout", "-q", "--detach", "HEAD~1"]);
     clear(&b.cfg, "u");
     let bundle = kept(&b, "clone-mod.1").join("base.bundle");
     assert!(bundle.exists(), "{:?}", left(&b.cfg));
-    let heads = out(
+    let heads = git_out(
         bundle.parent().unwrap(),
         &["bundle", "list-heads", "base.bundle"],
     );
@@ -812,18 +805,7 @@ fn nested(b: &Box) -> (PathBuf, PathBuf, String) {
     fs::write(nest.join("deep.txt"), "deep\n").unwrap();
     git(&nest, &["add", "deep.txt"]);
     git(&nest, &["commit", "-q", "-m", "unpublished deep"]);
-    let sha = String::from_utf8(
-        Command::new("git")
-            .arg("-C")
-            .arg(&nest)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    let sha = git_out(&nest, &["rev-parse", "HEAD"]);
     git(&outer_mod, &["add", "nest"]);
     git(&outer_mod, &["commit", "-q", "-m", "records deep"]);
     git(&at, &["add", "mod"]);
@@ -841,13 +823,11 @@ fn keeping_work_keeps_a_nested_submodule_commit_recursively() {
     clear(&b.cfg, "u");
     let bundle = kept(&b, "clone-mod-nest.1").join("base.bundle");
     assert!(bundle.exists(), "{:?}", left(&b.cfg));
-    let heads = Command::new("git")
-        .arg("-C")
-        .arg(bundle.parent().unwrap())
-        .args(["bundle", "list-heads", "base.bundle"])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&heads.stdout).contains(&sha));
+    let heads = git_out(
+        bundle.parent().unwrap(),
+        &["bundle", "list-heads", "base.bundle"],
+    );
+    assert!(heads.contains(&sha));
 }
 
 // A submodule the saved states name with no working tree keeps the scratch.
@@ -911,13 +891,14 @@ fn keeping_work_stays_when_the_index_is_unmerged() {
     git(&at, &["checkout", "-q", "-"]);
     fs::write(at.join("README"), "main\n").unwrap();
     git(&at, &["commit", "-q", "-am", "main"]);
-    let merge = Command::new("git")
-        .arg("-C")
-        .arg(&at)
-        .args(["merge", "side"])
-        .output()
-        .unwrap();
+    let merge = git_in(&at).args(["merge", "side"]).output().unwrap();
     assert!(!merge.status.success());
+    // It stopped on the conflict, with both sides in the index, not before.
+    assert!(
+        !git_out(&at, &["ls-files", "-u"]).is_empty(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
     fs::write(at.join("README"), "resolved by hand\n").unwrap();
     let e = keep_err(&b);
     assert!(e.contains("unmerged"), "{e}");
@@ -947,29 +928,16 @@ fn keeping_work_keeps_submodule_commits_a_saved_head_names() {
     fs::write(m.join("unpublished.txt"), "u\n").unwrap();
     git(&m, &["add", "unpublished.txt"]);
     git(&m, &["commit", "-q", "-m", "unpublished"]);
-    let sha = String::from_utf8(
-        Command::new("git")
-            .arg("-C")
-            .arg(&m)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    let sha = git_out(&m, &["rev-parse", "HEAD"]);
     git(&at, &["add", "mod"]);
     git(&at, &["commit", "-q", "-m", "record mod"]);
     fs::write(at.join("README"), "ordinary edit\n").unwrap();
     clear(&b.cfg, "u");
     let bundle = kept(&b, "clone-mod.1").join("base.bundle");
     assert!(bundle.exists(), "{:?}", left(&b.cfg));
-    let heads = Command::new("git")
-        .arg("-C")
-        .arg(bundle.parent().unwrap())
-        .args(["bundle", "list-heads", "base.bundle"])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&heads.stdout).contains(&sha));
+    let heads = git_out(
+        bundle.parent().unwrap(),
+        &["bundle", "list-heads", "base.bundle"],
+    );
+    assert!(heads.contains(&sha));
 }
