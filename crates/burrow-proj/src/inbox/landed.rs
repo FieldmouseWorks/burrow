@@ -183,10 +183,10 @@ impl Pass<'_> {
 
     /// A reopened child: its earlier job's awaits are no evidence for it now.
     pub(super) fn drop_awaited(&self, repo: &str, n: u64) -> bool {
-        match fs::remove_file(self.plan_dir(repo, &n.to_string()).join(AWAITED)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => false,
-            _ => true,
-        }
+        !matches!(
+            fs::remove_file(self.plan_dir(repo, &n.to_string()).join(AWAITED)),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound
+        )
     }
 
     /// The first of these that's a merged PR, as its URL.
