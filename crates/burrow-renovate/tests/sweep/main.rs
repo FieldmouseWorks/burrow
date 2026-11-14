@@ -162,6 +162,8 @@ struct Machine {
     root: PathBuf,
     /// The machine's own App, as its name and its bot's login.
     app: Option<(&'static str, &'static str)>,
+    /// Renovate's own bot, as REST spells it, when it acts as an App.
+    renovate: Option<&'static str>,
     /// The steward's repos.json, once there's one.
     covered: Option<PathBuf>,
 }
@@ -250,6 +252,7 @@ impl Machine {
             _dir: dir,
             root,
             app: None,
+            renovate: None,
             covered: None,
         };
         m.project("r", "https://github.com/sam/r.git");
@@ -259,7 +262,16 @@ impl Machine {
     fn as_app() -> Machine {
         Machine {
             app: Some(("workers", "sam-workers")),
+            renovate: Some("sam-workers[bot]"),
             ..Machine::new()
+        }
+    }
+
+    /// The jobs as the machinery's App, Renovate as an App of its own.
+    fn renovate_apart() -> Machine {
+        Machine {
+            renovate: Some("sam-renovate[bot]"),
+            ..Machine::as_app()
         }
     }
 
@@ -336,6 +348,7 @@ impl Machine {
         let config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
+            "renovate": self.renovate,
             "renovateRun": 7200,
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "seal": b.join("major-seal"),
