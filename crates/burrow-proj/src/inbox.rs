@@ -194,7 +194,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
         ));
     }
-    let permit = resumption::Permit::new(held);
+    let permit = resumption::Permit::pass(held);
     let p = Pass {
         cfg,
         inbox,
