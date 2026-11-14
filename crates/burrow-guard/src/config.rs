@@ -22,6 +22,11 @@ pub struct Config {
     /// How long the guard takes before it asks instead: past the hook's
     /// timeout, Claude Code runs the command unchecked.
     pub ask_after_seconds: u64,
+    /// The label that puts work ahead of the line, which only the owner
+    /// puts on (burrow.autoland.labels.first; first.rs): a proj job's
+    /// command that would is refused. None where nothing reads it.
+    #[serde(default)]
+    pub first_label: Option<String>,
 }
 
 /// The user the guard runs as, by the name /etc/passwd gives its uid; None

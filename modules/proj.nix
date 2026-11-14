@@ -105,6 +105,13 @@ let
     inherit (config.burrow) mcpServers;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
+    # The guard as the jobs' Claude Code's hook, where burrow.claude's
+    # managed settings, which run it for every Claude, aren't installed: a
+    # job's commands are guarded either way, as Codex's are.
+    claudeGuard = if config.burrow.claude.enable or false then null else {
+      command = lib.getExe guard.claude;
+      inherit (guard) timeout;
+    };
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;

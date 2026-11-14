@@ -56,9 +56,12 @@ Each has an entry below, and each can be imported on its own.
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch; `proj` makes the same guard Codex's managed hook for its Codex jobs
+  branch, and, in a proj job, before putting the steward's `first` label on
+  (`burrow.autoland.labels.first`, which only the owner puts on, and a job
+  may act on GitHub as them); `proj` makes the same guard Codex's managed hook for its Codex jobs
   (`/etc/codex/requirements.toml`), on their commands and apply_patch, refusing
-  where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  where it would ask, and, where this module is off, its Claude jobs' hook
+  (in the settings it starts them with). Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.

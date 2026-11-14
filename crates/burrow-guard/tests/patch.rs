@@ -39,10 +39,12 @@ fn snapshotted(tool: &str, command: &str, cwd: &Path) -> (bool, Option<String>) 
         systemd_run: PathBuf::from("/no-such-systemd-run"),
         snapshot_datasets: vec!["pool/a".to_owned()],
         ask_after_seconds: 8,
+        first_label: None,
     };
     let guard = Guard {
         config: &config,
         codex: true,
+        job: true,
         mark: dir.path().join("mark"),
         namespace: Namespace::Machine,
     };

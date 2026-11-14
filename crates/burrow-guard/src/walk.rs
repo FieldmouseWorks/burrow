@@ -68,8 +68,18 @@ const NESTED: usize = 16;
 /// that reads too long for the hook's timeout, which would let it run
 /// unchecked, isn't read to its end.
 pub fn walk(cmd: &str, visit: &mut Visit<'_>) -> Result<(), Unread> {
+    walk_read(cmd, false, visit)
+}
+
+/// [`walk`], each word read with marks ([`shell::read`]): an expansion and a literal
+/// `$` told apart, and an unquoted one marked as splitting.
+pub fn walk_marked(cmd: &str, visit: &mut Visit<'_>) -> Result<(), Unread> {
+    walk_read(cmd, true, visit)
+}
+
+fn walk_read(cmd: &str, marks: bool, visit: &mut Visit<'_>) -> Result<(), Unread> {
     let budget = Budget(Cell::new(WORDS));
-    read(shell::commands(cmd)?, 0, None, &budget, visit)
+    read(shell::read(cmd, marks)?, marks, 0, None, &budget, visit)
 }
 
 /// What [`walk`] calls for each word: the word, the words after it, the
@@ -78,6 +88,7 @@ pub type Visit<'v> = dyn FnMut(&String, Rest<'_>, &Budget, bool) -> Result<(), U
 
 fn read(
     commands: Vec<Vec<String>>,
+    marks: bool,
     depth: usize,
     trailing: Option<&Rest<'_>>,
     budget: &Budget,
@@ -88,7 +99,7 @@ fn read(
     }
     let last = commands.len().saturating_sub(1);
     for (n, words) in commands.into_iter().enumerate() {
-        let words = with_parameter_texts(words)?;
+        let words = with_parameter_texts(words, marks)?;
         let trailing = if n == last { trailing } else { None };
         let shell = words.iter().position(|w| is_shell(w));
         let input_as_words = words.iter().position(|w| takes_input_as_words(w));
@@ -100,14 +111,14 @@ fn read(
                 here: &words[i + 1..],
                 then: trailing,
             };
-            let inner = reading(word)?;
+            let inner = reading(word, marks)?;
             if !reads_as_itself(&inner, word) {
                 if !script_read && shell.is_some_and(|at| at + 1 < i) && is_c(&words[i - 1]) {
                     script_read = true;
                     let inner = given_params(inner, word, rest, budget)?;
-                    read(inner, depth + 1, None, budget, visit)?;
+                    read(inner, marks, depth + 1, None, budget, visit)?;
                 } else {
-                    read(inner, depth + 1, Some(&rest), budget, visit)?;
+                    read(inner, marks, depth + 1, Some(&rest), budget, visit)?;
                 }
             }
             visit(word, rest, budget, input_as_words.is_some_and(|at| at < i))?;
@@ -120,16 +131,17 @@ fn read(
 }
 
 /// `word` read as a command line: an assignment's value, or all of it.
-fn reading(word: &str) -> Result<Vec<Vec<String>>, shell::TooDeep> {
-    shell::commands(assigned(word).unwrap_or(word))
+fn reading(word: &str, marks: bool) -> Result<Vec<Vec<String>>, shell::TooDeep> {
+    shell::read(assigned(word).unwrap_or(word), marks)
 }
 
 /// Whether `word` read again is just itself. Reading a word again marks the
-/// globs it holds as unquoted ones (shell.rs's `bare`), whatever quoting it
-/// had the first time, so the marks don't count. (A brace list it holds
-/// expands into more words, which aren't just itself.)
+/// globs it holds as unquoted ones (shell.rs's `bare`), and in a marked
+/// reading its expansions as unquoted ones, whatever quoting it had the
+/// first time, so the marks don't count. (A brace list it holds expands into
+/// more words, which aren't just itself.)
 fn reads_as_itself(reading: &[Vec<String>], word: &str) -> bool {
-    let bare = |w: &str| w.replace(shell::UNKNOWN, "");
+    let bare = |w: &str| w.replace([shell::UNKNOWN, shell::SPLITS], "");
     matches!(reading, [only] if only.len() == 1 && bare(&only[0]) == bare(word))
 }
 
@@ -138,16 +150,16 @@ fn reads_as_itself(reading: &[Vec<String>], word: &str) -> bool {
 /// `eval` runs them even with a `;` among them, so its commands' words all
 /// join. The word stays, as `x` may be set to anything. A word that reads as
 /// more than itself has this done where it's read.
-fn with_parameter_texts(words: Vec<String>) -> Result<Vec<String>, shell::TooDeep> {
+fn with_parameter_texts(words: Vec<String>, marks: bool) -> Result<Vec<String>, shell::TooDeep> {
     if !words.iter().any(|w| w.contains("${")) {
         return Ok(words);
     }
     let mut all = Vec::with_capacity(words.len());
     for word in words {
-        if reads_as_itself(&reading(&word)?, &word) {
+        if reads_as_itself(&reading(&word, marks)?, &word) {
             for text in shell::parameter_texts(&word) {
-                for command in shell::commands(text)? {
-                    all.extend(with_parameter_texts(command)?);
+                for command in shell::read(text, marks)? {
+                    all.extend(with_parameter_texts(command, marks)?);
                 }
             }
         }
@@ -240,15 +252,25 @@ fn given_params(
         let mut given = Vec::with_capacity(words.len());
         for word in words {
             let mut word = word;
-            if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
+            if matches!(
+                word.replace([shell::UNKNOWN, shell::SPLITS], "").as_str(),
+                "$@" | "$*" | "${@}" | "${*}"
+            ) {
                 budget.spend(after_zero.len())?;
                 given.extend(after_zero.iter().map(|w| (*w).clone()));
                 continue;
             }
             for (n, arg) in numbered.iter().enumerate() {
-                word = word
-                    .replace(&format!("${n}"), arg)
-                    .replace(&format!("${{{n}}}"), arg);
+                for parameter in [format!("${n}"), format!("${{{n}}}")] {
+                    // A marked reading's marks go with what they mark.
+                    for marked in [
+                        format!("{}{}{parameter}", shell::SPLITS, shell::UNKNOWN),
+                        format!("{}{parameter}", shell::UNKNOWN),
+                        parameter,
+                    ] {
+                        word = word.replace(&marked, arg);
+                    }
+                }
             }
             budget.spend(1 + word.len() / 8)?;
             let expands = word.contains(['$', shell::UNKNOWN]);

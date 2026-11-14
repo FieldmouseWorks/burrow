@@ -1,5 +1,6 @@
-//! curl, read as curl reads its command line, for codex.rs: whether any
-//! request it makes writes a repo's commits or refs through GitHub's API.
+//! curl, read as curl reads its command line, for codex.rs and first.rs:
+//! whether any request it makes is a GitHub API write the caller counts
+//! ([`Counts`]).
 //!
 //! One curl may make many requests: each URL, `--url`'s too, and each
 //! operation after `--next` (`-:`) with options of its own. Every request
@@ -9,7 +10,8 @@
 //! (`-G` then `--no-get` sends the body as a POST). What curl would read
 //! that the guard can't (a config file, URLs from a file, a URL, method,
 //! header or body only an expansion gives, the shell's or curl's own
-//! `--expand-…` variables, a glob) counts as the write it may be.
+//! `--expand-…` variables, a glob) is handed on as unknown, for the caller
+//! to count as the write it may be.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -17,8 +19,30 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::codex::{GIT_DATA, MUTATION, endpoint};
+use crate::codex::endpoint;
 use crate::{pattern, shell};
+
+/// Whether a write to GitHub's API counts, for the caller: given its
+/// endpoint (no query, no trailing slash; None when the guard can't read
+/// where it goes), its [`Body`], and whether some of the body comes from
+/// where the guard can't read it.
+pub type Counts<'c> = dyn Fn(Option<&str>, &Body, bool) -> bool + 'c;
+
+/// A request's body, every way a caller may need to read it.
+pub struct Body {
+    /// Each piece as given, then the body curl puts them together into.
+    pub pieces: Vec<String>,
+    /// Each of those that's JSON, decoded ([`decode`]): what an escape
+    /// hides reads as it's sent.
+    pub decoded: Vec<String>,
+}
+
+impl Body {
+    /// Every text of it, as given and decoded.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.pieces.iter().chain(&self.decoded).map(String::as_str)
+    }
+}
 
 /// curl's short options that take a value: the rest of their word, or the
 /// next word (`curl --help all`).
@@ -189,6 +213,11 @@ struct Operation<'a> {
     /// `--request-target`: the path sent, whatever the URL's.
     target: Option<&'a str>,
     body: Vec<&'a str>,
+    /// The body curl sends, its `--data` family's and `--json`'s pieces
+    /// put together as curl puts them: each after the last, with `&`
+    /// between unless it's `--json`'s (`set_data` in curl's
+    /// tool_getparam.c).
+    data: String,
     /// A body from a file or input, or built from variables.
     body_unread: bool,
     upload: bool,
@@ -220,10 +249,15 @@ impl<'a> Operation<'a> {
                 self.body_unread |= name != "data-raw" && name != "form-string" && unread(value)
                     || value.contains(['$', shell::UNKNOWN]);
                 self.body.push(value);
+                if !name.starts_with("form") {
+                    self.append(value, name == "json");
+                }
             }
             "data-urlencode" => {
                 self.body_unread |= value.contains(['@', '$', shell::UNKNOWN]);
                 self.body.push(value);
+                // Encoded, the text it names reads no differently here.
+                self.append(value, false);
             }
             "upload-file" => self.upload = true,
             "connect-to" | "resolve" => self.rerouted = true,
@@ -237,6 +271,24 @@ impl<'a> Operation<'a> {
             }
             _ => {}
         }
+    }
+
+    /// A piece of the body, onto what's there.
+    fn append(&mut self, piece: &str, json: bool) {
+        if !self.data.is_empty() && !json {
+            self.data.push('&');
+        }
+        self.data.push_str(piece);
+    }
+
+    /// Its [`Body`].
+    fn body(&self) -> Body {
+        let mut pieces: Vec<String> = self.body.iter().map(|b| (*b).to_owned()).collect();
+        if !self.data.is_empty() {
+            pieces.push(self.data.clone());
+        }
+        let decoded = pieces.iter().filter_map(|b| decode(b)).collect();
+        Body { pieces, decoded }
     }
 
     /// A boolean switch, on as `--name` (or its short letter), off as
@@ -267,14 +319,17 @@ impl<'a> Operation<'a> {
         })
     }
 
-    /// Whether this operation's requests write commits or refs on GitHub.
-    fn writes(&self, unread_everywhere: bool) -> bool {
+    /// Whether this operation's requests make a write on GitHub that
+    /// `counts`.
+    fn writes(&self, unread_everywhere: bool, counts: &Counts<'_>) -> bool {
         let method = self.method();
         let write = !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD");
         if !write {
             return false;
         }
         let unread_body = self.body_unread || self.upload || unread_everywhere;
+        let bodies = self.body();
+        let unknown = || counts(None, &bodies, unread_body);
         let mut paths: Vec<String> = Vec::new();
         for url in &self.urls {
             // Where an expansion or a glob may send it, or a file of URLs.
@@ -282,7 +337,7 @@ impl<'a> Operation<'a> {
                 || url.starts_with('@')
                 || (!self.globoff && url.contains(['{', '[']))
             {
-                return true;
+                return unknown();
             }
             let (host, path) = split(url);
             if host == "api.github.com"
@@ -298,19 +353,40 @@ impl<'a> Operation<'a> {
         }
         if let Some(target) = self.target {
             if target.contains(['$', shell::UNKNOWN]) {
-                return true;
+                return unknown();
             }
             paths = vec![squash(target)];
         }
-        paths.iter().any(|path| {
-            let path = endpoint(path);
-            if path.ends_with("graphql") {
-                unread_body || self.body.iter().any(|b| MUTATION.is_match(b))
-            } else {
-                GIT_DATA.is_match(path)
-            }
-        })
+        paths
+            .iter()
+            .any(|path| counts(Some(endpoint(path)), &bodies, unread_body))
     }
+}
+
+/// A JSON body decoded: its keys and strings, each on a line of its own.
+/// None for one that isn't JSON.
+pub fn decode(body: &str) -> Option<String> {
+    fn strings(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(o) => {
+                for (k, v) in o {
+                    out.push_str(k);
+                    out.push('\n');
+                    strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let mut out = String::new();
+    strings(&value, &mut out);
+    Some(out)
 }
 
 /// A URL's host, lowercased, without its user or port, and its path, dot
@@ -354,21 +430,22 @@ fn squash(path: &str) -> String {
     format!("{}{query}", out.join("/"))
 }
 
-/// What curl with some words does, as far as codex.rs cares.
+/// What curl with some words does, as far as its caller cares.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Curl {
-    /// Nothing that writes commits or refs.
+    /// No write that counts.
     Fine,
-    /// Writes commits or refs through GitHub's API, or may: a request
-    /// whose destination or body the guard can't read.
+    /// A write through GitHub's API that counts, or may: a request whose
+    /// destination or body the guard can't read, as the caller counts it.
     Writes,
     /// Reads options from a file (`--config`), which may be any of them.
     Config,
 }
 
 /// What curl with these `words` does: each of its requests read with its
-/// own operation's options.
-pub fn read(words: &[&str]) -> Curl {
+/// own operation's options, and its writes to GitHub's API as `counts`
+/// counts them.
+pub fn read(words: &[&str], counts: &Counts<'_>) -> Curl {
     let mut ops = vec![Operation::default()];
     // Variables (`--variable`, `--expand-…`) build values the guard can't
     // read, in any operation.
@@ -446,7 +523,7 @@ pub fn read(words: &[&str]) -> Curl {
             });
         }
     }
-    if ops.iter().any(|op| op.writes(variables)) {
+    if ops.iter().any(|op| op.writes(variables, counts)) {
         Curl::Writes
     } else {
         Curl::Fine
@@ -463,6 +540,16 @@ fn long_name(c: char) -> &'static str {
         'T' => "upload-file",
         _ => "",
     }
+}
+
+/// Whether curl, given `words` on the command line `cmd`, reads a default
+/// config the guard can't read: one is there where curl looks
+/// ([`default_config`]), or the line moves where it looks
+/// ([`moves_default_config`]), and its first word doesn't keep it off
+/// them ([`skips_default_config`]).
+pub fn reads_default_config(words: &[&str], cmd: &str) -> bool {
+    !skips_default_config(words.first().copied())
+        && (moves_default_config(cmd) || default_config(|k| std::env::var_os(k)))
 }
 
 /// Whether curl's first word keeps it off its default config (`-q`).

@@ -24,6 +24,7 @@ fn machine() -> (TempDir, Config) {
         systemd_run,
         snapshot_datasets: vec!["pool/a".to_owned(), "pool/b".to_owned()],
         ask_after_seconds: 8,
+        first_label: None,
     };
     (dir, config)
 }
@@ -43,6 +44,7 @@ fn remove(dir: &Path, config: &Config, namespace: Namespace) -> Option<String> {
     let guard = Guard {
         config,
         codex: true,
+        job: true,
         mark: dir.join("mark"),
         namespace,
     };

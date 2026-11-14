@@ -32,6 +32,7 @@ impl Box {
             systemd_run: PathBuf::from("/no-such-systemd-run"),
             snapshot_datasets: datasets.iter().map(|d| (*d).to_owned()).collect(),
             ask_after_seconds: 8,
+            first_label: None,
         };
         Box { dir, config }
     }
@@ -49,6 +50,7 @@ impl Box {
         let guard = Guard {
             config: &self.config,
             codex: false,
+            job: false,
             mark: self.mark(),
             namespace: Namespace::Machine,
         };
@@ -142,6 +144,7 @@ fn only_bash_is_read() {
     let guard = Guard {
         config: &b.config,
         codex: false,
+        job: false,
         mark: b.mark(),
         namespace: Namespace::Machine,
     };

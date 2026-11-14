@@ -13,6 +13,14 @@
 //! words it makes, as bash expands it (shell/brace.rs), and an unquoted glob
 //! character marks its word [`UNKNOWN`] (a quoted one is text: see
 //! [`globs`]). Nothing else is expanded.
+//!
+//! Read with marks ([`read`]), it also tells a parameter expansion (`$x`, `${x}`) from
+//! a literal `$` (`'$x'`, as in a GraphQL query): an expansion gets
+//! [`UNKNOWN`] ahead of its `$`, as a substitution's output is unknown. And
+//! where an expansion or a substitution is unquoted, so that the shell
+//! splits what it gives into any number of words, [`SPLITS`] goes ahead of
+//! that. The plain reading keeps neither mark, for the readers that count
+//! every `$` as unknown.
 
 use crate::ansi_c;
 
@@ -21,6 +29,23 @@ mod brace;
 /// What a substitution's output is, in the word that holds it: unknown
 /// until it runs.
 pub const UNKNOWN: char = '\u{FFFC}';
+
+/// What marks an unquoted expansion or substitution in a marked reading
+/// ([`read`]), ahead of its [`UNKNOWN`]: what it gives the shell splits into
+/// words, any number of them, options among them.
+pub const SPLITS: char = '\u{FFFB}';
+
+/// Whether `word`, read with marks, may be more words than one, or other
+/// words than it reads as: an unquoted expansion or substitution, or a glob.
+pub fn splits(word: &str) -> bool {
+    word.contains(SPLITS) || globs(word)
+}
+
+/// Whether `word`, read with marks, holds what the guard can't read to its
+/// value: an expansion, a substitution or a glob. A literal `$` is text.
+pub fn unread(word: &str) -> bool {
+    word.contains([UNKNOWN, SPLITS])
+}
 
 /// How deeply substitutions may nest before the reading gives up.
 const DEPTH: usize = 64;
@@ -38,12 +63,29 @@ pub fn globs(word: &str) -> bool {
         .any(|(at, mark)| word[at + mark.len()..].starts_with(['*', '?', '[']))
 }
 
-/// Each command in `text` as its words, a substitution's commands among
-/// them, ahead of the command that holds them.
+/// [`read`], with no marks.
+#[cfg(test)]
 pub fn commands(text: &str) -> Result<Vec<Vec<String>>, TooDeep> {
-    let mut lexer = Lexer::new(text);
+    read(text, false)
+}
+
+/// Each command in `text` as its words, a substitution's commands among
+/// them, ahead of the command that holds them. With `marks`, its
+/// expansions are marked: [`UNKNOWN`] ahead of each, and [`SPLITS`] ahead
+/// of an unquoted one or an unquoted substitution.
+pub fn read(text: &str, marks: bool) -> Result<Vec<Vec<String>>, TooDeep> {
+    let mut lexer = Lexer::new(text, marks);
     lexer.list(0, false)?;
     Ok(lexer.commands)
+}
+
+/// Whether `$` followed by `next` starts a parameter expansion: a name, a
+/// positional or special parameter, or `${`.
+fn expands_after_dollar(next: Option<char>) -> bool {
+    next.is_some_and(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '{' | '@' | '*' | '#' | '?' | '$' | '!' | '-')
+    })
 }
 
 struct Lexer {
@@ -53,6 +95,8 @@ struct Lexer {
     commands: Vec<Vec<String>>,
     /// Here-documents whose bodies start at the next newline.
     heredocs: Vec<Heredoc>,
+    /// Whether expansions are marked ([`read`]).
+    marks: bool,
 }
 
 struct Heredoc {
@@ -369,12 +413,13 @@ pub fn is_only_a_parameter_text(word: &str) -> bool {
 }
 
 impl Lexer {
-    fn new(text: &str) -> Lexer {
+    fn new(text: &str, marks: bool) -> Lexer {
         Lexer {
             chars: text.chars().collect(),
             pos: 0,
             commands: Vec::new(),
             heredocs: Vec::new(),
+            marks,
         }
     }
 
@@ -459,7 +504,7 @@ impl Lexer {
 
     /// `text` read as a script of its own, its commands joining these.
     fn read_apart(&mut self, text: &str, depth: usize) -> Result<(), TooDeep> {
-        let mut inner = Lexer::new(text);
+        let mut inner = Lexer::new(text, self.marks);
         inner.list(depth + 1, false)?;
         self.commands.append(&mut inner.commands);
         Ok(())
@@ -556,6 +601,7 @@ impl Lexer {
             }
             '`' => {
                 self.backquote(depth, false)?;
+                self.mark_split(cmd);
                 cmd.push(UNKNOWN);
             }
             '$' => match self.peek() {
@@ -572,21 +618,45 @@ impl Lexer {
                 Some('(') => {
                     self.pos += 1;
                     self.list(depth + 1, true)?;
+                    self.mark_split(cmd);
                     cmd.push(UNKNOWN);
                 }
                 Some('{') => {
                     self.pos += 1;
+                    self.mark_split(cmd);
+                    self.mark_unknown(cmd);
                     cmd.word.push_str("${");
                     let outer = std::mem::replace(&mut cmd.in_parameter, true);
                     let read = self.parameter(cmd, depth + 1);
                     cmd.in_parameter = outer;
                     read?;
                 }
-                _ => cmd.push('$'),
+                next => {
+                    if expands_after_dollar(next) {
+                        self.mark_split(cmd);
+                        self.mark_unknown(cmd);
+                    }
+                    cmd.push('$');
+                }
             },
             c => cmd.bare(c),
         }
         Ok(())
+    }
+
+    /// In a marked reading, an unquoted expansion's or substitution's
+    /// [`SPLITS`].
+    fn mark_split(&self, cmd: &mut Command) {
+        if self.marks {
+            cmd.word.push(SPLITS);
+        }
+    }
+
+    /// In a marked reading, an expansion's [`UNKNOWN`], ahead of its `$`.
+    fn mark_unknown(&self, cmd: &mut Command) {
+        if self.marks {
+            cmd.word.push(UNKNOWN);
+        }
     }
 
     /// The rest of a `${…}`, after its `{`: part of one word, spaces and
@@ -622,6 +692,10 @@ impl Lexer {
                 '$' if self.next_if(|c| c == '(').is_some() => {
                     self.list(depth + 1, true)?;
                     cmd.word.push(UNKNOWN);
+                }
+                '$' if expands_after_dollar(self.peek()) => {
+                    self.mark_unknown(cmd);
+                    cmd.word.push('$');
                 }
                 c => cmd.word.push(c),
             }
