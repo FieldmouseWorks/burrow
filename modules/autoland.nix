@@ -77,6 +77,9 @@ let
   dashboardTitle = "Dependency Dashboard";
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
+    # The address Dependabot commits as, on every repo: a commit by anyone
+    # else on its branch is someone editing it (touches.py, autoland/shadow.nix).
+    dependabotEmail = "49699333+dependabot[bot]@users.noreply.github.com";
     inherit (cfg) owners exclude context rulesets baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
     inherit (cfg) authors;
@@ -648,53 +651,6 @@ in
       type = types.ints.positive;
       default = 2;
       description = "At most this many baseline jobs start in one pass (the first pass would otherwise start one per repo).";
-    };
-
-    reviewers = {
-      codex = {
-        enable = lib.mkEnableOption ''
-          Codex as a reviewer: the codex CLI, logged in to your ChatGPT plan
-          (`autoland-codex-login`, once). Its model is codex's default, unless
-          the reviewers' home has a `.codex/config.toml` that names one: which
-          model does what is the machine's business. It's the steward's one
-          reviewer: while the plan's usage is spent, or it's logged out, PRs
-          wait for it, and it comes back on its own
-        '';
-        effort = mkOption {
-          type = types.enum [ "low" "medium" "high" "xhigh" ];
-          default = "high";
-          description = "How hard it thinks (`model_reasoning_effort`).";
-        };
-        parallel = mkOption {
-          type = types.ints.positive;
-          default = 2;
-          description = "At most this many Codex reviews at once.";
-        };
-      };
-
-      timeoutMinutes = mkOption {
-        type = types.ints.positive;
-        default = 30;
-        description = ''
-          How long one review may run before it's stopped and counted a
-          failed try, like any other error: the steward asks again, three
-          tries in all, then three more an hour on.
-        '';
-      };
-
-      skipPaths = mkOption {
-        type = types.listOf types.str;
-        default = [ "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)\\.env(\\..*)?$" "\\.(pem|key|p12|pfx)$" ];
-        description = ''
-          Path regexes left out of the snapshot the reviewers read, on both
-          sides of the diff: they're told such a file changed, not how, so a
-          PR that changes one is judged before it lands. A directory matches
-          with a trailing slash. A repo's own `skipPaths` (in `repos`) adds
-          to these. They're Rust's regex syntax, which has no lookaround or
-          backreferences: one it can't read stops every snapshot it's for,
-          so those reviews wait rather than read what it was meant to hide.
-        '';
-      };
     };
 
     shadow = mkOption {

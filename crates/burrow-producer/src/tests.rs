@@ -459,10 +459,9 @@ fn records_survive_whole_and_hold_one_result_for_their_own_target() {
         "never skipped"
     );
     // A directory others can read isn't the producer's alone.
-    use std::os::unix::fs::PermissionsExt;
     let shared = dir.path().join("shared");
     std::fs::create_dir(&shared).unwrap();
-    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(&shared, 0o755);
     assert!(Records::open(&shared).is_err());
 }
 
@@ -616,11 +615,10 @@ fn signed_results_verify_through_conarys_verifier_and_nothing_else_does() {
 
 #[test]
 fn a_key_comes_only_from_its_credential() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let key = dir.path().join("proof-key");
     std::fs::write(&key, SECRET).unwrap();
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).unwrap();
+    burrow_test::permissions(&key, 0o400);
     let credentials = dir.path().as_os_str().to_owned();
     let with = |vars: Vec<(&'static str, std::ffi::OsString)>| {
         move |name: &str| {
@@ -650,9 +648,9 @@ fn a_key_comes_only_from_its_credential() {
         assert!(Signer::load_with(&given, "proofs", name).is_err(), "{name}");
     }
     // A key others could read isn't the producer's alone.
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    burrow_test::permissions(&key, 0o644);
     assert!(Signer::load_with(&given, "proofs", "proof-key").is_err());
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).unwrap();
+    burrow_test::permissions(&key, 0o400);
     let signer = Signer::load_with(&given, "kit", "proof-key").unwrap();
     let p = signer.signed(&kept(dir.path(), proof(true))).unwrap();
     let recipe = flow::recipe_digest(&proof(true).recipe);
