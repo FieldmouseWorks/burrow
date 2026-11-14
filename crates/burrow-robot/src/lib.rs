@@ -331,17 +331,7 @@ pub fn deliver(
 /// redirect followed (curl followed none), and every status an answer to
 /// read, so a redirect is a refusal like any other.
 pub fn agent() -> ureq::Agent {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(TIMEOUT))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into()
+    burrow_github::outbound::agent(TIMEOUT, 0)
 }
 
 /// Every key's fingerprint in Robot's list of SSH keys.

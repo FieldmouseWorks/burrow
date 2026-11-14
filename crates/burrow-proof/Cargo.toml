@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
+burrow-events = { path = "../burrow-events" }
 
 [dev-dependencies]
 burrow-test = { path = "../burrow-test" }

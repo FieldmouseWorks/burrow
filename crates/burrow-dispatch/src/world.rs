@@ -7,7 +7,6 @@ use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
 
 use burrow_github::{Gh, call, call_once};
 use burrow_systemd::working;
@@ -255,7 +254,7 @@ impl World for Real<'_> {
 
     fn kick(&self, path: &str) {
         let url = format!("{}/{path}", self.cfg.kick);
-        if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
+        if let Err(e) = burrow_events::kick::kick(&url, burrow_events::kick::KICK_TIMEOUT) {
             println!("couldn't kick {path}: {e}");
         }
     }

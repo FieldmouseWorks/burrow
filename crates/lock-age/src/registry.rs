@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use serde_json::Value;
-use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::{Ages, NPM, Out, Release, World, when};
 
@@ -28,17 +27,15 @@ pub struct Real {
 
 impl Real {
     pub fn new(resolver: Vec<String>) -> Real {
-        // The machine's own trust (its CA bundle), as every other program
-        // on it has.
-        let tls = TlsConfig::builder()
-            .root_certs(RootCerts::PlatformVerifier)
-            .build();
-        let agent = ureq::Agent::config_builder()
-            .tls_config(tls)
-            .timeout_global(Some(Duration::from_secs(60)))
-            .user_agent(UA)
-            .build()
-            .into();
+        let agent = burrow_github::outbound::agent_with(
+            Duration::from_secs(60),
+            10,
+            burrow_github::outbound::Options {
+                user_agent: Some(UA.to_owned()),
+                status_as_error: true,
+                ..Default::default()
+            },
+        );
         Real {
             resolver,
             agent,

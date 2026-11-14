@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "advisory-watch"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "burrow-test",
  "jiff",
  "rustix",
@@ -533,6 +534,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]
@@ -573,6 +575,7 @@ dependencies = [
 name = "burrow-heartbeat"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "burrow-health",
  "burrow-test",
  "serde",
@@ -692,11 +695,11 @@ dependencies = [
 name = "burrow-proof"
 version = "0.0.0"
 dependencies = [
+ "burrow-events",
  "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
- "ureq",
 ]
 
 [[package]]
@@ -735,6 +738,7 @@ name = "burrow-robot"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "burrow-github",
  "burrow-test",
  "serde",
  "serde_json",
@@ -2127,6 +2131,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 name = "lock-age"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "burrow-test",
  "jiff",
  "json5",

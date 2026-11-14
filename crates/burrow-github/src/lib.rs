@@ -8,6 +8,7 @@ use std::{fmt, thread, time::Duration};
 use serde_json::Value;
 
 mod author;
+pub mod outbound;
 pub mod quota;
 pub use author::{Author, author_names};
 
