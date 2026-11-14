@@ -657,13 +657,15 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
     fs::write(r.cfg.jobs.join("running/refuse"), "").unwrap();
     until(|| !r.cfg.jobs.join("running/1.slot").exists());
     usage::back(&r.cfg, None);
-    until(|| {
-        Job::new(&r.cfg, "running")
-            .turn("1", "retry-migration")
-            .exists()
-    });
-    usage::back(&r.cfg, None);
+    // The checkpoint lasts only from the watcher's transfer until the turn it
+    // launches resumes it, which can all come between two looks: wait for
+    // what lasts. The old parent can't take a slot past the barrier, so the
+    // slot is the launched turn's, taken by resuming the transferred refusal.
     until(|| r.cfg.jobs.join("running/took").exists());
+    let job = Job::new(&r.cfg, "running");
+    assert!(job.turn("1", "retry-attempt").exists());
+    assert!(job.turn("1", "spent").exists());
+    assert!(!job.turn("1", "retry-migration").exists());
     assert_eq!(
         read(&r.cfg.jobs.join("running/session")).as_deref(),
         Some("conversation-123")
