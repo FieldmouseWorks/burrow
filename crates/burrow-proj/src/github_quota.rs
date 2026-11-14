@@ -42,7 +42,7 @@ pub(crate) fn admission_reset(
     job: &Job,
     engine: crate::engine::Engine,
 ) -> Option<i64> {
-    let request = crate::job::Request::load(job).ok()?;
+    let request = crate::job::Request::peek(job).ok()?;
     let app = crate::turn::github_app(cfg, request.app, engine)
         .ok()
         .flatten()?;
