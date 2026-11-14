@@ -1,20 +1,55 @@
 //! A parked handoff reacquires the same shared admission capacity as a new
 //! one. The inbox pass lock serializes both; off operations never take it.
+//! An inbox pass holds that lock throughout, so its thread is already
+//! serialized: its own admissions count capacity under it rather than lose a
+//! second try for the lock to the pass itself, and the pass releases what's
+//! parked before it lets go (`inbox::main`).
 use super::{Pass, dirs};
 use crate::{config::Config, job::Job, read};
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fs::{File, OpenOptions, TryLockError},
     path::Path,
 };
 
+thread_local! {
+    /// Whether this thread holds the lock as an inbox pass ([`Permit::pass`]).
+    static HELD: Cell<bool> = const { Cell::new(false) };
+}
+
 pub(crate) struct Permit {
     _guard: Option<File>,
+    /// Taken by [`Permit::pass`]: it, not admission's own, marks the thread.
+    pass: bool,
 }
 
 impl Permit {
-    pub(super) fn new(lock: File) -> Self {
-        Self { _guard: Some(lock) }
+    /// The lock, held: admission's own permit, which serializes the next
+    /// admission behind its launch.
+    fn held(lock: File) -> Self {
+        Self {
+            _guard: Some(lock),
+            pass: false,
+        }
+    }
+
+    /// The lock, held by an inbox pass (or a forget) for the whole of it:
+    /// its thread's own admissions count capacity under it, one at a time.
+    pub(super) fn pass(lock: File) -> Self {
+        HELD.with(|h| h.set(true));
+        Self {
+            _guard: Some(lock),
+            pass: true,
+        }
+    }
+
+    /// Capacity that needed no lock, or was counted under the pass's.
+    fn unlocked() -> Self {
+        Self {
+            _guard: None,
+            pass: false,
+        }
     }
 }
 
@@ -25,17 +60,43 @@ impl Drop for Permit {
         if let Some(lock) = &self._guard {
             let _ = lock.unlock();
         }
+        if self.pass {
+            HELD.with(|h| h.set(false));
+        }
     }
 }
 
 pub(crate) enum Resume {
     Ready(Permit),
-    Waiting,
+    Waiting(Wait),
+}
+
+/// What a handoff that can't resume yet waits for, as its park records it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Wait {
+    /// Another process's inbox pass holds the lock; it releases parked work
+    /// as it ends.
+    Pass,
+    /// Every drain slot is taken.
+    Drain,
+    /// Every sorting slot is taken.
+    Sorting,
+}
+
+impl Wait {
+    /// What `proj status` says it's waiting for.
+    pub(crate) fn says(self) -> &'static str {
+        match self {
+            Wait::Pass => "the inbox pass",
+            Wait::Drain => "a drain slot",
+            Wait::Sorting => "a sorting slot",
+        }
+    }
 }
 
 pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     let Some(inbox) = &cfg.inbox else {
-        return Ok(Resume::Ready(Permit { _guard: None }));
+        return Ok(Resume::Ready(Permit::unlocked()));
     };
     let mine = |d: &Path| read(&d.join("job")).as_deref() == Some(job.id);
     let associated = dirs(&inbox.state, "")
@@ -45,19 +106,23 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
             .iter()
             .any(|d| mine(d));
     if !associated || inbox.triage.is_none() || job.path("unstick").exists() {
-        return Ok(Resume::Ready(Permit { _guard: None }));
+        return Ok(Resume::Ready(Permit::unlocked()));
     }
-    let lock = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(format!("{}.lock", inbox.wake.display()))
-        .map_err(|e| e.to_string())?;
-    match lock.try_lock() {
-        Ok(()) => (),
-        Err(TryLockError::WouldBlock) => return Ok(Resume::Waiting),
-        Err(e) => return Err(e.to_string()),
-    }
-    let permit = Permit::new(lock);
+    let permit = if HELD.with(Cell::get) {
+        Permit::unlocked()
+    } else {
+        let lock = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(format!("{}.lock", inbox.wake.display()))
+            .map_err(|e| e.to_string())?;
+        match lock.try_lock() {
+            Ok(()) => (),
+            Err(TryLockError::WouldBlock) => return Ok(Resume::Waiting(Wait::Pass)),
+            Err(e) => return Err(e.to_string()),
+        }
+        Permit::held(lock)
+    };
     let Some(t) = &inbox.triage else {
         return Ok(Resume::Ready(permit));
     };
@@ -85,7 +150,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
             .count()
             >= t.drain_jobs
     {
-        return Ok(Resume::Waiting);
+        return Ok(Resume::Waiting(Wait::Drain));
     }
     let sorting = dirs(&inbox.state.join(".triage"), "");
     if sorting.iter().any(|d| mine(d))
@@ -96,7 +161,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
             .count()
             >= t.at_once
     {
-        return Ok(Resume::Waiting);
+        return Ok(Resume::Waiting(Wait::Sorting));
     }
     Ok(Resume::Ready(permit))
 }
@@ -148,7 +213,7 @@ mod tests {
         // A concurrent fork inherits this same open file description until
         // exec closes it. Keep a duplicate to make that interval deterministic.
         let inherited = file.try_clone().unwrap();
-        let permit = Permit { _guard: Some(file) };
+        let permit = Permit::held(file);
         let next = OpenOptions::new().append(true).open(&lock).unwrap();
         assert!(matches!(next.try_lock(), Err(TryLockError::WouldBlock)));
         drop(permit);
@@ -202,15 +267,15 @@ mod tests {
                 }
             }
             let job = Job::new(&fixture.cfg, "parked");
-            policy::mark(&job, "done", false).unwrap();
+            policy::mark(&job, "done", false, None).unwrap();
             assert!(matches!(
                 admission(&fixture.cfg, &job).unwrap(),
-                Resume::Waiting
+                Resume::Waiting(_)
             ));
             assert!(policy::parked(&job));
             // An outstanding question still consumes the other worker's lane.
             let other = Job::new(&fixture.cfg, "other");
-            policy::mark(&other, "done", false).unwrap();
+            policy::mark(&other, "done", false, None).unwrap();
             if !sorting {
                 // Both workers are now policy-parked with their units gone.
                 fs::remove_file(fixture.path("active")).unwrap();
@@ -219,7 +284,7 @@ mod tests {
                 panic!("freed lane was not available")
             };
             assert!(
-                matches!(admission(&fixture.cfg, &other).unwrap(), Resume::Waiting),
+                matches!(admission(&fixture.cfg, &other).unwrap(), Resume::Waiting(_)),
                 "serialized with both new and restored work"
             );
         }

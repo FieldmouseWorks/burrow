@@ -33,9 +33,39 @@ normal event pass makes only the first unfinished child `ready`. The normal
 drain and worker admission both check the parent list. A child is offered
 once; a later deferral is retained instead of repeatedly paying to replan
 unchanged work. A manually applied
-engine label cannot admit a later child. Completion requires a merged PR,
-not merely a closed issue. Nested splits complete through their own lists.
-Issue, PR and turn-completion events advance the list without a parent job.
+engine label cannot admit a later child. Nested splits complete through
+their own lists. Issue, PR and turn-completion events advance the list
+without a parent job.
+
+A child is done when a merged PR is tied to it, whatever the PR's body
+said. Tied means a merged PR from any repository that closes it by a
+closing reference, a merged PR the child's own job awaited (`proj await`)
+before it ended with its own `proj done`, or one an author recorded. The
+job's awaits are kept in the child's plan folder (`.plans/OWNER_REPO-N/
+awaited`) only once the child is closed on an accepted completion (the
+checks that close an issue with its finished job, a `done` that isn't a
+one-way question's timeout, no owner's answer owed), and bound to that
+closure: when it closed, and the title and body it closed with. A child
+reopened, edited or closed again doesn't inherit them, whether or not a
+pass saw it open. The inbox closes an open child (repair-lane children
+included) once one of its awaited PRs has merged, and keeps them in that
+pass, on the closure GitHub answers the close with, before the job is let
+go; a child closed first, by hand say, keeps them the same way before the
+job's record goes. Either way the closure's text must be the text the
+completion was checked against. An awaited PR counts whenever it
+merges, a pass looking again hourly, and a source GitHub can't answer for
+never vetoes another that proves the child done. A closed child with
+nothing tied is not done: a hand close stays a no-op, but the checklist
+says once that the list waits on it, and the owner's notice is ensured
+every pass, and hourly, while the list waits, then closed until the
+notifier confirms it, whether or not the parent is still open; a pass
+scoped to other issues leaves it be. When the work provably landed some
+other way, an author records it from the host with `proj plan done
+OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
+pass lock. It refuses inside a job, a GitHub account outside
+`inbox.authors`, a repo that isn't one of the machine's projects and a PR
+that hasn't merged; the next pass advances the list and closes the child
+if it's still open.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes
