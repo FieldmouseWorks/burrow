@@ -162,45 +162,50 @@ def main():
 SEARCHED = [0]
 
 
-def failing(repo, why):
-    """What of burrow-upkeep's look failed: logged, and the stall watchdog
-    watches the repo."""
+def failing(repo, why, op="repo"):
+    """What of burrow-upkeep's look failed, in op (waits.failed): logged,
+    and the stall watchdog watches the repo."""
     log(f"{repo}: {why}")
-    waits.failed(repo)
+    waits.failed(repo, op=op)
     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
 
-def told(repo, out, mine):
-    """What a look of burrow-upkeep's says: what it lists goes in mine, the
-    pass it books is booked, and what failed is `failing`."""
-    mine.extend(tuple(x) for x in out["stuck"])
+def told(repo, op, out, lines):
+    """What a look of burrow-upkeep's (op) says: what it lists goes in
+    lines, the pass it books is booked, and what failed is `failing`."""
+    lines.extend(tuple(x) for x in out["stuck"])
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
     for why in out["failed"]:
-        failing(repo, why)
+        failing(repo, why, op)
 
 
-def branches(repo, default, in_use, mine, full):
+def branches(repo, default, in_use, lines, full):
     """The branches nothing needs any more, which burrow-upkeep deletes,
     leaving `in_use`, every open PR's head and base: told. A full pass's
-    also tries again what GitHub said no to. It raises when it fails, as
-    the repo's other steps do."""
-    told(repo, C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []),
-                        input=json.dumps(sorted(in_use))), mine)
+    also tries again what GitHub said no to. What fails is `failing`;
+    False when the look itself did, which lists nothing."""
+    try:
+        out = C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []), input=json.dumps(sorted(in_use)))
+    except Exception as e:
+        failing(repo, f"its branches: {e}", "branches")
+        return False
+    told(repo, "branches", out, lines)
 
 
-def upkeep(repo, mine):
+def upkeep(repo, lines):
     """The repo's Renovate dashboard and quarantined flaky tests, which
     burrow-upkeep looks at: told, and the Claude jobs it asks for are
     started here, each under the key it gives, by which its next look finds
     the job (whatever became of its id here). Whatever fails is
-    `failing`; the pass goes on."""
+    `failing`, and the pass goes on; False when the look itself did, which
+    lists nothing."""
     try:
         out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
     except Exception as e:
-        failing(repo, f"its upkeep: {e}")
-        return
-    told(repo, out, mine)
+        failing(repo, f"its upkeep: {e}", "upkeep")
+        return False
+    told(repo, "upkeep", out, lines)
     SEARCHED[0] += out["searched"]
     for j in out["jobs"]:
         try:
@@ -208,16 +213,33 @@ def upkeep(repo, mine):
         except C.JobPaused:
             continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
-            failing(repo, f"its {j['part']} job didn't start: {e}")
-            mine.extend(tuple(x) for x in j["unstarted"])
+            failing(repo, f"its {j['part']} job didn't start: {e}", "upkeep")
+            lines.extend(tuple(x) for x in j["unstarted"])
             continue
         if not jid:
             log(f"{repo}: couldn't start its {j['part']} job (no checkout, or proj refused)")
-            mine.extend(tuple(x) for x in j["unstarted"])
+            lines.extend(tuple(x) for x in j["unstarted"])
             if not C.taken(repo):  # no use looking again until that folder moves: a full pass will
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed
             continue
         C.wake(repo, j["wake"])  # ends: the job's own end, or this look (its `// ends:`)
+
+
+def operate(batch, repo, op, mine, run):
+    """One of the repo's operations that need only its PR listing (the
+    branch watch, upkeep), run on every batch that enters the repo: what it
+    lists replaces what it listed in an earlier batch of the traversal, so
+    what's resolved goes, and a failure of its alone from before is over once
+    it runs clean (waits.rechecked). Each handles its own failures
+    (`failing`); one whose look failed says False, and what it listed last
+    stands."""
+    lines = []
+    before = waits.FAILED.get(repo)
+    if run(lines) is False:
+        return
+    batch.listed(repo, op, mine, lines)
+    if waits.FAILED.get(repo) is before:
+        waits.rechecked(repo, op)
 
 
 def retire_deleted(known, failed, digest):
@@ -330,8 +352,9 @@ def run_pass(kick, continuing=False):
                 pending = [pr for pr in prs if pr in pending or pr["number"] in held]
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
-                # closes the PRs on it).
-                in_use = set()
+                # closes the PRs on it). From the whole listing, so the watch
+                # needn't wait for every PR to be stepped.
+                in_use = {b for pr in prs for b in (pr.get("headRefName"), pr.get("baseRefName")) if b}
                 snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
@@ -352,7 +375,6 @@ def run_pass(kick, continuing=False):
                         partial = True
                         batch.left = True
                         break
-                    in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
@@ -366,18 +388,22 @@ def run_pass(kick, continuing=False):
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
-                # Swept only once it has every open PR's head: one whose look
-                # failed before then would have the sweep take what's theirs.
                 if partial or batch.expired():
                     complete = False
                     batch.left = True
+                    # The train waits for every PR to be stepped; the branch
+                    # watch and upkeep need only the listing, so they run on
+                    # every batch. Otherwise a repo busy enough that no batch
+                    # steps all its PRs keeps every dead branch for good.
+                    operate(batch, repo, "branches", mine,
+                            lambda lines: branches(repo, r["default"], in_use, lines, full=kick is None and batch.traversal_full))
+                    operate(batch, repo, "upkeep", mine, lambda lines: upkeep(repo, lines))
                     continue
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
                 # before sweeping, just as a single complete pass does.
                 for pr in prs:
                     if pr not in pending:
-                        in_use.update((pr["headRefName"], pr["baseRefName"]))
                         snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 live[repo] = snaps
                 if why := batch.stopped(repo):
@@ -402,13 +428,14 @@ def run_pass(kick, continuing=False):
                         log(f"{repo}: its train: {e}")
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
-                branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
+                operate(batch, repo, "branches", mine,
+                        lambda lines: branches(repo, r["default"], in_use, lines, full=kick is None and batch.traversal_full))
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
                 seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
-            upkeep(repo, mine)
+            operate(batch, repo, "upkeep", mine, lambda lines: upkeep(repo, lines))
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             if operations_complete:

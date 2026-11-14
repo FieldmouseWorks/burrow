@@ -243,6 +243,143 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'], continuing=True)
         assert operations == ['sam/r'] and len(handled) == 1, (operations, handled)
 
+    # A repo busy enough that every pass is new work never finishes its
+    # traversal in one slice. Its branch watch and upkeep still run each
+    # batch, leaving every open PR's branches, the unstepped ones' too; only
+    # the train waits for the whole traversal.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(n) for n in range(1, 6)]
+        watched, kept, trained = [], [], []
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        def watch(repo, default, in_use, mine, full):
+            watched.append((repo, default, set(in_use)))
+
+        with patch.object(S, 'branches', watch), patch.object(S, 'upkeep', lambda repo, mine: kept.append(repo)), \
+                patch.object(S.T, 'step', trained.append), patch.object(S.step, 'handle', long):
+            for _ in range(3):
+                S.run_pass(['sam/r'])
+        assert len(handled) == 3 and trained == [], (handled, trained)
+        everyone = {f'branch-{n}' for n in range(1, 6)} | {'main'}
+        assert watched == [('sam/r', 'main', everyone)] * 3, watched
+        assert kept == ['sam/r'] * 3, kept
+    print('a busy repo still watches its branches every batch: passed')
+
+    # What each run lists replaces what it listed in an earlier batch of the
+    # traversal: a resolved notice goes, one still true isn't doubled, and
+    # PR lines and the other operation's stay. A failure of the branch watch
+    # alone is over once it runs clean, though the traversal isn't; one that
+    # fails again keeps its clock.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(n) for n in range(1, 6)]
+        said = {'branches': [('Stuck', 'sam/r: `old`', '')], 'upkeep': [('Stuck', 'sam/r: dashboard', '')]}
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            args[3].append(('Owner', f"[sam/r#{args[1]['number']}](url)", 'waiting'))
+            clock[0] += 9 * 60
+
+        def watch(repo, default, in_use, lines, full):
+            if said['branches'] is None:
+                S.failing(repo, 'its branches: GitHub said no', 'branches')
+                return False
+            lines.extend(said['branches'])
+
+        def listed():
+            return [x[1] for x in C.load('digest-repos.json', {})['sam/r']]
+
+        with patch.object(S, 'branches', watch), patch.object(S, 'upkeep', lambda repo, lines: lines.extend(said['upkeep'])), \
+                patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+            assert sorted(listed()) == ['[sam/r#1](url)', 'sam/r: `old`', 'sam/r: dashboard'], listed()
+            said['branches'] = [('Stuck', 'sam/r: `new`', '')]
+            S.run_pass(['sam/r'], continuing=True)
+            assert sorted(listed()) == ['[sam/r#1](url)', '[sam/r#2](url)', 'sam/r: `new`', 'sam/r: dashboard'], listed()
+            said['branches'] = None
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert 'sam/r: `new`' in listed(), listed()  # a failed look leaves what it listed last
+            failure = C.load('watch.json', {})['items']['sam/r']
+            assert failure['ops'] == ['branches'], failure
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert C.load('watch.json', {})['items']['sam/r']['since'] == failure['since']
+            said['branches'] = []
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert 'sam/r' not in C.load('watch.json', {})['items'], C.load('watch.json', {})['items']
+            assert 'sam/r: `new`' not in listed() and listed().count('sam/r: dashboard') == 1, listed()
+            assert len(handled) == 5 and C.load('pass-progress.json', {})['repos'], handled
+    print('repo operations replace their own notices and failures each batch: passed')
+
+    # A carried failure of something no partial batch retries (the train)
+    # keeps its clock while the branch watch and upkeep fail and recover
+    # around it: another operation's failure adds to it, never replaces it,
+    # recovery adds up across batches, and it goes only once the train has
+    # run clean. One with no operations recorded is kept the same way.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(n) for n in range(1, 6)]
+        fails = {'train': True, 'branches': False, 'upkeep': False}
+        slow = [False]
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            if slow[0]:
+                clock[0] += 9 * 60
+
+        def train(repo):
+            if fails['train']:
+                raise RuntimeError('the train broke')
+
+        def watch(repo, default, in_use, lines, full):
+            if fails['branches']:
+                S.failing(repo, 'its branches: GitHub said no', 'branches')
+                return False
+
+        def keep(repo, lines):
+            if fails['upkeep']:
+                S.failing(repo, 'its upkeep: GitHub said no', 'upkeep')
+                return False
+
+        def failure():
+            return C.load('watch.json', {})['items'].get('sam/r')
+
+        with patch.object(S, 'branches', watch), patch.object(S, 'upkeep', keep), \
+                patch.object(S.T, 'step', train), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])  # a whole traversal: the train fails
+            first = failure()
+            assert first and first['ops'] == ['repo'], first
+            slow[0] = True
+            fails['train'] = False
+            steps = [({'branches': True, 'upkeep': True}, ['branches', 'repo', 'upkeep']),
+                     ({'branches': False, 'upkeep': True}, ['repo', 'upkeep']),
+                     ({'branches': False, 'upkeep': False}, ['repo'])]
+            for i, (now, ops) in enumerate(steps):
+                fails.update(now)
+                C.NOW += 600
+                S.run_pass(['sam/r'], continuing=i > 0)
+                got = failure()
+                assert got and got['ops'] == ops and got['since'] == first['since'], (now, got)
+            assert C.load('pass-progress.json', {})['repos'], 'the traversal finished early'
+            items = C.load('watch.json', {})
+            del items['items']['sam/r']['ops']  # one recorded before operations were
+            C.save('watch.json', items)
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            got = failure()
+            assert got and 'ops' not in got and got['since'] == first['since'], got
+            slow[0] = False
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)  # the rest of it, and the train runs clean
+            assert failure() is None, failure()
+    print('a carried failure keeps every untried operation while others fail and recover: passed')
+
     # A bounded multi-repo kick owes the repo it never entered, and an
     # unavailable train is retried at its own deadline, not at once.
     with fixture() as (clock, handled, facts, repos, prs, info):

@@ -44,6 +44,7 @@ NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: n
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
 FAILING = {}  # the PRs whose step keeps failing, by key: what fails, which is the stall
+RECHECKED = {}  # the repo operations this pass ran without a failure, by repo
 SAID = {}  # what GitHub said to the latest try of each, by key: shown, but not the stall
 
 
@@ -53,6 +54,7 @@ def begin():
     FAILED.clear()
     FAILING.clear()
     SAID.clear()
+    RECHECKED.clear()
 
 
 def repo_of(key):
@@ -123,15 +125,24 @@ def overdue(repo, pr, why, said=None):
     return True
 
 
-def failed(repo, pr=None):
-    """The pass failed on the PR, or on the repo. Whatever its head, it's the
-    steward's pass that fails: no rev."""
+def failed(repo, pr=None, op="repo"):
+    """The pass failed on the PR, or on the repo: in op, one of its
+    operations (the branch watch, upkeep), or "repo" for the rest of it.
+    Whatever its head, it's the steward's pass that fails: no rev."""
     minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
     if pr:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
     else:
+        ops = sorted({*FAILED.get(repo, {}).get("ops", ()), op})
         FAILED[repo] = {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
-                        "kick": kick, "rev": None}
+                        "kick": kick, "rev": None, "ops": ops}
+
+
+def rechecked(repo, op):
+    """The repo's operation op ran this pass without failing: a failure of
+    its alone from an earlier pass is over, though the repo's traversal
+    isn't."""
+    RECHECKED.setdefault(repo, set()).add(op)
 
 
 def publish(seen, digest, full, inventory=None, deferred=()):
@@ -147,10 +158,17 @@ def publish(seen, digest, full, inventory=None, deferred=()):
     items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
              and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
+        # A deferred repo's carried failure stays for each operation in it
+        # this batch hasn't run clean (an unlabelled one's, "repo", counts
+        # as untried): its clock belongs to those operations, not the PR
+        # traversal. What's left is all it keeps, so recovery adds up
+        # across batches, and it goes once nothing is left.
+        carried = set()
         if repo in deferred and repo in was:
-            # The operation that failed has not been retried by this batch.
-            # Its clock belongs to that operation, not the PR traversal.
-            items[repo] = was[repo]
+            ops = set(was[repo].get("ops") or ["repo"])
+            carried = ops - RECHECKED.get(repo, set())
+            if carried:
+                items[repo] = was[repo] if carried == ops else {**was[repo], "ops": sorted(carried)}
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
 
@@ -159,7 +177,10 @@ def publish(seen, digest, full, inventory=None, deferred=()):
 
         items.update({k: v for k, v in was.items() if repo_of(k) == repo and k != repo and not theirs(k)
                       and (noted is None or (k in OPEN[repo] and k not in noted))})
-        now = {**{k: v for k, v in (noted or {}).items() if v}, **({repo: FAILED[repo]} if repo in FAILED else {})}
+        # This pass's failure of the repo adds to what's still carried, never
+        # replaces it: another operation failing doesn't end an untried one.
+        now = {**{k: v for k, v in (noted or {}).items() if v},
+               **({repo: {**FAILED[repo], "ops": sorted({*FAILED[repo]["ops"], *carried})}} if repo in FAILED else {})}
         for key, it in now.items():
             if theirs(key):
                 continue
@@ -180,7 +201,7 @@ def publish(seen, digest, full, inventory=None, deferred=()):
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,
-                          "rev": it["rev"]}
+                          "rev": it["rev"], **({"ops": it["ops"]} if it.get("ops") else {})}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")

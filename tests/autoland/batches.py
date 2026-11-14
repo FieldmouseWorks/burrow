@@ -90,7 +90,9 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert turn == 0
             if turn == 0:
                 assert len(handled) == 3, ('the pass ignored its work budget', handled)
-                assert trains == branches == ['sam/a'], (trains, branches)
+                # The train waits for a repo's whole traversal; the branch
+                # watch runs on each batch, sam/b's unfinished one too.
+                assert trains == ['sam/a'] and branches == ['sam/a', 'sam/b'], (trains, branches)
                 assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
                 assert C.load('digest-repos.json', {})['sam/c'][0][2] == 'untouched'
             if turn < 3:
@@ -99,7 +101,10 @@ with tempfile.TemporaryDirectory() as tmp:
             C.NOW += 601
         expected = [('sam/a', 1), *[('sam/b', n) for n in range(1, 8)], ('sam/c', 1)]
         assert handled == expected, (handled, expected)
-        assert trains == branches == ['sam/a', 'sam/b', 'sam/c'], (trains, branches)
+        assert trains == ['sam/a', 'sam/b', 'sam/c'], trains
+        # Once per batch that entered the repo: sam/b over three, and sam/c
+        # over two, its one PR having spent the slice that stepped it.
+        assert branches == ['sam/a', *['sam/b'] * 3, *['sam/c'] * 2], branches
         assert hooks == [repos], hooks
         assert all(x['covered'] for x in C.load('repos.json', {})['repos'].values())
         assert C.load('digest-repos.json', {})['sam/a'][0][0] == 'Owner'
