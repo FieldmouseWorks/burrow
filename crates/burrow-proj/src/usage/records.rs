@@ -24,8 +24,18 @@
 //! the usage limit's (it has a reset, and was told at once) unless it had
 //! lapsed when the login hold replaced it, held till the later of their
 //! deadlines and refused as late as either was; an ended record ends the
-//! other only if it ended after that one's last refusal; otherwise the
-//! later record stands, its own release and admission boundary with it.
+//! other only if a run started after that one's last refusal ended it
+//! ([`proves`]); two ended records are the one released last, with its
+//! admission boundary; otherwise the later record stands.
+//!
+//! A record says when it ended (`back`), which is when its run finished,
+//! not when it started, and not whether a run, a meter or the owner ended
+//! it: an earlier binary keeps nothing more. What it does say is that the
+//! run, or the meter's request, started after its own last refusal, which
+//! the release checked; and this binary's release refuses one started no
+//! later than the last refusal of both records, which it writes as the
+//! ended record's own. So that refusal is the evidence an ended record
+//! carries, and the other record's refusal is held to it.
 
 use std::fs;
 
@@ -125,9 +135,28 @@ pub(super) fn reconcile(u: Spent, l: Spent, login_later: bool, now: i64) -> Spen
             base.last = Some(base.refused().max(other.refused()));
             base
         }
-        (Some(back), None) if !earlier.owner && earlier.refused() >= back => earlier,
+        // Two releases: the last one, so a rewrite of the other (its
+        // notice's close sent again) never moves the boundary back.
+        (Some(_), Some(_)) => {
+            let at = |s: &Spent| (s.release(), s.admission_cutoff());
+            if at(&earlier) > at(&later) {
+                earlier
+            } else {
+                later
+            }
+        }
+        (Some(_), None) if !earlier.owner && !proves(&later, &earlier) => earlier,
+        (None, Some(_)) if !later.owner && proves(&earlier, &later) => earlier,
         _ => later,
     }
+}
+
+/// Whether the ended record `ended` ends `held`, whichever was written
+/// later: the run (or meter, or owner) that ended it is known only to have
+/// started after `ended`'s own last refusal, never by when it ended (see
+/// the module's doc), so `held` refused since then still holds.
+fn proves(ended: &Spent, held: &Spent) -> bool {
+    held.refused() <= ended.refused()
 }
 
 /// One record's text, as the hold it says.

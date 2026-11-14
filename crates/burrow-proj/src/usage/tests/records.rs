@@ -121,10 +121,15 @@ fn a_delayed_usage_record_keeps_the_later_login_refusal() {
     assert!(out(&cfg).is_some());
     assert!(cfg.jobs.join(LOGIN_FILE).exists());
     // One requested since ends the hold, and nothing comes back after it.
+    let held = text(&cfg, LOGIN_FILE);
     release(&cfg, Some(t + 5), true);
     assert_eq!(out(&cfg), None);
     assert!(!cfg.jobs.join(LOGIN_FILE).exists());
     assert!(kept(&cfg).unwrap().back.is_some());
+    // A crash before the login record went leaves it ended too: the meter's
+    // release proved past every refusal both records held.
+    fs::write(cfg.jobs.join(LOGIN_FILE), &held).unwrap();
+    assert_eq!(out(&cfg), None);
 }
 
 #[test]
@@ -172,19 +177,72 @@ fn a_usage_record_a_crash_left_beside_the_login_record_it_replaced_stands() {
 }
 
 #[test]
-fn an_ended_usage_record_ends_only_a_login_refused_before_its_release() {
-    // An earlier binary's run released its usage record at T+3.
+fn an_ended_usage_record_ends_only_a_login_its_run_started_after() {
+    // An earlier binary's run released its usage record, last refused at
+    // T+2, when it finished at T+5: it started after T+2, maybe at T+3, so
+    // a login refused at T+4 still holds, though it was before the release.
     let (_d, cfg) = rig();
     let t = now();
-    login(&cfg, "web-1", SAID, t + 5).unwrap();
-    legacy(&cfg, t, t, Some(t + 3));
-    assert!(out(&cfg).is_some_and(|s| s.login && s.refused() == t + 5));
-    // A login refused at T+2 that run proved since.
-    let (_d, cfg) = rig();
-    login(&cfg, "web-1", SAID, t + 2).unwrap();
-    legacy(&cfg, t, t, Some(t + 3));
+    login(&cfg, "web-1", SAID, t + 4).unwrap();
+    legacy(&cfg, t + 2, t + 2, Some(t + 5));
+    assert!(out(&cfg).is_some_and(|s| s.login && s.refused() == t + 4));
+    // proj-watch's look meanwhile doesn't end it either.
+    tend(&cfg);
+    assert!(out(&cfg).is_some_and(|s| s.login && s.refused() == t + 4));
+    // A run of this binary's that started by T+4 proves nothing; one since
+    // ends it, and both records go to the one it ended.
+    back(&cfg, Some(t + 4));
+    assert!(out(&cfg).is_some());
+    back(&cfg, Some(t + 5));
     assert_eq!(out(&cfg), None);
-    assert_eq!(kept(&cfg).unwrap().release(), t + 3);
+    assert!(!cfg.jobs.join(FILE).exists());
+
+    // A login refused when the usage record last was, or before, is one
+    // that run proved since.
+    for refused in [t + 1, t + 2] {
+        let (_d, cfg) = rig();
+        login(&cfg, "web-1", SAID, refused).unwrap();
+        legacy(&cfg, t + 2, t + 2, Some(t + 5));
+        assert_eq!(out(&cfg), None, "login refused at {}", refused - t);
+        assert_eq!(kept(&cfg).unwrap().release(), t + 5);
+    }
+}
+
+#[test]
+fn an_ended_login_record_ends_a_usage_record_rewritten_since() {
+    // A run this binary started after T+3 ended the login hold, and a
+    // crash left the usage record it had taken in; an earlier binary sends
+    // that one's notice again, so it's now the later written. It was
+    // refused at T+1, which the run proved since: nothing holds.
+    let (_d, cfg) = rig();
+    let t = now();
+    login(&cfg, "web-1", SAID, t + 3).unwrap();
+    back(&cfg, Some(t + 4));
+    assert!(kept(&cfg).is_some_and(|s| s.login && s.back.is_some()));
+    legacy(&cfg, t + 1, t + 1, None);
+    assert_eq!(out(&cfg), None);
+    assert!(kept(&cfg).is_some_and(|s| s.login));
+    // A usage refusal since the login's last holds again.
+    legacy(&cfg, t + 5, t + 5, None);
+    assert!(out(&cfg).is_some_and(|s| !s.login && s.refused() == t + 5));
+}
+
+#[test]
+fn two_ended_records_are_the_one_released_last() {
+    // The login hold was released last; an earlier binary's rewrite of an
+    // usage record released before (its close sent again) doesn't move the
+    // release back.
+    let (_d, cfg) = rig();
+    let t = now();
+    login(&cfg, "web-1", SAID, t).unwrap();
+    back(&cfg, Some(t + 1));
+    let released = kept(&cfg).unwrap().release();
+    legacy(&cfg, t - 200, t - 200, Some(t - 100));
+    let s = kept(&cfg).unwrap();
+    assert!(s.login && s.release() == released, "{s:?}");
+    // And one the earlier binary released after stands, written either way.
+    legacy(&cfg, t - 200, t - 200, Some(released + 50));
+    assert_eq!(kept(&cfg).unwrap().release(), released + 50);
 }
 
 #[test]
@@ -217,4 +275,11 @@ fn an_owner_hold_stands_beside_any_login_record() {
     // A run can't end it.
     back(&cfg, Some(now() + 1));
     assert!(out(&cfg).is_some_and(|s| s.owner));
+    // The owner can, and the login record refused before it goes with it,
+    // even where a crash left it.
+    let left = text(&cfg, LOGIN_FILE);
+    back(&cfg, None);
+    assert_eq!(out(&cfg), None);
+    fs::write(cfg.jobs.join(LOGIN_FILE), &left).unwrap();
+    assert_eq!(out(&cfg), None);
 }
