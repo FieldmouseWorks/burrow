@@ -1,7 +1,8 @@
 """A repo's proofSlots: how many of its open PRs may have a proof job queued
 or running at once, for proofs that take the whole machine (the rest would
-only wait out their timeout). The others wait their turn, the PRs labelled
-`first` (labels.first) ahead of the rest and the oldest first within each,
+only wait out their timeout). The others wait their turn, the PRs that go
+first (labels.first, by an author: steward.py's firsts) ahead of the rest
+and the oldest first within each,
 and the end of a job's turn kicks the repo's pass, which starts the next.
 
 What a slot is held by is a build: a running proof job with store paths

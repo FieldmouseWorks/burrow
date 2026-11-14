@@ -155,7 +155,10 @@ impl Pass<'_> {
         ]
     }
 
-    /// Whether an issue is sorted already, or isn't triage's to sort.
+    /// Whether an issue is sorted already, or isn't triage's to sort. One
+    /// an author marked first isn't kept back by `later` (first.rs): it's
+    /// planned as a ready one is. GitHub not saying who marked it leaves it
+    /// for the next look.
     pub(super) fn sorted(
         &mut self,
         repo: &str,
@@ -163,6 +166,28 @@ impl Pass<'_> {
         issue: &Value,
         claimed: &BTreeSet<String>,
     ) -> bool {
+        let later_first;
+        let issue = if super::first::labelled(self.inbox, issue)
+            && issue["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(LATER)))
+        {
+            match super::first::marked(self.cfg, self.inbox, repo, issue) {
+                Ok(marked) => {
+                    let mut noted = issue.clone();
+                    noted[super::first::MARKED] = marked.into();
+                    later_first = noted;
+                    &later_first
+                }
+                Err(e) => {
+                    eprintln!("proj-inbox: {e}");
+                    self.miss(repo);
+                    return true;
+                }
+            }
+        } else {
+            issue
+        };
         if issue.get("pull_request").is_some()
             || !self.eligible(repo, issue)
             || super::enrollment::automatic_parked(self.inbox, repo, issue)
@@ -201,10 +226,13 @@ impl Pass<'_> {
                 .exists()
                 && self.verified_source(repo, issue).unwrap_or(false);
         }
+        // `later` holds it back unless an author marked it first: then it's
+        // as good as ready.
+        let first = labels.contains(&LATER) && super::first::noted(issue);
+        let held = labels.contains(&LATER) && !first;
         if self.inbox.planning
             && (labels.contains(&TRACKER)
-                || (!labels.contains(&LATER)
-                    && (labels.contains(&READY) || self.engine(issue).is_some())))
+                || (!held && (labels.contains(&READY) || first || self.engine(issue).is_some())))
         {
             return self.planned(Some(repo), issue);
         }

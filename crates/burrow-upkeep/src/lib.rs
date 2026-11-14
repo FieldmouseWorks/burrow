@@ -10,7 +10,9 @@
 //! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
 //! their answers, posted only once the PR's head is their push (answer.rs);
 //! and a PR's commits, read whole for who made them (commits.rs); and its
-//! CI verdict and cancelled workflow recovery (ci.rs, ci_runs.rs). A
+//! CI verdict and cancelled workflow recovery (ci.rs, ci_runs.rs); and
+//! which PRs go first, by who labelled them or the issues they close
+//! (firsts.rs). A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
@@ -32,6 +34,7 @@ pub mod claims;
 pub mod commits;
 pub mod config;
 pub mod dashboard;
+pub mod firsts;
 pub mod flaky;
 pub mod hook;
 pub mod mirror;

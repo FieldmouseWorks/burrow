@@ -126,6 +126,8 @@ let
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
       inherit (cfg.inbox) planning;
+      # The steward's own label, read the same way on the issue (inbox/first.rs).
+      firstLabel = config.burrow.autoland.labels.first or "first";
       host = config.networking.hostName;
       wake = inboxWake;
       triage = if cfg.inbox.triage.enable || cfg.inbox.planning then {

@@ -9,7 +9,7 @@ import itertools
 import json
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
+from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, firsts_wrote, fresh_pr_state, info, mkpr, pr_state, run, serve_firsts, tmp
 
 kept = C.job
 ids = itertools.count(1)
@@ -125,17 +125,43 @@ P.begin("sam/r", {1, 2, 4}, {4})
 assert RUNNING in line(4, 800, labels=(first,)) and len(JOBS) == 1, JOBS
 assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # The pass takes a repo's PRs in that order, so a free slot goes to the
-# first in line.
+# first in line. `first` counts as GitHub's last labelled event for it says
+# who put it on (burrow-upkeep's firsts.rs): an author, or the steward, by
+# account id; the machinery's App, which Claude jobs act as, doesn't. A PR
+# closing an issue an author marked first gets the label, and goes first.
+AUTHOR, STEWARD = S.CFG["inbox"]["authors"][0]["id"], S.CFG["inbox"]["postingAccountId"]
+WORKERS, SPOOF = 99, 98  # the machinery's App; an author's login on another account
+
+
+def events(by):
+    """An issue's or PR's events: `first` put on by `by`, then the
+    steward's stage labels."""
+    return [{"event": "labeled", "label": {"name": first}, "actor": {"login": "sam", "id": by}},
+            {"event": "labeled", "label": {"name": "waiting: review"}, "actor": {"login": "steward[bot]", "id": STEWARD}}]
+
+
+def pr(k, labels=(), closes=()):
+    p = mkpr(number=k, labels=labels)
+    p["closingIssuesReferences"] = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [
+        {"number": i, "repository": {"nameWithOwner": "sam/r"}, "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": first}]}}
+        for i in closes]}
+    return p
+
+
+serve_firsts({f"repos/sam/r/issues/{n}/events?per_page=100": events(by)
+              for n, by in ((9, AUTHOR), (8, STEWARD), (7, WORKERS), (6, SPOOF), (11, AUTHOR), (13, WORKERS))})
 order = []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = lambda *a: None
-S.open_prs = lambda owner, name: (info, [mkpr(number=k, labels=lb) for k, lb in ((2, ()), (9, (first,)), (1, ()), (7, (first,)))])
+S.open_prs = lambda owner, name: (info, [pr(2), pr(9, (first,)), pr(1, closes=(11,)), pr(7, (first,)),
+                                         pr(8, (first,)), pr(3, closes=(13,)), pr(6, (first,))])
 S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
 S.main()
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
-assert order == [7, 9, 1, 2], order
+assert order == [1, 8, 9, 2, 3, 6, 7], order
+assert firsts_wrote() == [["POST", "repos/sam/r/issues/1/labels", {"labels": [first]}]], firsts_wrote()
 
 # Unset, no limit.
 fresh_pr_state()

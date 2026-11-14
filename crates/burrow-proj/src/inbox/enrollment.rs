@@ -1,6 +1,13 @@
 //! Issue labels govern both enrollment and every later turn.
 use super::{Pass, dirs, key, raw, say, written};
-use crate::{Fail, config::Inbox, github::api, io_fail, job::Job, read};
+use crate::{
+    Fail,
+    config::{Config, Inbox},
+    github::api,
+    io_fail,
+    job::Job,
+    read,
+};
 use serde_json::Value;
 use std::{
     fs::{self, File, OpenOptions},
@@ -8,7 +15,14 @@ use std::{
 };
 
 /// Missing labels are an unreadable response, never evidence of removal.
-pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str>, String> {
+/// `later` doesn't park an issue an author marked first (first.rs): GitHub
+/// is asked who did only about an issue that carries both.
+pub(super) fn parked(
+    cfg: &Config,
+    inbox: &Inbox,
+    repo: &str,
+    issue: &Value,
+) -> Result<Option<&'static str>, String> {
     let labels = issue["labels"]
         .as_array()
         .ok_or("issue labels are unavailable")?;
@@ -16,7 +30,7 @@ pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str
         .iter()
         .map(|l| l["name"].as_str().ok_or("issue label name is unavailable"))
         .collect::<Result<Vec<_>, _>>()?;
-    if names.contains(&super::triage::LATER) {
+    if names.contains(&super::triage::LATER) && !super::first::marked(cfg, inbox, repo, issue)? {
         Ok(Some("its issue is labelled later"))
     } else if !names.iter().any(|name| inbox.labels.contains_key(*name)) {
         Ok(Some("its issue has no engine label"))
@@ -64,6 +78,7 @@ fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     fs::write(path, "").map_err(|e| e.to_string())
 }
+
 /// Whether the job's latest turn was stopped: no turn of it starts again.
 pub(super) fn stopped(job: &Job) -> bool {
     job.turns()
@@ -80,13 +95,16 @@ pub(super) fn replaceable(inbox: &Inbox, job: &Job, repo: &str, n: &str) -> bool
             || parking_path(inbox, repo, n).exists())
 }
 
+/// Kept from automatic admission: stopped by the owner, or `later` and not
+/// noted as an author's first ([`super::first::noted`]; an issue nobody
+/// looked that up for counts as not).
 pub(super) fn automatic_parked(inbox: &Inbox, repo: &str, issue: &Value) -> bool {
     parking_path(inbox, repo, &raw(&issue["number"])).exists()
         || issue["labels"].as_array().is_none_or(|labels| {
             labels.iter().any(|l| {
                 l["name"]
                     .as_str()
-                    .is_none_or(|name| name == super::triage::LATER)
+                    .is_none_or(|name| name == super::triage::LATER && !super::first::noted(issue))
             })
         })
 }
@@ -185,7 +203,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
     let _held = lock(inbox, &repo, &n)?;
     let issue = api(job.cfg, &format!("repos/{repo}/issues/{n}"))
         .ok_or_else(|| format!("proj: cannot check {repo}#{n}'s labels; no turn started"))?;
-    if let Some(why) = parked(inbox, &issue)? {
+    if let Some(why) = parked(job.cfg, inbox, &repo, &issue)? {
         let message = format!(
             "proj: stopping {}: {why} ({repo}#{n}); no turn started",
             job.id
@@ -213,7 +231,9 @@ impl Pass<'_> {
         let held = lock(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
         let current = api(self.cfg, &format!("repos/{repo}/issues/{n}"))
             .ok_or_else(|| Fail::new(1, format!("proj-inbox: cannot check {repo}#{n}'s labels")))?;
-        if let Some(why) = parked(self.inbox, &current).map_err(|e| Fail::new(1, e))? {
+        if let Some(why) =
+            parked(self.cfg, self.inbox, repo, &current).map_err(|e| Fail::new(1, e))?
+        {
             mark_parked_locked(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
             return Err(Fail::new(1, format!("proj-inbox: no worker: {why}")));
         }
@@ -239,7 +259,7 @@ impl Pass<'_> {
         d: &Path,
         issue: &Value,
     ) -> Result<bool, Fail> {
-        match parked(self.inbox, issue) {
+        match parked(self.cfg, self.inbox, repo, issue) {
             Ok(None) => Ok(false),
             Ok(Some(why)) => {
                 eprintln!("proj-inbox: stopping {id}: {why} ({repo}#{n})");
@@ -284,7 +304,7 @@ impl Pass<'_> {
         for issue in open {
             let n = raw(&issue["number"]);
             let d = self.inbox.state.join(format!("{}-{n}", key(repo)));
-            match parked(self.inbox, issue) {
+            match parked(self.cfg, self.inbox, repo, issue) {
                 Ok(None) => (),
                 Ok(Some(_)) => {
                     if d.join("drained").exists() && !d.join("job").exists() {

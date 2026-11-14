@@ -99,6 +99,35 @@ def token(repo):
         sys.exit(1)
 
 
+def firsts(repo, prs):
+    """The PRs that go first in the proof line and this pass: an author's
+    `first` on them or on an issue they close, as burrow-upkeep's `firsts`
+    reads it (crates/burrow-upkeep/src/firsts.rs), which puts the label on
+    a PR that gets it from its issue. Asked only when some PR or issue
+    carries the label at all. GitHub not saying leaves none first: each
+    waits its turn as it would without it."""
+    label = CFG["labels"]["first"]
+
+    def names(x):
+        return {n.get("name") for n in (x.get("labels") or {}).get("nodes", ())}
+
+    def carried(pr):
+        closing = pr.get("closingIssuesReferences") or {}
+        return (label in names(pr) or (pr.get("labels") or {}).get("pageInfo", {}).get("hasNextPage")
+                or closing.get("pageInfo", {}).get("hasNextPage")
+                or any(label in names(i) or (i.get("labels") or {}).get("pageInfo", {}).get("hasNextPage")
+                       for i in closing.get("nodes", ())))
+
+    asked = [{k: pr.get(k) for k in ("number", "labels", "closingIssuesReferences")} for pr in prs if carried(pr)]
+    if not asked:
+        return set()
+    try:
+        return set(C.upkeep("firsts", repo, input=json.dumps({"prs": asked}))["firsts"])
+    except (C.Unavailable, RuntimeError) as e:
+        log(f"{repo}: which PRs go first isn't known: {e}")
+        return set()
+
+
 def main():
     if sys.argv[1:2] == ["token"] and len(sys.argv) == 3:
         token(sys.argv[2])
@@ -315,11 +344,7 @@ def run_pass(kick, continuing=False):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                # The PRs labelled to go first in the proof line. One whose
-                # labels can't be read isn't, and fails in its own step below:
-                # one bad PR mustn't stop the rest.
-                first = {pr["number"] for pr in prs if CFG["labels"]["first"] in
-                         {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
+                first = firsts(repo, prs)
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
                 waits.read(repo, prs)

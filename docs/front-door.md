@@ -304,7 +304,15 @@ queue. Paused repos reserve no drain capacity and their automated wakeups wait
 for the pause to lift.
 Rank issues with `priority: high`, `priority: medium` or `priority: low`.
 Priority comes first (no label means medium), then pipeline repos, then oldest
-first. Triage includes a priority in its verdict and adds it only if no priority
+first. An issue one of `inbox.authors` labelled `first` (the steward's own
+label, `burrow.autoland.labels.first`) goes ahead of every priority, oldest
+first among them: the drain hands it on even from `later`, `later` doesn't
+park it, its job takes the next free slot of its engine ahead of jobs without
+it (never a running turn's), and the steward puts `first` on the PR that
+closes it, which takes it ahead in the proof-slot line and each pass. Who put
+the label on is read from GitHub's labelled event, by account id: one the
+machinery's App or anyone else put on counts for nothing, on the issue or on
+the PR. It changes order only. Triage includes a priority in its verdict and adds it only if no priority
 label exists when it acts. `proj status` and the probe's `queue` show drain
 capacity used/total and the handoffs using it, then the next five candidates from the drain's cached lists; eligibility and slot availability
 are checked when handing one on.

@@ -1,14 +1,16 @@
 //! The drain enrolls issues triage sorted [`READY`] using its configured
 //! engine label. It admits the highest ranked candidate whose resolved engine has
 //! room; roles may choose another engine. From there it's an inbox issue
-//! like any other: its job, its answers, closed when it's done. Priority
-//! goes first, then pipeline repos, then age. At most `drain_jobs` of the
+//! like any other: its job, its answers, closed when it's done. An issue an
+//! author marked first (first.rs) goes ahead of every priority, `later` or
+//! not; then priority, then pipeline repos, then age. At most `drain_jobs` of the
 //! issues it handed on have a queued or running turn at once; one goes each
 //! pass at most.
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
 //! waits in line like any other, never ahead of work someone asked for
-//! (`first` is off for it): a `drained` mark in its issue's record says so,
-//! made before the label goes on.
+//! (`first` is off for it, unless an author marked its issue first): a
+//! `drained` mark in its issue's record says so, made before the label goes
+//! on.
 //!
 //! Only an issue opened by one of the inbox's authors is handed on, as only
 //! theirs start a job; one with a label other machinery owns, the owner's
@@ -24,7 +26,7 @@ use std::fs;
 
 use serde_json::Value;
 
-use super::triage::READY;
+use super::triage::{LATER, READY};
 use super::{Pass, RETRY, dirs, key, raw};
 use crate::config::Triage;
 use crate::engine::Engine;
@@ -41,10 +43,14 @@ pub(crate) const WAITING: &str = ".drain-waiting";
 /// as its last pass saw them.
 pub(crate) const READY_LISTS: &str = ".ready";
 
-/// A ready issue in the drain's order: its fields sort it, highest priority
-/// first, then the pipeline's repos, then the oldest.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A ready issue in the drain's order ([`Candidate::key`]): an author's
+/// first ahead of the rest, the oldest first among them whatever their
+/// priority or repo; then highest priority, then the pipeline's repos, then
+/// the oldest.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
+    /// Not marked first by an author: it goes after those that are.
+    pub(crate) behind: bool,
     pub(crate) priority: Priority,
     /// Outside the pipeline's repos: they go after its own.
     pub(crate) outside: bool,
@@ -54,6 +60,49 @@ pub(crate) struct Candidate {
     pub(crate) n: String,
     /// A repair child: it takes no ordinary drain capacity.
     pub(crate) repair: bool,
+}
+
+impl Candidate {
+    /// What sorts it: priority and repo count only among those not marked
+    /// first, and break no tie among those that are before their age does.
+    #[allow(clippy::type_complexity)]
+    fn key(
+        &self,
+    ) -> (
+        bool,
+        Option<(Priority, bool)>,
+        &str,
+        &str,
+        &str,
+        Priority,
+        bool,
+        bool,
+    ) {
+        let ranked = self.behind.then_some((self.priority, self.outside));
+        let (opened, repo, n) = (self.opened.as_str(), self.repo.as_str(), self.n.as_str());
+        (
+            self.behind,
+            ranked,
+            opened,
+            repo,
+            n,
+            self.priority,
+            self.outside,
+            self.repair,
+        )
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Pass<'_> {
@@ -148,11 +197,19 @@ impl Pass<'_> {
             if (going >= t.drain_jobs && !repair) || passed.contains(&repo) {
                 continue;
             }
-            let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
+            let Some(mut now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
                 self.miss(&repo);
                 passed.insert(repo);
                 continue;
             };
+            match super::first::marked(self.cfg, self.inbox, &repo, &now_issue) {
+                Ok(marked) => now_issue[super::first::MARKED] = marked.into(),
+                Err(_) => {
+                    self.miss(&repo);
+                    passed.insert(repo);
+                    continue;
+                }
+            }
             if now_issue["state"] != "open"
                 || self
                     .pick_ready(&t, std::slice::from_ref(&now_issue))
@@ -272,7 +329,7 @@ impl Pass<'_> {
             self.miss(repo);
             return true;
         };
-        match super::enrollment::parked(self.inbox, &issue) {
+        match super::enrollment::parked(self.cfg, self.inbox, repo, &issue) {
             Ok(Some(_)) => {
                 if let Err(error) = super::enrollment::mark_parked(self.inbox, repo, n) {
                     eprintln!("proj-inbox: {error}");
@@ -307,7 +364,10 @@ impl Pass<'_> {
     /// A repo's ready issues, from its pass's list of every open one, kept
     /// for the drain: what [`Pass::pick_ready`] reads of each. A pass that
     /// looked at some issues alone changes only theirs.
-    pub(super) fn note_ready(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
+    /// Each carrying `first` has whether an author put it on noted with it
+    /// ([`super::first::MARKED`]), and goes in `later` or not; one GitHub
+    /// won't say about is noted as not, and its repo's retry booked.
+    pub(super) fn note_ready(&mut self, repo: &str, all: &[Value]) -> Result<(), Fail> {
         let dir = self.inbox.state.join(READY_LISTS);
         let f = dir.join(key(repo));
         let others: Vec<Value> = if self.scope.is_some() {
@@ -321,23 +381,30 @@ impl Pass<'_> {
         } else {
             Vec::new()
         };
-        let fresh = all
-            .iter()
-            .filter(|i| i.get("pull_request").is_none())
-            .filter(|i| {
+        let mut fresh = Vec::new();
+        for i in all.iter().filter(|i| i.get("pull_request").is_none()) {
+            let has = |name: &str| {
                 i["labels"]
                     .as_array()
-                    .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(READY)))
-            })
-            .map(|i| {
-                serde_json::json!({
-                    "number": i["number"],
-                    "created_at": i["created_at"],
-                    "user": {"login": i["user"]["login"], "id": i["user"]["id"], "type": i["user"]["type"]},
-                    "labels": i["labels"],
-                    "repository_url": i["repository_url"],
-                })
+                    .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(name)))
+            };
+            if !has(READY) && !(super::first::labelled(self.inbox, i) && has(LATER)) {
+                continue;
+            }
+            let marked = super::first::marked(self.cfg, self.inbox, repo, i).unwrap_or_else(|e| {
+                eprintln!("proj-inbox: {e}");
+                self.miss(repo);
+                false
             });
+            fresh.push(serde_json::json!({
+                "number": i["number"],
+                "created_at": i["created_at"],
+                "user": {"login": i["user"]["login"], "id": i["user"]["id"], "type": i["user"]["type"]},
+                "labels": i["labels"],
+                "repository_url": i["repository_url"],
+                super::first::MARKED: marked,
+            }));
+        }
         let ready: Vec<Value> = others.into_iter().chain(fresh).collect();
         if ready.is_empty() {
             let _ = fs::remove_file(&f);
@@ -374,9 +441,10 @@ impl Pass<'_> {
     }
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
-    /// an author, nobody else's to work, and without a record here; the
-    /// priority first, then pipeline repos, then oldest first.
-    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
+    /// an author, nobody else's to work, and without a record here; an
+    /// author's first ahead (`later` doesn't keep it back), then the
+    /// priority, then pipeline repos, then oldest first.
+    pub(super) fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()
@@ -428,16 +496,17 @@ impl Pass<'_> {
                     .state
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
-                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n)).then(
-                    || Candidate {
-                        priority: priority(i),
-                        outside: rank(&repo),
-                        opened: raw(&i["created_at"]),
-                        repair: self.lane(i),
-                        repo,
-                        n,
-                    },
-                )
+                let marked = super::first::noted(i);
+                let ready = labels.contains(&READY) || (marked && labels.contains(&LATER));
+                (ready && !theirs && !kept && !claimed[&repo].contains(&n)).then(|| Candidate {
+                    behind: !marked,
+                    priority: priority(i),
+                    outside: rank(&repo),
+                    opened: raw(&i["created_at"]),
+                    repair: self.lane(i),
+                    repo,
+                    n,
+                })
             })
             .collect::<BTreeSet<_>>()
             .into_iter()

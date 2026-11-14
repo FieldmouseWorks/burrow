@@ -203,6 +203,9 @@ let
   # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
     inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate;
+    # Whose `first` label on an issue or a PR counts, by account id
+    # (firsts.rs): proj's inbox authors, the steward's App among them.
+    firstBy = lib.unique (map (a: a.id) config.burrow.proj.inbox.authors ++ [ cfg.app.accountId ]);
     # GitHub's REST API, where the App's own calls go: its tokens
     # (token.rs) and its webhook (hook.rs).
     api = "https://api.github.com";
@@ -771,7 +774,7 @@ in
         of jobTimeoutMinutes; long serial replays need not extend agent turns),
         proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
-        rest wait their turn, those labelled `labels.first` first, then the
+        rest wait their turn, those an author labelled `labels.first` first, then the
         oldest PR first; a job running a check without a build of its own
         holds a slot of its own; a build first builds what its derivations
         are built from, in a heavy slot but outside the line, so a slot is

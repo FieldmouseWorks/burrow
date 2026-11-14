@@ -28,6 +28,9 @@ pub struct Config {
     pub bots: Vec<String>,
     /// The steward's own App.
     pub app: App,
+    /// The accounts, by id, whose `first` label on an issue or a PR counts
+    /// (firsts.rs): proj's inbox authors and the steward's own App's bot.
+    pub first_by: Vec<u64>,
     /// GitHub's REST API, where the App's tokens are minted (token.rs).
     pub api: String,
     /// The webhooks to burrow-events (hook.rs).

@@ -87,8 +87,9 @@ PROJ_ASK_SRC = sys.argv[8]
 # every fix job as it was and says nothing of any (unpushed.py runs the real
 # one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
 # which ask GitHub nothing, its `carry`, which reads the stand-in for
-# GitHub's git remote, and its `commits`, which reads GitHub's compare as
-# serve_compare has it, on the config upkeep_config writes (UPKEEP_REAL).
+# GitHub's git remote, its `commits`, which reads GitHub's compare as
+# serve_compare has it, and its `firsts`, which reads GitHub as serve_firsts
+# has it, on the config upkeep_config writes (UPKEEP_REAL).
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
 UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
@@ -113,6 +114,42 @@ link = f'Link: <https://api.github.com/{{path.partition("?")[0]}}?per_page=100&p
 sys.stdout.write("HTTP/1.1 200 OK\\r\\n" + link + "\\r\\n" + json.dumps(pages[n - 1]))
 """)
 os.chmod(f"{COMPARE_BIN}/gh", 0o755)
+# GitHub as gh answers the real one's `firsts` with it: each GET's answer
+# from what serve_firsts last said (FIRSTS_ANSWERS, by path), each write
+# noted (FIRSTS_WROTE); no answer for a path it doesn't have.
+FIRSTS_BIN, FIRSTS_ANSWERS, FIRSTS_WROTE = f"{tmp}/firsts-bin", f"{tmp}/firsts.json", f"{tmp}/firsts-wrote"
+os.makedirs(FIRSTS_BIN)
+with open(f"{FIRSTS_BIN}/gh", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, sys
+method, path = sys.argv[4], sys.argv[5]
+if method != "GET":
+    with open({FIRSTS_WROTE!r}, "a") as f:
+        f.write(json.dumps([method, path, json.load(sys.stdin)]) + "\\n")
+    sys.stdout.write("HTTP/1.1 200 OK\\r\\n\\r\\n[]")
+    sys.exit(0)
+answers = json.load(open({FIRSTS_ANSWERS!r}))
+if path not in answers:
+    sys.stderr.write("no answer scripted\\n")
+    sys.exit(1)
+sys.stdout.write("HTTP/1.1 200 OK\\r\\n\\r\\n" + json.dumps(answers[path]))
+""")
+os.chmod(f"{FIRSTS_BIN}/gh", 0o755)
+
+
+def serve_firsts(answers):
+    """What GitHub answers burrow-upkeep's `firsts` with from now on, by
+    path, and its writes so far forgotten."""
+    with open(FIRSTS_ANSWERS, "w") as f:
+        json.dump(answers, f)
+    open(FIRSTS_WROTE, "w").close()
+
+
+def firsts_wrote():
+    """The writes burrow-upkeep's `firsts` made, since serve_firsts."""
+    return [json.loads(x) for x in open(FIRSTS_WROTE).read().splitlines()]
+
+
 # burrow-upkeep as every pass here runs the real one: its `commits` asks
 # that gh, whatever gh a test puts first for the rest.
 UPKEEP_RUN = f"{tmp}/upkeep-run"
@@ -120,6 +157,7 @@ with open(UPKEEP_RUN, "w") as f:
     f.write(f"""#!/bin/sh
 [ "$2" = commits ] && PATH={shlex.quote(COMPARE_BIN)}:$PATH
 [ "$2" = ci ] && PATH={shlex.quote(tmp + "/ci-bin")}:$PATH
+[ "$2" = firsts ] && PATH={shlex.quote(FIRSTS_BIN)}:$PATH
 exec {shlex.quote(UPKEEP)} "$@"
 """)
 os.chmod(UPKEEP_RUN, 0o755)
@@ -138,7 +176,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|carry|commits|ci) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry|commits|ci|firsts) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
@@ -345,6 +383,7 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
     with open(path, "w") as f:
         json.dump({"stateDir": C.STATE, "proj": f"{tmp}/upkeep-bin/proj", "projectsDir": C.CFG["projectsDir"],
                    "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"], "api": "http://127.0.0.1:9",
+                   "firstBy": [a["id"] for a in C.CFG["inbox"]["authors"]] + [C.CFG["inbox"]["postingAccountId"]],
                    "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
                    "jobTimeout": C.CFG["jobTimeout"], "renovate": C.CFG["renovate"],
                    "dashboard": {"title": "Dependency Dashboard", "waitDays": 4, "errorDays": 1, "renovateKick": None, "renovateRuns": None},
