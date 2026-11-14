@@ -347,7 +347,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         }
         let kicks = crate::turn::lines(&job.path("kick"));
         crate::job::kick(cfg, kicks);
-        crate::job::kick(cfg, vec!["autoland".into()]);
+        crate::job::republish(cfg);
         crate::scratch::clear(cfg, job.id);
     } else {
         let prompt = format!(

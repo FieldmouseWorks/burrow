@@ -101,6 +101,10 @@ pub struct Config {
     /// Host token service observations; never a job-writable directory.
     #[serde(default)]
     pub github_meters: Option<PathBuf>,
+    /// The steward's handler that publishes the owner's issue without a
+    /// pass over every repo; None without the steward.
+    #[serde(default)]
+    pub steward_publish: Option<String>,
     /// The steward App's account, distinct from the App running jobs.
     #[serde(default)]
     pub steward_account: Option<burrow_github::Author>,

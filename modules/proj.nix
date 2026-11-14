@@ -99,6 +99,8 @@ let
     machinery = if machineApp == null then null else machineApp.name;
     hostGithubApp = cfg.hostGithubApp;
     githubMeters = config.burrow.github.quotaDir;
+    # What to kick when a job's question changes the owner's issue.
+    stewardPublish = if config.burrow.autoland.enable or false then (import ./autoland/paths.nix config).stewardPublish else null;
     stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
     machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;

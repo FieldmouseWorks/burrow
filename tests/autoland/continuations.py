@@ -111,6 +111,36 @@ with tempfile.TemporaryDirectory() as tmp:
         assert '' in C.load('continue.json', {}), C.load('continue.json', {})
     print('full passes preserve skipped event and deadline obligations: passed')
 
+    # The watchdog (a stall it took) and proj (a job's question) kick the
+    # continuation line when only the owner's issues changed. With no
+    # traversal to carry on it publishes the last pass's digest and the
+    # escalated stalls, and passes over no repo; with one under way the
+    # slice runs, and publishes as it yields.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        published = []
+        C.save('digest-repos.json', {'sam/r': [['Waiting for Sam', 'sam/r#1', 'a']]})
+        Path(tmp, 'escalated.json').write_text(json.dumps([['Stalled', 'proj job j', 'b']]))
+        with patch.object(S.R, 'publish', published.append), \
+                patch.object(S.R, 'discover', side_effect=AssertionError('a pass over the repos')):
+            S.run_pass(None, continuing=True)
+        assert published == [[('Waiting for Sam', 'sam/r#1', 'a'), ('Stalled', 'proj job j', 'b')]], published
+        assert handled == [], handled
+        C.save('pass-progress.json', {'full': True, 'finished': [], 'repos': {}})
+        published.clear()
+        with patch.object(S.R, 'publish', published.append):
+            S.run_pass(None, continuing=True)
+        assert [n for n, _, _ in handled] == [1, 2], handled
+        assert published and ('Stalled', 'proj job j', 'b') in published[0], published
+        # Nor before a rate limit's reset.
+        C.save(C.RETRY_AFTER, C.NOW + 600)
+        C.save('pass-progress.json', {})
+        published.clear()
+        with patch.object(S.R, 'publish', published.append):
+            S.run_pass(None, continuing=True)
+        assert published == [], published
+        Path(tmp, 'escalated.json').unlink()
+    print('a continuation with nothing to carry on publishes the owner issues alone: passed')
+
     # Local completions/availability, lifecycle/held answers and sibling PR
     # changes all arrive on the ordinary line. Invalidate decisions on that
     # line while keeping visited ordering; an internal continuation keeps

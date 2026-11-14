@@ -103,6 +103,42 @@ fn notifications_disabled_do_not_add_watcher_kicks() {
 }
 
 #[test]
+fn a_question_has_the_steward_publish_not_pass_over_every_repo() {
+    use std::sync::{Arc, Mutex};
+    let mut f = Fixture::new();
+    f.cfg.wake = f.dir.path().join("wake.json");
+    f.cfg.waits = None;
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let seen = got.clone();
+    let (port, _) = burrow_events::http::listen(
+        0,
+        Arc::new(move |req| {
+            seen.lock().unwrap().push(req.target.clone());
+            202
+        }),
+    )
+    .unwrap();
+    f.cfg.kick = format!("http://127.0.0.1:{port}/kick");
+    f.cfg.steward_publish = Some("autoland-continue".into());
+    f.ending(1, "ask");
+    // The owner's label its question put on its issue.
+    let label = crate::ask::host_path(&f.job(), "label");
+    fs::create_dir_all(label.parent().unwrap()).unwrap();
+    fs::write(
+        &label,
+        r#"{"repo":"sam/r","number":"1","name":"waiting: sam"}"#,
+    )
+    .unwrap();
+    crate::cmd::finish(&f.cfg, "j1").unwrap();
+    let got = got.lock().unwrap();
+    assert!(
+        got.iter().any(|s| s == "/kick/autoland-continue"),
+        "{got:?}"
+    );
+    assert!(!got.iter().any(|s| s == "/kick/autoland"), "{got:?}");
+}
+
+#[test]
 fn finalization_defers_instead_of_waiting_on_resume_lock() {
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
