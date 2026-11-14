@@ -109,7 +109,11 @@ Each has an entry below, and each can be imported on its own.
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
   and the role settings every turn reads before confirmation. Failed
-  checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
+  checks include stderr diagnostics in the rollback notice. A check that
+  fails for its own reason excuses what can't pass without it
+  (`burrow.updates.healthExplains`): while `claude-login` says Claude Code
+  isn't logged in, the operator's check and the `claude-rc@` servers failing
+  after a switch don't revert it. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
   repo, and all of them run hourly), `advisory-watch` (CISA KEV, vulnix,

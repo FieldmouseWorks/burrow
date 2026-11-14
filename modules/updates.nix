@@ -93,6 +93,7 @@ let
     name = health;
     dir = "/etc/${healthD}";
     required = cfg.requiredHealth;
+    explains = cfg.healthExplains;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 90;
@@ -708,6 +709,15 @@ in
           }
         '';
       });
+
+      # No Remote Control server starts while Claude Code is logged out, so
+      # a login gone before a switch explains the operator's check and the
+      # servers failing after it: the switch restarted them, it didn't break
+      # them.
+      burrow.updates.healthExplains = lib.mkIf
+        ((config.burrow.claude.enable or false) && (config.burrow.remoteControl.enable or false)) {
+          claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ];
+        };
 
       environment.systemPackages = [ updateTool healthTool ];
       burrow.tools.update = updateTool;

@@ -150,13 +150,22 @@ impl Run<'_> {
             .arg(SETTLE)
             .stdin(Stdio::null())
             .output();
-        if let Some(bad) = compared.map_or(Some(String::new()), |o| {
-            (!o.status.success()).then(|| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_end_matches('\n')
-                    .to_string()
-            })
-        }) {
+        let (healthy, said) = compared.map_or((false, String::new()), |o| {
+            let said = String::from_utf8_lossy(&o.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            (o.status.success(), said)
+        });
+        if healthy {
+            // What it didn't count against the switch (what can't pass
+            // while a check fails, such as the Remote Control servers while
+            // Claude Code isn't logged in) goes in the journal; the
+            // heartbeat tells the owner about the failing check itself.
+            for line in said.lines().skip(1) {
+                self.warn(&format!("not the switch's doing: {line}"));
+            }
+        } else {
+            let bad = said;
             self.back(&log);
             let e = self.end(
                 Outcome::Failed,

@@ -350,6 +350,51 @@ fn a_compare_says_what_regressed() {
 }
 
 #[test]
+fn a_compare_doesnt_count_what_a_failing_check_explains() {
+    // Claude Code logged out before the switch: the operator's check and the
+    // Remote Control servers fail after it, and that's the login's doing.
+    let m = Machine::new(&[("claude-login", "fail"), ("operator", "fail")]);
+    let mut config: serde_json::Value = serde_json::from_str(&m.read("config.json")).unwrap();
+    config["explains"] = serde_json::json!({
+        "claude-login": ["check:operator", "user-unit:claude-rc@*.service"],
+    });
+    fs::write(m.path("config.json"), config.to_string()).unwrap();
+    fs::write(
+        m.path("before"),
+        "check:claude-login fail\ncheck:operator ok\n",
+    )
+    .unwrap();
+    let env = [(
+        "USER_FAILED",
+        "claude-rc@web.service loaded failed failed Remote Control\n",
+    )];
+    let ran = m.run(&env, &["compare", m.path("before").to_str().unwrap(), "0"]);
+    assert_eq!(
+        (ran.status.code(), stdout(&ran).as_str()),
+        (
+            Some(0),
+            "healthy\ncheck:operator is failing, but not counted: check:claude-login is failing, and it can't pass without that\nclaude-rc@web.service failed, but not counted: check:claude-login is failing, and it can't pass without that\n"
+        ),
+        "{ran:?}"
+    );
+    // A login the switch broke is the switch's.
+    fs::write(
+        m.path("before"),
+        "check:claude-login ok\ncheck:operator ok\n",
+    )
+    .unwrap();
+    let ran = m.run(&env, &["compare", m.path("before").to_str().unwrap(), "0"]);
+    assert_eq!(
+        (ran.status.code(), stdout(&ran).as_str()),
+        (
+            Some(1),
+            "check:claude-login is failing\ncheck:operator is failing\nclaude-rc@web.service failed\n"
+        ),
+        "{ran:?}"
+    );
+}
+
+#[test]
 fn a_compare_waits_for_what_regressed_to_pass_again() {
     let m = Machine::new(&[("counted", "counted")]);
     fs::write(m.path("before"), "check:counted ok\n").unwrap();
