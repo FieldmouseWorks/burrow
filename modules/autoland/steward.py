@@ -162,22 +162,23 @@ def main():
 SEARCHED = [0]
 
 
-def failing(repo, why):
-    """What of burrow-upkeep's look failed: logged, and the stall watchdog
-    watches the repo."""
+def failing(repo, why, op):
+    """What of burrow-upkeep's look failed, in the repo's operation op:
+    logged, and the stall watchdog watches the repo."""
     log(f"{repo}: {why}")
-    waits.failed(repo)
+    waits.failed(repo, op=op)
     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
 
-def told(repo, out, mine):
-    """What a look of burrow-upkeep's says: what it lists goes in mine, the
-    pass it books is booked, and what failed is `failing`."""
+def told(repo, out, mine, op):
+    """What a look of burrow-upkeep's (the repo's operation op) says: what
+    it lists goes in mine, the pass it books is booked, and what failed is
+    `failing`."""
     mine.extend(tuple(x) for x in out["stuck"])
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
     for why in out["failed"]:
-        failing(repo, why)
+        failing(repo, why, op)
 
 
 def branches(repo, default, in_use, mine, full):
@@ -186,7 +187,7 @@ def branches(repo, default, in_use, mine, full):
     also tries again what GitHub said no to. It raises when it fails, as
     the repo's other steps do."""
     told(repo, C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []),
-                        input=json.dumps(sorted(in_use))), mine)
+                        input=json.dumps(sorted(in_use))), mine, "branches")
 
 
 def upkeep(repo, mine):
@@ -198,9 +199,9 @@ def upkeep(repo, mine):
     try:
         out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
     except Exception as e:
-        failing(repo, f"its upkeep: {e}")
+        failing(repo, f"its upkeep: {e}", "upkeep")
         return
-    told(repo, out, mine)
+    told(repo, out, mine, "upkeep")
     SEARCHED[0] += out["searched"]
     for j in out["jobs"]:
         try:
@@ -208,7 +209,7 @@ def upkeep(repo, mine):
         except C.JobPaused:
             continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
-            failing(repo, f"its {j['part']} job didn't start: {e}")
+            failing(repo, f"its {j['part']} job didn't start: {e}", "upkeep")
             mine.extend(tuple(x) for x in j["unstarted"])
             continue
         if not jid:
@@ -289,10 +290,14 @@ def run_pass(kick, continuing=False):
                 R.restart(r, known, failed)
             except Exception as e:
                 log(f"{repo}: starting it over as new: {e}")
-                waits.failed(repo)
+                waits.failed(repo, op="restart")
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 batch.finish(repo)
                 continue
+            waits.passed(repo, "restart")
+            # The operation under way, whose failure the repo's wait is for:
+            # it ends with the first pass that runs that one again and passes.
+            op = "settings"
             try:
                 new = R.settle_repo(r, known)
                 if r["default"] is None:
@@ -314,6 +319,8 @@ def run_pass(kick, continuing=False):
                         failed[repo] = C.NOW
                 elif new and not CFG["baselineJobs"]:
                     known.add(repo)
+                waits.passed(repo, op)
+                op = "PRs"
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
                 # The PRs labelled to go first in the proof line. One whose
@@ -346,6 +353,8 @@ def run_pass(kick, continuing=False):
                     n = pr["number"]
                     return n not in held, n not in first, batch.visited(repo, pr), P.place(repo, n)
 
+                # Read and ready: each PR's own step fails on its own.
+                waits.passed(repo, op)
                 partial = False
                 for pr in sorted(pending, key=order):
                     if batch.expired():
@@ -372,6 +381,7 @@ def run_pass(kick, continuing=False):
                     complete = False
                     batch.left = True
                     continue
+                op = "train"
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
                 # before sweeping, just as a single complete pass does.
@@ -393,6 +403,7 @@ def run_pass(kick, continuing=False):
                     # After its PRs, so the ones settled this pass are in it.
                     try:
                         T.step(repo)
+                        waits.passed(repo, op)
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
                         operations_complete = False
@@ -400,15 +411,20 @@ def run_pass(kick, continuing=False):
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
-                        waits.failed(repo)
+                        waits.failed(repo, op=op)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                else:
+                    waits.passed(repo, op)
+                op = "branches"
                 branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
+                waits.passed(repo, op)
             except Exception as e:
                 log(f"{repo}: {e}")
-                waits.failed(repo)
+                waits.failed(repo, op=op)
                 seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             upkeep(repo, mine)
+            waits.passed(repo, "upkeep")
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             if operations_complete:

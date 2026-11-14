@@ -191,10 +191,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # An old repository failure is retained while its operation is deferred;
     # a failed retry preserves its original deadline, and success clears it.
-    for operation in ('train', 'train unavailable', 'branches', 'upkeep'):
+    # A wait from before its operations were noted (no ops) is kept so too.
+    for operation, ops in (('train', ['train']), ('train unavailable', ['train']), ('branches', ['branches']),
+                           ('upkeep', ['upkeep']), ('train', None)):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
                        phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+            if ops:
+                old['ops'] = ops
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             original = S.step.handle
 
@@ -210,7 +214,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 if operation == 'train unavailable':
                     raise C.Unavailable('temporarily unavailable')
                 if operation == 'upkeep':
-                    S.failing('sam/r', 'its upkeep failed')
+                    S.failing('sam/r', 'its upkeep failed', 'upkeep')
                 else:
                     raise RuntimeError('still failing')
 
@@ -220,10 +224,54 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             current = C.load('watch.json', {})['items']['sam/r']
             assert current['since'] == 10 and current['due'] == 7210, (operation, current)
+            # A traversal that ends with it failing again says what fails.
+            assert current['ops'] == ['train' if operation.startswith('train') else operation], current
             C.NOW += 600
             S.run_pass(['sam/r'])
             assert 'sam/r' not in C.load('watch.json', {})['items'], operation
     print('deferred operation failures keep their original watchdog clocks: passed')
+
+    # The repo's wait is for the operation that failed, not its traversal: a
+    # read of its PRs fails once, and the next slice that reads them ends the
+    # wait though it yields with PRs left and the train and branches not
+    # reached; one that failed after the PRs stays until it's run again.
+    for after in (None, 'train'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            prs[:] = [pr(n) for n in range(1, 5)]
+
+            def unread(*args):
+                raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+
+            def broken(*args):
+                raise RuntimeError('still failing')
+
+            with patch.object(S, 'open_prs', unread):
+                S.run_pass(None)
+            current = C.load('watch.json', {})['items']['sam/r']
+            assert current['phase'] == W.FAILS and current['ops'] == ['PRs'], current
+            if after:
+                C.NOW += 600
+                with patch.object(S.T, 'step', broken):
+                    S.run_pass(['sam/r'])
+                current = C.load('watch.json', {})['items']['sam/r']
+                assert current['since'] == 1000 and current['ops'] == ['train'], current
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            handled.clear()
+            C.NOW += 600
+            with patch.object(S.step, 'handle', long):
+                S.run_pass(None)
+            assert 0 < len(handled) < len(prs), handled
+            items = C.load('watch.json', {})['items']
+            if after:
+                assert items['sam/r']['since'] == 1000 and items['sam/r']['ops'] == ['train'], items
+            else:
+                assert 'sam/r' not in items, items
+    print("a repo's wait ends with the operation that failed passing: passed")
 
     # Exhausting the work slice on the final PR still defers repository
     # operations; the continuation can run them without repeating the PR.
