@@ -292,18 +292,21 @@ impl Pass<'_> {
     /// again no earlier than the error's own deadline (`retry_at`, which
     /// burrow-github sets for every rate limit it recognizes: a 403's, a
     /// 429's, GraphQL's), nor than the reset of a budget `rate_limit` says
-    /// is spent. That probe costs nothing against the limit, and runs once
-    /// a pass; a failed or healthy one can't shorten the error's deadline,
-    /// and a later limit's deadline only lengthens the pass's.
+    /// is spent, nor than the probe's own deadline when `rate_limit` is
+    /// itself limited (it can be: a secondary limit covers it too). That
+    /// probe costs nothing against the primary limit, and runs once a
+    /// pass; a failed, malformed or healthy one can't shorten the error's
+    /// deadline, and a later limit's deadline only lengthens the pass's.
     pub fn noted(&mut self, e: Error) -> Error {
         if let Some(retry_at) = e.retry_at {
             let mut at = retry_at as f64;
             if self.out.limited.is_none() {
-                let spent = call(self.api, "GET", "rate_limit", None, None)
-                    .ok()
-                    .and_then(|r| r.json().ok())
-                    .map_or(0.0, |v| reset(&v));
-                at = at.max(spent);
+                let probe =
+                    match call(self.api, "GET", "rate_limit", None, None).and_then(|r| r.json()) {
+                        Ok(v) => reset(&v),
+                        Err(limited) => limited.retry_at.map_or(0.0, |t| t as f64),
+                    };
+                at = at.max(probe);
             }
             self.out.limited = Some(self.out.limited.map_or(at, |was| was.max(at)));
         }
@@ -500,6 +503,57 @@ mod tests {
                 }
             });
             assert_eq!(at, Some(T + 900.0));
+        }
+
+        /// What `rate_limit` answers, after a secondary limit of a minute
+        /// on `repos/sam/r`: the pass's deadline.
+        fn probed(probe: crate::testing::Answer) -> Option<f64> {
+            let mut hub = Hub::default();
+            let no = answer(403, json!({"message": SECONDARY})).with("Retry-After", "60");
+            hub.on("GET", "repos/sam/r$", no);
+            hub.on("GET", "rate_limit$", probe);
+            noted(&mut hub, |p| get(p, "repos/sam/r"))
+        }
+
+        #[test]
+        fn a_limited_probe_s_own_longer_deadline_wins() {
+            let secondary = answer(403, json!({"message": SECONDARY})).with("Retry-After", "600");
+            assert_eq!(probed(secondary), Some(T + 600.0));
+            let reset = format!("{}", T as u64 + 1200);
+            let primary = answer(403, json!({"message": "Forbidden"}))
+                .with("x-ratelimit-remaining", "0")
+                .with("x-ratelimit-reset", &reset);
+            assert_eq!(probed(primary), Some(T + 1200.0));
+            let wordless = answer(429, json!({"message": "Too many"})).with("Retry-After", "900");
+            assert_eq!(probed(wordless), Some(T + 900.0));
+        }
+
+        #[test]
+        fn a_probe_that_says_nothing_of_use_keeps_the_error_s_deadline() {
+            // A limited probe whose deadline is sooner, and one whose
+            // answer isn't the budgets at all.
+            let sooner = answer(429, json!({"message": "Too many"})).with("Retry-After", "10");
+            assert_eq!(probed(sooner), Some(T + 60.0));
+            assert_eq!(probed(answer(200, json!([1, 2]))), Some(T + 60.0));
+        }
+
+        #[test]
+        fn a_limited_probe_runs_once_a_pass_and_its_deadline_holds() {
+            let mut hub = Hub::default();
+            let soon = answer(403, json!({"message": SECONDARY})).with("Retry-After", "60");
+            hub.on("GET", "repos/sam/a$", soon.clone());
+            hub.on("GET", "repos/sam/b$", soon);
+            let probe = answer(403, json!({"message": SECONDARY})).with("Retry-After", "600");
+            hub.on("GET", "rate_limit$", probe);
+            let at = noted(&mut hub, |p| {
+                get(p, "repos/sam/a");
+                get(p, "repos/sam/b");
+            });
+            assert_eq!(at, Some(T + 600.0));
+            assert_eq!(
+                hub.paths().iter().filter(|p| **p == "rate_limit").count(),
+                1
+            );
         }
 
         #[test]
