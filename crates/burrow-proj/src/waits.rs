@@ -391,11 +391,12 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     fs::create_dir_all(&dir)?;
     let held = cfg.jobs.join(HELD);
     fs::create_dir_all(&held)?;
-    let lock = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(cfg.jobs.join(".waits.lock"))?;
-    lock.lock()?;
+    let _lock = crate::held::Held::lock(
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(cfg.jobs.join(".waits.lock"))?,
+    )?;
     for id in ids {
         let f = dir.join(id);
         let job = Job::new(cfg, id);

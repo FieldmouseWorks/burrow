@@ -1,30 +1,12 @@
 //! Forgetting a repository under the inbox pass lock.
 
-use std::fs::{self, File, TryLockError};
-use std::io;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread::sleep;
-use std::time::{Duration, Instant};
 
 use super::{drain, enrollment, key};
 use crate::config::Config;
 use crate::job::Job;
 use crate::{Fail, io_fail, read};
-
-/// The lock, once whoever holds it lets go, if that's within `wait`.
-pub(super) fn lock_within(f: &File, wait: Duration) -> io::Result<bool> {
-    let until = Instant::now() + wait;
-    loop {
-        match f.try_lock() {
-            Ok(()) => return Ok(true),
-            Err(TryLockError::WouldBlock) if Instant::now() < until => {
-                sleep(Duration::from_millis(100));
-            }
-            Err(TryLockError::WouldBlock) => return Ok(false),
-            Err(TryLockError::Error(e)) => return Err(e),
-        }
-    }
-}
 
 /// All the inbox kept about a repo's issues (which job each is, what of it
 /// has been answered, that the repo has the label, that it's out of reach),

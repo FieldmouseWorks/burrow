@@ -177,13 +177,13 @@ pub(super) fn reset(cfg: &Config) -> io::Result<()> {
 }
 
 /// Shared by discovery, completion and watchdog-disabled marker reset.
-pub(super) fn lock(cfg: &Config) -> io::Result<File> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(cfg.jobs.join(".adopt.lock"))?;
-    file.lock()?;
-    Ok(file)
+pub(super) fn lock(cfg: &Config) -> io::Result<crate::held::Held> {
+    crate::held::Held::lock(
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(cfg.jobs.join(".adopt.lock"))?,
+    )
 }
 
 /// Every job [`unheld`] finds, and whether every read it needed answered: a

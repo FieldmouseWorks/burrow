@@ -318,12 +318,10 @@ fn released(cfg: &Config) -> Result<i64, String> {
 
 /// jobs/.usage.lock, held: every change to the record goes under it, and
 /// none goes ahead without it.
-pub(crate) fn lock(cfg: &Config) -> Result<File, String> {
+pub(crate) fn lock(cfg: &Config) -> Result<crate::held::Held, String> {
     let path = cfg.jobs.join(".usage.lock");
     let f = File::create(&path).map_err(|e| format!("proj: {}: {e}", path.display()))?;
-    f.lock()
-        .map_err(|e| format!("proj: {}: {e}", path.display()))?;
-    Ok(f)
+    crate::held::Held::lock(f).map_err(|e| format!("proj: {}: {e}", path.display()))
 }
 
 /// Waiters retry contention so an emergency promotion can bypass a stalled

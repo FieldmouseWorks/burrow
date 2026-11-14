@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::jobs::revived;
-use super::{Pass, forget, key, lock_within, named_for, raw, repo_of, seconds, uri};
+use super::{Pass, forget, key, named_for, raw, repo_of, seconds, uri};
 use crate::config::Config;
 use crate::config::tests::example;
 use crate::engine::Engine;
+use crate::held::Held;
 
 #[test]
 fn repos() {
@@ -195,15 +196,21 @@ fn forgets_a_repo() {
 fn forget_waits_for_a_pass() {
     let tmp = tempfile::TempDir::new().unwrap();
     let lock = tmp.path().join("wake.json.lock");
-    let pass = File::create(&lock).unwrap();
-    pass.lock().unwrap();
-    let mine = File::options().append(true).open(&lock).unwrap();
+    let pass = Held::lock(File::create(&lock).unwrap()).unwrap();
+    let mine = || File::options().append(true).open(&lock).unwrap();
     let start = Instant::now();
-    assert!(!lock_within(&mine, Duration::from_millis(300)).unwrap());
+    assert!(
+        Held::lock_within(mine(), Duration::from_millis(300))
+            .unwrap()
+            .is_none()
+    );
     assert!(start.elapsed() >= Duration::from_millis(300));
-    pass.unlock().unwrap();
-    assert!(lock_within(&mine, Duration::from_millis(300)).unwrap());
-    mine.unlock().unwrap();
+    drop(pass);
+    assert!(
+        Held::lock_within(mine(), Duration::from_millis(300))
+            .unwrap()
+            .is_some()
+    );
 }
 
 // A hidden project folder is a repo's only when it's named for it.

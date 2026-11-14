@@ -820,9 +820,11 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         .turns()
         .filter(|n| job.turn(n, "retry-cancelled").exists());
     let _finalizing = if let Some(n) = &cancelled {
-        let lock = fs::File::create(job.turn(n, "retry-finalizing"))
-            .map_err(|e| Fail::new(1, e.to_string()))?;
-        lock.lock().map_err(|e| Fail::new(1, e.to_string()))?;
+        let lock = crate::held::Held::lock(
+            fs::File::create(job.turn(n, "retry-finalizing"))
+                .map_err(|e| Fail::new(1, e.to_string()))?,
+        )
+        .map_err(|e| Fail::new(1, e.to_string()))?;
         if job.turn(n, "retry-finalized").exists() {
             return Ok(());
         }

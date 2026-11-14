@@ -34,7 +34,7 @@ fn dir(cfg: &Config) -> std::path::PathBuf {
 /// The registry's lock. Job locks precede it; held by every operation that
 /// reads policy and commits on it (publication, merging, deadline shifts and
 /// a reversible default's acceptance), so none acts on a stale snapshot.
-pub(crate) fn locked(cfg: &Config) -> Result<fs::File, String> {
+pub(crate) fn locked(cfg: &Config) -> Result<crate::held::Held, String> {
     use std::os::unix::fs::DirBuilderExt;
     super::ensure_root(cfg)?;
     fs::DirBuilder::new()
@@ -47,8 +47,7 @@ pub(crate) fn locked(cfg: &Config) -> Result<fs::File, String> {
         .append(true)
         .open(dir(cfg).join("lock"))
         .map_err(|e| e.to_string())?;
-    file.lock().map_err(|e| e.to_string())?;
-    Ok(file)
+    crate::held::Held::lock(file).map_err(|e| e.to_string())
 }
 
 /// Legacy publications predate embedded identity. Bind them to the opened

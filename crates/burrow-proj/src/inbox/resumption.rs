@@ -5,13 +5,9 @@
 //! second try for the lock to the pass itself, and the pass releases what's
 //! parked before it lets go (`inbox::main`).
 use super::{Pass, dirs};
+use crate::held::Held;
 use crate::{config::Config, job::Job, read};
-use std::{
-    cell::Cell,
-    collections::BTreeMap,
-    fs::{File, OpenOptions, TryLockError},
-    path::Path,
-};
+use std::{cell::Cell, collections::BTreeMap, fs::OpenOptions, path::Path};
 
 thread_local! {
     /// Whether this thread holds the lock as an inbox pass ([`Permit::pass`]).
@@ -19,7 +15,7 @@ thread_local! {
 }
 
 pub(crate) struct Permit {
-    _guard: Option<File>,
+    _guard: Option<Held>,
     /// Taken by [`Permit::pass`]: it, not admission's own, marks the thread.
     pass: bool,
 }
@@ -27,7 +23,7 @@ pub(crate) struct Permit {
 impl Permit {
     /// The lock, held: admission's own permit, which serializes the next
     /// admission behind its launch.
-    fn held(lock: File) -> Self {
+    fn held(lock: Held) -> Self {
         Self {
             _guard: Some(lock),
             pass: false,
@@ -36,7 +32,7 @@ impl Permit {
 
     /// The lock, held by an inbox pass (or a forget) for the whole of it:
     /// its thread's own admissions count capacity under it, one at a time.
-    pub(super) fn pass(lock: File) -> Self {
+    pub(super) fn pass(lock: Held) -> Self {
         HELD.with(|h| h.set(true));
         Self {
             _guard: Some(lock),
@@ -55,11 +51,7 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // Closing alone leaves the lock held while a concurrently forked
-        // child has the same open file description, until that child execs.
-        if let Some(lock) = &self._guard {
-            let _ = lock.unlock();
-        }
+        // The guard, a [`Held`], lets the lock go itself as it drops.
         if self.pass {
             HELD.with(|h| h.set(false));
         }
@@ -116,11 +108,9 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
             .create(true)
             .open(format!("{}.lock", inbox.wake.display()))
             .map_err(|e| e.to_string())?;
-        match lock.try_lock() {
-            Ok(()) => (),
-            Err(TryLockError::WouldBlock) => return Ok(Resume::Waiting(Wait::Pass)),
-            Err(e) => return Err(e.to_string()),
-        }
+        let Some(lock) = Held::try_lock(lock).map_err(|e| e.to_string())? else {
+            return Ok(Resume::Waiting(Wait::Pass));
+        };
         Permit::held(lock)
     };
     let Some(t) = &inbox.triage else {
@@ -200,17 +190,17 @@ mod tests {
     use super::*;
     use crate::inbox::sorting_tests::Box;
     use crate::policy::{self, Identity, Kind};
-    use std::fs;
+    use std::fs::{self, File, TryLockError};
+    use std::os::fd::AsFd;
 
     #[test]
     fn a_released_permit_does_not_wait_for_an_inherited_descriptor() {
         let fixture = Box::new();
         let lock = fixture.path("wake.json.lock");
-        let file = File::create(&lock).unwrap();
-        file.lock().unwrap();
+        let file = Held::lock(File::create(&lock).unwrap()).unwrap();
         // A concurrent fork inherits this same open file description until
         // exec closes it. Keep a duplicate to make that interval deterministic.
-        let inherited = file.try_clone().unwrap();
+        let inherited = file.as_fd().try_clone_to_owned().unwrap();
         let permit = Permit::held(file);
         let next = OpenOptions::new().append(true).open(&lock).unwrap();
         assert!(matches!(next.try_lock(), Err(TryLockError::WouldBlock)));

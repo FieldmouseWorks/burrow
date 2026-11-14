@@ -42,6 +42,7 @@ use serde_json::Value;
 use crate::cmd::{New, start_job};
 use crate::config::{Config, Inbox};
 use crate::github::every;
+use crate::held::Held;
 use crate::job::Job;
 use crate::pick::origin;
 use crate::{Fail, io_fail, now, read, swap};
@@ -82,17 +83,17 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             .get(1)
             .filter(|r| r.contains('/'))
             .ok_or_else(|| Fail::new(2, "usage: proj-inbox forget OWNER/REPO"))?;
-        if !lock_within(&pass, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+        let Some(held) = Held::lock_within(pass, FORGET_WAIT).map_err(|e| io_fail(&lock, e))?
+        else {
             return Err(Fail::new(
                 1,
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
-        }
-        let _permit = resumption::Permit::pass(pass);
+        };
+        let _permit = resumption::Permit::pass(held);
         return forget(cfg, &inbox.state, repo);
     }
-    pass.lock().map_err(|e| io_fail(&lock, e))?;
-    let pass = resumption::Permit::pass(pass);
+    let pass = resumption::Permit::pass(Held::lock(pass).map_err(|e| io_fail(&lock, e))?);
     let mut p = Pass {
         cfg,
         inbox,
@@ -188,13 +189,13 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         .create(true)
         .open(&lock)
         .map_err(|e| io_fail(&lock, e))?;
-    if !lock_within(&held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+    let Some(held) = Held::lock_within(held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? else {
         return Err(Fail::new(
             1,
             "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
         ));
-    }
-    let permit = resumption::Permit::new(held);
+    };
+    let permit = resumption::Permit::pass(held);
     let p = Pass {
         cfg,
         inbox,
@@ -217,7 +218,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
 mod dirs;
 use dirs::dirs;
 mod forget;
-use forget::{forget, lock_within};
+use forget::forget;
 mod scope;
 use scope::told;
 
