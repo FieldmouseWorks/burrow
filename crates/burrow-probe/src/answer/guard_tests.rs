@@ -4,7 +4,7 @@
 //! environment `runners` reads facts in.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use super::facts_tests::{Fake, HASH, base, command, config, machine, show};
@@ -14,8 +14,7 @@ use crate::query::Query;
 
 fn exe(path: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(path, "#!/bin/sh\n");
 }
 
 fn runner(cfg: &Config, root: &Path, fake: &Fake) -> String {
@@ -253,13 +252,13 @@ fn a_path_directory_the_probe_could_not_search_leaves_the_toolchain_unknown() {
     {
         let locked = root.join("opt/locked");
         fs::create_dir_all(&locked).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        burrow_test::permissions(&locked, 0o000);
         cfg.runners[0].environment.insert(
             "PATH".into(),
             "/opt/locked:/etc/actions-runner/ci-runner/bin".into(),
         );
         let got = runner(&cfg, root, &fake);
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::permissions(&locked, 0o755);
         assert!(
             got.contains("cargo unknown: not found in the directories searched; the probe could not search /opt/locked (unknown: the probe may not read it)"),
             "{got}"

@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -156,8 +156,7 @@ pub(super) fn command(root: &Path, dir: &str, package: &str, name: &str) {
     let store = root.join(format!("nix/store/{HASH}-{package}/bin"));
     fs::create_dir_all(&store).unwrap();
     let file = store.join(name);
-    fs::write(&file, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&file, "#!/bin/sh\n");
     let dir = root.join(dir.trim_start_matches('/'));
     fs::create_dir_all(&dir).unwrap();
     symlink(
@@ -430,14 +429,14 @@ fn an_unreadable_home_is_unknown_and_an_unknown_runner_is_refused() {
         "default_toolchain = \"x\"\n",
     )
     .unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o000)).unwrap();
+    burrow_test::permissions(&home, 0o000);
     let cfg = config(root);
     let fake = Fake::default();
     let m = machine(&cfg, root, &fake);
     let got = m.answer(&Query::Runners {
         name: Some("ci-runner".into()),
     });
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(&home, 0o755);
     let got = got.unwrap();
     // Root reads anything: the test only means something as a user.
     if !fs::read_to_string("/proc/self/status")
