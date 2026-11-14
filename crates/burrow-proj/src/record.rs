@@ -276,27 +276,10 @@ impl Record {
 pub fn derive(job: &Job) -> Record {
     let stage = stage(job);
     let state = stage.to_string();
-    let awaited = match read(&job.path("await")) {
-        Some(text) if filled(&job.path("await")) => awaits(&text),
-        _ => Vec::new(),
-    };
+    let awaited = awaited(job);
     let facts = facts(job, &state, &awaited);
     let n = job.turns().unwrap_or_default();
-    let retry = job.turns().is_some_and(|n| job.retry_pending(&n));
-    let mut wait = match &stage {
-        Stage::Parked => vec![Wait::Policy(crate::policy::waits_for(job))],
-        Stage::Queued if !retry => vec![Wait::Slot],
-        Stage::Running => crate::turn::lines(&job.turn(&n, "wait"))
-            .into_iter()
-            .filter_map(|l| {
-                let mut fields = l.split('\t');
-                let since = fields.next().unwrap_or_default().to_owned();
-                let what = fields.next().unwrap_or(&l).to_owned();
-                (!what.is_empty()).then_some(Wait::Line { since, what })
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let mut wait = stage_waits(job, &stage, &n);
     let unread = match holds(job) {
         Ok(held) => {
             wait.extend(held);
@@ -336,8 +319,41 @@ pub fn derive(job: &Job) -> Record {
         next,
         history: history(job),
         awaits: awaited,
-        ends: crate::turn::lines(&job.turn(&n, "end")),
+        ends: ends(job, &n),
         facts,
+    }
+}
+
+/// Each PR or issue it awaits, as its await says.
+pub(crate) fn awaited(job: &Job) -> Vec<Await> {
+    match read(&job.path("await")) {
+        Some(text) if filled(&job.path("await")) => awaits(&text),
+        _ => Vec::new(),
+    }
+}
+
+/// How turn N said it ends, a line each.
+pub(crate) fn ends(job: &Job, n: &str) -> Vec<String> {
+    crate::turn::lines(&job.turn(n, "end"))
+}
+
+/// What its stage waits on: the policy for a parked job, a slot for a
+/// queued turn (one a transfer holds waits on that instead), and for a
+/// running turn, each thing its commands wait in line for.
+pub(crate) fn stage_waits(job: &Job, stage: &Stage, n: &str) -> Vec<Wait> {
+    match stage {
+        Stage::Parked => vec![Wait::Policy(crate::policy::waits_for(job))],
+        Stage::Queued if !job.retry_pending(n) => vec![Wait::Slot],
+        Stage::Running => crate::turn::lines(&job.turn(n, "wait"))
+            .into_iter()
+            .filter_map(|l| {
+                let mut fields = l.split('\t');
+                let since = fields.next().unwrap_or_default().to_owned();
+                let what = fields.next().unwrap_or(&l).to_owned();
+                (!what.is_empty()).then_some(Wait::Line { since, what })
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -361,17 +377,23 @@ fn next(stage: &Stage, wait: &[Wait], facts: Option<&Facts>) -> String {
 }
 
 /// Turn N's file of kind `f`, or, for a job from before each turn kept its
-/// own, the unnumbered one when it's no older than turn N's prompt (what
-/// [`Job::adopt`] moves into place).
-fn turn_file(job: &Job, n: &str, f: &str) -> PathBuf {
+/// own, the unnumbered one where [`Job::adopt`] would move it into place:
+/// when the job has a turn, the file is no older than that turn's prompt,
+/// and, for an outcome, the unit that may still read it back is gone.
+pub(crate) fn turn_file(job: &Job, n: &str, f: &str) -> PathBuf {
     let numbered = job.turn(n, f);
-    if numbered.exists() {
+    if numbered.exists() || !crate::job::valid_turn(n) {
         return numbered;
     }
     let old = job.path(f);
     let mtime = |p: &Path| fs::metadata(p).ok()?.modified().ok();
     match (mtime(&old), mtime(&job.path(&format!("prompt.{n}")))) {
-        (Some(t), prompt) if prompt.is_none_or(|p| p <= t) => old,
+        (Some(t), prompt)
+            if prompt.is_none_or(|p| p <= t)
+                && (f != "outcome" || systemd::gone(job.cfg, &job.unit())) =>
+        {
+            old
+        }
         _ => numbered,
     }
 }
@@ -587,7 +609,6 @@ pub fn note(job: &Job, why: &str) -> Result<(), String> {
     if !job.dir.is_dir() {
         return Ok(());
     }
-    let to = derive(job).summary();
     let path = history_path(job);
     let failed = |e: io::Error| format!("{}: {e}", path.display());
     crate::ask::ensure(job)?;
@@ -599,6 +620,9 @@ pub fn note(job: &Job, why: &str) -> Result<(), String> {
         .map_err(failed)?;
     // Two notes at once append one change, not two.
     f.lock().map_err(failed)?;
+    // Derived under the lock, so a note that waited for another's can't
+    // append a state from before it.
+    let to = derive(job).summary();
     let from = fs::read_to_string(&path)
         .map_err(failed)?
         .lines()

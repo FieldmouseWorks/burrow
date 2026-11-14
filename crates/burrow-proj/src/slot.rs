@@ -196,6 +196,7 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     if automation_paused(job.cfg, job) {
         crate::policy::mark(job, "queued", false, Some(crate::policy::DENIED))
             .map_err(io::Error::other)?;
+        crate::record::noted(job, &format!("turn {n} parked by the policy"));
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
     let _ = fs::remove_file(crate::policy::path(job, "order"));

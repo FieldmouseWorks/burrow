@@ -14,10 +14,13 @@ use crate::job::Job;
 /// up when `up` is.
 fn rig(tmp: &Path, up: bool) -> Config {
     let ctl = tmp.join("systemctl");
-    burrow_test::executable(
-        &ctl,
-        format!("#!/bin/sh\nexit {}\n", if up { 0 } else { 3 }),
-    );
+    // Up, or gone: `show` says inactive and `is-active` fails.
+    let script = if up {
+        "#!/bin/sh\nexit 0\n"
+    } else {
+        "#!/bin/sh\ncase \"$*\" in *show*) echo inactive; exit 0;; esac\nexit 3\n"
+    };
+    burrow_test::executable(&ctl, script);
     let mut v = example();
     v["jobs"] = tmp.join("jobs").to_str().unwrap().into();
     v["tools"]["systemctl"] = ctl.to_str().unwrap().into();
@@ -305,4 +308,42 @@ fn the_history_notes_each_change_once() {
     assert_eq!(j.state(), "running");
     assert_eq!(j.lifecycle().unwrap(), ("running".to_owned(), vec![]));
     assert_eq!(derive(&j).history.len(), 3);
+}
+
+#[test]
+fn a_job_from_before_numbered_turns_reads_as_adopt_would_move_it() {
+    let at = |p: &Path, secs: u64| {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap()
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = rig(tmp.path(), false);
+    // No turn: nothing unnumbered is any turn's.
+    let none = Job::new(&cfg, "none");
+    fs::create_dir_all(&none.dir).unwrap();
+    fs::write(none.path("outcome"), "done").unwrap();
+    assert_eq!(none.state(), "failed");
+    // Written after turn 1's prompt: turn 1's, its answer too.
+    let j = job(&cfg, "j");
+    at(&j.path("prompt.1"), 1000);
+    fs::write(j.path("outcome"), "done").unwrap();
+    fs::write(j.path("result"), "the answer").unwrap();
+    assert_eq!(j.state(), "done");
+    let row = crate::snapshot::row(&j, crate::host_jobs::View::Owner);
+    assert_eq!(
+        (row.state.as_str(), row.answer.as_str()),
+        ("done", "the answer")
+    );
+    // Older than turn 1's prompt: an earlier turn's.
+    at(&j.path("outcome"), 10);
+    at(&j.path("result"), 10);
+    assert_eq!(j.state(), "failed");
+    assert_eq!(
+        crate::snapshot::row(&j, crate::host_jobs::View::Owner).answer,
+        ""
+    );
 }

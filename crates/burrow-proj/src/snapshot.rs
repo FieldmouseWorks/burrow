@@ -492,10 +492,12 @@ fn recent(cfg: &Config, limit: usize, view: View) -> Result<Vec<JobRow>, Fail> {
 /// A job's row: its record ([`crate::record`]) printed, with what it runs
 /// as and its latest answer.
 pub(crate) fn row(job: &Job, view: View) -> JobRow {
-    let record = crate::record::derive(job);
+    // The parts of its record a row prints, derived as the record is.
     let n = job.turns().unwrap_or_default();
-    let waits = &record.wait;
-    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    let stage = crate::record::stage(job);
+    let waits = crate::record::stage_waits(job, &stage, &n);
+    let result =
+        crate::state_reads::bytes(&crate::record::turn_file(job, &n, "result")).unwrap_or_default();
     // A shortened credential may lose its closing delimiter. The bridge's
     // view redacts the complete answer first, while it still has its
     // logical boundaries.
@@ -523,10 +525,13 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
                 _ => None,
             })
             .collect(),
-        awaits: record.awaits.iter().map(|a| a.target.clone()).collect(),
-        ends: record.ends.clone(),
+        awaits: crate::record::awaited(job)
+            .into_iter()
+            .map(|a| a.target)
+            .collect(),
+        ends: crate::record::ends(job, &n),
         answer: String::from_utf8_lossy(&result[..cut]).replace('\n', " "),
-        state: record.stage.to_string(),
+        state: stage.to_string(),
     }
 }
 

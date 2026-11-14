@@ -222,7 +222,6 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
     )
     .map_err(|e| e.to_string())?;
     wake(job.cfg);
-    crate::record::noted(job, "parked by the policy");
     Ok(())
 }
 
