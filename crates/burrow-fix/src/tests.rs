@@ -49,6 +49,8 @@ struct Runner {
     held: Vec<(String, String)>,
     /// Whether a stop fails.
     stop_fails: bool,
+    /// Whether a start reads as failed, though its job started.
+    start_fails: bool,
 }
 
 #[derive(Clone, Default)]
@@ -63,6 +65,9 @@ impl Jobs for Fake {
         let id = format!("job-{}", r.started.len() + 1);
         r.started.push((repo.into(), key.into(), task.into()));
         r.held.push((key.into(), id.clone()));
+        if r.start_fails {
+            return Err("proj run failed".into());
+        }
         Ok(id)
     }
     fn find(&self, key: &str) -> Result<Option<String>, String> {
@@ -576,13 +581,62 @@ fn a_job_that_wont_stop_keeps_its_pr_held() {
     let r = rig();
     r.script(&[overdue], answered(None), &[HEAD]);
     r.runner.0.lock().unwrap().stop_fails = true;
-    let t = r.serve(2);
+    let t = r.serve(3);
     let err = r.ask(&fix(HEAD)).unwrap_err();
     assert!(err.contains("wouldn't stop"), "{err}");
     // No second fix starts beside it, and a restart can find it.
     let err = r.ask(&fix(HEAD)).unwrap_err();
-    t.join().unwrap();
     assert!(err.contains("at work already"), "{err}");
     assert_eq!(r.runner.0.lock().unwrap().started.len(), 1);
     assert_eq!(fs_count(&r.cfg.state.join("live")), 1);
+    // Once it stops, the PR's next fix runs.
+    r.runner.0.lock().unwrap().stop_fails = false;
+    r.script(&[record("done")], answered(None), &[HEAD]);
+    r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(
+        (runner.started.len(), &runner.stopped[..]),
+        (2, &["job-1".to_owned()][..])
+    );
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_start_that_read_as_failed_leaves_no_job_at_work() {
+    let r = rig();
+    r.script(&[record("running")], answered(None), &[HEAD]);
+    r.runner.0.lock().unwrap().start_fails = true;
+    let t = r.serve(2);
+    let err = r.ask(&fix(HEAD)).unwrap_err();
+    assert!(err.contains("proj run failed"), "{err}");
+    assert_eq!(r.runner.0.lock().unwrap().stopped, ["job-1"]);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+    r.runner.0.lock().unwrap().start_fails = false;
+    r.script(&[record("done")], answered(None), &[HEAD]);
+    r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+}
+
+#[test]
+fn a_restart_serves_on_when_a_lost_job_wont_stop_and_holds_its_pr() {
+    let r = rig();
+    let k = format!("{}/1", key(REPO, 7));
+    std::fs::write(r.cfg.state.join("live").join(k.replace('/', "+")), &k).unwrap();
+    {
+        let mut runner = r.runner.0.lock().unwrap();
+        runner.held.push((k, "job-9".into()));
+        runner.stop_fails = true;
+    }
+    assert_eq!(r.broker.reconcile(), Ok(0));
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 1);
+    r.script(&[record("done")], answered(None), &[HEAD]);
+    let t = r.serve(2);
+    let err = r.ask(&fix(HEAD)).unwrap_err();
+    assert!(err.contains("won't stop"), "{err}");
+    r.runner.0.lock().unwrap().stop_fails = false;
+    r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+    assert_eq!(r.runner.0.lock().unwrap().stopped, ["job-9"]);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
 }

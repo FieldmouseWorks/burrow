@@ -26,7 +26,7 @@ use burrow_producer::serve::Work;
 use conary_core::plugin::{
     Answer, Choice, Context, Executed, FixResult, Identity, Request, Response, Task, version,
 };
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -43,8 +43,10 @@ pub struct Broker {
     pub github: GitHub,
     /// How often it reads a job's record while it waits.
     pub look: Duration,
-    /// The PRs with a live fix here, by [`key`].
-    live: Mutex<HashSet<String>>,
+    /// The PRs with a live fix here, by [`key`]: a request's own, or the
+    /// job key of one that wouldn't stop ([`Held::keep`]), stopped again
+    /// before the PR's next fix starts.
+    live: Mutex<HashMap<String, Option<String>>>,
 }
 
 /// A PR's live fix, here, and the proj key its job is held under: let go
@@ -57,9 +59,13 @@ struct Held<'a> {
 }
 
 impl Held<'_> {
-    /// Its job wouldn't stop: the PR stays held, and its job's key kept for
-    /// a restart to stop it, so no second fix starts beside it.
+    /// Its job wouldn't stop: the PR stays held by its job's key, kept on
+    /// disk too, so no second fix starts beside it until that job is
+    /// stopped ([`Broker::hold`], [`Broker::reconcile`]).
     fn keep(self) {
+        if let Ok(mut live) = self.broker.live.lock() {
+            live.insert(self.pr.clone(), Some(self.job.clone()));
+        }
         std::mem::forget(self);
     }
 }
@@ -71,6 +77,11 @@ impl Drop for Held<'_> {
             live.remove(&self.pr);
         }
     }
+}
+
+/// The PR key a job key is beneath.
+fn pr_of(job: &str) -> &str {
+    job.rsplit_once('/').map_or(job, |(pr, _)| pr)
 }
 
 /// A PR's own key, in proj's key alphabet (letters, digits and `._/:-`).
@@ -108,20 +119,56 @@ impl Broker {
     }
 
     /// At startup: stop each job a fix was waiting on when the broker
-    /// stopped, its connection lost with it. How many it stopped.
+    /// stopped, its connection lost with it. How many it stopped. One that
+    /// won't stop keeps its PR held, as it would have before the restart,
+    /// and the rest are served.
     pub fn reconcile(&self) -> Result<usize, String> {
         let dir = self.cfg.state.join("live");
         let mut stopped = 0;
         for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let path = entry.map_err(|e| e.to_string())?.path();
-            let key = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            if let Some(id) = self.jobs.find(key.trim())? {
-                self.jobs.stop(&id)?;
-                stopped += 1;
+            let job = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let job = job.trim();
+            match self.let_go(job) {
+                Ok(found) => {
+                    stopped += usize::from(found);
+                    fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                }
+                Err(e) => {
+                    eprintln!("burrow-fix: {job} wouldn't stop, so its PR stays held: {e}");
+                    self.live
+                        .lock()
+                        .map_err(|_| "the broker's lock is poisoned")?
+                        .insert(pr_of(job).to_owned(), Some(job.to_owned()));
+                }
             }
-            fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         Ok(stopped)
+    }
+
+    /// Stop the job held under `job`, if there is one: whether there was.
+    fn let_go(&self, job: &str) -> Result<bool, String> {
+        match self.jobs.find(job)? {
+            Some(id) => self.jobs.stop(&id).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// Why a request's fix ended with no answer, once its job (by `id`, or
+    /// by its key when its start may have run all the same) is stopped; or,
+    /// when it won't stop, its PR kept held.
+    fn ended(&self, held: Held<'_>, id: Option<&str>, why: String) -> String {
+        let stopped = match id {
+            Some(id) => self.jobs.stop(id),
+            None => self.let_go(&held.job).map(|_| ()),
+        };
+        match stopped {
+            Ok(()) => why,
+            Err(e) => {
+                held.keep();
+                format!("{why}; and its job wouldn't stop: {e}")
+            }
+        }
     }
 
     /// One request's fix: its answer, or why there's none.
@@ -158,20 +205,16 @@ impl Broker {
         let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
         let kept = self.kept(&held.job);
         fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
-        let id = self.jobs.start(repo, &held.job, &task)?;
+        // Stopped before the answer is let go of, so no fix is left at work
+        // for a request that's over: a start that read as failed may have
+        // started all the same.
+        let id = match self.jobs.start(repo, &held.job, &task) {
+            Ok(id) => id,
+            Err(why) => return Err(self.ended(held, None, why)),
+        };
         let record = match self.wait(&id, work) {
             Ok(record) => record,
-            Err(why) => {
-                // Stopped before the answer is let go of, so no fix is left
-                // at work for a request that's over.
-                return Err(match self.jobs.stop(&id) {
-                    Ok(()) => why,
-                    Err(e) => {
-                        held.keep();
-                        format!("{why}; and its job {id} wouldn't stop: {e}")
-                    }
-                });
-            }
+            Err(why) => return Err(self.ended(held, Some(&id), why)),
         };
         let said = self
             .jobs
@@ -225,9 +268,20 @@ impl Broker {
             .live
             .lock()
             .map_err(|_| "the broker's lock is poisoned")?;
-        if !live.insert(key.clone()) {
-            return Err(format!("a fix of {repo}#{pr} is at work already"));
+        match live.get(&key) {
+            None => {}
+            Some(None) => return Err(format!("a fix of {repo}#{pr} is at work already")),
+            // A fix whose job wouldn't stop: stopped now, or still held.
+            Some(Some(job)) => {
+                self.let_go(job).map_err(|e| {
+                    format!(
+                        "a fix of {repo}#{pr} is at work already, and its job {job} won't stop: {e}"
+                    )
+                })?;
+                let _ = fs::remove_file(self.kept(job));
+            }
         }
+        live.insert(key.clone(), None);
         Ok(Held {
             broker: self,
             pr: key,
