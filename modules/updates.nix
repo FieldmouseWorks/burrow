@@ -96,7 +96,7 @@ let
     explains = cfg.healthExplains;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
-    checkTimeout = 30;
+    checkTimeout = 90;
     settle = 20;
   });
   healthTool = pkgs.runCommand health {
@@ -693,16 +693,20 @@ in
           if [ "$(id -un)" = ${user} ]; then claude --version
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
         '';
-        # Logged in, and not past the login's own expiry. Its stdout (who's
-        # logged in) goes no further than jq.
-        claude-login = ''
-          status() {
-            if [ "$(id -un)" = ${user} ]; then claude auth status --json
-            else runuser -u ${user} -- env HOME=${account.home} claude auth status --json; fi
+        # Whether Claude Code can authenticate: a live reading of its usage
+        # meter, which only an answer from its endpoint is (burrow-claude-login,
+        # of crates/burrow-usage-reset; no model call, and the token never
+        # leaves Claude Code). An expired login fails every server and job turn
+        # at once, so this names it rather than its symptoms.
+        claude-login = let
+          probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
+          claude = lib.getExe' config.burrow.claude.package "claude";
+        in ''
+          if [ "$(id -un)" = ${user} ]; then ${probe} ${claude}
+          else runuser -u ${user} -- env HOME=${account.home} ${probe} ${claude}; fi || {
+            echo "Claude Code can't authenticate as ${user}: its login expired. Log in again on this machine as ${user} (run claude, then /login)." >&2
+            exit 1
           }
-          status 2>/dev/null | jq -e '.loggedIn == true and (.loginExpiresAt == null
-            or (.loginExpiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > now)' >/dev/null \
-            || { echo "Claude Code isn't logged in as ${user} (claude auth status)" >&2; exit 1; }
         '';
       });
 

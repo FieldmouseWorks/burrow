@@ -112,3 +112,75 @@ fn a_denied_unit_still_stopping_is_vacated_and_parked() {
         calls(&log)
     );
 }
+
+/// The same machine with an inbox whose drain has one place, and a gh
+/// that logs every call and says nothing of any issue.
+fn inbox_rig() -> (tempfile::TempDir, Config, PathBuf) {
+    let (tmp, mut cfg, _) = rig("", "inactive");
+    let asked = tmp.path().join("gh-calls");
+    cfg.tools.gh = tmp.path().join("gh");
+    burrow_test::executable(
+        &cfg.tools.gh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{}'\nprintf 'HTTP/2.0 404 Not Found\\n\\n{{\"message\":\"Not Found\"}}'\nexit 1\n",
+            asked.display()
+        ),
+    );
+    let inbox = cfg.inbox.as_mut().unwrap();
+    inbox.state = tmp.path().join("state");
+    inbox.wake = tmp.path().join("wake.json");
+    inbox.triage = Some(crate::config::Triage {
+        sort_unlabelled: true,
+        owner_label: "needs-owner".into(),
+        owner: Some("sam".into()),
+        skip: Vec::new(),
+        at_once: 2,
+        drain: Some(crate::engine::Engine::Claude),
+        drain_jobs: 1,
+    });
+    fs::create_dir_all(&inbox.state).unwrap();
+    (tmp, cfg, asked)
+}
+
+#[test]
+fn a_pass_asks_github_nothing_of_a_parked_job_it_has_no_place_for() {
+    // On remi 127 inbox jobs sat parked behind three drain places, and each
+    // policy pass read every one's issue before finding it had no place:
+    // two thousand reads an hour of the installation's five thousand.
+    let (_tmp, cfg, asked) = inbox_rig();
+    let state = cfg.inbox.as_ref().unwrap().state.clone();
+    // The drain's one place is taken: a handoff still enrolling.
+    let taken = state.join("sam_web-1");
+    fs::create_dir_all(&taken).unwrap();
+    fs::write(taken.join("drained"), "sam/web#1").unwrap();
+    // A parked inbox job of issue 2 waits for it.
+    job(&cfg, "waiting", "sam/web", "done");
+    let waiting = Job::new(&cfg, "waiting");
+    fs::write(waiting.path("inbox-issue"), "true\n").unwrap();
+    fs::write(waiting.path("link"), "https://github.com/sam/web/issues/2").unwrap();
+    let record = state.join("sam_web-2");
+    fs::create_dir_all(&record).unwrap();
+    fs::write(record.join("job"), "waiting").unwrap();
+    fs::write(record.join("drained"), "sam/web#2").unwrap();
+    crate::policy::mark(&waiting, "done", false).unwrap();
+
+    for _ in 0..2 {
+        let _ = crate::policy::reconcile(&cfg);
+        assert!(crate::policy::parked(&waiting));
+        assert_eq!(
+            calls(&asked),
+            Vec::<String>::new(),
+            "a pass with no place for the job asked GitHub about it"
+        );
+    }
+    // The place frees: now its issue's labels are read before it's released.
+    fs::remove_dir_all(&taken).unwrap();
+    let _ = crate::policy::reconcile(&cfg);
+    assert!(
+        calls(&asked)
+            .iter()
+            .any(|c| c.contains("repos/sam/web/issues/2")),
+        "{:?}",
+        calls(&asked)
+    );
+}

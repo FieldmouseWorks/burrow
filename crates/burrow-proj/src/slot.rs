@@ -51,7 +51,7 @@ use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
-pub const RETRY_HANDOVER_FORMAT: &str = "3";
+pub const RETRY_HANDOVER_FORMAT: &str = "4";
 const NEXT_FRESH: i64 = 2;
 /// Whatever the note says, a waiter looks this often, which is as long as a
 /// job whose class changed can go on holding its old place in line.

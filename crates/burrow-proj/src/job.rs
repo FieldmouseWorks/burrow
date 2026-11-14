@@ -3,7 +3,9 @@
 //! Set when it's run: `project` (where it runs), `kick` (what each turn's
 //! start and end kick, a line each), `timeout` and `idle`, `pipeline` and
 //! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
-//! --vm). Kept across turns: `turns` (the latest turn's number), `session`
+//! --vm). What it runs as (`project`, `engine`, `role`, `app`, `agent`,
+//! `owned`) is its protected request ([`Request`]); those files are its
+//! published copy. Kept across turns: `turns` (the latest turn's number), `session`
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
@@ -17,7 +19,8 @@
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
 //! one of its commands waits in line for), `N.waits` (where they say so),
-//! `N.cut` (what it was told when its answer was cut short), and `N.late`,
+//! `N.cut` (what it was told when its answer was cut short), `N.answers`
+//! (the job's answers.json as the turn left it, if there was one), `N.holds` (what it held open then) and `N.captured` (both kept), and `N.late`,
 //! `N.quiet` and `N.stopped` (what stopped it). And `await` (each PR or
 //! issue an ended turn awaits: TARGET, since, its fingerprint then, a tab
 //! apart), with the running turn's own in `await.next` and `end.next`.
@@ -27,8 +30,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod request;
 mod start;
 
+pub(crate) use request::Request;
 #[cfg(test)]
 mod locking_tests;
 
@@ -265,7 +270,7 @@ impl<'a> Job<'a> {
             && self.state() == "failed"
             && !filled(&self.turn(n, "outcome"))
             && !self.turn(n, "stopped").exists()
-            && !filled(&self.path("agent"))
+            && Request::load(self).is_ok_and(|r| r.agent.is_none())
             && crate::engine::stream_names_session(&self.turn(n, "jsonl"), 0)
             && last_result(&self.turn(n, "jsonl"), 0).is_none()
     }
@@ -343,6 +348,14 @@ impl<'a> Job<'a> {
             .map_err(|e| format!("{}: {e}", self.path("lock").display()))?;
         let state = self.state();
         let mut held = self.holds()?;
+        held.extend(self.limit_holds(&state));
+        Ok((state, held))
+    }
+
+    /// What a quota or usage limit holds a turn for, a line each, as
+    /// [`Job::lifecycle`] adds it to [`Job::holds`].
+    fn limit_holds(&self, state: &str) -> Vec<String> {
+        let mut held = Vec::new();
         if let Some(facts) = self.facts() {
             if let Some((_, reset)) = facts.quota_reset {
                 held.push(format!("quota GitHub {reset}"));
@@ -352,7 +365,7 @@ impl<'a> Job<'a> {
                     .then(|| facts.spent.map(|s| s.release()))
                     .flatten()
             });
-            if matches!(state.as_str(), "queued" | "running")
+            if matches!(state, "queued" | "running")
                 && let Some(release) = usage::last_release(self.cfg)
                 && self.engine_label(&facts.turn) == "Claude"
             {
@@ -363,7 +376,38 @@ impl<'a> Job<'a> {
                 held.push(format!("usage {engine} {reset}"));
             }
         }
-        Ok((state, held))
+        held
+    }
+
+    /// Keeps the latest turn's answers as it left them, beside what it held
+    /// open (`N.answers`, `N.holds`), and says so (`N.captured`, written
+    /// last): the next turn rewrites answers.json, and whoever collects a
+    /// job's answers (the steward's claims) may not have looked before then.
+    /// Run as a turn ends and again before the next starts, so one whose end
+    /// never ran, or failed, is kept all the same; and a turn doesn't start
+    /// until it succeeds. A file that can't be read is an error, never an
+    /// absent one.
+    pub fn capture(&self) -> Result<(), String> {
+        let Some(n) = self.turns() else { return Ok(()) };
+        if self.turn(&n, "captured").exists() {
+            return Ok(());
+        }
+        let failed = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
+        match crate::state_reads::bytes(&self.path("answers.json")) {
+            Ok(text) => {
+                let mut held = self.holds()?;
+                held.extend(self.limit_holds(&self.state()));
+                let holds = self.turn(&n, "holds");
+                crate::state_reads::write(&holds, held.join("\n"))
+                    .map_err(|e| failed(&holds, &e))?;
+                let answers = self.turn(&n, "answers");
+                crate::state_reads::write(&answers, text).map_err(|e| failed(&answers, &e))?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(&self.path("answers.json"), &e)),
+        }
+        let done = self.turn(&n, "captured");
+        crate::state_reads::write(&done, "").map_err(|e| failed(&done, &e))
     }
 
     /// What it holds open, whatever its latest turn's outcome (a failed
@@ -425,7 +469,7 @@ impl<'a> Job<'a> {
         let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
         Some(Facts {
             id: self.id.to_owned(),
-            owned: self.path("owned").exists(),
+            owned: Request::load(self).is_ok_and(|r| r.owned),
             unstick: self.path("unstick").exists(),
             stopped: self.turn(&n, "stopped").exists(),
             end: opt(self.turn(&n, "end")),
@@ -556,7 +600,7 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-fn valid_turn(n: &str) -> bool {
+pub(crate) fn valid_turn(n: &str) -> bool {
     !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|v| v > 0)
 }
 
@@ -841,11 +885,18 @@ mod tests {
         .unwrap();
         assert!(!job.cut_off("2"), "it ended in a result");
         fs::write(&stream, session).unwrap();
-        for f in [job.turn("2", "stopped"), job.path("agent")] {
-            fs::write(&f, "x\n").unwrap();
-            assert!(!job.cut_off("2"), "{}", f.display());
-            fs::remove_file(&f).unwrap();
-        }
+        fs::write(job.turn("2", "stopped"), "x\n").unwrap();
+        assert!(!job.cut_off("2"), "stopped");
+        fs::remove_file(job.turn("2", "stopped")).unwrap();
+        // A sandbox's, as its starter made it: a file the job writes isn't.
+        fs::write(job.path("agent"), "x\n").unwrap();
+        assert!(job.cut_off("2"), "a written agent file");
+        let mut request = crate::job::Request::load(&job).unwrap();
+        request.agent = Some("x".into());
+        request.save(&job).unwrap();
+        assert!(!job.cut_off("2"), "a sandbox's");
+        request.agent = None;
+        request.save(&job).unwrap();
         fs::write(job.turn("2", "outcome"), "failed\n").unwrap();
         assert!(!job.cut_off("2"), "it has an outcome");
     }

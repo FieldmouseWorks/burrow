@@ -40,6 +40,24 @@ TESTS = ("Run the tests of what you changed before you push (for a merge, of wha
 NO_CI_TESTS = "Run the repo's tests before you push: it has no CI to run them."
 
 
+# How a fix job weighs review findings, the same from a PR's first round to
+# past its round limit (where step.py hands what's left to a job and a judge
+# reads its answers, PAST_LIMIT): on their merits, not on their count or the
+# severity a reviewer gave them. What must be fixed is a real defect or a
+# rule the repo's reviewers flag as P1 broken (MUST_FIX); the rest is
+# answered with a reason, so no round goes on a finding that names neither.
+MUST_FIX = ("a concrete defect (inputs or a state you can name that give a wrong result, a crash, lost data or a hole), "
+            "or a break of a rule the Code Review Rules of the repo's AGENTS.md, as its base has them, list as P1")
+FINDINGS = ("Weigh every finding on its merits, the same from the first round on, past the review-round limit too, "
+            "whatever severity the reviewer gave it. "
+            f"Fix in full each one that is {MUST_FIX}: all of what its finding says a complete fix covers, with a "
+            "regression test for each of those cases that fails without the fix, not only the line the thread is on. "
+            "Answer the rest with your reasons and change nothing for them: an edge no input or state can reach (say why "
+            "not), a style preference no rule asks for, or a hypothetical the finding gives no concrete failure scenario "
+            "for. A finding labelled P1 that names no rule on that P1 list, no reason in the PR's description that doesn't hold "
+            "(settled as below) and no concrete failure scenario counts as P2 here: its label alone doesn't make it one to fix. ")
+
+
 def answers(repo, pr):
     """How a fix job says what it did: in its answers file, which the steward
     posts only once the PR's head is the job's push (claims.py)."""
@@ -48,6 +66,8 @@ def answers(repo, pr):
         f"write what you have to say to {claims.brief_file()} as JSON, "
         '{"pushed": COMMIT, "threads": [{"id": THREAD_ID, "fixed": true, "reply": TEXT}], "description": TEXT, "comment": TEXT}, '
         "and the steward posts it, resolving each thread after its reply, only once the PR's head is your push. "
+        "It goes up as each turn of yours ends: one that ends awaiting this PR (proj await) is resumed by its next change, "
+        "and a later turn's answers go up only if that turn rewrites the file. "
         "pushed is the full commit your push put on the branch (git rev-parse HEAD, once git push has said it updated the branch), "
         "or null if you pushed nothing. threads has one entry for each thread you settled, by its id "
         f"(gh api graphql, the reviewThreads of PR {pr['number']} in {repo}): fixed is true only for one your push fixes, and "
@@ -107,8 +127,7 @@ def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, 
         f"Fetch it (git fetch origin {branch}) and work in {WORKTREE}, made at exactly that commit "
         f"(git worktree add --detach DIR {head}); push from there with git push origin HEAD:refs/heads/{branch}. "
         "For every unresolved review thread (the reviewers', which the steward posts as its GitHub App marked Codex, or anyone's): "
-        "either fix it, fixing all of what its finding says a complete fix covers, with a test for each of those cases, "
-        f"not only the line the thread is on, or answer it with why it's wrong or out of scope. {CLAIMS}"
+        f"either fix it or answer it with why it's wrong or out of scope. {FINDINGS}{CLAIMS}"
         "A fix that belongs in another repo (one this PR pins, say) goes there, as a PR of its own; end your turn with "
         "`proj await` on it, and the steward leaves this PR to you meanwhile: proj resumes you once it changes, to bring "
         "the fix in here once it has landed. "
@@ -177,7 +196,7 @@ REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
 # stand in for their last look, so the judge reads those too.
 PAST_LIMIT = ("it went past its review-round limit, so its reviewers weren't asked to look again and a Claude job "
               "fixed or answered their last findings (read each thread as well as the diff: a finding answered away "
-              "that is a real defect counts as failing, the same as a failing build or test, so say which), "
+              f"that is {MUST_FIX} counts as failing, the same as a failing build or test, so say which), "
               "every thread is resolved")
 # A dependency update isn't reviewed: the judge is the first to read it.
 DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"

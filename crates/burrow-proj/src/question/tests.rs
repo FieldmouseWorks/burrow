@@ -74,6 +74,60 @@ esac
 }
 
 #[test]
+fn a_turn_keeps_the_answers_file_and_what_it_held_as_it_left_them() {
+    let f = Fixture::new();
+    f.ending(1, "ask");
+    fs::write(f.job().path("answers.json"), "first").unwrap();
+    fs::write(
+        f.job().path("await"),
+        "sam/r#5\t1800000000\t{}\nsam/up#3\t1800000000\t{}\n",
+    )
+    .unwrap();
+    crate::cmd::finish(&f.cfg, "j1").unwrap();
+    fs::write(f.job().path("answers.json"), "second").unwrap();
+    // Kept once: a later capture (the next turn's start) doesn't take the
+    // rewritten file for turn 1's.
+    f.job().capture().unwrap();
+    let kept = |name: &str| fs::read_to_string(f.job().turn("1", name)).unwrap();
+    assert_eq!(kept("answers"), "first");
+    assert_eq!(kept("holds"), "ask\nawait sam/r#5\nawait sam/up#3");
+    assert!(f.job().turn("1", "captured").exists());
+}
+
+#[test]
+fn a_turn_with_no_answers_is_confirmed_absent_not_assumed() {
+    let f = Fixture::new();
+    f.ending(1, "done");
+    crate::cmd::finish(&f.cfg, "j1").unwrap();
+    assert!(f.job().turn("1", "captured").exists());
+    assert!(!f.job().turn("1", "answers").exists());
+}
+
+// An end hook that never ran (the machine went down) or failed leaves the
+// capture to the next turn's start, which refuses to go on without it: the
+// only copy of the answers is never rewritten uncollected.
+#[test]
+fn the_next_turn_does_not_start_until_the_last_ones_answers_are_kept() {
+    let f = Fixture::new();
+    f.ending(1, "done");
+    // answers.json is a directory: it can't be read, which isn't absent.
+    fs::create_dir(f.job().path("answers.json")).unwrap();
+    assert!(crate::cmd::finish(&f.cfg, "j1").is_err());
+    assert!(!f.job().turn("1", "captured").exists());
+    let err = crate::turn::start(&f.cfg, "j1", "again", false).unwrap_err();
+    assert!(err.contains("answers aren't kept"), "{err}");
+    assert!(f.job().turns().as_deref() == Some("1"));
+    // Readable again: kept by the start itself, without the end hook.
+    fs::remove_dir(f.job().path("answers.json")).unwrap();
+    fs::write(f.job().path("answers.json"), "left").unwrap();
+    f.job().capture().unwrap();
+    assert_eq!(
+        fs::read_to_string(f.job().turn("1", "answers")).unwrap(),
+        "left"
+    );
+}
+
+#[test]
 fn notifications_disabled_do_not_add_watcher_kicks() {
     use std::sync::{Arc, Mutex};
     let mut f = Fixture::new();
@@ -560,7 +614,9 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         fs::create_dir_all(&inbox.state).unwrap();
         fs::write(inbox.state.join(crate::inbox::WAITING), "sam/repo").unwrap();
         f.ending(1, "ask");
-        fs::write(f.job().path("owned"), "").unwrap();
+        let mut request = crate::job::Request::load(&f.job()).unwrap();
+        request.owned = true;
+        request.save(&f.job()).unwrap();
         fs::write(f.job().path("kick"), "completion").unwrap();
         let scratch = crate::scratch::dir(&f.cfg, "j1");
         fs::create_dir_all(&scratch).unwrap();
