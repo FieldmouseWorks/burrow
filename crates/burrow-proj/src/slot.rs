@@ -777,6 +777,7 @@ fn lock(path: &Path) -> Lock {
 }
 
 mod owner;
+pub(crate) mod table;
 
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
 /// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
