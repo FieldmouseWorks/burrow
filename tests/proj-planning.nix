@@ -21,8 +21,12 @@ import ./proj/test.nix { inherit self pkgs; planning = true; } "proj-planning" '
       assert machine.succeed(f"wc -c </data/dev/jobs/{planner}/prompt.1").strip().isdigit()
       assert int(machine.succeed(f"wc -c </data/dev/jobs/{planner}/prompt.1")) < 66000
       assert "inbox-done " + "x" * 70000 in machine.succeed(f"cat /data/dev/jobs/{planner}/task-source")
-      machine.succeed("su - dev -c 'proj-inbox o/r'")
-      machine.succeed("su - dev -c 'proj-inbox o/r'")
+      # Each pass runs as the wake-up it booked would: once the listing's and
+      # the drain's gaps are over (inbox/scope.rs, inbox/drain.rs), which
+      # this fixture's event port, recording kicks alone, never runs.
+      gaps_over = "rm -rf /var/lib/burrow/proj-inbox/.listed /var/lib/burrow/proj-inbox/.drain-asked"
+      machine.succeed(gaps_over + " && su - dev -c 'proj-inbox o/r'")
+      machine.succeed(gaps_over + " && su - dev -c 'proj-inbox o/r'")
       worker = machine.succeed("su - dev -c 'proj-inbox status'").split()[-1]
       assert worker != planner
       machine.succeed("rm /tmp/inbox-hold")

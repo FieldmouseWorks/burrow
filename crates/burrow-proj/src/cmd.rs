@@ -852,11 +852,12 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         names.push(watch::kick_for(&a.target));
     }
     // A ready issue waiting for a slot (proj-inbox's drain): whatever turn
-    // this was, its slot is room now, and the issue's repo's pass looks.
+    // this was, its slot is room now, and the drain's own pass looks, from
+    // the saved ready lists, listing nothing.
     if let Some(inbox) = &cfg.inbox
-        && let Some(repo) = read(&inbox.state.join(crate::inbox::WAITING))
+        && inbox.state.join(crate::inbox::WAITING).exists()
     {
-        names.push(format!("proj-inbox/{repo}"));
+        names.push(crate::inbox::DRAIN_KICK.to_owned());
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so

@@ -310,8 +310,15 @@ first. Triage includes a priority in its verdict and adds it only if no priority
 label exists when it acts. `proj status` and the probe's `queue` show drain
 capacity used/total and the handoffs using it, then the next five candidates from the drain's cached lists; eligibility and slot availability
 are checked when handing one on.
-While a `ready` issue waits for a slot, every job turn's end kicks a pass, since
-any of them frees one; a usage hold books one for when it resets.
+While a `ready` issue waits for a slot, every job turn's end kicks the drain's
+own pass (`proj-inbox drain`), since any of them frees one: it reads the cached
+lists and lists nothing. A usage hold books a pass for when it resets.
+However many events, kicks and turns' ends come at once, a repo's open issues
+are listed at most once a gap, and the drain asks GitHub at most once a gap
+(`LISTING_GAP` and `DRAIN_GAP` in crates/burrow-proj/src/inbox); what comes
+sooner books the pass that does it at the gap's end. With no idle slot on the
+engine an issue's cached labels route it to, the drain doesn't ask GitHub
+about it at all.
 
 Strangers' issues are never sorted or handed on: an agent reads them with the
 box's logins. Nor is one labelled `inbox.outsideLabel` (`outside text`), whoever
