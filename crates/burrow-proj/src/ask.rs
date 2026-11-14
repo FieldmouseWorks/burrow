@@ -137,9 +137,26 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     };
     let pending: PendingRecommendation = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     if !pending.turn.is_empty() && job.turns().as_deref() != Some(pending.turn.as_str()) {
-        return Ok(None);
+        // A recommendation left by the turn a handoff is ending is still the
+        // question's until the handoff has moved it to its successor or given
+        // it back: the launcher can stop between numbering the successor and
+        // retargeting the record.
+        let source = state(&job.path(crate::scratch::HANDOFF))?;
+        if source.as_deref().map(str::trim) != Some(pending.turn.as_str()) {
+            return Ok(None);
+        }
     }
     Ok(Some(pending.recommendation))
+}
+
+/// Whether a one-way recommendation is active for the open question and not
+/// yet committed to it: one [`pending`] still counts, so a superseded one
+/// (a later `done` or `await` marker) or another turn's doesn't. A handoff
+/// moves the recommendation to its successor's turn with the question, so a
+/// carried one counts. Such a question is one-way already: its default never
+/// runs on its own.
+fn one_way_pending(job: &Job) -> Result<bool, String> {
+    Ok(pending(job)?.is_some_and(|r| r.one_way))
 }
 
 /// The end marker commits the active declaration; only asks keep a pending
@@ -271,11 +288,19 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     if crate::question::acceptance_pending(job)? {
         return Ok(Some(crate::now() + 60));
     }
+    let busy = job.end_pending() || matches!(job.state().as_str(), "queued" | "running");
+    // A recommendation a handoff carried to a turn that never ran (or one left
+    // for a question already open) is the question's: committed now, with the
+    // question's identity, text and deadline kept, so neither its one-way flag
+    // nor its default is lost to the one on record.
+    if !busy && pending(job)?.is_some() {
+        finish(cfg, job, "ask")?;
+    }
     let Some(q) = load(job)? else { return Ok(None) };
     if crate::planning::admit(job).is_err() {
         return Ok(Some(crate::now() + 60));
     }
-    if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
+    if busy {
         return Ok(Some(q.due.max(crate::now() + 60)));
     }
     if crate::now() < q.due {
@@ -284,7 +309,8 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     // Admission may inspect another job under its lock. Do that before
     // taking the registry, which that job may need to publish its question.
     // Keep the admission result through acceptance instead of scanning again.
-    let capacity = if q.recommendation.one_way {
+    let one_way = q.recommendation.one_way || one_way_pending(job)?;
+    let capacity = if one_way {
         None
     } else {
         Some(crate::inbox::resumption::admission(cfg, job)?)
@@ -298,7 +324,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         return Ok(Some(q.due));
     }
     let time = burrow_probe::answer::utc(q.due);
-    if q.recommendation.one_way {
+    if q.recommendation.one_way || one_way {
         crate::inbox::enrollment::admit(job)?;
         // A one-way decision gets no engine and cannot accidentally execute
         // its default. Record a completed host turn for the normal issue writer.
@@ -565,6 +591,113 @@ mod tests {
         assert!(host_path(&job, "question-needs-owner").exists());
         assert!(load(&job).unwrap().is_none());
         assert_eq!(owner_lines(&cfg).len(), 1);
+    }
+    // A one-way upgrade left for a reversible question (a handoff carries it
+    // to a turn that may never run) is no reversible default's to override.
+    #[test]
+    fn a_pending_one_way_upgrade_stops_a_reversible_default_from_running() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        expire(&cfg, &job).unwrap();
+        drop(_held);
+        assert!(!job.path("prompt.2").exists(), "no engine ran the default");
+        assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
+        assert!(host_path(&job, "question-needs-owner").exists());
+    }
+    // A carried one-way recommendation with no committed question yet (the
+    // successor failed before it could commit one) is published at expiry with
+    // its own default, and an upgrade over a reversible question brings its
+    // default along, not the old one.
+    #[test]
+    fn a_carried_recommendation_is_committed_whole_when_the_successor_never_runs() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        expire(&cfg, &job).unwrap();
+        drop(_held);
+        assert_eq!(
+            read(&host_path(&job, "question-needs-owner")).as_deref(),
+            Some("delete it")
+        );
+        // No committed question at all.
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::remove_file(host_path(&job, "question")).unwrap();
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        assert!(expire(&cfg, &job).unwrap().is_some());
+        let q = load(&job).unwrap().unwrap();
+        assert!(q.recommendation.one_way);
+        assert_eq!(q.recommendation.default, "delete it");
+    }
+    // The launcher of a handoff can die after numbering the successor and
+    // before retargeting the recommendation: it is still the question's, for
+    // the handoff's source turn only, until the handoff is over.
+    #[test]
+    fn a_handoff_in_progress_keeps_its_source_turns_recommendation() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        job.set_turns(2).unwrap();
+        // No handoff: the turn count moved on, so it is another turn's.
+        assert!(!one_way_pending(&job).unwrap());
+        fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+        assert!(one_way_pending(&job).unwrap());
+        let kept = pending(&job).unwrap().unwrap();
+        assert_eq!(kept.default, "delete it");
+        // Another turn's still isn't.
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"x","one_way":true,"turn":"7"}"#,
+        )
+        .unwrap();
+        assert!(!one_way_pending(&job).unwrap());
+    }
+    // A one-way recommendation that was superseded (a later marker committed
+    // before its removal failed) or belongs to another turn doesn't make the
+    // question one-way.
+    #[test]
+    fn a_superseded_or_foreign_one_way_recommendation_does_not_hold_the_question() {
+        for (end, turn) in [(Some("done"), "1"), (None, "7")] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, false);
+            if let Some(end) = end {
+                fs::write(job.path("end.next"), format!("{end}\n")).unwrap();
+            }
+            fs::write(
+                job.path("ask.next"),
+                format!(r#"{{"default":"delete it","one_way":true,"turn":"{turn}"}}"#),
+            )
+            .unwrap();
+            assert!(!one_way_pending(&job).unwrap());
+        }
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        assert!(one_way_pending(&job).unwrap());
     }
     // What a job still holds open (Job::holds), through each end its
     // question can come to: the steward and claims take one that holds

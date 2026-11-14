@@ -17,10 +17,17 @@ use crate::config::Config;
 use crate::job::Job;
 use crate::{filled, read};
 
+mod preserve;
+
 /// Where job ID's scratch is.
 pub fn dir(cfg: &Config, id: &str) -> PathBuf {
     cfg.scratch.join("jobs").join(id)
 }
+
+/// The job's file while `proj handoff` moves its waiting turn to a new one: the
+/// turn it ends, by number. The scratch is the new turn's, so nothing clears it
+/// in between, and that turn's stop is no end of the job ([`Job::handing_off`]).
+pub const HANDOFF: &str = "handoff";
 
 /// Whether the job is over as its latest turn left it, so nothing gives it
 /// another turn of its own accord: `proj stop` ended it, or it awaits nothing
@@ -30,7 +37,10 @@ pub fn dir(cfg: &Config, id: &str) -> PathBuf {
 /// comes next) keeps its scratch: what it awaits, or a reply, resumes it there.
 /// A reply to a job that was over finds its scratch made afresh, empty.
 pub fn over(job: &Job) -> bool {
-    if crate::policy::parked(job) || crate::policy::path(job, "restoring").exists() {
+    if crate::policy::parked(job)
+        || crate::policy::path(job, "restoring").exists()
+        || job.path(HANDOFF).exists()
+    {
         return false;
     }
     // A question whose authority can't be read is still a question.
@@ -57,8 +67,33 @@ pub fn over(job: &Job) -> bool {
 /// end and `proj stop`, both) finds nothing to do. Only once no turn of the job
 /// runs: whatever still worked in it would lose its files. An id that isn't
 /// one name, which no job has, is left alone: it would name someone else's.
+/// Work not yet published (changed or new files git doesn't ignore) is copied
+/// to the job's `preserved/` first ([`preserve`]); a build's output isn't.
 pub fn clear(cfg: &Config, id: &str) {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') {
+        return;
+    }
+    let job = Job::new(cfg, id);
+    if job.path(HANDOFF).exists() {
+        return;
+    }
+    // One clear at a time owns the scratch: it keeps what the job didn't
+    // publish and removes the scratch, and another waits for that, then finds
+    // nothing left.
+    let _owner = match Owner::take(cfg, id) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("proj: job {id}'s scratch is kept, its clear lock couldn't be taken: {e}");
+            return;
+        }
+    };
+    if job.path(HANDOFF).exists() {
+        return;
+    }
+    // What the job didn't publish is kept first; one that can't be kept
+    // leaves the scratch where it is, for a reply or another try.
+    if let Err(e) = preserve::unfinished(cfg, id) {
+        eprintln!("proj: job {id}'s scratch is kept, its unfinished work couldn't be saved: {e}");
         return;
     }
     let gone = cfg
@@ -94,6 +129,36 @@ pub fn clear(cfg: &Config, id: &str) {
                 common.display()
             );
         }
+    }
+}
+
+/// The right to clear one job's scratch: a lock file beside it, taken whole
+/// (the one a waiter got is the one there still, or it asks again) and removed
+/// by the owner once done.
+struct Owner {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl Owner {
+    fn take(cfg: &Config, id: &str) -> std::io::Result<Owner> {
+        use std::os::unix::fs::MetadataExt;
+        let path = cfg.scratch.join("jobs").join(format!(".clear-{id}.lock"));
+        loop {
+            let file = crate::state_reads::append(&path)?;
+            file.lock()?;
+            let same = fs::metadata(&path)
+                .is_ok_and(|m| m.ino() == file.metadata().map(|f| f.ino()).unwrap_or(0));
+            if same {
+                return Ok(Owner { path, _file: file });
+            }
+        }
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 

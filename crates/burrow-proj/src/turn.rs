@@ -15,10 +15,13 @@ use crate::engine::{self, Engine, LONG, NEXT, Said, answer, is_error};
 use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
-use crate::waits::{rewatch, rewatch_later, waiting};
+use crate::waits::{rewatch, rewatch_later};
 use crate::{
     Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
 };
+use clock::Clock;
+use handoff::failed;
+pub(crate) use handoff::{CARRY, start_handoff};
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
@@ -85,6 +88,7 @@ fn start_with(
     permit: Option<&crate::inbox::resumption::Resume>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    let carry = matches!(answer, Answer::Handoff);
     crate::inbox::enrollment::admit(&job)?;
     crate::planning::admit(&job)?;
     let unit = job.unit();
@@ -134,17 +138,21 @@ fn start_with(
     // that can't start, or a start killed partway, leaves the job as it was.
     let prompt = job.path(&format!("prompt.{n}"));
     let couldnt = || format!("proj: turn {n} of {id} couldn't start");
-    let undo = || {
+    let undo = || -> Option<String> {
         if n == 1 {
             let _ = crate::state_reads::remove(job.path("turns"));
         } else {
             let _ = job.set_turns(n - 1);
         }
         let _ = crate::state_reads::remove(&prompt);
+        if carry {
+            return handoff::give_back(&job, &last.to_string(), &n.to_string()).err();
+        }
+        None
     };
     if let Err(e) = write_prompt(&prompt, &msg) {
         // write can leave a truncated or partial prompt even on failure.
-        undo();
+        let _ = undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
     }
     let acquired;
@@ -157,14 +165,20 @@ fn start_with(
                 &acquired
             }
             Err(error) => {
-                undo();
+                let _ = undo();
                 return Err(error);
             }
         }
     };
     if job.set_turns(n).is_err() {
-        undo();
+        let _ = undo();
         return Err(couldnt());
+    }
+    if carry && let Err(e) = handoff::take_over(&job, &last.to_string(), &n.to_string()) {
+        return Err(failed(
+            undo(),
+            format!("proj: turn {n} of {id} took no records: {e}"),
+        ));
     }
     // Claude is what goes first when memory runs out, not whatever it's
     // next to. Past its own cap the kernel kills the job's biggest process
@@ -188,12 +202,13 @@ fn start_with(
         launch(cfg, &job, first)
     };
     if !started {
-        undo();
-        return Err(couldnt());
+        return Err(failed(undo(), couldnt()));
     }
     // Accepted resumption owns the previous intent, including an error
     // recovery. A failed launch above leaves it durable for another attempt.
-    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+    if !carry {
+        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+    }
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -286,7 +301,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    if !job.turn(&n, "retry-migration").exists() {
+    // A handoff's successor keeps them (the old turn's, still waiting).
+    if !job.turn(&n, "retry-migration").exists() && !job.turn(&n, CARRY).exists() {
         crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
         for f in ["await", "await.next"] {
             let _ = crate::state_reads::remove(job.path(f));
@@ -835,96 +851,6 @@ impl Run<'_> {
     }
 }
 
-/// A run's clock: it stops the run once the turn's deadline in N.deadline
-/// has passed (N.late), or once its stream has said nothing for the job's
-/// --idle (N.quiet), and keeps the turn's wait in line (N.wait, from
-/// [`waiting`]) for the watchdog, telling it as one starts or ends. While
-/// one of its commands waits in line, the deadline moves on with the clock:
-/// waiting its turn for something shared isn't being stuck, and the
-/// watchdog holds a wait to stallAfterMinutes. Telling the watchdog goes on
-/// in the background, never waited for: its lock or a slow kick holds up
-/// neither the clock nor the end of the run.
-struct Clock {
-    /// When it was last read, in nanoseconds.
-    last: i64,
-    /// The wait in line it last saw.
-    was: Option<String>,
-    /// It stopped the run, or the run is over.
-    done: bool,
-    /// When it's read next.
-    next: Instant,
-}
-
-impl Clock {
-    fn tick(&mut self, run: &Run, pid: Pid) {
-        let (job, n) = (run.job, run.n);
-        let now = now_nanos();
-        let w = waiting(run.waitdir).map(|(since, what)| format!("{since}\t{what}"));
-        let mut dl = deadline(job, n);
-        if w.is_some()
-            && let Some(d) = dl
-        {
-            let moved = d + now - self.last;
-            let _ = crate::state_reads::write(job.turn(n, "deadline"), format!("{moved}\n"));
-            dl = Some(moved);
-        }
-        self.last = now;
-        if w != self.was {
-            match &w {
-                Some(w) => {
-                    let _ = crate::state_reads::write(job.turn(n, "wait"), format!("{w}\n"));
-                }
-                None => {
-                    let _ = crate::state_reads::remove(job.turn(n, "wait"));
-                }
-            }
-            self.was = w.clone();
-            rewatch_later(run.cfg, job.id);
-        }
-        if let Some(d) = dl
-            && now >= d
-        {
-            touch(&job.turn(n, "late"));
-            stop(pid);
-            self.finish(run);
-            return;
-        }
-        let stream = mtime_nanos(&job.turn(n, "jsonl")).unwrap_or(0);
-        if gone_quiet(now, stream, run.quiet) {
-            touch(&job.turn(n, "quiet"));
-            stop(pid);
-            self.finish(run);
-            return;
-        }
-        let mut nap = Duration::from_secs(1);
-        if let Some(d) = dl
-            && w.is_none()
-            && d - now < 1_000_000_000
-        {
-            nap = Duration::from_nanos((d - now).max(0) as u64);
-        }
-        self.next = Instant::now() + nap;
-    }
-
-    /// Done with: a wait it was keeping is over.
-    fn finish(&mut self, run: &Run) {
-        if self.done {
-            return;
-        }
-        self.done = true;
-        if self.was.take().is_some() {
-            let _ = crate::state_reads::remove(run.job.turn(run.n, "wait"));
-            rewatch_later(run.cfg, run.job.id);
-        }
-    }
-}
-
-/// Whether a stream last written at `stream` has said nothing for all of
-/// `quiet` by `now`, all in nanoseconds; a `quiet` of 0 is no --idle.
-fn gone_quiet(now: i64, stream: i64, quiet: i64) -> bool {
-    quiet > 0 && now - stream >= quiet
-}
-
 /// Stop a run: TERM to its timeout(1), which passes it on to all of it.
 fn stop(pid: Pid) {
     let _ = kill_process(pid, Signal::TERM);
@@ -998,6 +924,8 @@ fn oom_kills() -> u64 {
         .unwrap_or(0)
 }
 
+mod clock;
+pub(crate) mod handoff;
 #[cfg(test)]
 mod tests;
 

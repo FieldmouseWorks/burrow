@@ -301,3 +301,28 @@ fn a_hand_stopped_worker_tells_its_issue_once_and_never_retries() {
     assert_eq!(Job::new(&b.cfg, &fresh).turns().as_deref(), Some("1"));
     assert_eq!(job.turns().as_deref(), Some("1"));
 }
+
+// A worker whose turn is stopped only by the handoff replacing it isn't
+// stopped by hand: its issue isn't told it won't resume, and the issue keeps it.
+#[test]
+fn a_worker_mid_handoff_is_not_told_it_was_stopped() {
+    let b = fixture();
+    let d = b.record("j1");
+    let job = Job::new(&b.cfg, "j1");
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    fs::write(job.path(crate::scratch::HANDOFF), "1").unwrap();
+    assert!(!super::enrollment::stopped(&job));
+    let enrolled = issue(7, "sam", &["codex"]);
+    on_github(&b, &enrolled);
+    for _ in 0..2 {
+        let mut p = b.pass();
+        p.new_issues("sam/box", std::slice::from_ref(&enrolled))
+            .unwrap();
+        p.jobs("sam/box", "box", std::slice::from_ref(&enrolled))
+            .unwrap();
+    }
+    assert_eq!(read(&d.join("job")).as_deref(), Some("j1"));
+    assert!(!d.join("stopped-told").exists());
+    let posted = b.posted();
+    assert!(!posted.contains("was stopped"), "{posted}");
+}

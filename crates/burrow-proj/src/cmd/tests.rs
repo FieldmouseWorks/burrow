@@ -205,3 +205,161 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         assert_eq!(value["github"].as_array().map_or(0, Vec::len), count);
     }
 }
+
+// A handoff's stop of the turn it replaces is no end of the job while the
+// handoff is in progress: nothing reads the turn as stopped for good, the job
+// still holds, and the scratch stays. Once its successor is accepted the turn
+// keeps a marker nothing reads, and a stop (the job's end) retires the record.
+#[test]
+fn a_handoff_in_progress_is_not_a_stop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().to_str().unwrap().into();
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    fs::create_dir(tmp.path().join("j")).unwrap();
+    fs::write(tmp.path().join("j/turns"), "1\n").unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    assert!(job.stopped_for_good("1"), "a stop is final");
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    assert!(!job.stopped_for_good("1"));
+    assert!(job.holds().unwrap().contains(&"handoff".to_owned()));
+    assert!(!crate::scratch::over(&job));
+
+    // Its successor numbered but not yet accepted: the handoff still holds
+    // the job, so the job is no ended one.
+    fs::write(job.path("turns"), "2\n").unwrap();
+    assert!(job.holds().unwrap().contains(&"handoff".to_owned()));
+    fs::write(job.path("turns"), "1\n").unwrap();
+
+    // Interrupted before its successor: nothing to settle yet.
+    super::handoff::settle_handoff(&job).unwrap();
+    assert!(job.turn("1", "stopped").exists());
+    assert!(job.path(crate::scratch::HANDOFF).exists());
+
+    // Its successor accepted: the turn's stop is history, not a stop.
+    fs::write(job.path("turns"), "2\n").unwrap();
+    super::handoff::settle_handoff(&job).unwrap();
+    assert!(!job.turn("1", "stopped").exists());
+    assert!(job.turn("1", "handed-off").exists());
+    assert!(!job.stopped_for_good("1"));
+    assert!(!job.path(crate::scratch::HANDOFF).exists());
+}
+
+// A withdrawal of a job whose handoff stopped its turn but never started the
+// next finishes the job: the question and waits go, the scratch is cleared and
+// the handoff's record goes with them, last. It isn't taken for a turn that
+// merely isn't waiting.
+#[test]
+fn withdrawing_a_stranded_handoff_cancels_everything() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+    v["scratch"] = tmp.path().join("scratch").to_str().unwrap().into();
+    let mut cfg: Config = serde_json::from_value(v).unwrap();
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    fs::create_dir_all(tmp.path().join("jobs/j")).unwrap();
+    fs::create_dir_all(tmp.path().join("scratch/jobs/j")).unwrap();
+    fs::write(tmp.path().join("scratch/jobs/j/f"), "x").unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.path("turns"), "1\n").unwrap();
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    fs::write(job.path("await"), "o/r#1\t0\t{}\n").unwrap();
+    super::halt(&cfg, &job, true).unwrap();
+    assert!(!job.path("await").exists(), "its waits are cancelled");
+    assert!(!job.path(crate::scratch::HANDOFF).exists());
+    assert!(
+        !tmp.path().join("scratch/jobs/j").exists(),
+        "its scratch goes"
+    );
+}
+
+// A withdrawal that can't act (the turn isn't waiting) leaves a handoff alone.
+#[test]
+fn a_failed_stop_keeps_the_handoff() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().to_str().unwrap().into();
+    let mut cfg: Config = serde_json::from_value(v).unwrap();
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 0 ;; *LoadState*) echo loaded ;; *ActiveState*) echo active ;; *stop*) exit 1 ;; esac\n",
+    );
+    fs::create_dir(tmp.path().join("j")).unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.path("turns"), "1\n").unwrap();
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    assert!(super::halt(&cfg, &job, false).is_err());
+    assert!(job.path(crate::scratch::HANDOFF).exists());
+}
+
+// A withdrawal keeps its no-slot safeguard once a handoff's successor was
+// accepted, or can't be told: only a successor known never accepted unwinds.
+#[test]
+fn withdrawing_leaves_an_accepted_or_unknown_handoff_successor_be() {
+    for (stub, slot) in [("echo not-found", true), ("exit 1", false)] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let mut cfg: Config = serde_json::from_value(v).unwrap();
+        cfg.tools.systemctl = tmp.path().join("systemctl");
+        burrow_test::executable(
+            &cfg.tools.systemctl,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *ActiveState*) echo active ;; *LoadState*) {stub} ;; esac\n"
+            ),
+        );
+        fs::create_dir(tmp.path().join("j")).unwrap();
+        let job = Job::new(&cfg, "j");
+        fs::write(job.path("turns"), "2\n").unwrap();
+        fs::write(job.turn("1", "stopped"), "").unwrap();
+        fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+        if slot {
+            fs::write(job.turn("2", "slot"), "").unwrap();
+        }
+        super::halt(&cfg, &job, true).unwrap_or(());
+        assert!(
+            job.path(crate::scratch::HANDOFF).exists(),
+            "the handoff and the running successor are left be"
+        );
+        assert!(!job.turn("2", "stopped").exists());
+    }
+}
+
+// A stop is the job's end in every phase of a handoff: one whose successor was
+// accepted but never settled is stopped like any turn, and its marker and
+// protection go with it, so the scratch is cleared (a second stop too).
+#[test]
+fn stopping_an_accepted_handoff_successor_retires_the_handoff() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+    v["scratch"] = tmp.path().join("scratch").to_str().unwrap().into();
+    let mut cfg: Config = serde_json::from_value(v).unwrap();
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    fs::create_dir_all(tmp.path().join("jobs/j")).unwrap();
+    fs::create_dir_all(tmp.path().join("scratch/jobs/j")).unwrap();
+    fs::write(tmp.path().join("scratch/jobs/j/f"), "x").unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.path("turns"), "2\n").unwrap();
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    fs::write(job.turn("2", "slot"), "").unwrap();
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    super::halt(&cfg, &job, false).unwrap();
+    assert!(!job.path(crate::scratch::HANDOFF).exists());
+    assert!(job.turn("1", "handed-off").exists());
+    assert!(job.turn("2", "stopped").exists());
+    assert!(!tmp.path().join("scratch/jobs/j").exists());
+    // Again: nothing left to hold it.
+    super::halt(&cfg, &job, false).unwrap();
+}

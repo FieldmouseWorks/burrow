@@ -198,6 +198,16 @@ pub(crate) fn accept(job: &Job, n: &str) -> Result<(), String> {
     apply_receipt(&path, &job.dir)
 }
 
+/// What the host's receipt for turn `n` says: `(accepted, applied)`, or None
+/// when there is none. An unreadable receipt is an error, never "none".
+pub(crate) fn receipt_state(job: &Job, n: &str) -> Result<Option<(bool, bool)>, String> {
+    let Some(text) = read_state(&receipt_path(job, n))? else {
+        return Ok(None);
+    };
+    let r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(Some((r.accepted, r.applied)))
+}
+
 /// A published prompt whose unit has not recorded acceptance must not let
 /// an expired older question execute its default while _exec reconciles.
 pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {
@@ -225,6 +235,10 @@ pub(crate) enum Answer {
     /// needs to. A one-way question stays open for a person, so for it this
     /// is an [`Answer::Update`].
     Closed(String),
+    /// `proj handoff` moved the turn: nothing was answered, and the open
+    /// question stays as it was (an [`Answer::Update`] that also keeps what
+    /// the last turn waited on, see [`crate::turn::start_handoff`]).
+    Handoff,
 }
 
 pub(crate) struct Resume {
@@ -255,6 +269,7 @@ impl Resume {
         // An unreadable question is an error, not a one-way one: the resume
         // is retried rather than kept as an update that leaves it open.
         let answer = match answer {
+            Answer::Handoff => Answer::Update,
             Answer::Closed(_)
                 if !crate::ask::load(job)?.is_some_and(|q| !q.recommendation.one_way) =>
             {
@@ -396,8 +411,7 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     }
     let Some(n) = job.turns() else { return false };
     if job.path("open-question").exists()
-        || (!job.turn(&n, "stopped").exists()
-            && read(&job.turn(&n, "end")).as_deref() == Some("ask"))
+        || (!job.stopped_for_good(&n) && read(&job.turn(&n, "end")).as_deref() == Some("ask"))
     {
         return true;
     }
@@ -463,7 +477,7 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     // one. Later replies belong to a new conversation.
     let ended = (asked..=latest).find(|t| {
         let t = t.to_string();
-        job.turn(&t, "stopped").exists()
+        job.stopped_for_good(&t)
             || job.turn(&t, "question-lapsed").exists()
             || (read(&job.turn(&t, "end")).as_deref() == Some("done")
                 && !job.turn(&t, "timeout").exists())
@@ -502,7 +516,7 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
         }
         Some(_) => "Closed: the question was answered.".into(),
         None => match ended {
-            Some(t) if job.turn(&t.to_string(), "stopped").exists() => {
+            Some(t) if job.stopped_for_good(&t.to_string()) => {
                 "Closed: the job was stopped.".into()
             }
             Some(t) if job.turn(&t.to_string(), "question-lapsed").exists() => {
@@ -567,7 +581,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let latest = n
         .parse::<u64>()
         .map_err(|e| format!("invalid committed turn {n}: {e}"))?;
-    let stopped = job.turn(&n, "stopped").exists();
+    let stopped = job.stopped_for_good(&n);
     let end = read(&job.turn(&n, "end"));
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,

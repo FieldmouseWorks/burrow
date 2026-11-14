@@ -51,6 +51,7 @@ pub fn remote(args: &[String]) -> bool {
                 | "reply"
                 | "stop"
                 | "withdraw"
+                | "handoff"
                 | "list"
                 | "find"
         )
@@ -74,7 +75,10 @@ fn validate(args: &[String]) -> Result<(), String> {
         ["status", n] => *n == "--line" || number(n),
         ["state", "--schema" | "--json"] => true,
         ["state", "--json", n] => number(n),
-        ["state" | "lifecycle" | "stop" | "withdraw", target] => id(target),
+        [
+            "state" | "lifecycle" | "stop" | "withdraw" | "handoff",
+            target,
+        ] => id(target),
         ["log", target, rest @ ..] if id(target) => {
             let mut rest = rest;
             let mut valid = true;

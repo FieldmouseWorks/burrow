@@ -64,10 +64,10 @@ fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     fs::write(path, "").map_err(|e| e.to_string())
 }
-/// Whether the job's latest turn was stopped: no turn of it starts again.
+/// Whether the job's latest turn was stopped for good (not mid-handoff):
+/// no turn of it starts again.
 pub(super) fn stopped(job: &Job) -> bool {
-    job.turns()
-        .is_some_and(|n| job.turn(&n, "stopped").exists())
+    job.turns().is_some_and(|n| job.stopped_for_good(&n))
 }
 
 /// A stopped worker its issue's labels parked, which the issue's next

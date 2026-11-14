@@ -79,6 +79,13 @@ impl Request {
         }
     }
 
+    /// The record as the starter (or an earlier adoption) wrote it, if there
+    /// is one: never adopted here from what the job wrote of itself.
+    pub fn recorded(job: &Job) -> Option<Self> {
+        let bytes = crate::state_reads::bytes(&Self::path(job)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     /// Initialize the record if no one has, and return the winner: a
     /// reader holding stale values never overwrites a record, or an
     /// enrollment's update, that landed after it looked.
