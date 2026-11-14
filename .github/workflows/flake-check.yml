@@ -519,6 +519,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # Planned from the source the gate will check (gate-reuse).
+          TREE_SOURCE: ${{ inputs.gate-reuse }}
           SKIP: ${{ inputs.build-skip }}
           APART: ${{ inputs.eval-apart }}
           LEGS: ${{ inputs.legs }}

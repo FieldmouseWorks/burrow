@@ -136,14 +136,17 @@ no earlier run used, so only the tree can match it. `run` names the run
 whose evidence it is (`/attempts/N` or `/job/N` may follow).
 
 Equal trees are the whole match for the checked source, so with
-gate-reuse on, the gate makes its verdict the tree's (`src/source.rs`):
-while it evaluates and builds, in either mode, HEAD is a commit of the tree
-alone, with no parents and fixed authors and dates, and is put back after.
-Everything Nix reads of the commit (`self.rev`, `shortRev`, `revCount`,
-`lastModified`) is then the same for every checkout of the tree, whichever
-commit it was and however much history it fetched, on the run that attests
-and on the push that asks alike. A flake reads a `revCount` of 1 and a
-`lastModified` of 1 then. The gate says `"source": "tree"`.
+gate-reuse on, the gate makes its verdict the tree's (`src/source.rs`): it
+evaluates and builds, in either mode, a private checkout of the tree whose
+HEAD is a commit of that tree alone, made in a git context of its own (no
+parents, fixed authors and dates, no inherited config). Everything Nix reads
+of the commit (`self.rev`, `shortRev`, `revCount`, `lastModified`) is then
+the same for every checkout of the tree, whichever commit it was, shallow
+or full, a repository or a worktree, on the run that attests and on the
+push that asks alike; a flake reads a `revCount` and `lastModified` of 1.
+Its lock file is the tree's too: a lock that needs changing fails the gate.
+The kept-build waiter plans from the same source, and the caller's checkout
+is never touched. The gate says `"source": "tree"`.
 
 Only a hit, read whole, for this request (its `query`), naming a run of this
 repository on this server, skips the gate: the job named check (the gate

@@ -493,3 +493,14 @@ fn the_attestation_names_the_gate() {
     assert_eq!(before(&predicates[0]), before(&predicates[1]));
     assert!(!predicates[1].contains("gate"), "{}", predicates[1]);
 }
+
+/// Whatever plans the gate's derivations plans them from the source the gate
+/// checks: the kept-build waiter's planner and the gate are told the same.
+#[test]
+fn the_planner_and_the_gate_check_one_source() {
+    let wf = wf();
+    let check = &wf["jobs"]["check"];
+    let mode = "${{ inputs.gate-reuse }}";
+    assert_eq!(step(check, "gate")["env"]["TREE_SOURCE"], mode);
+    assert_eq!(step(check, "kept-wait")["env"]["TREE_SOURCE"], mode);
+}
