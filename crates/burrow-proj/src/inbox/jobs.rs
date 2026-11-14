@@ -421,9 +421,7 @@ impl Pass<'_> {
                         // close went through. Not kept: the record stays, and
                         // the next pass, finding the child closed, keeps it
                         // under the same checks (keep_landing).
-                        if awaited
-                            && !n.parse().is_ok_and(|c| self.keep_awaited(repo, c, &job))
-                        {
+                        if awaited && !n.parse().is_ok_and(|c| self.keep_awaited(repo, c, &job)) {
                             drop(held);
                             self.retry(repo);
                             continue;

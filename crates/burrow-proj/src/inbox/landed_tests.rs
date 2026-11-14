@@ -147,8 +147,10 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
 }
 
 fn stored_at(b: &Box, parent: &str) -> List {
-    serde_json::from_slice(&fs::read(b.pass().plan_dir("sam/box", parent).join("tasks.json")).unwrap())
-        .unwrap()
+    serde_json::from_slice(
+        &fs::read(b.pass().plan_dir("sam/box", parent).join("tasks.json")).unwrap(),
+    )
+    .unwrap()
 }
 
 /// Edited while the job ran: the job is handed the issue again, and what it
@@ -218,12 +220,7 @@ fn a_hand_close_after_the_jobs_done_keeps_its_landing() {
         pr(&b, "sam/machine", 1218, true);
         jobs(&b, false);
         assert!(!d.exists(), "{case}");
-        assert_eq!(
-            kept(&b).is_some(),
-            keeps,
-            "{case}: {}",
-            b.log()
-        );
+        assert_eq!(kept(&b).is_some(), keeps, "{case}: {}", b.log());
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
         assert_eq!(moved_on(&b), keeps, "{case}");
     }

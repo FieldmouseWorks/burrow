@@ -107,7 +107,12 @@ impl Pass<'_> {
     /// The merged PR tied to child N: Some(Some(url)) when there is one,
     /// Some(None) when there's none, None when GitHub couldn't be asked.
     /// What a finished job awaited counts only for a `closed` child.
-    pub(super) fn landed_child(&mut self, repo: &str, n: u64, closed: bool) -> Option<Option<String>> {
+    pub(super) fn landed_child(
+        &mut self,
+        repo: &str,
+        n: u64,
+        closed: bool,
+    ) -> Option<Option<String>> {
         if let Some(pr) = self.recorded_landing(repo, n) {
             return Some(Some(pr));
         }
