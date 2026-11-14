@@ -1,7 +1,7 @@
 //! The gate without eval-apart: the checks built first, by derivation, kept
 //! until nix flake check has found them built.
 
-use super::{EVERY, Gate, Run};
+use super::{EVERY, Gate, Run, lines};
 use crate::harness::write;
 
 /// Without eval-apart, the checks are built by derivation, kept until nix
@@ -201,5 +201,41 @@ fn whole_the_flake_is_read_purely() {
             },
         );
         assert!(r.code != 0 && !r.out.contains("hunter2"), "{}", r.out);
+    }
+}
+
+/// A build that stops making progress fails rather than hold its runner for
+/// hours (#1102): every build and flake check the gate runs, with or
+/// without eval-apart, reads nix's max-silent-time as an hour, as nix
+/// itself reads its config, and the case's own config still holds (its
+/// store, without which nothing here would build).
+#[test]
+fn every_build_gives_up_on_an_hour_of_silence() {
+    let g = Gate::new();
+    let every = g.flake(EVERY);
+    for whole in [true, false] {
+        for skip in ["", "vm"] {
+            let r = g.run(
+                &every,
+                Run {
+                    whole,
+                    skip,
+                    ..Run::default()
+                },
+            );
+            assert_eq!(r.code, 0, "{whole} {skip}: {}", r.out);
+            let builds = r
+                .calls
+                .iter()
+                .filter(|c| c.starts_with("build ") || c.starts_with("flake check"))
+                .count();
+            let silent = lines(&g.s.join("nix.log.silent"));
+            assert!(builds > 0, "{whole} {skip}: {:?}", r.calls);
+            assert_eq!(silent.len(), builds, "{whole} {skip}: {:?}", r.calls);
+            assert!(
+                silent.iter().all(|s| s == "3600"),
+                "{whole} {skip}: {silent:?}"
+            );
+        }
     }
 }
