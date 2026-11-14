@@ -31,7 +31,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
     """The reviewers' part of the PR's step this pass. key, st and lost_on
     are its state file's name, its state and the findings its reviewers
     couldn't post; digest and line its listing; age how long its head has
-    been seen; after, strike and cleared its step's own (step.py); needed,
+    been still (since its push, as near as GitHub says); after, strike and cleared its step's own (step.py); needed,
     whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     head = pr["headRefOid"]

@@ -3,6 +3,7 @@ from harness import admission, DEFAULT_ADMISSION
 wake-ups a pass books, a kicked pass over one repo, and the kicks from
 reviews and Claude jobs coming back."""
 
+import datetime
 import json
 import os
 import sys
@@ -19,6 +20,29 @@ assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
 # The reviewers queued: their answers kick it (below), so there's only the day.
 run(mkpr(), 200)
 assert queued() == ["codex", "rival"] and C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
+# The delay runs from the head's push, as near as GitHub says (its earliest
+# check suite), not from the steward's first look: a head still for longer
+# than it by then has its reviewers asked on that look; one pushed a minute
+# before still waits out the rest of it.
+def stamp(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+fresh_pr_state()
+pushed = [{"createdAt": stamp(T - 3600), "conclusion": None, "workflowRun": None},
+          {"createdAt": stamp(T - 60), "conclusion": None, "workflowRun": None}]
+run(mkpr(suites=pushed), 0)
+assert queued() == ["codex", "rival"] and pr_state()["seen"] == T - 3600, (queued(), pr_state())
+fresh_pr_state()
+run(mkpr(suites=pushed[1:]), 0)
+assert queued() == [] and C.WAKE == {"sam/r": T - 60 + 3 * 60 + 1}, (queued(), C.WAKE)
+run(mkpr(suites=pushed[1:]), 2 * 60)
+assert queued() == ["codex", "rival"], queued()
+# A suite GitHub dates after the look (its clock ahead of ours) is no later
+# than the look.
+fresh_pr_state()
+run(mkpr(suites=[{"createdAt": stamp(T + 600), "conclusion": None, "workflowRun": None}]), 0)
+assert queued() == [] and pr_state()["seen"] == T, pr_state()
 fresh_pr_state()
 run(clean(threads=[False]), 300)
 assert C.WAKE == {"sam/r": T + 300 + 30 * 60 + 1}, C.WAKE
