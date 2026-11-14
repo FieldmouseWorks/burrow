@@ -5,7 +5,9 @@
 # log; the corrected text passes; the same old text passes against a burrow
 # pinned before the script went, so the pin decides; and a doc citing a
 # script passes until the script is deleted, since the check reads the
-# whole tree and not only its Markdown.
+# whole tree and not only its Markdown. A project on a platform burrow's
+# own packages aren't built for gets the check too, its checker built for
+# that platform: evaluated here, since this machine can't run it.
 #
 #   nix build .#checks.x86_64-linux.house-cited-paths -L
 { self, pkgs, nixpkgs, inputs, system, ... }:
@@ -48,6 +50,11 @@ let
     "tools/other.sh" = "#!/bin/sh";
     "docs/run.md" = "Run `tools/run.sh`.";
   };
+  # Without Rust of its own, on a system burrow builds no packages for.
+  darwin = (import ../lib/project.nix { inherit nixpkgs; burrow = self; inherit (inputs) rust-overlay crane; } {
+    inherit self;
+    systems = [ "aarch64-darwin" ];
+  }).checks.aarch64-darwin.guidance-paths;
   retired = pkgs.testers.testBuildFailure (gate self before);
   deleted = pkgs.testers.testBuildFailure (gate self scriptGone);
 in
@@ -62,5 +69,6 @@ pkgs.runCommand "house-cited-paths-check" { } ''
   # These built: the corrected text, the old one against the old pin, and
   # the doc while its script is there.
   : ${gate self after} ${gate oldBurrow before} ${gate self cites}
+  echo ${lib.escapeShellArg (builtins.unsafeDiscardStringContext darwin.drvPath)}
   touch $out
 ''

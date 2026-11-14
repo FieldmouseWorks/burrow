@@ -145,15 +145,15 @@ fn markdown_links_resolve_from_their_document() {
             at,
             at,
             "docs/a.md",
-            "[r](README.md) and [p](lib/project.nix)\n[gone](../gone.md#x)\n[out](../../x.md)\n[ref]: nope.md\n[file](b.md/)"
+            "[r](README.md) and [p](lib/project.nix)\n[gone](../gone.md#x)\n[out](../../x.md)\n\n[ref]: nope.md\n[file](b.md/)"
         ),
         [
             "docs/a.md:1: cites README.md, which this repository doesn't have",
             "docs/a.md:1: cites lib/project.nix, which this repository doesn't have",
             "docs/a.md:2: cites ../gone.md#x, which this repository doesn't have",
             "docs/a.md:3: cites ../../x.md, which this repository doesn't have",
-            "docs/a.md:4: cites nope.md, which this repository doesn't have",
-            "docs/a.md:5: cites b.md/, which this repository doesn't have",
+            "docs/a.md:5: cites nope.md, which this repository doesn't have",
+            "docs/a.md:6: cites b.md/, which this repository doesn't have",
         ]
     );
 }
@@ -280,5 +280,180 @@ fn a_tree_fails_when_a_cited_file_goes() {
             "docs/run.md:1: cites tools/run.sh, which this repository doesn't have",
             "docs/run.md:1: cites ../tools/run.sh, which this repository doesn't have",
         ]
+    );
+}
+
+/// A link's destination is all of what CommonMark takes for it: balanced
+/// and escaped parentheses, a title, a line break before it, and a
+/// reference's definition in a list or a quote, or with its destination on
+/// the next line. Escaped brackets and code spans are no link.
+#[test]
+fn a_links_whole_destination_is_checked() {
+    let own = tree(&["docs/a.md", "docs/a(b).md", "docs/b.md"]);
+    let at = own.path();
+    for ok in [
+        "[x](a(b).md)",
+        "[x](a\\(b\\).md)",
+        "[x](<a(b).md>)",
+        "[x](\nb.md\n\"a title\")",
+        "[x](b.md 'B')",
+        "[ref]:\n  b.md\n  \"B\"",
+        "- item\n\n  [ref]: b.md",
+        "\\[x](gone.md)",
+        "`[x](gone.md)`",
+        "`one\n[x](gone.md) two`",
+        "``code ` [x](gone.md)``",
+    ] {
+        assert!(cited(at, at, "docs/a.md", ok).is_empty(), "{ok}");
+    }
+    assert_eq!(
+        cited(
+            at,
+            at,
+            "docs/a.md",
+            "[x](\ngone.md)\n\n[ref]:\n  gone2.md\n\n- [y](gone(3).md)\n\n  [ref2]: gone4.md\n\n> [z](gone5.md \"t\")\n>\n> [ref3]: gone6.md"
+        ),
+        [
+            "docs/a.md:1: cites gone.md, which this repository doesn't have",
+            "docs/a.md:4: cites gone2.md, which this repository doesn't have",
+            "docs/a.md:7: cites gone(3).md, which this repository doesn't have",
+            "docs/a.md:9: cites gone4.md, which this repository doesn't have",
+            "docs/a.md:11: cites gone5.md, which this repository doesn't have",
+            "docs/a.md:13: cites gone6.md, which this repository doesn't have",
+        ]
+    );
+}
+
+/// A fence closes only on a run of its own character at least as long as
+/// its opener, with nothing after it: an example fence inside a longer one,
+/// or a line that starts like a fence, leaves it open. Fences in lists and
+/// quotes are code too.
+#[test]
+fn a_fence_runs_to_its_own_close() {
+    let own = tree(&["modules/a.nix"]);
+    let at = own.path();
+    for ok in [
+        "````md\n```\n`modules/gone.nix`\n```\n[x](gone.md)\n````",
+        "~~~~\n~~~\n`modules/gone.nix`\n~~~~",
+        "```\n```sh\n`modules/gone.nix`\n```",
+        "- item\n\n  ```\n  `modules/gone.nix` [x](gone.md)\n  ```",
+        "> ```\n> `modules/gone.nix`\n> ```",
+        "    indented `modules/gone.nix` [x](gone.md)",
+    ] {
+        assert!(cited(at, at, "docs/a.md", ok).is_empty(), "{ok}");
+    }
+    // Once it does close, the text after it is read again.
+    assert_eq!(
+        cited(
+            at,
+            at,
+            "docs/a.md",
+            "````\n```\n````\n`modules/gone.nix`\n\n- ```\n  x\n  ```\n\n  [y](gone.md)"
+        ),
+        [
+            "docs/a.md:4: cites modules/gone.nix, which this repository doesn't have",
+            "docs/a.md:10: cites gone.md, which this repository doesn't have",
+        ]
+    );
+}
+
+/// A link names a file as it's called: spaces (escaped or in `<...>`) and
+/// punctuation are part of its name, not a template's marks; only a
+/// placeholder word is.
+#[test]
+fn link_filenames_are_literal() {
+    let own = tree(&[
+        "docs/a.md",
+        "assets/my image.png",
+        "docs/a@b.md",
+        "docs/c[1].md",
+    ]);
+    let at = own.path();
+    for ok in [
+        "![x](../assets/my%20image.png)",
+        "![x](<../assets/my image.png>)",
+        "[x](a@b.md)",
+        "[x](c\\[1\\].md)",
+        "[x](a@b.md?plain=1#L3)",
+        "[n](NAME.md)",
+    ] {
+        assert!(cited(at, at, "docs/a.md", ok).is_empty(), "{ok}");
+    }
+    assert_eq!(
+        cited(
+            at,
+            at,
+            "docs/a.md",
+            "![x](../assets/missing%20image.png) [y](<../assets/gone file.png>)\n[z](gone@b.md) [w](c$1.md) [v](g{a,b}.md)"
+        ),
+        [
+            "docs/a.md:1: cites ../assets/missing%20image.png, which this repository doesn't have",
+            "docs/a.md:1: cites ../assets/gone file.png, which this repository doesn't have",
+            "docs/a.md:2: cites gone@b.md, which this repository doesn't have",
+            "docs/a.md:2: cites c$1.md, which this repository doesn't have",
+            "docs/a.md:2: cites g{a,b}.md, which this repository doesn't have",
+        ]
+    );
+}
+
+/// A target is in its tree only when what it resolves to is: a symlink
+/// out of the tree, or a broken one, at the end or on the way, fails; one
+/// to elsewhere in the tree passes. The same for burrow's tree.
+#[test]
+fn symlinks_stay_in_their_tree() {
+    use std::os::unix::fs::symlink;
+    let outside = tree(&["passwd", "etc/hosts"]);
+    let own = tree(&["docs/a.md", "lib/project.nix", "modules/burrow.nix"]);
+    let at = own.path();
+    symlink(outside.path(), at.join("out")).unwrap();
+    symlink(outside.path().join("passwd"), at.join("lib/passwd")).unwrap();
+    symlink(at.join("nowhere"), at.join("dead")).unwrap();
+    symlink("../lib", at.join("docs/lib")).unwrap();
+    symlink("project.nix", at.join("lib/alias.nix")).unwrap();
+    for ok in [
+        "[x](lib/project.nix)",
+        "[x](lib/alias.nix)",
+        "`docs/lib/project.nix`",
+        "`lib/alias.nix`",
+    ] {
+        assert!(cited(at, at, "docs/a.md", ok).is_empty(), "{ok}");
+    }
+    assert_eq!(
+        cited(
+            at,
+            at,
+            "docs/a.md",
+            "[a](../out/passwd) [b](/lib/passwd) [c](../dead)\n`out/passwd` `lib/passwd` `dead/x` `out/etc/`"
+        ),
+        [
+            "docs/a.md:1: cites ../out/passwd, which this repository doesn't have",
+            "docs/a.md:1: cites /lib/passwd, which this repository doesn't have",
+            "docs/a.md:1: cites ../dead, which this repository doesn't have",
+            "docs/a.md:2: cites out/passwd, which this repository doesn't have",
+            "docs/a.md:2: cites lib/passwd, which this repository doesn't have",
+            "docs/a.md:2: cites dead/x, which this repository doesn't have",
+            "docs/a.md:2: cites out/etc/, which this repository doesn't have",
+        ]
+    );
+    // burrow's tree is held the same way.
+    let burrow = burrow_now();
+    symlink(outside.path(), burrow.path().join("modules/out")).unwrap();
+    assert_eq!(
+        cited(
+            at,
+            burrow.path(),
+            "docs/a.md",
+            "burrow's `modules/out/passwd`"
+        ),
+        ["docs/a.md:1: cites modules/out/passwd, which the pinned burrow doesn't have"]
+    );
+    assert!(
+        cited(
+            at,
+            burrow.path(),
+            "docs/a.md",
+            "burrow's `modules/claude.nix`"
+        )
+        .is_empty()
     );
 }

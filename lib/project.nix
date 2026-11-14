@@ -707,9 +707,10 @@ let
   # this burrow has, the input the project pins (burrow-guidance paths,
   # crates/burrow-guidance/src/paths.rs). Its input is the whole tracked
   # tree, so deleting a script fails the doc that still cites it. It runs no
-  # tests.
+  # tests. The checker is built for the gate's own platform, any of the
+  # project's systems (burrow.lib.guidance).
   guidancePathsCheck = pkgs: pkgs.runCommand "guidance-paths" { passthru.testFiles = [ ]; } ''
-    ${burrow.packages.${pkgs.stdenv.hostPlatform.system}.burrow-guidance}/bin/burrow-guidance paths --burrow ${burrow} ${self}
+    ${burrow.lib.guidance pkgs.stdenv.hostPlatform.system}/bin/burrow-guidance paths --burrow ${burrow} ${self}
     touch $out
   '';
 

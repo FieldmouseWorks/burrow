@@ -10,6 +10,7 @@ publish.workspace = true
 burrow-settings = { path = "../burrow-settings" }
 house-sync = { path = "../house-sync" }
 serde_json.workspace = true
+pulldown-cmark = { version = "0.13.6", default-features = false }
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 [dev-dependencies]

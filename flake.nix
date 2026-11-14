@@ -101,7 +101,8 @@
       # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl. No test reads README.md,
       # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
-      crates = self.lib.project {
+      # cratesWith { systems = [ SYSTEM ]; } builds them for any platform.
+      cratesWith = extra: self.lib.project ({
         inherit self;
         rust = {
           dir = "crates";
@@ -118,7 +119,8 @@
           ];
           testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
-      };
+      } // extra);
+      crates = cratesWith { };
       # A workspace below its repo's root whose test reads a file outside
       # it: lib/project.nix's `include`, for its checks.
       houseInclude = self.lib.project {
@@ -138,6 +140,9 @@
       # burrow is itself, for the guidance-paths check: its burrow-guidance,
       # and the tree paths cited as burrow's resolve against.
       lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; burrow = self; };
+      # burrow-guidance built for SYSTEM: whichever platforms a project's
+      # gate names, not only those burrow's packages are built for.
+      lib.guidance = system: (cratesWith { systems = [ system ]; }).packages.${system}.burrow-guidance;
 
       templates.default = {
         path = ./templates/project;

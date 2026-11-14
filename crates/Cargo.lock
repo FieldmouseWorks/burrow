@@ -545,6 +545,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-settings",
  "house-sync",
+ "pulldown-cmark",
  "regex",
  "serde_json",
  "tempfile",
