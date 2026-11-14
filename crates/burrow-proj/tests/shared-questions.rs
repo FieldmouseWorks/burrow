@@ -2,11 +2,12 @@
 //! This test also runs on the feature's base, where merge-questions is absent.
 use burrow_proj::{
     config::Config,
+    host_jobs,
     job::Job,
     policy::{self, Identity, Kind},
 };
 use serde_json::json;
-use std::{fs, process::Command};
+use std::fs;
 
 #[test]
 fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_member() {
@@ -54,9 +55,9 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         policy::mark(&job, "done", false, None).unwrap(); // accepted answers stay parked
     }
     let run = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_burrow-proj"))
-            .env("PROJ_CONFIG", &config)
-            .env("PROJ_SELF", env!("CARGO_BIN_EXE_burrow-proj"))
+        // Run from inside a job, a bare command's reply would go to the live
+        // host through that job's bridge, not to this test's config.
+        let out = host_jobs::owner(env!("CARGO_BIN_EXE_burrow-proj").as_ref(), &config)
             .args(args)
             .output()
             .unwrap();

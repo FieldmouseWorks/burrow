@@ -138,21 +138,31 @@ pub fn client(path: &Path, args: &[String]) -> Result<(), Fail> {
     }
 }
 
+/// proj `me` as the host runs it, on the configuration at `config`: never
+/// through a job's bridge, even when started from inside a job (a broker's
+/// child, or a test a job runs), whose `PROJ_JOB` would otherwise send the
+/// job commands to the live host instead.
+pub fn owner(me: &Path, config: &Path) -> Command {
+    let mut command = Command::new(me);
+    command
+        .env("PROJ_CONFIG", config)
+        .env("PROJ_SELF", me)
+        .env_remove("PROJ_JOB")
+        .env_remove("PROJ_HOST_JOBS_SOCKET")
+        .env_remove("PROJ_PROBE_SOCKET");
+    command
+}
+
 pub(crate) fn answer(cfg: &Config, request: &str) -> String {
     let result = (|| -> Result<Response, String> {
         let args: Vec<String> = serde_json::from_str(request).map_err(|e| e.to_string())?;
         validate(&args)?;
-        let mut command = Command::new(&cfg.me);
+        let mut command = owner(&cfg.me, &cfg.path);
         command
             // The child renders the bridge's view: redacted, with recovery
             // replies that retain open owner questions.
             .arg("_host-view")
-            .args(&args)
-            .env("PROJ_CONFIG", &cfg.path)
-            .env("PROJ_SELF", &cfg.me)
-            .env_remove("PROJ_JOB")
-            .env_remove("PROJ_HOST_JOBS_SOCKET")
-            .env_remove("PROJ_PROBE_SOCKET");
+            .args(&args);
         let output = burrow_process::output(
             &mut command,
             None,
@@ -275,6 +285,16 @@ pub(crate) fn view(cfg: &Config, args: &[String]) -> Result<(), Fail> {
 #[cfg(test)]
 mod tests {
     use super::{Output, output_contract, scrub_output};
+
+    #[test]
+    fn the_owners_command_never_inherits_a_jobs_bridge() {
+        let command = super::owner("/bin/proj".as_ref(), "/etc/proj.json".as_ref());
+        let envs: Vec<_> = command.get_envs().collect();
+        for var in ["PROJ_JOB", "PROJ_HOST_JOBS_SOCKET", "PROJ_PROBE_SOCKET"] {
+            assert!(envs.contains(&(var.as_ref(), None)), "{var} is inherited");
+        }
+        assert!(envs.contains(&("PROJ_CONFIG".as_ref(), Some("/etc/proj.json".as_ref()))));
+    }
 
     #[test]
     fn formatted_json_jsonl_and_mixed_diagnostics_keep_their_structure() {
