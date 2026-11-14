@@ -212,13 +212,27 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
     Ok(())
 }
 
-/// A parked job now waits for `wait`: a park of its latest turn takes the
-/// new reason and keeps its state, time, priority and order ([`mark`]).
-fn waiting(job: &Job, wait: &str) -> Result<(), String> {
-    let state = read(&path(job, "park"))
-        .and_then(|p| serde_json::from_str::<Park>(&p).ok())
-        .map_or_else(|| "queued".to_owned(), |p| p.state);
-    mark(job, &state, false, Some(wait))
+/// A parked job now waits for `wait`. Under the job's lock (`_held`), which
+/// stops and turn starts take, so it reads the park as it stands: only a
+/// park of the job's latest turn takes the reason, and nothing else in it
+/// changes. One a stop removed, or a newer turn's start replaced, is left as
+/// it is, and no park is ever made here.
+fn refresh(job: &Job, _held: &crate::job::JobLock, wait: &str) -> Result<(), String> {
+    let bytes = match fs::read(path(job, "park")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut park: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if job.turns().as_deref() != Some(park.turn.as_str()) || park.wait.as_deref() == Some(wait) {
+        return Ok(());
+    }
+    park.wait = Some(wait.to_owned());
+    swap(
+        &path(job, "park"),
+        &serde_json::to_string(&park).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Runs in its own independent unit, so vacating the caller cannot kill the
@@ -380,8 +394,10 @@ fn reconcile_job(
                 .turns()
                 .is_some_and(|n| read(&job.turn(&n, "priority")).as_deref() == Some("first"));
             mark(&job, &state, first, Some(DENIED))?;
-        } else {
-            waiting(&job, DENIED)?;
+        } else if let Some(held) = job.try_lock().map_err(|e| e.to_string())? {
+            // A stop or a turn start holding it is changing the park; the
+            // next pass says what's left. Vacating never waits for either.
+            refresh(&job, &held, DENIED)?;
         }
         // stop kills the complete cgroup: inherited job, heavy and engine
         // locks are freed even when descendants ignored TERM.
@@ -414,7 +430,7 @@ fn reconcile_job(
         // start (two thousand reads an hour with 127 parked).
         let capacity = crate::inbox::resumption::admission(cfg, &job)?;
         if let crate::inbox::resumption::Resume::Waiting(wait) = capacity {
-            return waiting(&job, wait.says());
+            return refresh(&job, &held, wait.says());
         }
         match crate::inbox::enrollment::check(&job)? {
             crate::inbox::enrollment::Admission::Ready => (),

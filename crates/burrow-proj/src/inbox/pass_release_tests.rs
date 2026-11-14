@@ -162,3 +162,45 @@ fn a_parked_job_its_repository_is_then_denied_says_so_and_keeps_its_place() {
         row(&job)
     );
 }
+
+#[test]
+fn a_reason_refresh_never_brings_back_a_park_a_stop_removed() {
+    let mut fixture = Box::new();
+    let launched = drained_pair(&mut fixture);
+    let overlay = fixture.path("settings.json");
+    fixture.cfg.settings.as_mut().unwrap().overlay = overlay;
+    let job = Job::new(&fixture.cfg, "waiting");
+    crate::turn::start(&fixture.cfg, job.id, "the await changed", false).unwrap();
+    fixture
+        .cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .command(&["pause".into(), "sam/box".into()], "test")
+        .unwrap();
+    // A stop is under way: it holds the job's lock while it cancels the park.
+    let stopping = job.lock().unwrap();
+    crate::policy::reconcile(&fixture.cfg).unwrap();
+    assert_eq!(
+        crate::policy::waits_for(&job).as_deref(),
+        Some(Wait::Drain.says()),
+        "the refresh waits for the stop rather than race it"
+    );
+    crate::policy::cancel(&job).unwrap();
+    drop(stopping);
+    crate::policy::reconcile(&fixture.cfg).unwrap();
+    assert!(!crate::policy::parked(&job), "a stopped job stays stopped");
+    assert!(!crate::policy::path(&job, "restoring").exists());
+    // And unpaused, nothing of it resumes.
+    fixture
+        .cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .command(&["allow".into(), "sam/box".into()], "test")
+        .unwrap();
+    fs::remove_file(fixture.path("active")).unwrap();
+    crate::policy::reconcile(&fixture.cfg).unwrap();
+    assert!(!crate::policy::parked(&job));
+    assert!(!launched.exists());
+}
