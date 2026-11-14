@@ -13,6 +13,9 @@ use crate::pass::Pass;
 pub const LANE: &str = "lane into ";
 /// Prefix of a documentation-only gate, followed by its base and fork.
 pub const DOCS: &str = "docs only into ";
+/// What GitHub names an unnamed actions/attest step in a job's steps,
+/// followed by its ref: the shared workflow leaves those steps unnamed.
+pub const ATTEST: &str = "Run actions/attest@";
 pub(crate) const FLAKE: &str = ".github/workflows/flake.yml";
 
 pub fn suite(c: &Value) -> &Value {

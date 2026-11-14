@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
+use burrow_upkeep::ci::ATTEST_STEP;
+
 use crate::harness::{Scratch, read, script, step, steps, workflow, write, yaml};
 
 const TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJ4In0.c2ln";
@@ -725,4 +727,28 @@ fn a_leg_that_failed_or_cant_be_held_to_its_log_fails_the_gate_job() {
             assert_eq!(log, all_logs(), "{why}");
         }
     }
+}
+
+/// The steward runs a job again once when its only failed steps uploaded the
+/// attestation (a Sigstore outage after the check passed), knowing them by
+/// the name GitHub gives an unnamed `uses:` step, "Run" and the action: a
+/// name here would make that outage a red check again.
+#[test]
+fn attestation_uploads_keep_the_name_the_steward_retries() {
+    assert_eq!(ATTEST_STEP, "Run actions/attest@");
+    let jobs = workflow(".github/workflows/flake-check.yml")["jobs"].clone();
+    let mut seen = vec![];
+    for (job, body) in jobs.as_mapping().expect("jobs") {
+        for s in body["steps"].as_sequence().into_iter().flatten() {
+            if s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("actions/attest@"))
+            {
+                assert!(s.get("name").is_none(), "{job:?}: {s:?}");
+                seen.push(job.as_str().unwrap_or("").to_owned());
+            }
+        }
+    }
+    // The gate's own, the legs' gate job's, and the negative run's.
+    assert_eq!(seen, ["check", "gate", "negative"]);
 }

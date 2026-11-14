@@ -1,4 +1,6 @@
-//! The head's one CI verdict and cancellation recovery owner. The steward
+//! The head's one CI verdict and recovery owner: a cancelled job, or one
+//! whose only failed step is the attestation upload (a Sigstore outage
+//! after the check itself passed), is run again once. The steward
 //! hands over GraphQL nodes and gets one verdict; all remote reads and
 //! reruns use its inherited App token. GitHub's run_attempt is the only
 //! retry store, shared across PRs, process restarts and uncertain writes.
@@ -9,13 +11,13 @@ use burrow_github::{Error, call, pages};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ci_runs::{self, cancelled, suite, workflow_name};
+use crate::ci_runs::{self, ATTEST, cancelled, suite, workflow_name};
 use crate::pass::Pass;
 
 // The shared workflows' contract tests use the CI owner's names and
 // recognition functions, so a language or representation change cannot
 // silently leave their assertions reading a replaced implementation.
-pub use crate::ci_runs::{DOCS, LANE, gate as gate_job, workflow};
+pub use crate::ci_runs::{ATTEST as ATTEST_STEP, DOCS, LANE, gate as gate_job, workflow};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,11 +69,14 @@ struct Recovery {
     runs: BTreeMap<String, Run>,
     refused: BTreeSet<String>,
     lookup: BTreeSet<String>,
-    // A never-started run needs the whole workflow; cancellations need
-    // only failed jobs, preserving successful independent jobs.
+    // A never-started run needs the whole workflow; cancellations and
+    // attestation uploads need only failed jobs, preserving successful
+    // independent jobs.
     due: BTreeMap<String, &'static str>,
     /// Check runs GitHub stopped for running past their timeout.
     timed_out: BTreeSet<u64>,
+    /// Failed check runs whose only failed steps uploaded the attestation.
+    attest_only: BTreeSet<u64>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +108,20 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     let runs = ci_runs::runs(p, ask, contexts);
     let mut recovery = Recovery::default();
     let effective = ci_runs::effective(contexts, &runs.stale, ci_runs::docs_lane(ask));
+    for c in effective
+        .iter()
+        .filter(|c| failed(c) && run_id(c).is_some())
+    {
+        if ask.remote
+            && let Some(id) = c["databaseId"].as_u64().filter(|id| *id > 0)
+        {
+            // An Actions check run's id is its job's.
+            let job = p.get(&format!("repos/{}/actions/jobs/{id}", p.repo))?;
+            if attest_only(&job) {
+                recovery.attest_only.insert(id);
+            }
+        }
+    }
     for c in effective.iter().filter(|c| cancelled(c)) {
         if ask.remote
             && let Some(id) = c["databaseId"].as_u64().filter(|id| *id > 0)
@@ -171,6 +190,40 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     ))
 }
 
+fn failed(c: &Value) -> bool {
+    c["status"] == "COMPLETED" && c["conclusion"] == "FAILURE"
+}
+
+/// Whether a job failed only in its attestation upload: at least one step
+/// failed, and every one that did was actions/attest.
+fn attest_only(job: &Value) -> bool {
+    let failed: Vec<_> = array(&job["steps"])
+        .iter()
+        .filter(|s| s["conclusion"] == "failure")
+        .collect();
+    !failed.is_empty()
+        && failed
+            .iter()
+            .all(|s| text(&s["name"]).is_some_and(|n| n.starts_with(ATTEST)))
+}
+
+/// Why a completed check run may be run again once, and the conclusion its
+/// workflow run ends with before that: a cancellation, or an attestation
+/// upload alone failing.
+fn retryable(c: &Value, recovery: &Recovery) -> Option<(&'static str, &'static str)> {
+    if cancelled(c) {
+        Some(("cancelled", "cancelled"))
+    } else if failed(c)
+        && c["databaseId"]
+            .as_u64()
+            .is_some_and(|id| recovery.attest_only.contains(&id))
+    {
+        Some(("attestation upload failed", "failure"))
+    } else {
+        None
+    }
+}
+
 fn read(p: &mut Pass, recovery: &mut Recovery) -> Result<(), Error> {
     for key in std::mem::take(&mut recovery.lookup) {
         let got = p.get(&format!("repos/{}/actions/runs/{key}", p.repo))?;
@@ -206,7 +259,7 @@ fn classify(
     let mut seen = runs.unrun.len();
     let mut broken = BTreeSet::new();
     let mut going = BTreeSet::new();
-    let mut cancelled_jobs = BTreeSet::new();
+    let mut retried_jobs = BTreeSet::new();
     for s in suites {
         if s["conclusion"] == "STARTUP_FAILURE" {
             seen += 1;
@@ -264,18 +317,33 @@ fn classify(
             {
                 red.push(format!("{name} (timed out)"));
                 broken.insert(run_id(c));
-            } else if cancelled(c) {
+            } else if let Some((said, ended)) = retryable(c, recovery) {
                 let key = if ask.recover { rerun_key(c) } else { None };
                 let info = key.as_ref().and_then(|k| recovery.runs.get(k));
                 match key {
-                    None => pending.push(format!("{name} (cancelled, to be run again)")),
-                    Some(k) if recovery.refused.contains(&k) => pending.push(format!("{name} (cancelled; the App may not run it again, which needs Actions write)")),
+                    None => pending.push(format!("{name} ({said}, to be run again)")),
+                    Some(k) if recovery.refused.contains(&k) => pending.push(format!(
+                        "{name} ({said}; the App may not run it again, which needs Actions write)"
+                    )),
                     Some(k) => match info {
-                        None => { recovery.lookup.insert(k); pending.push(format!("{name} (cancelled, to be run again)")); }
-                        Some(r) if r.status != "completed" || r.conclusion.as_deref() != Some("cancelled") => pending.push(format!("{name} (cancelled, run again)")),
-                        Some(r) if r.run_attempt >= 2 => red.push(format!("{name} (cancelled again after a rerun)")),
-                        Some(_) => { cancelled_jobs.insert(Some(k)); pending.push(format!("{name} (cancelled, to be run again)")); }
-                    }
+                        None => {
+                            recovery.lookup.insert(k);
+                            pending.push(format!("{name} ({said}, to be run again)"));
+                        }
+                        Some(r)
+                            if r.status != "completed"
+                                || r.conclusion.as_deref() != Some(ended) =>
+                        {
+                            pending.push(format!("{name} ({said}, run again)"))
+                        }
+                        Some(r) if r.run_attempt >= 2 => {
+                            red.push(format!("{name} ({said} again after a rerun)"))
+                        }
+                        Some(_) => {
+                            retried_jobs.insert(Some(k));
+                            pending.push(format!("{name} ({said}, to be run again)"));
+                        }
+                    },
                 }
             } else if !["SUCCESS", "NEUTRAL", "SKIPPED"]
                 .iter()
@@ -312,7 +380,7 @@ fn classify(
         }
     }
     recovery.due.extend(
-        cancelled_jobs
+        retried_jobs
             .difference(&broken)
             .filter(|k| !going.contains(*k))
             .flatten()
