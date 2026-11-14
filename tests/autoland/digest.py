@@ -12,6 +12,7 @@ R.job_questions = lambda: QUESTIONS
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
 LABELS = {}  # the labels on each open issue, by number, when not the two the stuck one is made with
+BODIES = {}  # each open issue's body, by number, as its last edit left it
 GH = {"fail": ""}  # a write that fails: an issue command, or a flag
 
 
@@ -20,9 +21,13 @@ def gh(*a, **k):
     if a[:2] == ("issue", "list"):
         label = a[a.index("--label") + 1] if "--label" in a else None
         n = OPEN.get(label)
-        return [{"number": n, "body": "", "labels": [{"name": x} for x in LABELS.get(n, [label, "unstick"])]}] if n else []
+        return [{"number": n, "body": BODIES.get(n, ""), "labels": [{"name": x} for x in LABELS.get(n, [label, "unstick"])]}] if n else []
     # A write that fails: an issue command, or any call with a flag.
-    return None if GH["fail"] and (a[:2] == ("issue", GH["fail"]) or GH["fail"] in a) else {}
+    if GH["fail"] and (a[:2] == ("issue", GH["fail"]) or GH["fail"] in a):
+        return None
+    if a[:2] == ("issue", "edit") and "--body" in a:
+        BODIES[int(a[2])] = a[a.index("--body") + 1]
+    return {}
 
 
 def made(label):
@@ -55,6 +60,7 @@ def fresh(enable=True, app=True, labels=None):
     CALLS.clear()
     OPEN.clear()
     LABELS.clear()
+    BODIES.clear()
     fresh_pr_state()
     GH.update(fail="")
     R.CFG["inbox"] = {"enable": enable, "labels": {"claude": "claude", "codex": "codex"} if labels is None else labels,
@@ -309,6 +315,38 @@ R.publish([])
 owner_question = made("autoland")
 assert owner_question and "issues/42" in owner_question["--body"], CALLS
 assert not made("claude"), CALLS
+QUESTIONS.clear()
+
+# The owner's issue's own job asks (burrow#1100). What it asks is on that
+# issue already, the inbox's post of its answer: listed or announced there
+# again, an edit or a comment would be news on the job's own issue, which
+# resumes it, which asks again with a moved deadline, which the steward
+# lists, round and round. So the steward writes nothing there for it.
+fresh()
+OPEN["autoland"] = 7
+R.publish(DIGEST[:3])
+later(DIGEST[:3])
+assert not [a for a in CALLS if a[0] == "issue" and a[1] != "list"], CALLS
+own = ("Jobs waiting for the owner", "[j7](https://github.com/Sam/Notes/issues/7)", "job j7 asks: which?; default: keep it; deadline")
+touched = lambda: [a for a in CALLS if a[:2] in (("issue", "edit"), ("issue", "comment"), ("issue", "close")) and a[2] == "7"]
+for deadline in ("16:06Z", "16:19Z"):
+    QUESTIONS[:] = [own[:2] + (f"{own[2]} {deadline}",)]
+    CALLS.clear()
+    R.publish(DIGEST[:3])
+    later(DIGEST[:3])
+    assert not touched() and "j7" not in BODIES[7], (CALLS, BODIES)
+# Another job's question, on another issue, is listed and news as ever.
+QUESTIONS.append(("Jobs waiting for the owner", "[j8](https://github.com/sam/notes/issues/8)", "job j8 asks: what?"))
+CALLS.clear()
+R.publish(DIGEST[:3])
+assert said(7) == ["New:\n- Jobs waiting for the owner: [j8](https://github.com/sam/notes/issues/8): job j8 asks: what?"], CALLS
+assert "j8" in BODIES[7] and "j7" not in BODIES[7], BODIES
+# Its own job alone keeps the issue open, waiting there, and says so.
+QUESTIONS[:] = QUESTIONS[:1]
+CALLS.clear()
+R.publish([])
+assert not any(a[:2] == ("issue", "close") for a in CALLS) and said(7) == [], CALLS
+assert BODIES[7].startswith("Nothing else: this issue's own job is waiting"), BODIES
 QUESTIONS.clear()
 
 
