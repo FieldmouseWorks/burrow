@@ -9,6 +9,8 @@
 assert import ./switch-timeouts.nix { inherit self pkgs; nixpkgs = self.inputs.nixpkgs; };
 pkgs.testers.runNixOSTest {
   name = "switch";
+  # The module patches switch-to-configuration with an overlay.
+  node.pkgsReadOnly = false;
 
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.switch ];

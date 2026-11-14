@@ -495,6 +495,11 @@ fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
     crate::waits::rewatch(&cfg, &["failed"]);
     let watched = |id: &str| jobs.join(".waits").join(id).exists();
     assert!(watched("failed"));
+    // A pass while nothing is denied: the jobs denied before there were
+    // holds are adopted once, and there are none, so a later pause doesn't
+    // take the settled job for one of them.
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/.adopted").exists());
     // Paused: the watchdog doesn't hear of it, but it isn't forgotten.
     say(&["pause", "sam/web"]);
     crate::policy::reconcile(&cfg).unwrap();
@@ -513,6 +518,49 @@ fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
     say(&["allow", "sam/web"]);
     crate::policy::reconcile(&cfg).unwrap();
     assert!(!watched("failed") && !jobs.join(".waits-held/failed").exists());
+}
+
+#[test]
+fn a_job_denied_before_there_were_holds_is_watched_when_its_repo_is_allowed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let settings = cfg.settings.clone().unwrap();
+    let say = |w: &[&str]| {
+        settings
+            .command(&w.iter().map(|w| w.to_string()).collect::<Vec<_>>(), "test")
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    say(&["pause", "sam/web"]);
+    // Failed turns: one in a paused repo, whose watch a proj before
+    // `.waits-held` dropped with nothing to keep it, and one settled in a
+    // repo that's allowed.
+    for (id, repo) in [("denied", "sam/web"), ("settled", "sam/api")] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Repository(repo.into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+    }
+    say(&["allow", "sam/api"]);
+    let watched = |id: &str| jobs.join(".waits").join(id).exists();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("denied"));
+    assert!(
+        jobs.join(".waits-held/denied").exists(),
+        "a job denied before holds existed wasn't held"
+    );
+    assert!(!watched("settled") && !jobs.join(".waits-held/settled").exists());
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(watched("denied"), "allowed again, it wasn't watched");
+    assert!(!watched("settled"));
 }
 
 fn watch_config(tmp: &TempDir, jobs: &std::path::Path) -> Config {
@@ -620,6 +668,14 @@ fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
     fs::create_dir_all(&settled.dir).unwrap();
     settled.set_turns(1).unwrap();
     fs::write(settled.path("prompt.1"), "work").unwrap();
+    // Allowed: one the policy denies is held once the watchdog is there
+    // (a_job_denied_before_there_were_holds_is_watched_when_its_repo_is_allowed).
+    crate::policy::bind(
+        &settled,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     // Nothing was ever published for any (no watchdog then).
     assert!(!jobs.join(".waits").exists());
     crate::waits::rewatch_all(&cfg);
@@ -765,4 +821,163 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
         !asked.contains(&Job::new(&cfg, "settled-failure").unit()),
         "{asked}"
     );
+}
+
+/// A denied job whose turn failed, its repo `sam/web` paused.
+fn denied_failure(cfg: &Config, id: &str) {
+    let job = Job::new(cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("prompt.1"), "work").unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Repository("sam/web".into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+}
+
+fn adoption_cfg(tmp: &TempDir) -> (Config, std::path::PathBuf) {
+    let jobs = jobs_dir(tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    (cfg, jobs)
+}
+
+fn say(cfg: &Config, words: &[&str]) {
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            "test",
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_denied_failure_in_a_stretch_without_the_watchdog_is_found_when_it_returns() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/.adopted").exists());
+    // The watchdog is off; a job fails, its repo is paused.
+    let waits = cfg.waits.take();
+    denied_failure(&cfg, "late");
+    say(&cfg, &["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(
+        !jobs.join(".waits-held/.adopted").exists(),
+        "a stretch without the watchdog left the marker"
+    );
+    cfg.waits = waits;
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/late").exists());
+    say(&cfg, &["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/late").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_waits_for_an_unreadable_job_to_be_readable() {
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    say(&cfg, &["pause", "sam/web"]);
+    let job = Job::new(&cfg, "legacy");
+    let outcome = job.turn("1", "outcome");
+    fs::write(&outcome, "failed").unwrap();
+    burrow_test::permissions(&outcome, 0o0);
+    if fs::read(&outcome).is_ok() {
+        return; // running as root: nothing is unreadable
+    }
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(
+        !jobs.join(".waits-held/.adopted").exists(),
+        "adoption completed past a file it couldn't read"
+    );
+    burrow_test::permissions(&outcome, 0o644);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/legacy").exists());
+    assert!(jobs.join(".waits-held/.adopted").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_refuses_a_link_where_a_job_state_file_should_be() {
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    say(&cfg, &["pause", "sam/web"]);
+    let job = Job::new(&cfg, "legacy");
+    // /dev/zero would never end; the confined reader refuses the link.
+    std::os::unix::fs::symlink("/dev/zero", job.turn("1", "outcome")).unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!jobs.join(".waits-held/.adopted").exists());
+    // A named pipe in place of turns is refused without blocking.
+    fs::remove_file(job.turn("1", "outcome")).unwrap();
+    fs::remove_file(job.path("turns")).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(job.path("turns"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!jobs.join(".waits-held/.adopted").exists());
+}
+
+#[test]
+fn jobs_an_adoption_found_stay_its_when_the_policy_moves_before_it_ends() {
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    // Found while denied, recorded, and the repo allowed before it ended.
+    fs::create_dir_all(jobs.join(".waits-held")).unwrap();
+    say(&cfg, &["pause", "sam/web"]);
+    let snapshot = cfg.settings.as_ref().unwrap().snapshot().unwrap();
+    fs::write(
+        jobs.join(".waits-held/.adopting"),
+        serde_json::to_vec(&serde_json::json!({"policies": [snapshot], "found": ["legacy"]}))
+            .unwrap(),
+    )
+    .unwrap();
+    say(&cfg, &["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/legacy").exists());
+    assert!(jobs.join(".waits-held/.adopted").exists());
+    assert!(!jobs.join(".waits-held/.adopting").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proj_with_a_successor_leaves_adoption_to_it_without_waiting_on_its_lock() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, jobs) = adoption_cfg(&tmp);
+    let deployed = tmp.path().join("deployed");
+    burrow_test::executable(
+        &deployed,
+        "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_rewatch_all) exit 0 ;;\n*) exit 2 ;;\nesac\n",
+    );
+    cfg.deployed = deployed;
+    // Another pass holds the adoption lock; this one must not wait for it.
+    let lock = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(jobs.join(".adopt.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    crate::waits::rewatch_all(&cfg);
+    assert!(!jobs.join(".waits-held/.adopted").exists());
 }
