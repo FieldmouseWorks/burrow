@@ -49,7 +49,7 @@ fn usage_totals_preserve_cost_recovery_and_partial_tokens_at_every_level() {
         for totals in [false, true] {
             let query = format!("usage @{since}{}", if totals { " --totals" } else { "" });
             let got = m.answer(&Query::parse(&query).unwrap()).unwrap();
-            assert!(got.contains(&format!("Cost: ${cost} recorded over {turns} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; 0 turns whose engine's cost and tokens aren't read.")), "{query}: {got}");
+            assert!(got.contains(&format!("Cost: ${cost} recorded over {turns} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; 0 turns whose engine's stream carries tokens but no cost (their runs' missing and recovered tokens count above); 0 turns whose engine's cost and tokens aren't read.")), "{query}: {got}");
             assert!(
                 got.contains(&format!("Tokens: {partial} turns with partial counts")),
                 "{got}"
@@ -137,7 +137,7 @@ fn usage_projects_keep_supported_basenames_distinct_and_escape_display() {
         }
     }
     assert!(
-        rows.contains(&"codex all (unknown) 1 - - - - - 1 0 0 0 0".into()),
+        rows.contains(&"codex all (unknown) 1 0 0 0 0 - 0 1 0 0 1".into()),
         "{got}"
     );
     assert!(
