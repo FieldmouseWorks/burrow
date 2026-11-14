@@ -288,17 +288,24 @@ impl Pass<'_> {
         Ok(all)
     }
 
-    /// GitHub's error, once a rate limit it met is noted: when it resets,
-    /// from `rate_limit`, which costs nothing against it. A limit with none
-    /// of it spent (a secondary one) resets at 0, which is past.
+    /// GitHub's error, once a rate limit it met is noted: the pass may ask
+    /// again no earlier than the error's own deadline (`retry_at`, which
+    /// burrow-github sets for every rate limit it recognizes: a 403's, a
+    /// 429's, GraphQL's), nor than the reset of a budget `rate_limit` says
+    /// is spent. That probe costs nothing against the limit, and runs once
+    /// a pass; a failed or healthy one can't shorten the error's deadline,
+    /// and a later limit's deadline only lengthens the pass's.
     pub fn noted(&mut self, e: Error) -> Error {
-        if self.out.limited.is_none() && e.unanswered && e.why.to_lowercase().contains("rate limit")
-        {
-            let reset = call(self.api, "GET", "rate_limit", None, None)
-                .ok()
-                .and_then(|r| r.json().ok())
-                .map_or(0.0, |v| reset(&v));
-            self.out.limited = Some(reset);
+        if let Some(retry_at) = e.retry_at {
+            let mut at = retry_at as f64;
+            if self.out.limited.is_none() {
+                let spent = call(self.api, "GET", "rate_limit", None, None)
+                    .ok()
+                    .and_then(|r| r.json().ok())
+                    .map_or(0.0, |v| reset(&v));
+                at = at.max(spent);
+            }
+            self.out.limited = Some(self.out.limited.map_or(at, |was| was.max(at)));
         }
         e
     }
@@ -386,5 +393,130 @@ mod tests {
             0.0
         );
         assert_eq!(reset(&json!({})), 0.0);
+    }
+
+    mod limits {
+        use super::super::Pass;
+        use crate::testing::{Hub, States, T, answer, config, look};
+        use burrow_github::{call, query};
+        use serde_json::json;
+
+        const SECONDARY: &str = "You have exceeded a secondary rate limit";
+
+        fn healthy(hub: &mut Hub) {
+            let budgets = json!({"resources": {"core": {"remaining": 4000, "reset": T + 3000.0}}});
+            hub.on("GET", "rate_limit$", answer(200, budgets));
+        }
+
+        fn noted(hub: &mut Hub, f: impl FnOnce(&mut Pass)) -> Option<f64> {
+            let d = tempfile::tempdir().unwrap();
+            let cfg = config(d.path());
+            let mut jobs = States::new("running");
+            let (out, _) = look(&cfg, hub, &mut jobs, 0.0, |p| {
+                f(p);
+                Ok(())
+            });
+            out.limited
+        }
+
+        fn get(p: &mut Pass, path: &str) {
+            p.get(path).unwrap_err();
+        }
+
+        #[test]
+        fn a_secondary_limit_keeps_its_retry_after_past_a_healthy_probe() {
+            let mut hub = Hub::default();
+            let no = answer(403, json!({"message": SECONDARY})).with("Retry-After", "600");
+            hub.on("GET", "repos/sam/r$", no);
+            healthy(&mut hub);
+            let at = noted(&mut hub, |p| get(p, "repos/sam/r"));
+            assert_eq!(at, Some(T + 600.0));
+        }
+
+        #[test]
+        fn a_primary_403_keeps_its_reset() {
+            let mut hub = Hub::default();
+            let reset = format!("{}", T as u64 + 1200);
+            let no = answer(403, json!({"message": "Forbidden"}))
+                .with("x-ratelimit-remaining", "0")
+                .with("x-ratelimit-reset", &reset);
+            hub.on("GET", "repos/sam/r$", no);
+            // The probe fails: it can't erase the error's own deadline.
+            hub.on("GET", "rate_limit$", answer(502, json!(null)));
+            let at = noted(&mut hub, |p| get(p, "repos/sam/r"));
+            assert_eq!(at, Some(T + 1200.0));
+        }
+
+        #[test]
+        fn a_429_with_no_words_of_a_limit_keeps_its_retry_after() {
+            let mut hub = Hub::default();
+            let no = answer(429, json!({"message": "Too many"})).with("Retry-After", "300");
+            hub.on("GET", "repos/sam/r$", no);
+            // The probe can't answer at all: still the error's deadline.
+            let mut gone = answer(0, json!(null));
+            gone.why = "gh: connection refused".into();
+            hub.on("GET", "rate_limit$", gone);
+            let at = noted(&mut hub, |p| get(p, "repos/sam/r"));
+            assert_eq!(at, Some(T + 300.0));
+        }
+
+        #[test]
+        fn a_graphql_quota_error_is_noted() {
+            let mut hub = Hub::default();
+            let errors = json!({"errors": [{"type": "RATE_LIMITED", "message": "quota spent"}]});
+            let no = answer(200, errors).with("Retry-After", "900");
+            hub.graphql.push(("viewer".into(), no));
+            healthy(&mut hub);
+            let at = noted(&mut hub, |p| {
+                let e = query(p.api, "sam", "query { viewer { login } }", json!({}));
+                p.noted(e.unwrap_err());
+            });
+            assert_eq!(at, Some(T + 900.0));
+        }
+
+        #[test]
+        fn a_spent_budget_that_resets_later_wins() {
+            let mut hub = Hub::default();
+            let no = answer(403, json!({"message": SECONDARY})).with("Retry-After", "60");
+            hub.on("GET", "repos/sam/r$", no);
+            let spent = json!({"resources": {"core": {"remaining": 0, "reset": T + 2400.0}}});
+            hub.on("GET", "rate_limit$", answer(200, spent));
+            let at = noted(&mut hub, |p| get(p, "repos/sam/r"));
+            assert_eq!(at, Some(T + 2400.0));
+        }
+
+        #[test]
+        fn a_later_limit_only_lengthens_the_pass_s_wait() {
+            let mut hub = Hub::default();
+            let soon = answer(403, json!({"message": SECONDARY})).with("Retry-After", "60");
+            let late = answer(403, json!({"message": SECONDARY})).with("Retry-After", "900");
+            hub.on("GET", "repos/sam/a$", soon.clone());
+            hub.on("GET", "repos/sam/b$", late);
+            hub.on("GET", "repos/sam/c$", soon);
+            healthy(&mut hub);
+            let at = noted(&mut hub, |p| {
+                for path in ["repos/sam/a", "repos/sam/b", "repos/sam/c"] {
+                    get(p, path);
+                }
+            });
+            assert_eq!(at, Some(T + 900.0));
+        }
+
+        #[test]
+        fn what_isn_t_a_limit_notes_nothing() {
+            let mut hub = Hub::default();
+            hub.on(
+                "GET",
+                "repos/sam/r$",
+                answer(404, json!({"message": "Not Found"})),
+            );
+            healthy(&mut hub);
+            let at = noted(&mut hub, |p| {
+                call(p.api, "GET", "repos/sam/r", None, None)
+                    .map_err(|e| p.noted(e))
+                    .unwrap_err();
+            });
+            assert_eq!(at, None);
+        }
     }
 }

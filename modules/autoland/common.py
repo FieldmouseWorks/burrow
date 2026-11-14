@@ -222,8 +222,9 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     if p.returncode:
         raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
-    if out["limited"] is not None and not LIMITED:
-        LIMITED.append(out["limited"])
+    if out["limited"] is not None:
+        # The latest deadline any call met: one met first can't shorten it.
+        LIMITED[:] = [max([*LIMITED, out["limited"]])]
     return out
 
 

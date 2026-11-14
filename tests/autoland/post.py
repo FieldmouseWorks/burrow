@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 from harness import REAL_GH, C, V, tmp, upkeep_config
 
@@ -160,12 +161,18 @@ with C.acting_for("sam/r"):
         assert "didn't take" in str(e) and not isinstance(e, C.Unavailable), e
     github(compare=(403, {"message": "API rate limit exceeded for installation ID 1."}))
     C.LIMITED.clear()
+    # A limit with none of its budgets spent (rate_limit says none is) and
+    # no reset said keeps the failed request's own deadline, a minute on
+    # (burrow-github's), not 0: the pass waits it out.
+    before = time.time()
     try:
         V.post("sam/r", pr, "rival", answer, shown)
         raise AssertionError("posted with GitHub unavailable")
     except C.Unavailable as e:
         assert "rate limit" in str(e), e
-    assert C.LIMITED == [0.0] and [p for _, p, _, _ in calls()] == [f"repos/sam/r/compare/main...{head}", "rate_limit"], calls()
+    after = time.time()
+    assert len(C.LIMITED) == 1 and int(before) + 60 <= C.LIMITED[0] <= after + 60, (C.LIMITED, before, after)
+    assert [p for _, p, _, _ in calls()] == [f"repos/sam/r/compare/main...{head}", "rate_limit"], calls()
     C.LIMITED.clear()
 # The word posts what it's given: a status run has nothing to post, and a
 # reviewer's name goes into its marks, so it's a plain word.
