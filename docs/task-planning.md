@@ -42,24 +42,28 @@ said. Tied means a merged PR from any repository that closes it by a
 closing reference, a merged PR the child's own job awaited (`proj await`)
 before it ended with its own `proj done`, or one an author recorded. The
 job's awaits are kept in the child's plan folder (`.plans/OWNER_REPO-N/
-awaited`) only once the child is closed on an accepted completion: the
+awaited`) only once the child is closed on an accepted completion (the
 checks that close an issue with its finished job, a `done` that isn't a
-one-way question's timeout, and no owner's answer owed. The inbox closes
-an open child (repair-lane children included) when one of its awaited PRs
-has merged, and keeps the awaits only once that close has gone through; a
-child closed first, by hand say, keeps them the same way before the job's
-record goes. An awaited PR counts whenever it merges, a later pass looking
-again, and a reopened child drops what its earlier job awaited. A closed
-child with nothing tied is not done: a hand close stays a no-op, but the
-checklist says once that the list waits on it, and the owner's notice is
-ensured every pass until the list stops waiting, then closed, both retried
-until the notifier confirms them, whether or not the parent is still open.
-When the work provably landed some other way, an author records it from
-the host with `proj plan done OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/
-landed`), under the inbox's pass lock. It refuses inside a job, a GitHub
-account outside `inbox.authors`, a repo that isn't one of the machine's
-projects and a PR that hasn't merged; the next pass advances the list and
-closes the child if it's still open.
+one-way question's timeout, no owner's answer owed), and bound to that
+closure: when it closed, and the title and body it closed with. A child
+reopened, edited or closed again doesn't inherit them, whether or not a
+pass saw it open. The inbox closes an open child (repair-lane children
+included) once one of its awaited PRs has merged; the close's own pass,
+finding it closed, keeps them, as it does for a child closed first, by
+hand say, before the job's record goes. An awaited PR counts whenever it
+merges, a pass looking again hourly, and a source GitHub can't answer for
+never vetoes another that proves the child done. A closed child with
+nothing tied is not done: a hand close stays a no-op, but the checklist
+says once that the list waits on it, and the owner's notice is ensured
+every pass, and hourly, while the list waits, then closed until the
+notifier confirms it, whether or not the parent is still open; a pass
+scoped to other issues leaves it be. When the work provably landed some
+other way, an author records it from the host with `proj plan done
+OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
+pass lock. It refuses inside a job, a GitHub account outside
+`inbox.authors`, a repo that isn't one of the machine's projects and a PR
+that hasn't merged; the next pass advances the list and closes the child
+if it's still open.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes

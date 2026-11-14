@@ -103,9 +103,10 @@ fn moved_on(b: &Box) -> bool {
 
 /// What the host kept of what #7's job awaited, one per line.
 fn kept(b: &Box) -> Option<String> {
-    let kept: Value =
-        serde_json::from_str(&crate::read(&b.pass().plan_dir("sam/box", "7").join("awaited"))?)
-            .unwrap();
+    let kept: Value = serde_json::from_str(&crate::read(
+        &b.pass().plan_dir("sam/box", "7").join("awaited"),
+    )?)
+    .unwrap();
     Some(
         kept["targets"]
             .as_array()
