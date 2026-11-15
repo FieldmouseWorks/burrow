@@ -706,13 +706,21 @@ fn nothing_public_signs_a_statement_a_caller_hands_it_or_reads_a_record_back() {
         assert!(!s.contains("SigningKey"), "{s}");
     }
     // Signing happens only as a record is published: the signer's public
-    // calls load its key and read a signed result, and nothing else.
+    // calls load its key and read a signed result, and nothing else, but
+    // for a test's signer, which no build that runs has.
     assert_eq!(
         public_in(&signatures, "sign.rs"),
-        ["check", "conclusion", "load", "text"]
+        ["check", "conclusion", "for_tests", "load", "text"]
     );
     let sign =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sign.rs")).unwrap();
+    assert!(
+        sign.contains(
+            "    #[cfg(any(test, feature = \"test-key\"))]\n    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {"
+        ),
+        "a test's signer is only in a test's build"
+    );
+    assert_eq!(sign.matches("pub fn for_tests").count(), 1);
     assert!(
         sign.contains("\nmod sealed {"),
         "how a result signs stays private"

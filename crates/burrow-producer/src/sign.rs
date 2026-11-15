@@ -277,8 +277,11 @@ impl Signer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
+    /// A signer with a key the test hands it: only in this crate's tests,
+    /// and in a crate's that names the `test-key` feature among its
+    /// dev-dependencies, never in a build that runs.
+    #[cfg(any(test, feature = "test-key"))]
+    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
         Self {
             producer: producer.into(),
             key: SigningKey::from_bytes(&secret),

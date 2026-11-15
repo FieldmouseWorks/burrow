@@ -315,6 +315,7 @@ in
     (import ./common.nix inputs)
     (import ./autoland/review.nix inputs)
     (import ./autoland/fix.nix inputs)
+    (import ./autoland/proof.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
@@ -666,6 +667,20 @@ in
         `autoland-shadow@OWNER-NAME` (autoland/shadow.nix). Read-only: for
         checking the flow against the steward before a repo switches over.
         Needs a burrow.ledger.package whose `cn` has `flow compare`.
+      '';
+    };
+
+    flowConfigs = mkOption {
+      type = types.path;
+      readOnly = true;
+      internal = true;
+      default = shadow.configs;
+      defaultText = lib.literalMD "the shadow's configurations";
+      description = ''
+        Each shadowed repo's flow configuration, at OWNER/NAME.json
+        lowercased (autoland/shadow.nix): where the flow's plugins read its
+        settings (a proof's recipe), until the flow's own configuration is
+        rendered (burrow#724).
       '';
     };
 

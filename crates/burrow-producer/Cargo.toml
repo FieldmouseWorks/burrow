@@ -19,6 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
+[features]
+# A signer from a key a test hands it (`Signer::for_tests`), for another
+# crate's tests. Never in a build that runs.
+test-key = []
 
 [dev-dependencies]
 base64.workspace = true
