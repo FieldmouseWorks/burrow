@@ -170,6 +170,8 @@ fn hits(hub: &mut Hub, n: u64, who: &str) {
     let items =
         json!({"items": [{"number": n, "title": "Dependency Dashboard", "user": {"login": who}}]});
     hub.on("GET", "search/issues", answer(200, items));
+    // No branch on the dashboard has had a PR since.
+    hub.on("GET", "repos/sam/r/pulls", answer(200, json!([])));
 }
 
 fn watch_at(cfg: &Config, hub: &mut Hub, jobs: &mut States, at: f64) -> Out {
@@ -796,4 +798,93 @@ fn a_job_whose_ask_isnt_kept_isnt_asked_for() {
     );
     fs::remove_dir(&tmp).unwrap();
     assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY + 1.0).jobs.len(), 1);
+}
+
+/// GitHub's time for `at` seconds after T.
+fn iso(at: f64) -> String {
+    jiff::Timestamp::from_second((T + at) as i64)
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_branch_whose_pr_a_pass_never_saw_starts_over_from_it() {
+    // A grouped branch (renovate/dependencies) gets its PR once its
+    // updates have soaked, the PR merges within minutes, and the next
+    // night's updates put the branch back on the dashboard. A pass that
+    // didn't read the dashboard while the PR was there kept the branch's
+    // first sighting, and handed a branch that had just landed to a job as
+    // four days stuck. Renovate's own PR from the branch says it moved:
+    // what's on the dashboard now waits from that PR's close.
+    let d = tempfile::tempdir().unwrap();
+    let cfg = config(d.path());
+    let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
+    hits(&mut hub, 7, "sam");
+    let pending = |title: &str| {
+        format!(
+            "## Pending Status Checks\n\n - [ ] <!-- unpend-branch=renovate/dependencies -->{title}\n"
+        )
+    };
+    dashboard(
+        &mut hub,
+        &pending("deps: update rust crate zip to v9.5.1"),
+        &[],
+    );
+    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
+    let wait = cfg.dashboard.as_ref().unwrap().wait_days as f64 * DAY;
+    let merged = 3.0 * DAY + HOUR;
+    // Newest first, as GitHub lists them: Renovate's PR from before the
+    // branch was first seen, a PR someone else opened from it, and the
+    // one Renovate opened and merged in between.
+    let prs = json!([
+        {"number": 9, "user": {"login": "mallory"}, "created_at": iso(merged + 60.0), "closed_at": null},
+        {"number": 8, "user": {"login": "sam"}, "created_at": iso(merged - 600.0), "closed_at": iso(merged)},
+        {"number": 2, "user": {"login": "sam"}, "created_at": iso(-DAY), "closed_at": iso(-DAY)},
+    ]);
+    hub.on("GET", "repos/sam/r/pulls", answer(200, prs));
+    dashboard(
+        &mut hub,
+        &pending("deps: update dependencies (`rust`, `ureq`)"),
+        &[],
+    );
+    let out = watch_at(&cfg, &mut hub, &mut jobs, wait);
+    assert!(out.jobs.is_empty() && out.stuck.is_empty(), "{out:?}");
+    let asked = hub
+        .paths()
+        .into_iter()
+        .find(|p| p.starts_with("repos/sam/r/pulls"));
+    let head = encode("renovate/dependencies");
+    assert_eq!(
+        asked,
+        Some(format!("repos/sam/r/pulls?state=all&sort=created&direction=desc&per_page=100&head=sam:{head}").as_str())
+    );
+    let it = &state(&cfg).items["branch renovate/dependencies"];
+    assert_eq!(it.since, T + merged);
+    assert_eq!(out.wake, Some(T + merged + wait));
+    // Still there four days after that PR, with none from Renovate since
+    // (the one opened after it is someone else's): stuck, and handed on.
+    let out = watch_at(&cfg, &mut hub, &mut jobs, merged + wait);
+    assert_eq!(out.jobs.len(), 1, "{out:?}");
+    assert!(
+        out.jobs[0]
+            .task
+            .contains(&format!("there since {}", day(T + merged)))
+    );
+    // Handed on, then Renovate's next PR from it lands before the day
+    // after the job is up: not listed on the stuck issue, and it waits
+    // afresh from that PR.
+    let handed = merged + wait;
+    start(&cfg, handed, "dashboard", "dash-1");
+    let again = handed + 2.0 * HOUR;
+    let prs = json!([
+        {"number": 10, "user": {"login": "sam"}, "created_at": iso(handed + HOUR), "closed_at": iso(again)},
+    ]);
+    hub.on("GET", "repos/sam/r/pulls", answer(200, prs));
+    let out = watch_at(&cfg, &mut hub, &mut jobs, handed + DAY);
+    assert!(out.stuck.is_empty() && out.jobs.is_empty(), "{out:?}");
+    let it = &state(&cfg).items["branch renovate/dependencies"];
+    assert_eq!(
+        (it.since, it.handed, it.job.as_deref()),
+        (T + again, None, None)
+    );
 }
