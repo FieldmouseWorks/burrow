@@ -211,10 +211,13 @@ pkgs.testers.runNixOSTest {
         producer("systemctl stop nix-daemon.service", ok=False)
 
     with subtest("its runs end with it"):
-        machine.succeed(f"systemctl is-active {unit('c1')}")
+        # A oneshot is activating while its command runs.
+        def running(id):
+            return f"systemctl show -p ActiveState --value {unit(id)} | grep -qx -e activating -e active"
+        machine.succeed(running("c1"))
         machine.succeed("systemctl restart autoland-proof.service")
         machine.wait_for_file("/run/conary-producers/proof/producer.sock")
-        machine.wait_until_fails(f"systemctl is-active {unit('c1')}", timeout=60)
+        machine.wait_until_fails(running("c1"), timeout=60)
         machine.wait_until_fails("pgrep -x sleep", timeout=30)
         # Once its startup has cleared what its runs left.
         machine.wait_until_succeeds(f"test ! -e {folder('c1')}", timeout=30)
