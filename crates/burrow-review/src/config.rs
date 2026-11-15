@@ -23,6 +23,12 @@ pub struct Config {
     pub sessions: PathBuf,
     /// The snapshots' checkouts, by name: what a look reads.
     pub snapshots: PathBuf,
+    /// The review producer's looks (crates/burrow-review-producer), when
+    /// it's on: each one's snapshot, `NAME`, which the producer takes and
+    /// clears, and its session's home, `NAME.home`, which a look makes
+    /// and clears. Nothing in it is resumed.
+    #[serde(default)]
+    pub fresh: Option<PathBuf>,
     pub reviewers: Reviewers,
     /// How long one look may take, in minutes.
     pub timeout_minutes: f64,

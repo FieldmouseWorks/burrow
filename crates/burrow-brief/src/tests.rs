@@ -18,7 +18,6 @@ fn ask<'a>(quoted: &'a str, rules: &'a str, house: &'a str, secret: &'a [String]
         title: "Use eval",
         base: "main",
         quoted,
-        reasons: "Weigh the reasons.",
         rules,
         house,
         secret,
@@ -128,6 +127,7 @@ fn the_cli_gives_every_text_by_name_for_its_owner() {
         "dep_seen",
         "failing",
         "land_or_owner",
+        "reasons",
     ]
     .into();
     assert_eq!(got, want);
@@ -159,7 +159,6 @@ fn policy() -> HashSet<String> {
         title: MARK,
         base: MARK,
         quoted: MARK,
-        reasons: MARK,
         rules: MARK,
         house: MARK,
         secret: &secret,
@@ -291,4 +290,10 @@ fn a_copy_of_the_briefs_text_is_found() {
         found.iter().any(|f| f.contains("caller.py:2:")),
         "{found:?}"
     );
+}
+
+#[test]
+fn a_description_is_quoted_line_by_line_and_none_says_so() {
+    assert_eq!(super::quote("  one\n\ntwo  \n"), "> one\n>\n> two");
+    assert_eq!(super::quote(" \n "), "(none)");
 }

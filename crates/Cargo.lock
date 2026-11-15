@@ -563,6 +563,7 @@ dependencies = [
  "burrow-github",
  "burrow-producer",
  "burrow-settings",
+ "burrow-test",
  "conary-core",
  "rustix",
  "serde",
@@ -813,6 +814,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-review-producer"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "burrow-brief",
+ "burrow-github",
+ "burrow-producer",
+ "burrow-review",
+ "burrow-settings",
+ "burrow-test",
+ "burrow-upkeep",
+ "conary-core",
+ "conary-github",
+ "ed25519-dalek",
+ "jiff",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-robot"
 version = "0.0.0"
 dependencies = [
@@ -1058,7 +1081,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=eac5fc9df1c22fd9560e9fddc9e31ce52f119f27#eac5fc9df1c22fd9560e9fddc9e31ce52f119f27"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=53c6b35c3875b0d57993e896507235ff4a39bd07#53c6b35c3875b0d57993e896507235ff4a39bd07"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1067,12 +1090,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=eac5fc9df1c22fd9560e9fddc9e31ce52f119f27#eac5fc9df1c22fd9560e9fddc9e31ce52f119f27"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=53c6b35c3875b0d57993e896507235ff4a39bd07#53c6b35c3875b0d57993e896507235ff4a39bd07"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3456,7 +3480,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

@@ -67,6 +67,7 @@ impl sealed::Signs for Judgment {
             self.generation,
             self.verdict,
             self.provenance.as_ref(),
+            self.basis.as_ref(),
         );
         let log = flow::receipt_digest(&receipt);
         signer.sign(&self.target(), &self.tree, None, true, log)
@@ -121,6 +122,8 @@ pub struct Judgment {
     pub generation: u64,
     pub verdict: Option<Verdict>,
     pub provenance: Option<Provenance>,
+    /// Why the flow asked, and the findings and answers it was judged on.
+    pub basis: Option<flow::Basis>,
 }
 
 /// A proof's run, as the proof producer recorded its program's exit:

@@ -342,6 +342,13 @@ Each has an entry below, and each can be imported on its own.
   exact commit, each run as a user systemd makes for it, and its verdict
   signed with the producer's own key (`plugins.proof.keyFile`) and posted
   as a check run; it needs `burrow.ledger.controllerUser` too.
+  `plugins.review.enable` (off) runs Conary's review plugin and its
+  producer (crates/burrow-review-producer): each request a fresh Codex look
+  through the reviewers' service, on a snapshot of its own briefed with the
+  role's earlier findings, and a sign pass, on each submitted review, that
+  signs the flow's publication with the producer's own key
+  (`plugins.review.keyFile`) only once it holds all the look recorded; it
+  needs `burrow.ledger.controllerUser` and Codex as a reviewer.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

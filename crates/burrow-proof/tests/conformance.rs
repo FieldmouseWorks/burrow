@@ -3,7 +3,6 @@
 //! module makes a one-line wrapper of `burrow-proof-plugin plugin CONFIG`.
 //! The fixtures need no producer: none listens here.
 use conary_core::plugin::{Kind, Limits, Plugin};
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 #[test]
@@ -22,16 +21,14 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
     });
     std::fs::write(&config, cfg.to_string()).unwrap();
     let plugin = d.join("burrow-proof-plugin");
-    std::fs::write(
+    burrow_test::executable(
         &plugin,
         format!(
             "#!/bin/sh\nexec {} plugin {}\n",
             env!("CARGO_BIN_EXE_burrow-proof-plugin"),
             config.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let limits = Limits {
         deadline: Duration::from_secs(30),
         response_bytes: 1 << 20,

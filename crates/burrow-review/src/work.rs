@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::queue::{self, Item};
+use crate::queue::{self, Fresh, Item};
 use crate::scrub::{head, said, scrub};
 use crate::{Failed, Service, codex, now};
 
@@ -60,7 +60,10 @@ pub fn review(s: &Service, name: &str) {
     };
     let out = match &item {
         Err(e) => Err(Failed::Error(e.clone())),
-        Ok(item) => look(s, item),
+        Ok(item) => match &item.fresh {
+            None => look(s, item).map(|answer| (answer, Value::Null)),
+            Some(fresh) => fresh_look(s, item, fresh, &path),
+        },
     };
     // Read once it's done: a refresh while it ran is scrubbed too.
     let keys = s.keys();
@@ -74,8 +77,14 @@ pub fn review(s: &Service, name: &str) {
     let pr = format!("{}#{}", fmt(&tag(&raw, "repo")), fmt(&tag(&raw, "number")));
     let mut back = match out {
         Err(Failed::Paused { .. }) => return,
-        Ok(answer) => json!({"result": "review", "answer": scrub(&answer, &keys),
-                             "description": item.as_ref().map(|i| i.description.clone())}),
+        Ok((answer, ran)) => {
+            let mut back = json!({"result": "review", "answer": scrub(&answer, &keys),
+                                  "description": item.as_ref().map(|i| i.description.clone())});
+            if !ran.is_null() {
+                back["ran"] = ran;
+            }
+            back
+        }
         Err(Failed::Out { why, until }) => {
             let why = said(&why, &keys);
             let who = item
@@ -104,7 +113,11 @@ pub fn review(s: &Service, name: &str) {
         s.say(&format!("{name}: couldn't keep its answer: {e}"));
     }
     let _ = fs::remove_file(&path);
-    if let Some(repo) = tag(&raw, "repo").as_str() {
+    // A fresh look's answer is the review producer's, which waits on it:
+    // there's nothing in it for the steward's pass.
+    if let Some(repo) = tag(&raw, "repo").as_str()
+        && tag(&raw, "fresh").is_null()
+    {
         let url = format!("{}/{repo}", s.cfg.kick);
         if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
             s.say(&format!("couldn't kick {url}: {e}"));
@@ -183,6 +196,8 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
         &session.join("home"),
         last_id,
         &item.repo,
+        None,
+        &|| false,
     ) {
         Ok(got) => got,
         Err(e) => {
@@ -216,6 +231,64 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
         }
     ));
     Ok(answer)
+}
+
+/// The review producer's look: on its own snapshot, in a session of its
+/// own that nothing resumes and that's gone once it ends, on the model and
+/// effort the flow chose, and stopped as soon as the producer takes its
+/// entry off the queue (its request was abandoned). Its answer, and what
+/// ran it: the session, the model and the effort, which the producer
+/// answers the flow with.
+fn fresh_look(
+    s: &Service,
+    item: &Item,
+    fresh: &Fresh,
+    entry: &Path,
+) -> Result<(Value, Value), Failed> {
+    if s.cfg.paused(&item.repo) {
+        return Err(Failed::Paused { session: None });
+    }
+    let Some(dir) = &s.cfg.fresh else {
+        return Err(Failed::Error("this machine has no review producer".into()));
+    };
+    if !on(s, &item.reviewer, &item.repo) {
+        return Err(Failed::Error(format!(
+            "{} isn't one {} reviews",
+            item.repo, item.reviewer
+        )));
+    }
+    let snap = dir.join(&item.snap);
+    if item.snap.contains('/') || item.snap.starts_with('.') || !snap.is_dir() {
+        return Err(Failed::Error("its snapshot is gone".into()));
+    }
+    let home = dir.join(format!("{}.home", item.snap));
+    let _ = remove_all(&home);
+    let pr = format!("{}#{}", item.repo, item.number);
+    s.say(&format!(
+        "{pr}: {} is reviewing {} afresh, for the review producer",
+        item.reviewer,
+        item.head_ref_oid.chars().take(7).collect::<String>()
+    ));
+    let got = codex::look(
+        s,
+        &snap,
+        &item.prompt,
+        &home,
+        None,
+        &item.repo,
+        Some(fresh),
+        &|| !entry.exists(),
+    );
+    let _ = remove_all(&home);
+    let (answer, sid) = got?;
+    let effort = fresh
+        .effort
+        .clone()
+        .unwrap_or_else(|| s.cfg.reviewers.codex.effort.clone());
+    Ok((
+        answer,
+        json!({"session": sid, "model": fresh.model, "effort": effort}),
+    ))
 }
 
 /// Whether the repo has this reviewer: it's on, and the repo isn't one it

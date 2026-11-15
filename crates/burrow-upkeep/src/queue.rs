@@ -40,9 +40,6 @@ pub struct Ask {
     pub reviewer: String,
     /// The head's snapshot's name (reviewers.py `snap_name`).
     pub name: String,
-    /// How a reviewer weighs the reasons a description gives
-    /// (reviewers.py `REASONS`, which a judge's task gives too).
-    pub reasons: String,
 }
 
 impl Ask {
@@ -85,6 +82,7 @@ pub fn queue(p: &mut Pass, ask: &Ask) -> Result<String, String> {
         description: ask.description.clone(),
         opened: ask.opened,
         at: p.now,
+        fresh: None,
     };
     let entry = format!("{}--{}", ask.reviewer, ask.name);
     p.save(&format!("{QUEUE}/{entry}.json"), &item)?;
@@ -104,7 +102,6 @@ pub fn brief(owner: &str, repo: &str, ask: &Ask, meta: &Meta, prior: &str) -> St
         title: &ask.title,
         base: &ask.base,
         quoted: &ask.quoted,
-        reasons: &ask.reasons,
         rules: &meta.rules,
         house: &meta.house,
         secret: &meta.secret,
