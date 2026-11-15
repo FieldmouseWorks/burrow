@@ -1,13 +1,14 @@
 # The proof producer's systemd half (modules/autoland/proof.nix), for real:
 # it starts only with its key, as a user of its own, listening only for the
 # flow's controller. Each run is a unit of its own (autoland-proof-work@ID)
-# as a user systemd makes for it, which reads the producer's mirror though
-# it's another user's, and whose exit the unit keeps: 0 and 1 are a pass
-# and a fail, anything else (a run killed, a tree that isn't the head's) no
-# verdict, the unit gone. A build proves its derivation with the machine's
-# nix. One run can't reach another's processes or log, nor write the
-# producer's mirror; only the producer starts and stops runs, and nothing
-# else; and a restarted producer stops the runs it lost. The crate's tests
+# as a user systemd makes for it, which sees only its run's folder as the
+# producer lays it out (producer.rs, `lay`), reads its copy of the repo
+# though it's another user's, and whose exit the unit keeps: 0 and 1 are a
+# pass and a fail, anything else (a run killed, a tree that isn't the
+# head's) no verdict, the unit gone. A build proves its derivation with the
+# machine's nix. One run can't reach another's processes or folder, nor the
+# mirrors or the producer's key; only the producer starts and stops runs,
+# and nothing else; and its runs end with it. The crate's tests
 # (crates/burrow-proof) run the same work with fakes for systemd and
 # GitHub; this is systemd's, polkit's and nix's half.
 #
@@ -84,6 +85,9 @@ pkgs.testers.runNixOSTest {
     def unit(id):
         return f"autoland-proof-work@{id}.service"
 
+    def folder(id):
+        return f"${state}/runs/{id}"
+
     def shown(id):
         out = machine.succeed(f"systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus {unit(id)}")
         return dict(l.split("=", 1) for l in out.splitlines())
@@ -96,21 +100,27 @@ pkgs.testers.runNixOSTest {
             return int(s["ExecMainStatus"])
         return None
 
+    # A run's folder as the producer lays it out (producer.rs, `lay`), then
+    # its unit started as the producer starts it.
     def run(id, recipe, mode="proof", tree=None, block=True):
         spec = {"mode": mode, "repo": "acme/widget", "head": head, "tree": tree or tree_of_head,
                 "check": "c", "recipe": recipe}
-        producer(f"mkdir {state}/runs/{id} && cat >{state}/runs/{id}/spec.json <<'EOF'\n{json.dumps(spec)}\nEOF")
+        producer(" && ".join([
+            f"mkdir -m 0750 {folder(id)}",
+            f"cat >{folder(id)}/spec.json <<'EOF'\n{json.dumps(spec)}\nEOF",
+            f": >{folder(id)}/log && chmod 0660 {folder(id)}/log",
+            f"${git} clone -q --mirror --local ${mirror} {folder(id)}/repo.git",
+        ]))
         # A run with no verdict fails its start, which the producer reads
         # from systemd too.
         machine.execute(f"runuser -u autoland-proof -- systemctl start {'--no-block ' if not block else '''}{unit(id)}")
         return verdict(id) if block else None
 
-    def log(id):
-        return producer(f"cat /run/autoland-proof-work/{id}/log")
+    def printed(id):
+        return producer(f"cat {folder(id)}/log")
 
     def stop(id):
-        producer(f"systemctl stop {unit(id)} && rm -rf {state}/runs/{id}")
-        machine.fail(f"test -e /run/autoland-proof-work/{id}")
+        producer(f"systemctl stop {unit(id)} && rm -rf {folder(id)}")
 
     machine.wait_for_unit("multi-user.target")
 
@@ -123,7 +133,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("runuser -u conary-flow -- test -S /run/conary-producers/proof/producer.sock")
 
     # The producer's mirror, as its fetch leaves it: the head under
-    # refs/proof/, the producer's own and its group's to read.
+    # refs/proof/.
     out = producer("""
       set -e
       g="${git} -c user.name=t -c user.email=t@t"
@@ -143,15 +153,13 @@ pkgs.testers.runNixOSTest {
     head, tree_of_head = out[0], out[1]
 
     with subtest("a run's command is its own user's, and its exit, kept by its unit, is the verdict"):
-        assert run("a1", {"Run": ["bash", "-c", "test -f f && echo ran-here && id -u >&2"]}) == 0, shown("a1")
-        assert "ran-here" in log("a1"), log("a1")
-        uid = int(log("a1").split("ran-here")[1].split()[0])
+        assert run("a1", {"Run": ["bash", "-c", "test -f f && echo ran-here && id -u"]}) == 0, printed("a1")
+        assert "ran-here" in printed("a1"), printed("a1")
+        uid = int(printed("a1").split("ran-here")[1].split()[0])
         assert uid not in (0, int(machine.succeed("id -u autoland-proof"))), uid
-        # The log is the producer's group's, and nobody else's.
-        assert machine.succeed("stat -c '%G %a' /run/autoland-proof-work/a1/log").strip() == "autoland-proof 640"
-        machine.fail("runuser -u dev -- cat /run/autoland-proof-work/a1/log")
+        machine.fail(f"runuser -u dev -- cat {folder('a1')}/log")
         stop("a1")
-        assert run("a2", {"Run": ["bash", "-c", "exit 3"]}) == 1, shown("a2")
+        assert run("a2", {"Run": ["bash", "-c", "exit 3"]}) == 1, printed("a2")
         stop("a2")
 
     with subtest("a run killed, or a tree that isn't the head's, is no verdict, and its unit goes"):
@@ -161,27 +169,29 @@ pkgs.testers.runNixOSTest {
             machine.wait_until_fails(f"systemctl list-units --all --plain --no-legend {unit(id)} | grep -q .", timeout=30)
             stop(id)
 
-    with subtest("a build proves its derivation, from the producer's mirror, with the machine's nix"):
-        assert run("b1", {"Build": "checks.x86_64-linux.ok"}) == 0, log("b1")
+    with subtest("a build proves its derivation, from its copy of the repo, with the machine's nix"):
+        assert run("b1", {"Build": "checks.x86_64-linux.ok"}) == 0, printed("b1")
         stop("b1")
-        assert run("b2", {"Build": "checks.x86_64-linux.bad"}) == 1, log("b2")
+        assert run("b2", {"Build": "checks.x86_64-linux.bad"}) == 1, printed("b2")
         stop("b2")
         # Prepared: built already, so it needs no slot.
-        assert run("b3", {"Build": "checks.x86_64-linux.ok"}, mode="prepare") == 0, log("b3")
+        assert run("b3", {"Build": "checks.x86_64-linux.ok"}, mode="prepare") == 0, printed("b3")
         stop("b3")
 
-    with subtest("one run can't reach another's processes or log, nor write the producer's mirror"):
+    with subtest("a run sees only its own folder: not another run's, nor the mirrors, nor the producer's key"):
         run("c1", {"Run": ["bash", "-c", "exec sleep 300"]}, block=False)
         machine.wait_until_succeeds("pgrep -x sleep", timeout=60)
         pid = machine.succeed("pgrep -x sleep").strip()
         assert run("c2", {"Run": ["bash", "-c", " && ".join([
             f"! kill -0 {pid}",
             f"! test -r /proc/{pid}/environ",
-            "! touch /run/autoland-proof-work/c1/log",
-            "! cat /run/autoland-proof-work/c1/log",
-            "! touch ${mirror}/forged",
+            f"! test -e {folder('c1')}",
+            "! test -e ${mirror}",
+            "! test -e ${state}/records",
+            f"! touch {folder('c2')}/forged",
             "! cat /run/credentials/autoland-proof.service/proof-key",
-        ])]}) == 0, log("c2")
+            f"test -r {folder('c2')}/repo.git/HEAD",
+        ])]}) == 0, printed("c2")
         stop("c2")
 
     with subtest("only the producer starts and stops runs, and nothing else"):
@@ -191,12 +201,12 @@ pkgs.testers.runNixOSTest {
         producer("systemctl restart autoland-proof.service", ok=False)
         producer("systemctl stop nix-daemon.service", ok=False)
 
-    with subtest("a restarted producer stops the runs it lost"):
+    with subtest("its runs end with it"):
         machine.succeed(f"systemctl is-active {unit('c1')}")
         machine.succeed("systemctl restart autoland-proof.service")
         machine.wait_for_file("/run/conary-producers/proof/producer.sock")
         machine.wait_until_fails(f"systemctl is-active {unit('c1')}", timeout=60)
         machine.wait_until_fails("pgrep -x sleep", timeout=30)
-        machine.succeed("test ! -e /run/autoland-proof-work/c1 && test ! -e ${state}/runs/c1")
+        machine.succeed(f"test ! -e {folder('c1')}")
   '';
 }

@@ -9,12 +9,13 @@
 #
 # Each run's work is a unit of its own (autoland-proof-work@ID), as a user
 # of its own that systemd makes for it and takes back after (DynamicUser),
-# since a proof runs the repo's own code: one run can't touch another's
-# processes, tree or log, nor the producer's key, records or App. Its
-# group lets it read the producer's mirrors and its run's spec. The
-# verdict is the work's exit, which the unit keeps (0 or 1 leave it
-# active, anything else fails it), and the producer alone may start and
-# stop those units (polkit).
+# since a proof runs the repo's own code. Of the producer's state it sees
+# only its run's folder (its spec, its log and its own copy of its repo),
+# which its group lets it read and the log write: never another run's
+# folder, tree or processes, another repo's mirror, nor the producer's
+# key, records or App. The verdict is the work's exit, which the unit
+# keeps (0 or 1 leave it active, anything else fails it), and the producer
+# alone may start and stop those units (polkit).
 #
 # Off by default: Conary#314 turns the flow's plugins on, with the
 # producer's key and its line in the machine's producers file.
@@ -97,7 +98,6 @@ in
         git = lib.getExe config.programs.git.package;
         github = "https://github.com";
         inherit state;
-        out = "/run/${worker}";
         # The unit's own /var/tmp (PrivateTmp, which DynamicUser brings),
         # gone when the unit is.
         unit = worker;
@@ -171,6 +171,10 @@ in
     # verdict (crates/burrow-proof, work.rs).
     systemd.services."${worker}@" = {
       description = "A proof producer's run %i";
+      # Its producer, which alone reads how it ended: a run outliving it
+      # is no one's.
+      bindsTo = [ "autoland-proof.service" ];
+      after = [ "autoland-proof.service" ];
       # A switch leaves a run be: its producer stops it.
       restartIfChanged = false;
       path = [ pkgs.bash pkgs.coreutils config.programs.git.package config.nix.package ];
@@ -178,11 +182,11 @@ in
         # Where its programs keep what they cache (nix's fetches, cargo's):
         # its own /var/tmp, as nothing else is its to write.
         HOME = "/var/tmp";
-        # The producer's mirrors are another user's, which git (and nix's
-        # git) refuses to read unless they're named safe.
+        # Its copy of its repo is the producer's, which git (and nix's git)
+        # refuses to read unless it's named safe.
         GIT_CONFIG_COUNT = "1";
         GIT_CONFIG_KEY_0 = "safe.directory";
-        GIT_CONFIG_VALUE_0 = "${state}/git/*";
+        GIT_CONFIG_VALUE_0 = "${state}/runs/*";
       };
       serviceConfig = {
         Type = "oneshot";
@@ -192,18 +196,16 @@ in
         # Anything else is no verdict: the unit fails, and goes.
         CollectMode = "inactive-or-failed";
         # A user of its own, named for the unit, and the producer's group,
-        # which reads the producer's mirrors and its spec.
+        # for its run's folder, the only part of the producer's state it
+        # sees.
         DynamicUser = true;
         SupplementaryGroups = [ producer ];
+        TemporaryFileSystem = "${state}:ro";
+        BindPaths = [ "${state}/runs/%i" ];
         ExecStart = "${package}/bin/burrow-proof work ${configFile} %i";
         TimeoutStartSec = cfg.timeoutMinutes * 60;
         # Its cgroup is the run's to fence its command in.
         Delegate = true;
-        # Its log, which the producer reads before it stops the unit: the
-        # log is the producer's group's (work.rs), its folder only passed
-        # through.
-        RuntimeDirectory = "${worker}/%i";
-        RuntimeDirectoryMode = "0711";
         UMask = "0027";
       };
     };

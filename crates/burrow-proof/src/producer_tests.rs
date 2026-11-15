@@ -4,12 +4,14 @@
 //! recipes on a real mirror, with no cgroups.
 use crate::fence::Fence;
 use crate::plugin::{Config, describe, plugin};
-use crate::producer::{Ended, GitHub, Producer, Units, ended};
+use crate::producer::{Ended, GitHub, Producer, Units, ended, lay};
 use crate::work::{self, BROKE, FAILED, Mode, PASSED, SPEC, Spec};
 use burrow_github::fake::{Fake, ok};
 use burrow_github::{Api, Failed, Response as GhResponse};
+use burrow_producer::publish;
+use burrow_producer::records::{Records, Target};
 use burrow_producer::serve::{Controller, Server, Work};
-use burrow_producer::sign::Signer;
+use burrow_producer::sign::{Proof, Signer};
 use conary_core::op::{Outcome, Repo};
 use conary_core::plugin::{Answer, Capabilities, Kind, Model, Offers, Request, Sandbox};
 use conary_github::attest::service::Producers;
@@ -52,7 +54,6 @@ struct Scripted(Arc<Mutex<Script>>);
 
 #[derive(Default)]
 struct Script {
-    out: PathBuf,
     runs: PathBuf,
     ends: VecDeque<Ended>,
     printed: String,
@@ -65,17 +66,20 @@ struct Script {
 
 impl Units for Scripted {
     fn run(&self, id: &str, work: &Work, until: Instant) -> Result<Ended, String> {
-        let (hang, out) = {
+        let hang = {
             let mut s = self.0.lock().unwrap();
             let spec: Spec =
                 serde_json::from_slice(&std::fs::read(s.runs.join(id).join(SPEC)).unwrap())
                     .unwrap();
             s.started.push(spec);
-            std::fs::create_dir_all(s.out.join(id)).unwrap();
-            std::fs::write(s.out.join(id).join("log"), &s.printed).unwrap();
-            (s.hang, s.out.clone())
+            // The log the producer laid out, written as a worker would.
+            let mut log = std::fs::OpenOptions::new()
+                .append(true)
+                .open(s.runs.join(id).join("log"))
+                .unwrap();
+            log.write_all(s.printed.as_bytes()).unwrap();
+            s.hang
         };
-        let _ = out;
         if hang {
             while !work.abandoned() && Instant::now() < until {
                 thread::sleep(Duration::from_millis(10));
@@ -87,9 +91,7 @@ impl Units for Scripted {
     }
 
     fn stop(&self, id: &str) -> Result<(), String> {
-        let mut s = self.0.lock().unwrap();
-        let _ = std::fs::remove_dir_all(s.out.join(id));
-        s.stopped.push(id.into());
+        self.0.lock().unwrap().stopped.push(id.into());
         Ok(())
     }
 
@@ -131,7 +133,7 @@ fn config(d: &Path) -> Config {
         "producer": PRODUCER, "credential": "proof-key",
         "flow": d.join("flow"), "gh": "gh", "git": "git",
         "github": format!("file://{}", d.join("github").display()),
-        "state": d.join("state"), "out": d.join("out"),
+        "state": d.join("state"),
         "unit": "autoland-proof-work", "systemctl": "systemctl",
         "timeout": 600, "nix": "/nix/bin", "heavy": null,
         "trees": d.join("trees"),
@@ -210,7 +212,6 @@ fn rig() -> Rig {
     let units = Scripted::default();
     {
         let mut s = units.0.lock().unwrap();
-        s.out = cfg.out.clone();
         s.runs = cfg.state.join("runs");
         s.printed = "built\n".into();
     }
@@ -582,10 +583,27 @@ fn a_v1_proof_names_no_commit_and_is_refused() {
 fn startup_stops_what_a_restart_left_and_withdraws_unfinished_runs() {
     let r = rig();
     r.units.0.lock().unwrap().loaded = vec!["abc".into()];
+    // Its folder, and another whose unit a stop already ended.
     std::fs::create_dir_all(r.cfg.run("abc")).unwrap();
-    assert_eq!(r.producer.reconcile().unwrap(), 0);
+    std::fs::create_dir_all(r.cfg.run("def").join("repo.git")).unwrap();
+    // A proof whose check run a crash left in progress, with no result.
+    let records = Records::open(&r.cfg.state.join("records")).unwrap();
+    let mut record = records
+        .begin::<Proof>(Target {
+            repo: REPO.into(),
+            head: r.head.clone(),
+            check: "agents".into(),
+        })
+        .unwrap();
+    publish::start(&mut r.github.clone(), &records, &mut record).unwrap();
+    assert_eq!(r.producer.reconcile().unwrap(), 1);
     assert_eq!(r.stopped(), ["abc"]);
-    assert!(!r.cfg.run("abc").exists());
+    assert!(!r.cfg.run("abc").exists() && !r.cfg.run("def").exists());
+    assert_eq!(
+        r.runs(),
+        [("start agents".into(), None), ("cancelled".into(), None)]
+    );
+    assert_eq!(r.producer.reconcile().unwrap(), 0, "finished once");
 }
 
 #[test]
@@ -654,8 +672,6 @@ fn a_run_recipe_is_its_command_in_a_fresh_clone_and_its_exit_the_verdict() {
         .unwrap();
     let run = |argv: &[&str], tree: &str| {
         let id = format!("{:x}", rand_ish());
-        std::fs::create_dir_all(r.cfg.run(&id)).unwrap();
-        std::fs::create_dir_all(r.cfg.out.join(&id)).unwrap();
         let spec = Spec {
             mode: Mode::Proof,
             repo: REPO.into(),
@@ -664,13 +680,13 @@ fn a_run_recipe_is_its_command_in_a_fresh_clone_and_its_exit_the_verdict() {
             check: "gate".into(),
             recipe: Recipe::Run(argv.iter().map(|c| (*c).to_owned()).collect()),
         };
-        std::fs::write(
-            r.cfg.run(&id).join(SPEC),
-            serde_json::to_vec(&spec).unwrap(),
-        )
-        .unwrap();
+        // Laid out as the producer lays a run out: the worker reads its
+        // own copy of the repo, never the mirror.
+        lay(&r.cfg, &id, &spec).unwrap();
+        std::fs::rename(r.cfg.mirror(REPO), r.dir.path().join("hidden")).unwrap();
         let code = work::work(&r.cfg, &id, &mut Bare);
         let log = std::fs::read_to_string(r.cfg.log(&id)).unwrap();
+        std::fs::rename(r.dir.path().join("hidden"), r.cfg.mirror(REPO)).unwrap();
         (code, log)
     };
     let bash = |script: &'static str| ["bash", "-c", script];

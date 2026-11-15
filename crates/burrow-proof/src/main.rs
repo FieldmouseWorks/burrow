@@ -22,19 +22,20 @@ const USAGE: &str = "usage:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => return failed(&format!("which program this is: {e}")),
-    };
+    // Asked for by each verb that needs it, so a work's failure to find
+    // it is the work's own (no verdict), never exit 1, which is a fail.
+    let exe = || std::env::current_exe().map_err(|e| format!("which program this is: {e}"));
     let done = match args.as_slice() {
-        [word, dir] if word == "start" => start(Path::new(dir), &exe, Path::new("systemd-run")),
-        [word, dir] if word == "run" => {
-            Cgroups::own(exe).and_then(|mut fences| run(Path::new(dir), &mut fences))
+        [word, dir] if word == "start" => {
+            exe().and_then(|exe| start(Path::new(dir), &exe, Path::new("systemd-run")))
         }
+        [word, dir] if word == "run" => exe()
+            .and_then(Cgroups::own)
+            .and_then(|mut fences| run(Path::new(dir), &mut fences)),
         [word, dir] if word == "end" => end(Path::new(dir), &Ended::from_env()).map(drop),
         [word, config, id] if word == "work" => {
             let code = Config::read(Path::new(config)).and_then(|cfg| {
-                let mut fences = Cgroups::own(exe)?;
+                let mut fences = Cgroups::own(exe()?)?;
                 Ok(work(&cfg, id, &mut fences))
             });
             return ExitCode::from(code.unwrap_or_else(|why| {

@@ -32,8 +32,11 @@ use conary_core::plugin::{
     Answer, CheckResult, Executed, Identity, Request, Response, Task, Verdict, version,
 };
 use conary_github::flow::{self, Recipe};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -97,14 +100,18 @@ impl Producer {
         })
     }
 
-    /// At startup: stop every run a restart left (their requests went with
-    /// it), and finish what a crash left of each record: a committed one
-    /// published from what it holds, any other withdrawn. How many records
-    /// it finished.
+    /// At startup: stop every run a restart left and clear every run's
+    /// folder (their requests went with it), and finish what a crash left
+    /// of each record: a committed one published from what it holds, any
+    /// other withdrawn. How many records it finished.
     pub fn reconcile(&self) -> Result<usize, String> {
         for id in self.units.loaded()? {
             self.units.stop(&id)?;
-            let _ = fs::remove_dir_all(self.cfg.run(&id));
+        }
+        let runs = self.cfg.state.join("runs");
+        for entry in fs::read_dir(&runs).map_err(|e| format!("{}: {e}", runs.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            fs::remove_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         publish::reconcile::<Proof>(&mut *(self.github)(), &self.records, &self.signer)
     }
@@ -250,33 +257,20 @@ impl Producer {
         Ok(())
     }
 
-    /// Run `id`'s spec, written where its worker reads it.
-    fn spec(&self, id: &str, spec: &Spec) -> Result<(), String> {
-        let dir = self.cfg.run(id);
-        fs::DirBuilder::new()
-            .mode(0o750)
-            .create(&dir)
-            .map_err(|e| format!("{}: {e}", dir.display()))?;
-        let path = dir.join(SPEC);
-        fs::write(&path, serde_json::to_vec(spec).map_err(|e| e.to_string())?)
-            .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(0o640)))
-            .map_err(|e| format!("{}: {e}", path.display()))
-    }
-
     /// Run `id`'s unit, to its end, and let go of it: how it ended, and
-    /// what it printed. Its folder goes either way.
-    fn run(&self, id: &str, spec: &Spec, work: &Work) -> Result<(Ended, Vec<u8>), String> {
-        let ran = self.spec(id, spec).and_then(|()| {
+    /// the digest of what it printed, read once nothing of it is left
+    /// running. Its folder goes either way.
+    fn run(&self, id: &str, spec: &Spec, work: &Work) -> Result<(Ended, String), String> {
+        let ran = lay(&self.cfg, id, spec).and_then(|()| {
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
             self.units.run(id, work, until)
         });
-        // Read before the unit stops: its log goes with it.
-        let log = fs::read(self.cfg.log(id)).unwrap_or_default();
         let stopped = self.units.stop(id);
+        let log = digest(&self.cfg.log(id));
         let _ = fs::remove_dir_all(self.cfg.run(id));
         let ended = ran?;
         stopped.map_err(|e| format!("its unit wouldn't stop: {e}"))?;
-        Ok((ended, log))
+        Ok((ended, log?))
     }
 
     /// One check proved on `head`: its record and check run first, then
@@ -332,7 +326,7 @@ impl Producer {
             check: name.into(),
             recipe: recipe.clone(),
             passed,
-            log: flow::receipt_digest(&log),
+            log,
         };
         if let Err(why) = self.records.keep(&mut record, proof) {
             publish::withdraw(api, &self.records, &mut record)?;
@@ -429,6 +423,58 @@ fn new_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     format!("{now:x}{:x}", N.fetch_add(1, Ordering::SeqCst))
+}
+
+/// Run `id`'s folder, laid out for its worker, which sees nothing else of
+/// the producer's: its spec, its log (empty, for the worker to write), and
+/// its own copy of the repo's mirror, hard links of its objects, as the one
+/// repo it reads. Only the producer writes the folder itself.
+pub fn lay(cfg: &Config, id: &str, spec: &Spec) -> Result<(), String> {
+    let dir = cfg.run(id);
+    let at = |e: std::io::Error, path: &Path| format!("{}: {e}", path.display());
+    fs::DirBuilder::new()
+        .mode(0o750)
+        .create(&dir)
+        .map_err(|e| at(e, &dir))?;
+    let path = dir.join(SPEC);
+    fs::write(&path, serde_json::to_vec(spec).map_err(|e| e.to_string())?)
+        .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(0o640)))
+        .map_err(|e| at(e, &path))?;
+    let log = cfg.log(id);
+    fs::write(&log, b"")
+        .and_then(|()| fs::set_permissions(&log, fs::Permissions::from_mode(0o660)))
+        .map_err(|e| at(e, &log))?;
+    let out = Command::new(&cfg.git)
+        .args(["clone", "-q", "--mirror", "--local"])
+        .arg(cfg.mirror(&spec.repo))
+        .arg(cfg.repo(id))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "its copy of the mirror: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// The digest of the log at `path`, as Conary's receipt digest is
+/// (`flow::receipt_digest`), however long the log.
+pub fn digest(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0; 1 << 16];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The worker's units, through systemctl: `UNIT@ID.service`, which the

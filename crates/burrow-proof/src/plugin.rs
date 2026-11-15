@@ -34,13 +34,10 @@ pub struct Config {
     pub git: PathBuf,
     /// Where repos are fetched from: `GITHUB/OWNER/REPO.git`.
     pub github: String,
-    /// The producer's own state: `records/`, `git/` (its mirrors, which
-    /// the worker reads) and `runs/` (what each run is, which the worker
-    /// reads and never writes).
+    /// The producer's own state: `records/`, `git/` (its mirrors) and
+    /// `runs/`: each run's folder, the only part of it a run's worker sees
+    /// (`run`), and writes only its log in.
     pub state: PathBuf,
-    /// Where a run's worker leaves its log: `out/ID/log` (its unit's
-    /// runtime directory, which goes when the unit stops).
-    pub out: PathBuf,
     /// The worker's unit template: a run is `UNIT@ID.service`.
     pub unit: String,
     pub systemctl: PathBuf,
@@ -75,9 +72,14 @@ impl Config {
         self.flow.join(format!("{}.json", repo.to_lowercase()))
     }
 
-    /// A run's log, which its worker writes.
+    /// A run's log, which the producer makes and its worker writes.
     pub fn log(&self, id: &str) -> PathBuf {
-        self.out.join(id).join("log")
+        self.run(id).join("log")
+    }
+
+    /// A run's own copy of its repo's mirror, the one repo its worker sees.
+    pub fn repo(&self, id: &str) -> PathBuf {
+        self.run(id).join("repo.git")
     }
 }
 

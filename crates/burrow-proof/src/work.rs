@@ -27,7 +27,6 @@ use conary_github::flow::Recipe;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, fchown};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -64,20 +63,9 @@ pub const SPEC: &str = "spec.json";
 
 /// Run `id`'s work, each command fenced by `fence`: its exit.
 pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
-    // Its log, for the producer's group to read, as its spec is: the run's
-    // own user is one systemd made for it (DynamicUser), whose group is
-    // nobody else's.
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o640)
-        .open(cfg.log(id))
-        .and_then(|log| {
-            let group = fs::metadata(cfg.run(id).join(SPEC))?.gid();
-            fchown(&log, None, Some(group))?;
-            Ok(log)
-        });
-    let log = match log {
+    // Its log, which the producer made in the run's folder: the worker
+    // writes it and can't swap it for anything else.
+    let log = match OpenOptions::new().append(true).open(cfg.log(id)) {
         Ok(log) => log,
         Err(e) => {
             eprintln!("burrow-proof: {}: {e}", cfg.log(id).display());
@@ -97,7 +85,7 @@ pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
             return BROKE;
         }
     };
-    let mirror = cfg.mirror(&spec.repo);
+    let mirror = cfg.repo(id);
     let tree = git(cfg, &mirror)
         .args(["rev-parse", "--verify", "-q"])
         .arg(format!("{}^{{tree}}", spec.head))
@@ -288,15 +276,23 @@ fn prepare(cfg: &Config, drv: &str, log: &File) -> u8 {
     })
 }
 
-/// nix-store's exits for a build that failed: 100 and up, each bit of the
-/// rest a way it did. Anything else is the machine's failure.
-const BUILD_FAILED: std::ops::RangeInclusive<i32> = 100..=107;
+/// nix-store's exit for a build that failed, a builder's own non-zero
+/// exit. Its others (100 with a bit for each other way: 1 a timeout or
+/// silence, 2 a fixed output's hash, 4 a check's mismatch) are nix or the
+/// network failing, never the check's verdict, and so is anything else.
+const BUILD_FAILED: i32 = 100;
 
-/// The derivation realised in a heavy slot, its outputs rooted in the
-/// run's folder: [`PASSED`] once they're valid, [`FAILED`] on a build
-/// failure.
+/// The derivation realised in a heavy slot, its outputs rooted beside its
+/// tree while it builds: [`PASSED`] once they're valid, [`FAILED`] on a
+/// build failure.
 fn realise(cfg: &Config, id: &str, drv: &str, log: &File) -> u8 {
-    let root = cfg.out.join(id).join("result");
+    let root = cfg.trees.join(format!("{id}.result"));
+    let ended = build(cfg, &root, drv, log);
+    let _ = fs::remove_file(&root);
+    ended
+}
+
+fn build(cfg: &Config, root: &Path, drv: &str, log: &File) -> u8 {
     let argv = [
         cfg.nix.join("nix-store").to_string_lossy().into_owned(),
         "--realise".into(),
@@ -332,7 +328,7 @@ fn realise(cfg: &Config, id: &str, drv: &str, log: &File) -> u8 {
                 BROKE
             }
         },
-        Some(code) if BUILD_FAILED.contains(&code) => FAILED,
+        Some(BUILD_FAILED) => FAILED,
         _ => BROKE,
     }
 }
@@ -360,7 +356,7 @@ fn run(
         let _ = fs::remove_dir_all(&tree);
         let mut c = Command::new(&cfg.git);
         c.args(["clone", "-q", "--shared", "--no-checkout"])
-            .arg(cfg.mirror(&spec.repo))
+            .arg(cfg.repo(id))
             .arg(&tree)
             .stdin(Stdio::null());
         read(c, log)?;

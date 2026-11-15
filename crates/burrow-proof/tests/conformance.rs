@@ -16,7 +16,7 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
         "producer": "machine-proof", "credential": "proof-key",
         "flow": d.join("flow"), "gh": "gh", "git": "git",
         "github": "https://github.com", "state": d.join("state"),
-        "out": d.join("out"), "unit": "autoland-proof-work",
+        "unit": "autoland-proof-work",
         "systemctl": "systemctl", "timeout": 600, "nix": "/nix/bin",
         "heavy": null, "trees": d.join("trees"),
     });
