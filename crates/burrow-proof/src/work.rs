@@ -25,7 +25,7 @@ use crate::verdict;
 use conary_github::flow::Recipe;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::Deref;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::ExitStatusExt;
@@ -315,52 +315,125 @@ fn prepare(cfg: &Worker, drv: &str, log: &File) -> u8 {
     })
 }
 
-/// nix-store's exit for a build that failed, a builder's own non-zero
-/// exit. Its others (100 with a bit for each other way: 1 a timeout or
-/// silence, 2 a fixed output's hash, 4 a check's mismatch) are nix or the
-/// network failing, never the check's verdict, and so is anything else.
-const BUILD_FAILED: i32 = 100;
-
 /// The derivation realised in a heavy slot: [`PASSED`] once its outputs
-/// are valid, [`FAILED`] on a build failure. Nothing roots them (the
-/// unit's paths are its own, which the daemon can't see), so outputs
-/// collected before they're checked are no verdict.
+/// are valid, [`FAILED`] when a builder in its closure ran and failed.
+/// Nothing roots them (the unit's paths are its own, which the daemon
+/// can't see), so outputs collected before they're checked are no verdict.
 fn realise(cfg: &Worker, drv: &str, log: &File) -> u8 {
+    let note = |text: &str| {
+        let _ = writeln!(&mut &*log, "burrow-proof: {text}");
+    };
     let argv = [
         cfg.nix.join("nix-store").to_string_lossy().into_owned(),
         "--realise".into(),
         drv.into(),
     ];
-    let (out, err) = (log.try_clone(), log.try_clone());
-    let (Ok(out), Ok(err)) = (out, err) else {
+    let Ok(out) = log.try_clone() else {
         return BROKE;
     };
-    let status = match heavy(cfg, &argv).stdout(out).stderr(err).status() {
-        Ok(status) => status,
+    // What it says goes to the log, and is read: through the daemon its
+    // exit is 1 however the build failed.
+    let said = heavy(cfg, &argv)
+        .stdout(out)
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let mut said = Vec::new();
+            if let Some(mut err) = child.stderr.take() {
+                err.read_to_end(&mut said)?;
+            }
+            Ok((child.wait()?, said))
+        });
+    let (status, said) = match said {
+        Ok((status, said)) => (status, String::from_utf8_lossy(&said).into_owned()),
         Err(e) => {
-            let _ = writeln!(&mut &*log, "burrow-proof: can't build: {e}");
+            note(&format!("can't build: {e}"));
             return BROKE;
         }
     };
-    match status.code() {
-        Some(0) => match outputs(cfg, &[drv.to_owned()], log).and_then(|o| invalid(cfg, &o, log)) {
+    let _ = (&*log).write_all(said.as_bytes());
+    if status.success() {
+        return match outputs(cfg, &[drv.to_owned()], log).and_then(|o| invalid(cfg, &o, log)) {
             Ok(missing) if missing.is_empty() => PASSED,
             Ok(missing) => {
-                let _ = writeln!(
-                    &mut &*log,
-                    "burrow-proof: built, but not in the store: {}",
+                note(&format!(
+                    "built, but not in the store: {}",
                     missing.join(", ")
-                );
+                ));
                 BROKE
             }
             Err(why) => {
-                let _ = writeln!(&mut &*log, "burrow-proof: {why}");
+                note(&why);
                 BROKE
             }
-        },
-        Some(BUILD_FAILED) => FAILED,
-        _ => BROKE,
+        };
     }
+    match failed(&said, |drv| fs::read_to_string(drv)) {
+        Ok(true) => FAILED,
+        Ok(false) => {
+            note(&format!(
+                "the build failed with {status}, but no builder did"
+            ));
+            BROKE
+        }
+        Err(why) => {
+            note(&why);
+            BROKE
+        }
+    }
+}
+
+/// Whether what nix said of a failed build is a builder in it failing: one
+/// that ran and exited non-zero, and isn't a fixed output's (a fetch,
+/// whose failing is the network's), with the disk not full. Anything else
+/// is nix or the machine failing, never the check's verdict.
+pub(crate) fn failed(
+    said: &str,
+    read: impl Fn(&str) -> std::io::Result<String>,
+) -> Result<bool, String> {
+    if said.contains("lack of free disk space") {
+        return Ok(false);
+    }
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let drv = match quoted(line, "Cannot build '") {
+            Some(drv)
+                if lines.get(i + 1).is_some_and(|next| {
+                    next.starts_with("Reason: builder failed with exit code ")
+                }) =>
+            {
+                drv
+            }
+            _ => continue,
+        };
+        let text = read(drv).map_err(|e| format!("{drv}: {e}"))?;
+        if !fixed(&text).ok_or_else(|| format!("{drv} doesn't read as a derivation"))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The quoted path in `line` after `before`, when it's a derivation's.
+fn quoted<'a>(line: &'a str, before: &str) -> Option<&'a str> {
+    let (_, rest) = line.split_once(before)?;
+    let (drv, _) = rest.split_once('\'')?;
+    (drv.starts_with('/') && drv.ends_with(".drv")).then_some(drv)
+}
+
+/// Whether a derivation (its ATerm) has a fixed output: each output is
+/// `("NAME","PATH","ALGO","HASH")`, and a fixed one's hash isn't empty.
+fn fixed(drv: &str) -> Option<bool> {
+    let (outputs, _) = drv.strip_prefix("Derive([")?.split_once("],[")?;
+    let mut fixed = false;
+    for output in outputs.split("),(") {
+        let fields: Vec<&str> = output.trim_matches(['(', ')']).split(',').collect();
+        let [_, _, _, hash] = fields[..] else {
+            return None;
+        };
+        fixed |= hash != "\"\"";
+    }
+    Some(fixed)
 }
 
 /// The command line in a fresh clone of the commit, in its fence:

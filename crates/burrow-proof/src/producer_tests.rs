@@ -753,3 +753,52 @@ fn a_runs_id_names_a_user_of_its_own() {
     let unique: std::collections::BTreeSet<_> = ids.iter().collect();
     assert_eq!(unique.len(), ids.len());
 }
+
+#[test]
+fn a_build_fails_when_nix_says_a_builder_in_it_did() {
+    // nix-store's own words through the daemon, which exits 1 whatever
+    // failed.
+    let said = |failed: &str, reason: &str| {
+        format!(
+            "building '{failed}'...\n\
+             error: Cannot build '{failed}'.\n       Reason: {reason}.\n       Output paths:\n         /nix/store/x-out\n\
+             error: Cannot build '/nix/store/t-top.drv'.\n       Reason: 1 dependency failed.\n\
+             error: Build failed due to failed dependency\n"
+        )
+    };
+    let built = r#"Derive([("out","/nix/store/b-bad","","")],[],[],"x86_64-linux","/bin/sh",["-c","exit 2"],[("out","/nix/store/b-bad")])"#;
+    let fetched = r#"Derive([("out","/nix/store/f-fetch","sha256","e3b0c44298fc1c149afbf4e35bc078b4c539668989de3cdcde285867c7dbb083")],[],[],"x86_64-linux","/bin/sh",["-c","exit 1"],[("out","/nix/store/f-fetch")])"#;
+    let read = |drv: &str| match drv {
+        "/nix/store/b-bad.drv" => Ok(built.to_owned()),
+        "/nix/store/f-fetch.drv" => Ok(fetched.to_owned()),
+        _ => Err(std::io::Error::other("not there")),
+    };
+    let builder = "builder failed with exit code 2";
+    // A builder of the check's own, there or in what it needs: the verdict.
+    assert_eq!(
+        work::failed(&said("/nix/store/b-bad.drv", builder), read),
+        Ok(true)
+    );
+    // A fetch failing is the network's.
+    assert_eq!(
+        work::failed(&said("/nix/store/f-fetch.drv", builder), read),
+        Ok(false)
+    );
+    // And anything but a builder failing is nix's.
+    assert_eq!(
+        work::failed(
+            &said("/nix/store/b-bad.drv", "timed out after 60 seconds"),
+            read
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        work::failed("error: cannot connect to socket", read),
+        Ok(false)
+    );
+    let full = said("/nix/store/b-bad.drv", builder)
+        + "note: build failure may have been caused by lack of free disk space\n";
+    assert_eq!(work::failed(&full, read), Ok(false));
+    // A derivation nix names that can't be read is no verdict.
+    assert!(work::failed(&said("/nix/store/g-gone.drv", builder), read).is_err());
+}
