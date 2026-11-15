@@ -4,7 +4,7 @@
 //! recipes on a real mirror, with no cgroups.
 use crate::fence::Fence;
 use crate::plugin::{Config, describe, plugin};
-use crate::producer::{Ended, GitHub, Producer, Units, ended, lay};
+use crate::producer::{Ended, GitHub, Producer, Units, ended, lay, run_id};
 use crate::work::{self, BROKE, FAILED, Mode, PASSED, SPEC, Spec};
 use burrow_github::fake::{Fake, ok};
 use burrow_github::{Api, Failed, Response as GhResponse};
@@ -733,4 +733,16 @@ fn the_capabilities_are_a_programs() {
             mcp: false,
         })
     );
+}
+
+#[test]
+fn a_runs_id_names_a_user_of_its_own() {
+    // systemd's user names: at most 31 characters, `proof-` and the id.
+    let ids: Vec<String> = (0..1000).map(|_| run_id()).collect();
+    for id in &ids {
+        assert!(format!("proof-{id}").len() <= 31, "{id}");
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+    }
+    let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len());
 }

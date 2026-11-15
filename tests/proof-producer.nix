@@ -107,7 +107,7 @@ pkgs.testers.runNixOSTest {
                 "check": "c", "recipe": recipe}
         producer(" && ".join([
             f"mkdir -m 0750 {folder(id)}",
-            f"cat >{folder(id)}/spec.json <<'EOF'\n{json.dumps(spec)}\nEOF",
+            f"printf %s {shlex.quote(json.dumps(spec))} >{folder(id)}/spec.json",
             f": >{folder(id)}/log && chmod 0660 {folder(id)}/log",
             f"${git} clone -q --mirror --local ${mirror} {folder(id)}/repo.git",
         ]))
@@ -157,6 +157,10 @@ pkgs.testers.runNixOSTest {
         assert "ran-here" in printed("a1"), printed("a1")
         uid = int(printed("a1").split("ran-here")[1].split()[0])
         assert uid not in (0, int(machine.succeed("id -u autoland-proof"))), uid
+        # Each run's own: another's, at once, is another.
+        assert run("a5", {"Run": ["bash", "-c", "echo ran-here && id -u"]}) == 0, printed("a5")
+        assert int(printed("a5").split("ran-here")[1].split()[0]) != uid
+        stop("a5")
         machine.fail(f"runuser -u dev -- cat {folder('a1')}/log")
         stop("a1")
         assert run("a2", {"Run": ["bash", "-c", "exit 3"]}) == 1, printed("a2")
@@ -207,6 +211,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_file("/run/conary-producers/proof/producer.sock")
         machine.wait_until_fails(f"systemctl is-active {unit('c1')}", timeout=60)
         machine.wait_until_fails("pgrep -x sleep", timeout=30)
-        machine.succeed(f"test ! -e {folder('c1')}")
+        # Once its startup has cleared what its runs left.
+        machine.wait_until_succeeds(f"test ! -e {folder('c1')}", timeout=30)
   '';
 }

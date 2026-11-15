@@ -195,10 +195,13 @@ in
         SuccessExitStatus = "1";
         # Anything else is no verdict: the unit fails, and goes.
         CollectMode = "inactive-or-failed";
-        # A user of its own, named for the unit, and the producer's group,
-        # for its run's folder, the only part of the producer's state it
-        # sees.
+        # A user of its own, named for the run (an unnamed one would be
+        # named for the template, which every run would share), and the
+        # producer's group, for its run's folder, the only part of the
+        # producer's state it sees. Other users' processes it doesn't see.
         DynamicUser = true;
+        User = "proof-%i";
+        ProtectProc = "invisible";
         SupplementaryGroups = [ producer ];
         TemporaryFileSystem = "${state}:ro";
         BindPaths = [ "${state}/runs/%i" ];

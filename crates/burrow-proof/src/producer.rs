@@ -304,7 +304,7 @@ impl Producer {
             check: name.into(),
             recipe: recipe.clone(),
         };
-        let passed = match self.run(record.id(), &spec, work) {
+        let passed = match self.run(&run_id(), &spec, work) {
             Ok((Ended::Exited(PASSED), log)) => Ok((true, log)),
             Ok((Ended::Exited(FAILED), log)) => Ok((false, log)),
             Ok((Ended::Exited(code), _)) => Err(format!(
@@ -371,7 +371,7 @@ impl Producer {
                 check: name.clone(),
                 recipe: recipe.clone(),
             };
-            match self.run(&new_id(), &spec, work)?.0 {
+            match self.run(&run_id(), &spec, work)?.0 {
                 Ended::Exited(PASSED) => why.push(format!("{name} is built already")),
                 Ended::Exited(FAILED) => {
                     slot = true;
@@ -416,13 +416,18 @@ fn id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A new run's id: for a prepare, which keeps no record.
-fn new_id() -> String {
+/// A new run's id, which names its unit and so the user systemd makes for
+/// it (`proof-ID`, one a run): 20 hex digits, as a user's name is at most
+/// 31 characters, where a record's id is 32.
+pub fn run_id() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("{now:x}{:x}", N.fetch_add(1, Ordering::SeqCst))
+        .map_or(0, |d| d.as_nanos() as u64);
+    format!(
+        "{now:016x}{:04x}",
+        N.fetch_add(1, Ordering::SeqCst) & 0xffff
+    )
 }
 
 /// Run `id`'s folder, laid out for its worker, which sees nothing else of

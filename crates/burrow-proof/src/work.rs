@@ -16,8 +16,7 @@
 //!
 //! A `Build` recipe is its flake attribute's derivation at the commit, as
 //! the steward works it out (no import from derivation, no flake config),
-//! realised in a heavy slot, its outputs rooted in the run's folder until
-//! its unit stops. A `Run` recipe is its command line (a program and its
+//! realised in a heavy slot. A `Run` recipe is its command line (a program and its
 //! arguments, as the flow's settings give it), in a fresh clone of the
 //! commit, in a fence of its own.
 use crate::fence::Fence;
@@ -103,7 +102,7 @@ pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
     note(&format!("{} on {} at {}", spec.check, spec.repo, spec.head));
     match (&spec.recipe, spec.mode) {
         (Recipe::Build(attr), mode) => match derivation(cfg, &spec, &mirror, attr, &log) {
-            Ok(drv) if mode == Mode::Proof => realise(cfg, id, &drv, &log),
+            Ok(drv) if mode == Mode::Proof => realise(cfg, &drv, &log),
             Ok(drv) => prepare(cfg, &drv, &log),
             Err(why) => {
                 note(&why);
@@ -282,23 +281,14 @@ fn prepare(cfg: &Config, drv: &str, log: &File) -> u8 {
 /// network failing, never the check's verdict, and so is anything else.
 const BUILD_FAILED: i32 = 100;
 
-/// The derivation realised in a heavy slot, its outputs rooted beside its
-/// tree while it builds: [`PASSED`] once they're valid, [`FAILED`] on a
-/// build failure.
-fn realise(cfg: &Config, id: &str, drv: &str, log: &File) -> u8 {
-    let root = cfg.trees.join(format!("{id}.result"));
-    let ended = build(cfg, &root, drv, log);
-    let _ = fs::remove_file(&root);
-    ended
-}
-
-fn build(cfg: &Config, root: &Path, drv: &str, log: &File) -> u8 {
+/// The derivation realised in a heavy slot: [`PASSED`] once its outputs
+/// are valid, [`FAILED`] on a build failure. Nothing roots them (the
+/// unit's paths are its own, which the daemon can't see), so outputs
+/// collected before they're checked are no verdict.
+fn realise(cfg: &Config, drv: &str, log: &File) -> u8 {
     let argv = [
         cfg.nix.join("nix-store").to_string_lossy().into_owned(),
         "--realise".into(),
-        "--add-root".into(),
-        root.to_string_lossy().into_owned(),
-        "--indirect".into(),
         drv.into(),
     ];
     let (out, err) = (log.try_clone(), log.try_clone());
