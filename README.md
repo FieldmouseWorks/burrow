@@ -336,7 +336,12 @@ Each has an entry below, and each can be imported on its own.
   `plugins.fix.enable` (off) runs Conary's fix plugin and its broker
   (crates/burrow-fix): the flow's fixes run as proj jobs on the fixing role
   (`plugins.fix.role`), one live fix a PR, stopped when the flow's request
-  is; it needs `burrow.ledger.controllerUser`.
+  is; it needs `burrow.ledger.controllerUser`. `plugins.proof.enable` (off)
+  runs Conary's proof plugin and its producer (crates/burrow-proof): a
+  check's recipe from the repo's flow settings, run as a program on the
+  exact commit, each run as a user systemd makes for it, and its verdict
+  signed with the producer's own key (`plugins.proof.keyFile`) and posted
+  as a check run; it needs `burrow.ledger.controllerUser` too.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

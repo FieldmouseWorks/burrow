@@ -179,6 +179,66 @@ impl std::fmt::Debug for Signer {
     }
 }
 
+/// A file's POSIX access ACL, as the kernel keeps it in its extended
+/// attributes.
+const ACCESS_ACL: &str = "system.posix_acl_access";
+
+/// Whether anyone but root and `me` may read a file with `mode`, owned by
+/// `owner`, with the access ACL `acl` (its xattr, if it has one). systemd
+/// hands a service its credential as root's file, mode 0400, with an ACL
+/// entry granting the service's user read: the mode's group bits are then
+/// the ACL's mask, and the ACL says who may read.
+pub(crate) fn others_may_read(
+    mode: u32,
+    owner: u32,
+    acl: Option<&[u8]>,
+    me: u32,
+) -> Result<bool, String> {
+    const READ: u16 = 4;
+    let ours = |uid: u32| uid == 0 || uid == me;
+    if mode & 0o400 != 0 && !ours(owner) || mode & 0o004 != 0 {
+        return Ok(true);
+    }
+    let Some(acl) = acl else {
+        return Ok(mode & 0o040 != 0);
+    };
+    let bad = || "its ACL doesn't read as one".to_string();
+    let (version, entries) = acl.split_first_chunk::<4>().ok_or_else(bad)?;
+    if u32::from_le_bytes(*version) != 2 || entries.len() % 8 != 0 {
+        return Err(bad());
+    }
+    let entries: Vec<(u16, u16, u32)> = entries
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|e| {
+            (
+                u16::from_le_bytes([e[0], e[1]]),
+                u16::from_le_bytes([e[2], e[3]]),
+                u32::from_le_bytes([e[4], e[5], e[6], e[7]]),
+            )
+        })
+        .collect();
+    let mask = entries
+        .iter()
+        .find(|e| e.0 == 0x10)
+        .map_or(u16::MAX, |e| e.1);
+    Ok(entries.iter().any(|&(tag, perm, id)| {
+        let reads = perm & READ != 0;
+        match tag {
+            // The owner, whom the mode already said.
+            0x01 => false,
+            // A named user, through the mask.
+            0x02 => reads && mask & READ != 0 && !ours(id),
+            // The owning group, or a named one, through the mask.
+            0x04 | 0x08 => reads && mask & READ != 0,
+            0x10 => false,
+            0x20 => reads,
+            _ => true,
+        }
+    }))
+}
+
 impl Signer {
     /// `producer`'s key, as the machine's producers file names it, from
     /// the systemd credential named `credential`: a file in
@@ -195,7 +255,7 @@ impl Signer {
         producer: &str,
         credential: &str,
     ) -> Result<Self, String> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::MetadataExt;
         if producer.trim().is_empty() || producer.trim() != producer {
             return Err(format!("{producer:?} isn't a producer's name"));
         }
@@ -220,7 +280,18 @@ impl Signer {
         if !meta.is_file() {
             return Err(format!("{credential} isn't a file"));
         }
-        if meta.permissions().mode() & 0o077 != 0 {
+        let mut buf = vec![0u8; 4096];
+        let acl = match rustix::fs::getxattr(&path, ACCESS_ACL, &mut buf[..]) {
+            Ok(n) => buf.get(..n),
+            Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => None,
+            Err(e) => return Err(format!("{credential}'s ACL: {e}")),
+        };
+        if others_may_read(
+            meta.mode(),
+            meta.uid(),
+            acl,
+            rustix::process::geteuid().as_raw(),
+        )? {
             return Err(format!(
                 "{credential} can be read by others than its owner, so it isn't this producer's alone"
             ));
@@ -277,8 +348,11 @@ impl Signer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
+    /// A signer with a key the test hands it: only in this crate's tests,
+    /// and in a crate's that names the `test-key` feature among its
+    /// dev-dependencies, never in a build that runs.
+    #[cfg(any(test, feature = "test-key"))]
+    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
         Self {
             producer: producer.into(),
             key: SigningKey::from_bytes(&secret),

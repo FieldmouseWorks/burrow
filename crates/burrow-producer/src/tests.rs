@@ -706,13 +706,21 @@ fn nothing_public_signs_a_statement_a_caller_hands_it_or_reads_a_record_back() {
         assert!(!s.contains("SigningKey"), "{s}");
     }
     // Signing happens only as a record is published: the signer's public
-    // calls load its key and read a signed result, and nothing else.
+    // calls load its key and read a signed result, and nothing else, but
+    // for a test's signer, which no build that runs has.
     assert_eq!(
         public_in(&signatures, "sign.rs"),
-        ["check", "conclusion", "load", "text"]
+        ["check", "conclusion", "for_tests", "load", "text"]
     );
     let sign =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sign.rs")).unwrap();
+    assert!(
+        sign.contains(
+            "    #[cfg(any(test, feature = \"test-key\"))]\n    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {"
+        ),
+        "a test's signer is only in a test's build"
+    );
+    assert_eq!(sign.matches("pub fn for_tests").count(), 1);
     assert!(
         sign.contains("\nmod sealed {"),
         "how a result signs stays private"
@@ -748,4 +756,67 @@ fn nothing_public_signs_a_statement_a_caller_hands_it_or_reads_a_record_back() {
         !records.contains("Deserialize)]\npub struct Record"),
         "a record can't be made by reading one in"
     );
+}
+
+#[test]
+fn a_key_is_its_producers_alone_by_its_mode_and_by_its_acl() {
+    use crate::sign::others_may_read;
+    let acl = |entries: &[(u16, u16, u32)]| {
+        let mut out = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            out.extend(tag.to_le_bytes());
+            out.extend(perm.to_le_bytes());
+            out.extend(id.to_le_bytes());
+        }
+        out
+    };
+    // As systemd hands a service its credential: root's file, 0400, and
+    // an ACL entry for the service's user (the mode's group bits are the
+    // ACL's mask).
+    let systemd = acl(&[
+        (1, 4, 0),
+        (2, 4, 1000),
+        (4, 0, 0),
+        (0x10, 4, 0),
+        (0x20, 0, 0),
+    ]);
+    assert_eq!(others_may_read(0o440, 0, Some(&systemd), 1000), Ok(false));
+    // Someone else's credential.
+    assert_eq!(others_may_read(0o440, 0, Some(&systemd), 1001), Ok(true));
+    // The owning group, or a named one, through the mask.
+    let group = acl(&[
+        (1, 4, 0),
+        (2, 4, 1000),
+        (4, 4, 0),
+        (0x10, 4, 0),
+        (0x20, 0, 0),
+    ]);
+    assert_eq!(others_may_read(0o440, 0, Some(&group), 1000), Ok(true));
+    let named = acl(&[
+        (1, 4, 0),
+        (2, 4, 1000),
+        (4, 0, 0),
+        (8, 4, 50),
+        (0x10, 4, 0),
+        (0x20, 0, 0),
+    ]);
+    assert_eq!(others_may_read(0o440, 0, Some(&named), 1000), Ok(true));
+    // A mask that grants nothing leaves only the owner.
+    let masked = acl(&[
+        (1, 4, 1000),
+        (2, 4, 1001),
+        (4, 4, 0),
+        (0x10, 0, 0),
+        (0x20, 0, 0),
+    ]);
+    assert_eq!(others_may_read(0o400, 1000, Some(&masked), 1000), Ok(false));
+    // Others, by the mode, whatever the ACL.
+    assert_eq!(others_may_read(0o404, 0, Some(&systemd), 1000), Ok(true));
+    // No ACL: the mode alone.
+    assert_eq!(others_may_read(0o400, 1000, None, 1000), Ok(false));
+    assert_eq!(others_may_read(0o440, 1000, None, 1000), Ok(true));
+    assert_eq!(others_may_read(0o400, 1001, None, 1000), Ok(true));
+    // An ACL that doesn't read as one is no answer.
+    assert!(others_may_read(0o400, 1000, Some(&[1, 0, 0, 0]), 1000).is_err());
+    assert!(others_may_read(0o400, 1000, Some(&systemd[..10]), 1000).is_err());
 }

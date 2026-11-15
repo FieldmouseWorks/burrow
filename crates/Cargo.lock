@@ -766,9 +766,17 @@ dependencies = [
 name = "burrow-proof"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
+ "burrow-github",
+ "burrow-producer",
  "burrow-test",
+ "conary-core",
+ "conary-github",
+ "ed25519-dalek",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "ureq",
 ]

@@ -14,11 +14,15 @@ burrow-process = { path = "../burrow-process" }
 conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "eac5fc9df1c22fd9560e9fddc9e31ce52f119f27" }
 conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "eac5fc9df1c22fd9560e9fddc9e31ce52f119f27" }
 ed25519-dalek = "3.0.0"
-rustix = { version = "1.1.6", features = ["net", "process", "rand"] }
+rustix = { version = "1.1.6", features = ["fs", "net", "process", "rand"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
+[features]
+# A signer from a key a test hands it (`Signer::for_tests`), for another
+# crate's tests. Never in a build that runs.
+test-key = []
 
 [dev-dependencies]
 base64.workspace = true
