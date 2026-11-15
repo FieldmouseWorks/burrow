@@ -1,7 +1,7 @@
 //! The API waiter, run as the workflow runs it, against a `gh` stand-in on
-//! PATH that serves `FAKE/runs.N.json`, `FAKE/jobs.N.json` and
-//! `FAKE/caches.N.json` (the last one once N runs out) and logs each request
-//! path.
+//! PATH that serves `FAKE/runs.N.json`, `FAKE/jobs.N.json`,
+//! `FAKE/caches.N.json` and `FAKE/compare.N.json` (the last one once N runs
+//! out) and logs each request path.
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -14,6 +14,7 @@ case $5 in
   */jobs\?*) kind=jobs ;;
   */actions/runs\?*) kind=runs ;;
   */actions/caches\?*) kind=caches ;;
+  */compare/*) kind=compare ;;
   *) exit 2 ;;
 esac
 n=$(cat "$FAKE/$kind.count" 2>/dev/null || echo 0)
@@ -128,7 +129,7 @@ fn jobs_since(items: &[(&str, &str, i64)]) -> String {
     format!(r#"{{"jobs":[{}]}}"#, jobs.join(","))
 }
 fn cache(key: &str, reference: &str) -> String {
-    format!(r#"{{"actions_caches":[{{"key":"{key}","ref":"{reference}"}}]}}"#)
+    format!(r#"{{"actions_caches":[{{"id":1,"key":"{key}","ref":"{reference}"}}]}}"#)
 }
 fn saved() -> String {
     cache(&format!("kept-CI +&%#-{TIP}"), "refs/heads/main +&%#")
@@ -377,7 +378,8 @@ fn a_red_fix_on_a_push_whose_leg_is_past_its_deadline_builds_cold_at_once() {
     // Nothing for the restore after it: the gate builds cold.
     assert_eq!(c.out(), "");
     assert_eq!(c.asked("/jobs?"), 1, "{}", c.log());
-    assert_eq!(c.asked("/caches?"), 1, "{}", c.log());
+    // The exact key, then every push's for the leg, for a newer one.
+    assert_eq!(c.asked("/caches?"), 2, "{}", c.log());
 }
 
 /// The deadline is the producer leg's, from its start: a leg waited for
@@ -435,4 +437,83 @@ fn a_running_leg_with_no_start_fails_the_soft_step() {
     assert!(!o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("start"), "{}", text(&o));
     assert_eq!(c.out(), "");
+}
+
+/// A newer default-branch commit, with the base tip in its history.
+const NEWER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+/// The leg's entries for every push: the exact key's listing comes first
+/// and finds none, then the prefix's finds `sha`'s.
+fn superseded_by(c: &Case, sha: &str, reference: &str) {
+    c.serve("caches", 1, NONE);
+    c.serve(
+        "caches",
+        2,
+        &cache(&format!("kept-CI +&%#-{sha}"), reference),
+    );
+}
+
+/// burrow#1132, replayed: its leg 1 waited three hours on its base push's
+/// leg 1, which compiled codex cold and then didn't save, as a newer push's
+/// entry for the leg was already there (keep-newer, #1011). The waiter
+/// read only the exact key, found none, and the PR's leg compiled codex
+/// cold for two hours more. The newer push's entry, whose commit has the
+/// base tip in its history, holds those builds: it's restored.
+#[test]
+fn a_base_push_superseded_by_a_newer_save_restores_the_newer() {
+    let c = Case::new("codex-0.167.0\n");
+    going(&c);
+    c.serve(
+        "jobs",
+        1,
+        &jobs(&[(&format!("check / {LEG}"), "completed")]),
+    );
+    superseded_by(&c, NEWER, "refs/heads/main +&%#");
+    // GitHub compares NEWER...TIP: the tip is behind it.
+    c.serve("compare", 1, r#"{"status":"behind"}"#);
+    let o = c.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("Saved"), "{}", text(&o));
+    assert!(text(&o).contains("newer push"), "{}", text(&o));
+    assert_eq!(
+        c.out(),
+        format!("key=kept-CI +&%#-{NEWER}\nsaved=true\n"),
+        "{}",
+        text(&o)
+    );
+    let log = c.log();
+    assert!(
+        log.contains(&format!("repos/o/r/compare/{NEWER}...{TIP}")),
+        "{log}"
+    );
+    assert!(
+        log.contains("actions/caches?key=kept-CI%20%2B%26%25%23-&ref=refs%2Fheads%2Fmain%20%2B%26%25%23&per_page=100"),
+        "{log}"
+    );
+}
+
+/// Only a commit with the tip in its history supersedes it: an older
+/// push's entry, one on a rewritten branch, or one under another ref has
+/// none of the tip's builds to offer, and the leg builds cold.
+#[test]
+fn an_older_diverged_or_other_ref_entry_is_not_restored() {
+    for (status, reference) in [
+        ("ahead", "refs/heads/main +&%#"),
+        ("diverged", "refs/heads/main +&%#"),
+        ("behind", "refs/heads/other"),
+    ] {
+        let c = Case::new("a\n");
+        going(&c);
+        c.serve("jobs", 1, &jobs(&[(LEG, "completed")]));
+        superseded_by(&c, NEWER, reference);
+        c.serve("compare", 1, &format!(r#"{{"status":"{status}"}}"#));
+        let o = c.run();
+        assert!(o.status.success(), "{}", text(&o));
+        assert!(
+            text(&o).contains("Gone"),
+            "{status} {reference}: {}",
+            text(&o)
+        );
+        assert_eq!(c.out(), "", "{status} {reference}");
+    }
 }

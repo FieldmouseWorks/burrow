@@ -85,8 +85,13 @@ nothing. A failed or superseded push is no reason not to wait: its legs
 keep their builds whether its gate passed or not (#812), under its own
 commit, which is the key this leg restores. The waiter lists the push's runs once, then polls only their jobs
 (`WAIT_POLL`, 60 seconds), and reads the exact cache once the leg isn't
-building, which keeps a long wait inside the token's hourly requests. A
-leg that ended without saving, or no such run, ends the wait. A request
+building, which keeps a long wait inside the token's hourly requests. With
+no exact entry it takes a newer push's for the leg, one whose commit has
+the base tip in its history: a push's leg doesn't save when a newer one's
+entry is already there, and prunes its own once one turns up
+(burrow-keep's prune, #1011), so that entry is where the base push's
+builds went, and the waiter decides it with the same code. A leg that
+ended with neither, or no such run, ends the wait. A request
 past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
 which reports `degraded/kept-wait`.
 

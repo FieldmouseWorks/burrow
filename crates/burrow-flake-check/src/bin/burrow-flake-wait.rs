@@ -1,6 +1,8 @@
-//! Wait for the exact default-branch push's kept builds. Planning is done by
-//! the dependency-free runner; this binary uses the shared GitHub client.
+//! Wait for the exact default-branch push's kept builds, or a newer push's
+//! that superseded them. Planning is done by the dependency-free runner; this
+//! binary uses the shared GitHub client.
 use burrow_github::{Api, Gh, encode, pages};
+use burrow_keep::prune::Leg;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use std::{
@@ -23,10 +25,15 @@ fn var(k: &str) -> String {
 }
 
 /// Where the base push's leg stands, as one poll found it.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum State {
-    /// Its kept builds are saved under the exact key.
-    Saved,
+    /// Kept builds this leg can restore are saved, under this key: the
+    /// exact one, or a newer push's whose commit has the base tip in its
+    /// history. A leg whose save a newer push's had already made pointless
+    /// doesn't save at all, and one saved is pruned once a newer is listed
+    /// (burrow-keep's prune, #1011), so the newer entry is where the base
+    /// push's builds went.
+    Saved(String),
     /// Its leg is running on a runner, inside its deadline: it ends, saved
     /// or not, without anything this leg holds.
     Building,
@@ -39,6 +46,18 @@ enum State {
     Queued,
     /// No run of it is going, or its leg ended without saving.
     Gone,
+}
+
+impl State {
+    fn name(&self) -> &'static str {
+        match self {
+            State::Saved(_) => "Saved",
+            State::Building => "Building",
+            State::Late => "Late",
+            State::Queued => "Queued",
+            State::Gone => "Gone",
+        }
+    }
 }
 
 /// Poll until the producer's leg stops building. The waiter has no cap of
@@ -60,6 +79,8 @@ struct Producer<'a> {
     workflow: &'a str,
     branch: &'a str,
     tip: &'a str,
+    /// The leg's key before the commit: every push's entries for it.
+    prefix: &'a str,
     key: &'a str,
     /// The leg's job name, as the workflow names it; a caller's reusable
     /// workflow puts its own job's name and " / " before it.
@@ -125,6 +146,25 @@ impl Producer<'_> {
                 .any(|c| c["key"] == self.key && c["ref"] == reference)
         })
     }
+    /// The key of kept builds this leg can restore: the exact one, else a
+    /// newer default-branch commit's whose history has the tip, decided as
+    /// the producer's own save decides it (burrow-keep's prune).
+    fn saved(&self, api: &mut dyn Api) -> Result<Option<String>> {
+        let exact = pages(api, &self.caches_path())
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|p| self.cached(p));
+        if exact {
+            return Ok(Some(self.key.to_owned()));
+        }
+        let leg = Leg {
+            repo: self.repo,
+            branch: self.branch,
+            prefix: self.prefix,
+            sha: self.tip,
+        };
+        Ok(leg.superseded(api)?)
+    }
     /// The producer's runs still going, read once: a run's id outlives
     /// its attempts, and its jobs say the rest.
     fn runs(&self, api: &mut dyn Api) -> Result<Vec<u64>> {
@@ -175,12 +215,8 @@ impl Producer<'_> {
         // Read the cache AFTER status, including on the first poll. A leg
         // that finished during planning or between polls has already saved
         // everything it can save, even if its final conclusion was failure.
-        let saved = pages(api, &self.caches_path())
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|p| self.cached(p));
-        Ok(if saved {
-            State::Saved
+        Ok(if let Some(key) = self.saved(api)? {
+            State::Saved(key)
         } else if late {
             State::Late
         } else if statuses.iter().any(|s| s != "completed") {
@@ -209,13 +245,15 @@ fn wait() -> Result<()> {
                 .into(),
         );
     }
-    let key = format!("{}{tip}", var("KEPT_KEY"));
+    let prefix = var("KEPT_KEY");
+    let key = format!("{prefix}{tip}");
     let deadline = SignedDuration::from_secs(var("WAIT_DEADLINE").parse().unwrap_or(DEADLINE));
     let producer = Producer {
         repo: &repo,
         workflow: &workflow,
         branch: &branch,
         tip: &tip,
+        prefix: &prefix,
         key: &key,
         job: &job,
         deadline,
@@ -241,11 +279,19 @@ fn wait() -> Result<()> {
         "its leg has run past its deadline ({}s from its start) without saving, so it has stopped making progress: building cold",
         deadline.as_secs()
     );
+    let newer = match &state {
+        State::Saved(saved) if *saved != key => format!(
+            "its leg saved none of its own, as a newer push's supersede them: restoring that push's, {saved}"
+        ),
+        _ => String::new(),
+    };
     println!(
-        "{state:?} after {}s: {}",
+        "{} after {}s: {}",
+        state.name(),
         started.elapsed().as_secs(),
-        match state {
-            State::Saved => "restoring its kept builds",
+        match &state {
+            State::Saved(saved) if *saved == key => "restoring its kept builds",
+            State::Saved(_) => &newer,
             State::Queued => "its leg has no runner yet, and may want this one, so building cold",
             State::Late => &late,
             State::Gone =>
@@ -253,14 +299,14 @@ fn wait() -> Result<()> {
             State::Building => unreachable!("poll returns once it stops building"),
         }
     );
-    if state == State::Saved
+    if let State::Saved(saved) = &state
         && let Some(path) = env::var_os("GITHUB_OUTPUT")
     {
         let mut out = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(path)?;
-        writeln!(out, "key={key}\nsaved=true")?;
+        writeln!(out, "key={saved}\nsaved=true")?;
     }
     Ok(())
 }
