@@ -31,6 +31,8 @@ pub struct Look {
     pub scope: String,
     /// SHA-256 of the earlier findings and replies the brief quoted.
     pub prior: String,
+    /// When it read them: what was said later isn't in `prior`.
+    pub asked: u64,
     pub findings: Vec<Finding>,
     /// When the look's answer came back: no publication is older.
     pub finished: u64,

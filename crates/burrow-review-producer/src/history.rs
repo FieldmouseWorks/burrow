@@ -84,16 +84,30 @@ fn all(api: &mut dyn Api, path: &str) -> Result<Vec<Value>, String> {
         .collect())
 }
 
-/// `role`'s earlier findings on PR `pr`, with their replies: every finding
-/// the flow published for it but those of the publication `except` names
-/// (the one being checked, which came after the look that quoted the
-/// rest). Read whole, or not at all.
+/// When `c` was made, in seconds since the epoch.
+fn made(c: &Value) -> Result<u64, String> {
+    let at = c["created_at"].as_str().unwrap_or_default();
+    at.parse::<jiff::Timestamp>()
+        .ok()
+        .and_then(|t| u64::try_from(t.as_second()).ok())
+        .ok_or_else(|| format!("a comment made at {at:?}"))
+}
+
+/// `role`'s earlier findings on PR `pr`, with their replies, as they were
+/// said by `until`: every finding the flow published for it but those of
+/// the publication `except` names (the one being checked, which came after
+/// the look that quoted the rest). A comment made later is left out, so
+/// what's said after a look (an answer, a reply) doesn't change what it
+/// quoted, and one of those edited since does. Each finding's line is the
+/// one it was made on, which a push doesn't move. Read whole, or not at
+/// all.
 pub fn read(
     api: &mut dyn Api,
     repo: &str,
     pr: u64,
     role: &str,
     voices: &Voices,
+    until: u64,
     except: Option<&str>,
 ) -> Result<String, String> {
     let lines = all(
@@ -106,6 +120,16 @@ pub fn read(
         &format!("repos/{repo}/issues/{pr}/comments?per_page=100"),
     )
     .map_err(|e| format!("its earlier findings: {e}"))?;
+    let said_by = |list: Vec<Value>| -> Result<Vec<Value>, String> {
+        let mut kept = vec![];
+        for c in list {
+            if made(&c)? <= until {
+                kept.push(c);
+            }
+        }
+        Ok(kept)
+    };
+    let (lines, talk) = (said_by(lines)?, said_by(talk)?);
     let ours = |c: &Value| -> Option<(String, FindingMark)> {
         if !voices.flow(c) {
             return None;
@@ -120,9 +144,8 @@ pub fn read(
         let Some((text, _)) = ours(root) else {
             continue;
         };
-        let at = root["line"]
+        let at = root["original_line"]
             .as_u64()
-            .or_else(|| root["original_line"].as_u64())
             .map(|n| format!(":{n}"))
             .unwrap_or_default();
         let mut said = format!(

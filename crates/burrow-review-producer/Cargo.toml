@@ -17,6 +17,7 @@ burrow-upkeep = { path = "../burrow-upkeep" }
 # kit's by Cargo.lock.
 conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "53c6b35c3875b0d57993e896507235ff4a39bd07" }
 conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "53c6b35c3875b0d57993e896507235ff4a39bd07" }
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

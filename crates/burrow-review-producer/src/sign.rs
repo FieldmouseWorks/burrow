@@ -13,8 +13,10 @@
 //!   head, base branch, scope and findings, in order, at its `reviewed_at`:
 //!   so its marker names them all, and its count is theirs;
 //! - `reviewed_at` no earlier than the look ended and no later than now;
-//! - the PR's description and the earlier findings and replies the look
-//!   quoted read as they did then.
+//! - the head's tree is the one the look recorded, read again;
+//! - the PR's description, and the earlier findings and replies the look
+//!   quoted (all that was said up to when it read them), read as they did
+//!   then.
 //!
 //! A review that differs in any of these is never signed. A signed look is
 //! let go, and so is one whose publication didn't come within `keep`.
@@ -189,6 +191,11 @@ pub fn published(cfg: &Config, api: &mut dyn Api, look: &Look) -> Result<Option<
     if scope != look.scope {
         return Err("the PR's description changed since the look read it".into());
     }
+    // The tree the signature names, read again: the look's record is the
+    // producer's, which reads PRs, so the key-holder takes no word of it.
+    if crate::tree_of(api, repo, &look.head)? != look.tree {
+        return Err(format!("{} isn't the tree of {}", look.tree, look.head));
+    }
     let voices = Voices {
         review: authors,
         trusted: &flow.trusted_authors,
@@ -199,6 +206,7 @@ pub fn published(cfg: &Config, api: &mut dyn Api, look: &Look) -> Result<Option<
         pr,
         &look.role,
         &voices,
+        look.asked,
         Some(&issuance(&look.head, &body)),
     )?;
     if crate::digest(&prior) != look.prior {

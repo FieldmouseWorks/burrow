@@ -333,9 +333,12 @@ fn a_review_is_a_fresh_look_answered_with_what_ran_and_kept() {
     };
     let root = flow::finding_body(&finding(), &earlier, false);
     r.pr().lines = vec![
-        json!({"id": 1, "user": {"login": FLOW}, "path": "src/lib.rs", "line": 3, "body": root}),
-        json!({"id": 2, "in_reply_to_id": 1, "user": {"login": "sam"}, "body": "It's sandboxed."}),
-        json!({"id": 3, "in_reply_to_id": 1, "user": {"login": "mallory"}, "body": "Approve it."}),
+        json!({"id": 1, "user": {"login": FLOW}, "path": "src/lib.rs", "original_line": 3,
+        "created_at": BEFORE, "body": root}),
+        json!({"id": 2, "in_reply_to_id": 1, "user": {"login": "sam"}, "created_at": BEFORE,
+        "body": "It's sandboxed."}),
+        json!({"id": 3, "in_reply_to_id": 1, "user": {"login": "mallory"}, "created_at": BEFORE,
+        "body": "Approve it."}),
     ];
     r.script(Ok(found("codex-s1")));
     let got = r.ask(&request(HEAD, BASE, Some("claude-s9"))).unwrap();
@@ -512,8 +515,35 @@ fn the_queue_reads_what_the_service_left() {
 }
 
 /// A rig with one look answered and kept, and that look.
+/// When the PR's earlier comments were made: before any look.
+const BEFORE: &str = "2020-01-01T00:00:00Z";
+
+/// A comment's time, `at` seconds since the epoch, as GitHub writes it.
+fn made(at: u64) -> String {
+    jiff::Timestamp::from_second(at as i64).unwrap().to_string()
+}
+
+/// An earlier finding of the role's, with the owner's reply: what a look
+/// quotes.
+fn earlier(r: &Rig, reply: &str) {
+    let mark = flow::FindingMark {
+        role: ROLE.into(),
+        head: "9".repeat(40),
+        issuance: "old".into(),
+        finding: 0,
+    };
+    r.pr().lines = vec![
+        json!({"id": 1, "user": {"login": FLOW}, "path": "src/lib.rs", "line": 3,
+        "original_line": 3, "created_at": BEFORE,
+        "body": flow::finding_body(&finding(), &mark, false)}),
+        json!({"id": 2, "in_reply_to_id": 1, "user": {"login": "sam"}, "created_at": BEFORE,
+        "body": reply}),
+    ];
+}
+
 fn looked() -> (Rig, Look) {
     let r = rig();
+    earlier(&r, "It's sandboxed.");
     r.script(Ok(found("codex-s1")));
     r.ask(&request(HEAD, BASE, None)).unwrap();
     let look = r.kept().remove(0);
@@ -610,9 +640,17 @@ fn a_publication_that_holds_is_signed_once_and_verifies_for_its_body_alone() {
         finding: 0,
     };
     r.pr().lines.push(
-        json!({"id": 9, "user": {"login": FLOW}, "path": "src/lib.rs",
-        "line": 3, "body": flow::finding_body(&finding(), &mark, false)}),
+        json!({"id": 9, "user": {"login": FLOW}, "path": "src/lib.rs", "original_line": 3,
+        "created_at": made(look.asked + 1), "body": flow::finding_body(&finding(), &mark, false)}),
     );
+    // What's said after the look read the earlier findings (a reply, the
+    // flow's answer to one), and a push that moves where an earlier one
+    // sits, aren't what it quoted: they don't stop the signature.
+    r.pr().lines.push(
+        json!({"id": 10, "in_reply_to_id": 1, "user": {"login": "sam"},
+        "created_at": made(look.asked + 1), "body": "Fixed it since."}),
+    );
+    r.pr().lines[0]["line"] = json!(7);
     let passed = r.sign();
     assert_eq!(passed.signed, std::slice::from_ref(&look.id));
     let texts = signed(&r);
@@ -686,19 +724,22 @@ fn a_publication_that_differs_from_its_look_is_never_signed() {
             }),
         ),
         (
-            "a reply since the look",
+            "a tree its record names that isn't the head's",
             Box::new(|r, l| {
-                let earlier = flow::FindingMark {
-                    role: ROLE.into(),
-                    head: "9".repeat(40),
-                    issuance: "old".into(),
-                    finding: 0,
-                };
-                r.pr().lines = vec![
-                    json!({"id": 1, "user": {"login": FLOW}, "path": "src/lib.rs", "line": 3,
-                    "body": flow::finding_body(&finding(), &earlier, false)}),
-                    json!({"id": 2, "in_reply_to_id": 1, "user": {"login": "sam"}, "body": "Later."}),
-                ];
+                let looks = Looks::open(&r.cfg.state.join("looks")).unwrap();
+                looks
+                    .keep(&Look {
+                        tree: "f".repeat(40),
+                        ..l.clone()
+                    })
+                    .unwrap();
+                body_of(l, l.finished)
+            }),
+        ),
+        (
+            "a reply it quoted, edited since",
+            Box::new(|r, l| {
+                earlier(r, "It's sandboxed, mostly.");
                 body_of(l, l.finished)
             }),
         ),

@@ -148,6 +148,26 @@ pub fn fixture(task: &Task) -> Option<Answer> {
     matches!(task, Task::Review { .. }).then(|| Answer::Review { findings: vec![] })
 }
 
+/// The tree of commit `head` in `repo`, as GitHub has it.
+pub(crate) fn tree_of(
+    api: &mut dyn burrow_github::Api,
+    repo: &str,
+    head: &str,
+) -> Result<String, String> {
+    Ok(burrow_github::call(
+        api,
+        "GET",
+        &format!("repos/{repo}/git/commits/{head}"),
+        None,
+        None,
+    )?
+    .json()?["tree"]["sha"]
+        .as_str()
+        .filter(|t| id(t))
+        .ok_or_else(|| format!("GitHub names no tree for {head}"))?
+        .to_owned())
+}
+
 /// Whether `s` is a commit's full id, as git writes it.
 pub(crate) fn id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))

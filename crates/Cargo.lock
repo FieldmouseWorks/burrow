@@ -826,6 +826,7 @@ dependencies = [
  "conary-core",
  "conary-github",
  "ed25519-dalek",
+ "jiff",
  "serde",
  "serde_json",
  "sha2",

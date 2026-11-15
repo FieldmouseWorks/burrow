@@ -155,23 +155,15 @@ impl Producer {
 
         let mut api = (self.github)();
         let now_pr = self.held(&mut *api, repo, *pr, head, base)?;
-        let tree = call(
-            &mut *api,
-            "GET",
-            &format!("repos/{repo}/git/commits/{head}"),
-            None,
-            None,
-        )?
-        .json()?["tree"]["sha"]
-            .as_str()
-            .filter(|t| id(t))
-            .ok_or_else(|| format!("GitHub names no tree for {head}"))?
-            .to_owned();
+        let tree = crate::tree_of(&mut *api, repo, head)?;
         let voices = Voices {
             review: &flow.settings.review_authors,
             trusted: &flow.trusted_authors,
         };
-        let prior = history::read(&mut *api, repo, *pr, role, &voices, None)?;
+        // What it quotes is what was said up to now: what comes later is
+        // the sign pass's to leave out (history::read).
+        let asked = now();
+        let prior = history::read(&mut *api, repo, *pr, role, &voices, asked, None)?;
         drop(api);
 
         let look_id = new_id();
@@ -236,6 +228,7 @@ impl Producer {
             base_ref: now_pr.base_ref,
             scope,
             prior: digest(&prior),
+            asked,
             findings: found.clone(),
             finished: now(),
             signed: None,
