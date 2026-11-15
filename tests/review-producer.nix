@@ -66,8 +66,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import shlex
 
+    # Stdin is never the test's console: rm asks there before removing
+    # another user's file, as the looks and answers are, and waits forever.
     def as_user(user, cmd, ok=True):
-        run = f"runuser -u {user} -- bash -c {shlex.quote(cmd)}"
+        run = f"runuser -u {user} -- bash -c {shlex.quote(cmd)} </dev/null"
         return machine.succeed(run) if ok else machine.fail(run)
 
     machine.wait_for_unit("multi-user.target")
