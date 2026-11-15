@@ -76,6 +76,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import re
     import shlex
 
     def producer(cmd, ok=True):
@@ -153,13 +154,17 @@ pkgs.testers.runNixOSTest {
     head, tree_of_head = out[0], out[1]
 
     with subtest("a run's command is its own user's, and its exit, kept by its unit, is the verdict"):
-        assert run("a1", {"Run": ["bash", "-c", "test -f f && echo ran-here && id -u"]}) == 0, printed("a1")
-        assert "ran-here" in printed("a1"), printed("a1")
-        uid = int(printed("a1").split("ran-here")[1].split()[0])
+        # What it printed, not the command line the log names it by.
+        def ran_as(id):
+            got = re.search(r"^ran as ([0-9]+)$", printed(id), re.M)
+            assert got, printed(id)
+            return int(got.group(1))
+        assert run("a1", {"Run": ["bash", "-c", "test -f f && echo ran as $(id -u)"]}) == 0, printed("a1")
+        uid = ran_as("a1")
         assert uid not in (0, int(machine.succeed("id -u autoland-proof"))), uid
         # Each run's own: another's, at once, is another.
-        assert run("a5", {"Run": ["bash", "-c", "echo ran-here && id -u"]}) == 0, printed("a5")
-        assert int(printed("a5").split("ran-here")[1].split()[0]) != uid
+        assert run("a5", {"Run": ["bash", "-c", "echo ran as $(id -u)"]}) == 0, printed("a5")
+        assert ran_as("a5") != uid
         stop("a5")
         machine.fail(f"runuser -u dev -- cat {folder('a1')}/log")
         stop("a1")
