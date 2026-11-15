@@ -86,7 +86,12 @@ Each has an entry below, and each can be imported on its own.
   patched to leave it queued, to run after that run
   ([held.rs](patches/switch-to-configuration-ng/held.rs)). The setup
   sysinit-reactivation.target reruns is still waited for, as the rest counts
-  on it. Enabled services must have bounded stop timeouts (including the
+  on it. A user manager is re-executed only when it may need it (another
+  systemd binary, or a config source changed since the re-execution last
+  seen): a re-execution refuses every `systemctl --user` and
+  `systemd-run --user` until it's done
+  ([user_reexec.rs](patches/switch-to-configuration-ng/user_reexec.rs)).
+  Enabled services must have bounded stop timeouts (including the
   manager default and `TimeoutSec`): the module rejects zero, infinity and
   time spans it cannot establish as positive integer seconds, minutes, hours
   or days within systemd's microsecond range. Boolean and list values are
