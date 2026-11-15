@@ -52,6 +52,26 @@ pub fn complete<T: Signable>(
     finish(api, records, signer, work.abandoned(), record)
 }
 
+/// Publish committed `record`'s result on its check run, signed, with no
+/// request's work behind it: a result its producer publishes on its own,
+/// after the request that made it has ended (the review producer signs a
+/// review once the flow has published it). Only a committed record: one
+/// that isn't could still be withdrawn.
+pub fn publish<T: Signable>(
+    api: &mut dyn Api,
+    records: &Records,
+    signer: &Signer,
+    record: &mut Record<T>,
+) -> Result<Signed, String> {
+    if !record.committed() {
+        return Err(format!(
+            "record {} isn't committed, so it isn't published on its own",
+            record.id()
+        ));
+    }
+    finish(api, records, signer, false, record)
+}
+
 /// Withdraw `record`: complete its check run, if it started one, as
 /// `cancelled`, and end it so that nothing ever publishes it. A committed
 /// record is never withdrawn: what went out stands, and startup publishes

@@ -10,7 +10,9 @@ let
   inherit (lib) mkOption types;
   cfg = config.burrow.autoland;
   rv = cfg.reviewers;
-  inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir stewardKick;
+  inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir freshDir stewardKick;
+  # The review producer's fresh looks, when it's on.
+  fresh = if cfg.plugins.review.enable then freshDir else null;
   # The reviewers' service's program.
   service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
@@ -47,6 +49,7 @@ let
     done = "${reviewDir}/done";
     sessions = "${reviewDir}/sessions";
     snapshots = snapDir;
+    inherit fresh;
     reviewers.codex = {
       inherit (rv.codex) enable effort parallel;
       off = lib.attrNames (lib.filterAttrs (_: r: !(r.codex or true)) cfg.repos);
@@ -162,7 +165,8 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
-        ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ];
+        ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ]
+          ++ lib.optional (fresh != null) fresh;
       };
     };
     environment.etc.${deployedDir} = lib.mkIf (!cfg.dryRun) { source = deployed; };

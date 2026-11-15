@@ -16,8 +16,6 @@ pub struct Review<'a> {
     pub base: &'a str,
     /// The PR's description, each line quoted.
     pub quoted: &'a str,
-    /// How to weigh the reasons the description gives.
-    pub reasons: &'a str,
     /// The repo's Code Review Rules, as the base has them.
     pub rules: &'a str,
     /// The house rules the reasons answer to.
@@ -85,7 +83,7 @@ End with your answer as JSON and nothing else: {{"findings": [...], "summary": "
         base = r.base,
         secret = secret,
         body = r.quoted,
-        reasons = r.reasons,
+        reasons = REASONS,
         house = or_none(r.house),
         rules = or_none(r.rules),
         prior = or_none(r.prior),
@@ -137,6 +135,27 @@ pub const PAST_LIMIT: &str = concat!(
     "every thread is resolved",
 );
 
+/// How a reviewer and a judge weigh the reasons a PR's description gives
+/// where the house rules ask for one. That the line is there is CI's to
+/// check; whether its reason holds up takes reading the code.
+pub const REASONS: &str = "Where the house rules ask a PR for a line in its description giving a reason (one starting `Why not Rust:` for new code that isn't Rust, say), judge the reason against the rule it answers and against the code, not only that it's there. Rust is the default, and a coin toss goes to Rust: a reason that only says it was quicker, that it's small, that the code around it is in that language already, or that the code itself contradicts (a \"throwaway\" script a service runs, \"glue\" with logic of its own) doesn't hold.";
+
+/// A PR's description as a reviewer or a judge is shown it: each line
+/// quoted, so nothing in it reads as their brief going on. What a review
+/// carries of it is the SHA-256 of this (Conary's `flow::fingerprint`).
+pub fn quote(body: &str) -> String {
+    let quoted: Vec<String> = body
+        .trim()
+        .lines()
+        .map(|l| format!("> {l}").trim_end().to_owned())
+        .collect();
+    if quoted.is_empty() {
+        "(none)".into()
+    } else {
+        quoted.join("\n")
+    }
+}
+
 /// What cleared a dependency update, which no reviewer reads: the judge
 /// is the first to.
 pub const DEP_SEEN: &str = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved";
@@ -163,6 +182,7 @@ pub fn texts(owner: &str) -> serde_json::Value {
         "dep_seen": DEP_SEEN,
         "failing": FAILING,
         "land_or_owner": land_or_owner(owner),
+        "reasons": REASONS,
     })
 }
 

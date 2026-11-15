@@ -36,6 +36,20 @@ pub struct Item {
     /// the queue is taken in (work.rs `work`).
     pub opened: f64,
     pub at: f64,
+    /// The review producer's look: in a session of its own, never resumed,
+    /// on its own snapshot (config.rs `fresh`), on the model and effort
+    /// the flow chose. None for the steward's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh: Option<Fresh>,
+}
+
+/// What a fresh look runs on: the model (None for the agent's own) and
+/// the effort (None for the reviewer's).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fresh {
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// The reviewer's session for the PR, on its base, whose head the snapshot

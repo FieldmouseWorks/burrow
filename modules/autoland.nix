@@ -316,6 +316,7 @@ in
     (import ./autoland/review.nix inputs)
     (import ./autoland/fix.nix inputs)
     (import ./autoland/proof.nix inputs)
+    (import ./autoland/review-producer.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
@@ -681,6 +682,19 @@ in
         lowercased (autoland/shadow.nix): where the flow's plugins read its
         settings (a proof's recipe), until the flow's own configuration is
         rendered (burrow#724).
+      '';
+    };
+
+    upkeepConfig = mkOption {
+      type = types.path;
+      readOnly = true;
+      internal = true;
+      default = upkeepConfig;
+      defaultText = lib.literalMD "burrow-upkeep's configuration";
+      description = ''
+        The steward's burrow-upkeep configuration: the review producer
+        takes its snapshots by it (autoland/review-producer.nix), so they
+        hide what the steward's hide.
       '';
     };
 

@@ -16,6 +16,11 @@ in
   # the machine keeps of it. On a machine whose root is wiped at boot, a boot
   # empties it too.
   snapDir = "/var/cache/autoland/snap";
+  # The review producer's fresh looks (autoland/review-producer.nix): each
+  # one's snapshot, which the producer takes and the reviewers' group
+  # reads, and its session's home, which the reviewers' service makes.
+  # Nothing in it is resumed; a cache too.
+  freshDir = "/var/cache/autoland/fresh";
   # Where a repo's pass is kicked: the reviewers' service kicks it when an
   # answer comes back, the steward when it books one.
   stewardKick = "${config.burrow.events.kick}/autoland";

@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use burrow_codex::{logged_out, spent, wait_for};
 
 use crate::egress::Gate;
+use crate::queue::Fresh;
 use crate::scrub::tail;
 use crate::{Failed, Service, now};
 
@@ -243,10 +244,18 @@ fn when(at: f64) -> String {
         .map_or_else(|_| format!("{at}"), |t| t.strftime("%a %H:%MZ").to_string())
 }
 
+/// A string as TOML writes one, for a `-c` value.
+fn quoted_str(s: &str) -> String {
+    Value::String(s.to_owned()).to_string()
+}
+
 /// Codex's look in the PR's session `sid` (a new one if None): its answer,
 /// and the session's id. `home` is the PR's own CODEX_HOME, which holds
 /// that session and nothing of any other PR's but the login, a copy lent
 /// for this look (login.rs).
+/// A fresh look runs on `fresh`'s model and effort, and any look stops,
+/// as a pause does, once `stop` says so.
+#[allow(clippy::too_many_arguments)]
 pub fn look(
     s: &Service,
     snap: &Path,
@@ -254,6 +263,8 @@ pub fn look(
     home: &Path,
     sid: Option<&str>,
     repo: &str,
+    fresh: Option<&Fresh>,
+    stop: &dyn Fn() -> bool,
 ) -> Result<(Value, String), Failed> {
     let err = |e: io::Error| Failed::Error(e.to_string());
     let login = s.home.join(".codex");
@@ -284,9 +295,17 @@ pub fn look(
         ),
         // The checkout's AGENTS.md is the PR's own: the base's rules are in the brief.
         "project_doc_max_bytes=0".to_owned(),
-        format!("model_reasoning_effort={}", s.cfg.reviewers.codex.effort),
+        format!(
+            "model_reasoning_effort={}",
+            fresh
+                .and_then(|f| f.effort.as_deref())
+                .unwrap_or(&s.cfg.reviewers.codex.effort)
+        ),
     ] {
         flags.extend(["-c".into(), c.into()]);
+    }
+    if let Some(model) = fresh.and_then(|f| f.model.as_deref()) {
+        flags.extend(["-c".into(), format!("model={}", quoted_str(model)).into()]);
     }
     let codex: OsString = s.cfg.agents.join("codex").into();
     let argv: Vec<OsString> = match sid {
@@ -335,7 +354,7 @@ pub fn look(
         cmd,
         prompt,
         Duration::from_secs_f64(s.cfg.timeout_minutes * 60.0),
-        || s.cfg.paused(repo),
+        || s.cfg.paused(repo) || stop(),
     );
     drop(gate);
     lent.give_back()

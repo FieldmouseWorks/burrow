@@ -39,15 +39,6 @@ TREES = CFG["snapDir"]
 # gone (burrow-upkeep's sweep.rs), and the service deletes it.
 SESSIONS = "review/sessions"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
-# How the reviewers (burrow-upkeep's brief.rs, handed it by `queue`) and a
-# judge (tasks.py) weigh the reasons a PR's description gives where the
-# house rules ask for one. That the line is there is CI's to check;
-# whether its reason holds up takes reading the code.
-REASONS = ("Where the house rules ask a PR for a line in its description giving a reason (one starting `Why not Rust:` "
-           "for new code that isn't Rust, say), judge the reason against the rule it answers and against the code, not only "
-           "that it's there. Rust is the default, and a coin toss goes to Rust: a reason that only says it was quicker, that "
-           "it's small, that the code around it is in that language already, or that the code itself contradicts (a "
-           "\"throwaway\" script a service runs, \"glue\" with logic of its own) doesn't hold.")
 
 
 def on(repo):
@@ -160,7 +151,7 @@ def queue(repo, pr, key, r):
     out = C.upkeep("queue", repo, bounded=False, input=json.dumps({
         "number": pr["number"], "head": head, "base": base, "title": pr["title"], "quoted": C.quote(pr["body"]),
         "description": C.fingerprint(pr["body"]), "opened": ts(pr["createdAt"]), "reviewer": r,
-        "name": snap_name(key, head, base), "reasons": REASONS}))
+        "name": snap_name(key, head, base)}))
     if out["queued"] is None:
         raise RuntimeError(out["why"])
 
