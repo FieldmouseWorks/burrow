@@ -560,6 +560,7 @@ name = "burrow-flake-check"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-keep",
  "burrow-test",
  "jiff",
  "serde_json",

@@ -81,12 +81,21 @@ nothing), until its deadline: 4 hours from that leg's own start
 this leg builds cold (#1102). A leg compiling a large package cold takes 2
 to 3 hours on a hosted runner and saves it, which is worth the wait; one
 past 4 hours has stopped making progress, and its job's timeout keeps
-nothing. A failed or superseded push is no reason not to wait: its legs
-keep their builds whether its gate passed or not (#812), under its own
-commit, which is the key this leg restores. The waiter lists the push's runs once, then polls only their jobs
-(`WAIT_POLL`, 60 seconds), and reads the exact cache once the leg isn't
-building, which keeps a long wait inside the token's hourly requests. A
-leg that ended without saving, or no such run, ends the wait. A request
+nothing. A failed push is no reason not to wait: its legs keep their
+builds whether its gate passed or not (#812), under its own commit, which
+is the key this leg restores. A newer push's entry for the leg is: the
+base push's leg skips its save once one is listed, and deletes its own
+if one turns up after (`burrow_keep::prune`), so the waiter asks that
+same question of the leg's entries and, on a yes, stops and restores the
+newer entry, which holds every build of the base's that the newer push
+didn't change (#1164: a base leg compiling cold for three hours skipped
+its save that way, and the PR leg that had waited on it built cold into
+the job's six-hour limit). The waiter lists the push's runs once, then
+polls only their jobs (`WAIT_POLL`, 60 seconds), and reads the leg's
+entries on the first poll, every `WAIT_NEWER` (300 seconds) and once the
+leg isn't building, which keeps a long wait inside the token's hourly
+requests. A leg that ended without saving, with no newer entry, or no
+such run, ends the wait and this leg builds cold. A request
 past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
 which reports `degraded/kept-wait`.
 
