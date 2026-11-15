@@ -114,5 +114,11 @@
       host = "example.org";
       secretFile = "/run/secrets/burrow-webhook";
     };
+    # The build store public runs of sam's repos substitute from and write.
+    builds = {
+      enable = true;
+      host = "example.org";
+      repos = [ "sam/homelab" ];
+    };
   };
 }
