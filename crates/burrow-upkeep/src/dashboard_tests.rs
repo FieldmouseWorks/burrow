@@ -832,22 +832,38 @@ fn a_branch_whose_pr_a_pass_never_saw_starts_over_from_it() {
     );
     watch_at(&cfg, &mut hub, &mut jobs, 0.0);
     let wait = cfg.dashboard.as_ref().unwrap().wait_days as f64 * DAY;
-    let merged = 3.0 * DAY + HOUR;
+    // Renovate's PR opens ten minutes before the branch comes due, and
+    // merges half an hour after.
+    let merged = wait + 1800.0;
     // Newest first, as GitHub lists them: Renovate's PR from before the
     // branch was first seen, a PR someone else opened from it, and the
     // one Renovate opened and merged in between.
     let prs = json!([
         {"number": 9, "user": {"login": "mallory"}, "created_at": iso(merged + 60.0), "closed_at": null},
-        {"number": 8, "user": {"login": "sam"}, "created_at": iso(merged - 600.0), "closed_at": iso(merged)},
+        {"number": 8, "user": {"login": "sam"}, "created_at": iso(merged - 2400.0), "closed_at": iso(merged)},
         {"number": 2, "user": {"login": "sam"}, "created_at": iso(-DAY), "closed_at": iso(-DAY)},
     ]);
+    // Due while that PR is still open, read from the body from before
+    // it: the PR pipeline's, so nothing is handed, and the branch stays
+    // as it was, so the PR's close moves it once it comes.
+    let mut open = prs.clone();
+    let list = open.as_array_mut().unwrap();
+    list.remove(0);
+    list[0]["closed_at"] = Value::Null;
+    hub.on("GET", "repos/sam/r/pulls", answer(200, open));
+    let out = watch_at(&cfg, &mut hub, &mut jobs, wait);
+    assert!(out.jobs.is_empty() && out.stuck.is_empty(), "{out:?}");
+    assert_eq!(out.wake, Some(T + wait + HOUR));
+    assert_eq!(state(&cfg).items["branch renovate/dependencies"].since, T);
+    // Merged, and the branch back with the next updates, without a pass
+    // seeing the PR's link.
     hub.on("GET", "repos/sam/r/pulls", answer(200, prs));
     dashboard(
         &mut hub,
         &pending("deps: update dependencies (`rust`, `ureq`)"),
         &[],
     );
-    let out = watch_at(&cfg, &mut hub, &mut jobs, wait);
+    let out = watch_at(&cfg, &mut hub, &mut jobs, wait + HOUR);
     assert!(out.jobs.is_empty() && out.stuck.is_empty(), "{out:?}");
     let asked = hub
         .paths()
