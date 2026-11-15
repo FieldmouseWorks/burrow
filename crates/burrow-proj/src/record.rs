@@ -177,6 +177,33 @@ pub struct Record {
     pub ends: Vec<String>,
     /// What the watchdog reads of its latest turn; None before the first.
     pub facts: Option<Facts>,
+    /// Its latest turn, as recorded; None before the first.
+    pub turn: Option<Turn>,
+}
+
+/// A turn as proj recorded it: what it ran on and the session its engine
+/// named. What a starter that reports a job's work (burrow-fix) says ran.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turn {
+    pub n: String,
+    /// Its N.engine, N.model and N.effort: no model or effort for the
+    /// engine's own.
+    pub engine: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// The session its stream names, once the engine has named one.
+    pub session: Option<String>,
+}
+
+/// Turn `n` of `job`, as recorded.
+fn turn(job: &Job, n: &str) -> Turn {
+    Turn {
+        n: n.to_owned(),
+        engine: read(&job.turn(n, "engine")),
+        model: read(&job.turn(n, "model")),
+        effort: read(&job.turn(n, "effort")),
+        session: crate::engine::stream_session(&job.turn(n, "jsonl")),
+    }
 }
 
 impl Record {
@@ -267,6 +294,11 @@ impl Record {
             "history": self.history.iter().map(|c| serde_json::json!({
                 "at": c.at, "from": c.from, "to": c.to, "why": c.why,
             })).collect::<Vec<_>>(),
+            "ends": self.ends,
+            "turn": self.turn.as_ref().map(|t| serde_json::json!({
+                "n": t.n, "engine": t.engine, "model": t.model, "effort": t.effort,
+                "session": t.session,
+            })),
         })
     }
 }
@@ -321,6 +353,7 @@ pub fn derive(job: &Job) -> Record {
         awaits: awaited,
         ends: ends(job, &n),
         facts,
+        turn: (!n.is_empty()).then(|| turn(job, &n)),
     }
 }
 

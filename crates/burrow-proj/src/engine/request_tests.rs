@@ -254,3 +254,43 @@ fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
     crate::cmd::reply(&f.cfg, &id, "next", false, None).unwrap();
     assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
 }
+
+#[test]
+fn a_job_started_by_its_repo_runs_in_that_repos_own_clone() {
+    let f = fixture();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&f.project, &["init", "-q"]);
+    git(
+        &f.project,
+        &["remote", "add", "origin", "https://github.com/sam/box.git"],
+    );
+    let new = crate::cmd::New {
+        role: Some("work".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    // As GitHub spells the name or not, it's that clone.
+    for repo in ["sam/box", "Sam/Box"] {
+        let id = crate::cmd::start_job(&f.cfg, &new, repo, "the task").unwrap();
+        let started = Request::load(&Job::new(&f.cfg, &id)).unwrap();
+        assert_eq!(started.project, f.project.to_string_lossy(), "{repo}");
+    }
+    // A repo no project clones is no project.
+    let err = crate::cmd::start_job(&f.cfg, &new, "sam/other", "the task").unwrap_err();
+    assert_eq!(
+        err,
+        crate::Fail::new(1, "no project is a clone of sam/other")
+    );
+}

@@ -154,7 +154,8 @@ read together under its turn-start lock, and the steward never takes one that
 holds anything for ended, however its turn ended, or starts a second job on
 its work. `proj why ID` says the rest of its record: what each wait is and what
 ends it, since when, when it's overdue, what happens next, and the changes
-its history noted (`--json` for the record whole).
+its history noted (`--json` for the record whole, with how its latest turn
+said it ends and the engine, model, effort and session that turn ran on).
 
 ## Engines with no agent
 

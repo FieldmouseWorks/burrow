@@ -348,6 +348,16 @@ fn run_with_cgroup(
 
 /// A new job in the project, its first turn started with the task: its id.
 pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String, Fail> {
+    // A repo, OWNER/NAME, is its own clone among the projects (no folder's
+    // name has a slash): what a starter that knows the repo alone names.
+    let folder;
+    let p = if p.contains('/') {
+        folder = crate::inbox::project_of(cfg, p)
+            .ok_or_else(|| Fail::new(1, format!("no project is a clone of {p}")))?;
+        folder.as_str()
+    } else {
+        p
+    };
     let project = format!("{}/{p}", cfg.projects.display());
     if !fs::metadata(&project).is_ok_and(|m| m.is_dir()) {
         return Err(Fail::new(1, format!("no such project: {project}")));

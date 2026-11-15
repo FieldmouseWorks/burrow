@@ -238,6 +238,15 @@ use scope::told;
 /// folder itself, never a linked worktree of it (.git is a file there) or a
 /// second clone. A hidden folder counts only when it's named for its repo
 /// (o/.github in .github), and a plain one goes first.
+/// The folder of `repo`'s own clone among the projects, by [`projects`]'
+/// rule, the repo's name compared as GitHub does, without case.
+pub(crate) fn project_of(cfg: &Config, repo: &str) -> Option<String> {
+    projects(cfg)
+        .into_iter()
+        .find(|(r, _)| r.eq_ignore_ascii_case(repo))
+        .map(|(_, folder)| folder)
+}
+
 fn projects(cfg: &Config) -> BTreeMap<String, String> {
     let mut all: Vec<(String, PathBuf)> = fs::read_dir(&cfg.projects)
         .map(|d| {
