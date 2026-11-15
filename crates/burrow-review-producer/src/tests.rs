@@ -48,6 +48,8 @@ struct Pr {
     /// Each check run started (its name), and each completed (its
     /// conclusion and output text).
     runs: Vec<Value>,
+    /// GitHub won't start check runs.
+    refusing: bool,
 }
 
 #[derive(Clone)]
@@ -78,6 +80,10 @@ impl Api for World {
             ("GET", p) if p.starts_with("/pulls/5/comments") => ok(200, json!(pr.lines), &[]),
             ("GET", p) if p.starts_with("/issues/5/comments") => ok(200, json!(pr.talk), &[]),
             ("GET", p) if p.starts_with("/pulls/5/reviews") => ok(200, json!(pr.reviews), &[]),
+            ("POST", "/check-runs") if pr.refusing => ok(503, json!({}), &[]),
+            ("GET", p) if p.starts_with("/commits/") && p.contains("/check-runs") => {
+                ok(200, json!({"total_count": 0, "check_runs": []}), &[])
+            }
             ("POST", "/check-runs") => {
                 pr.runs.push(json!({"start": body.unwrap()["name"]}));
                 ok(201, json!({"id": pr.runs.len()}), &[])
@@ -164,7 +170,7 @@ fn config(dir: &Path) -> Config {
         fresh: dir.join("fresh"),
         queue: dir.join("queue"),
         done: dir.join("done"),
-        wake: Some(dir.join("wake.json")),
+        sign: dir.join("sign"),
         keep: 86400,
     }
 }
@@ -588,7 +594,7 @@ fn a_publication_that_holds_is_signed_once_and_verifies_for_its_body_alone() {
         "nothing published yet"
     );
     let wake: Value =
-        serde_json::from_slice(&std::fs::read(r.cfg.wake.as_ref().unwrap()).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(r.cfg.sign.join("wake.json")).unwrap()).unwrap();
     assert!(
         wake[""].as_u64().is_some(),
         "it books its next pass: {wake}"
@@ -725,7 +731,7 @@ fn a_look_whose_publication_never_comes_is_let_go() {
     assert!(passed.waiting.is_empty());
     assert!(r.kept().is_empty(), "look {} let go", look.id);
     let wake: Value =
-        serde_json::from_slice(&std::fs::read(r.cfg.wake.as_ref().unwrap()).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(r.cfg.sign.join("wake.json")).unwrap()).unwrap();
     assert_eq!(wake, json!({}), "no pass booked");
 }
 
@@ -742,4 +748,90 @@ fn findings_are_read_whole_or_not_at_all() {
     }
     let none = crate::look::findings(&json!({"findings": [], "summary": "fine"})).unwrap();
     assert!(none.is_empty());
+}
+
+#[test]
+fn one_publication_is_signed_once_whichever_looks_match_it() {
+    let r = rig();
+    r.script(Ok(found("codex-s1")));
+    r.script(Ok(found("codex-s2")));
+    r.ask(&request(HEAD, BASE, None)).unwrap();
+    r.ask(&request(HEAD, BASE, None)).unwrap();
+    let looks = r.kept();
+    assert_eq!(looks.len(), 2);
+    let latest = looks.iter().map(|l| l.finished).max().unwrap();
+    // Both looks found the same, so the flow's one publication holds for
+    // either.
+    r.publish(&body_of(&looks[0], latest), FLOW, HEAD);
+    let passed = r.sign();
+    assert_eq!(passed.signed.len(), 1, "{passed:?}");
+    assert!(r.kept().is_empty(), "the other look is let go");
+    assert_eq!(signed(&r).len(), 1);
+}
+
+#[test]
+fn a_failure_stops_nothing_else_and_books_the_next_pass() {
+    let (r, look) = looked();
+    r.publish(&body_of(&look, look.finished), FLOW, HEAD);
+    r.pr().refusing = true;
+    let passed = r.sign();
+    assert_eq!(passed.failed.len(), 1, "{passed:?}");
+    let wake: Value =
+        serde_json::from_slice(&std::fs::read(r.cfg.sign.join("wake.json")).unwrap()).unwrap();
+    assert!(
+        wake[""].as_u64().is_some(),
+        "it books its next pass: {wake}"
+    );
+    // Still refused, what's left of it doesn't stop the pass from seeing
+    // to another look, whose publication is still to come.
+    let mut clean = found("codex-s2");
+    clean.answer = json!({"findings": [], "summary": "fine"});
+    r.script(Ok(clean));
+    r.ask(&request(HEAD, BASE, None)).unwrap();
+    let passed = r.sign();
+    assert_eq!(passed.failed.len(), 1, "{passed:?}");
+    assert_eq!(passed.waiting.len(), 1, "{passed:?}");
+    // Committed before it failed: the next pass publishes it first, and
+    // signs nothing again.
+    r.pr().refusing = false;
+    let passed = r.sign();
+    assert_eq!(passed.finished, 1, "{passed:?}");
+    assert!(passed.failed.is_empty(), "{passed:?}");
+    let texts = signed(&r);
+    assert_eq!(texts.len(), 1);
+    assert_eq!(
+        verify(&texts[0], &body_of(&look, look.finished)),
+        Ok(Outcome::Pass)
+    );
+}
+
+#[test]
+fn a_restart_lets_go_of_the_looks_it_left_and_nothing_else() {
+    let r = rig();
+    for dir in [&r.cfg.queue, &r.cfg.done, &r.cfg.fresh] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    for name in [
+        "codex--fresh-1.json",
+        "codex--pr-acme__widget-5-111111111111-22222222.json",
+    ] {
+        std::fs::write(r.cfg.queue.join(name), "{}").unwrap();
+        std::fs::write(r.cfg.done.join(name), "{}").unwrap();
+    }
+    std::fs::create_dir_all(r.cfg.fresh.join("fresh-1")).unwrap();
+    std::fs::create_dir_all(r.cfg.fresh.join("fresh-1.home")).unwrap();
+    assert_eq!(r.producer.reconcile(), Ok(1));
+    let left = |dir: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    // The steward's looks are its own.
+    let steward = ["codex--pr-acme__widget-5-111111111111-22222222.json"];
+    assert_eq!(left(&r.cfg.queue), steward);
+    assert_eq!(left(&r.cfg.done), steward);
+    assert_eq!(r.snaps.0.lock().unwrap().1, ["fresh-1"]);
 }

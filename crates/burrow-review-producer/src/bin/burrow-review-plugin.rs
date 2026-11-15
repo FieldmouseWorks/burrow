@@ -50,6 +50,10 @@ fn main() -> ExitCode {
                     Box::new(looker),
                     owner,
                 )?);
+                let gone = producer.reconcile()?;
+                if gone > 0 {
+                    eprintln!("let go of {gone} looks a restart left");
+                }
                 server
                     .serve(move |request, work: &Work| producer.handle(request, work))
                     .map_err(|e| e.to_string())
@@ -62,6 +66,12 @@ fn main() -> ExitCode {
                 }
                 for id in &passed.signed {
                     eprintln!("signed look {id}'s publication");
+                }
+                if !passed.failed.is_empty() {
+                    eprintln!(
+                        "{} things failed; the next pass is booked",
+                        passed.failed.len()
+                    );
                 }
                 if !passed.waiting.is_empty() {
                     eprintln!("{} looks wait for their publication", passed.waiting.len());

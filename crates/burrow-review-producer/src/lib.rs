@@ -65,19 +65,21 @@ pub struct Config {
     pub upkeep: PathBuf,
     /// gh as the App the producer acts as on GitHub.
     pub gh: PathBuf,
-    /// The producer's own state: `looks/` (what each look read and said),
-    /// `records/` (the sign pass's), and the snapshots' mirrors and what
-    /// each kept of its base (`review/`, burrow-upkeep's).
+    /// The producer's own state: `looks/` (what each look read and said,
+    /// which the sign pass's group may change), and the snapshots' mirrors
+    /// and what each kept of its base (`review/`, burrow-upkeep's).
     pub state: PathBuf,
+    /// The sign pass's own state, its user's alone to write: `records/`,
+    /// `issued/` (each publication it signed), and `wake.json`, where it
+    /// books its next pass (burrow-events') while a look's publication is
+    /// still to come or something failed.
+    pub sign: PathBuf,
     /// The snapshots the reviewers' service reads a fresh look from, one a
     /// look, which the producer takes and clears (burrow-review's `fresh`).
     pub fresh: PathBuf,
     /// The reviewers' service's queue and the answers it leaves.
     pub queue: PathBuf,
     pub done: PathBuf,
-    /// The sign pass's wake file (burrow-events'), where it books its next
-    /// pass while a look's publication is still to come.
-    pub wake: Option<PathBuf>,
     /// Seconds a look waits for its publication before it's let go.
     pub keep: u64,
 }

@@ -26,7 +26,7 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
         "flow": d.join("flow"), "settings": {"overlay": overlay},
         "upkeep": d.join("upkeep.json"), "gh": "gh", "state": d.join("state"),
         "fresh": d.join("fresh"), "queue": d.join("queue"), "done": d.join("done"),
-        "wake": null, "keep": 86400,
+        "sign": d.join("sign"), "keep": 86400,
     });
     std::fs::write(&config, cfg.to_string()).unwrap();
     let plugin = d.join("burrow-review-plugin");

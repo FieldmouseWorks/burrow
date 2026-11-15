@@ -34,8 +34,11 @@ let
       && !(off.burrow.events.handlers ? review-sign);
     holds = lib.all (a: a.assertion) on.assertions;
     refusedWithoutController = lib.any (lib.hasInfix "plugins.review: only the flow's controller may ask") failed;
+    # The key is lent to a user the producer, which reads PRs, never is.
     ownUser = producer.serviceConfig.User == "autoland-review-producer"
-      && sign.serviceConfig.User == "autoland-review-producer"
+      && sign.serviceConfig.User == "autoland-review-sign"
+      && on.users.users.autoland-review-sign.extraGroups == [ "autoland-review-producer" ]
+      && !(lib.elem "autoland-review-sign" on.users.users.autoland-review-producer.extraGroups)
       && lib.elem "autoland-review" on.users.users.autoland-review-producer.extraGroups
       && !(lib.elem "autoland-review-producer" (on.users.users.autoland-review.extraGroups or [ ]));
     socketDir = producer.serviceConfig.RuntimeDirectory == "conary-producers/review"
@@ -54,6 +57,7 @@ let
       && read.queue == "${on.burrow.stateDir}/autoland/review/queue"
       && read.done == "${on.burrow.stateDir}/autoland/review/done"
       && read.upkeep == on.burrow.autoland.upkeepConfig
+      && read.sign == "${on.burrow.stateDir}/autoland-review-sign"
       && read.settings == on.burrow.settings.effective;
     # The reviewers' service runs fresh looks there, and may write it.
     reviewers = lib.elem "/var/cache/autoland/fresh" review.serviceConfig.ReadWritePaths;

@@ -44,68 +44,105 @@ pub struct Passed {
     pub signed: Vec<String>,
     /// Looks whose publication is still to come.
     pub waiting: Vec<String>,
+    /// What failed, to be tried again on the next pass.
+    pub failed: Vec<String>,
 }
 
-/// One pass over every kept look.
+/// One pass over every kept look. Nothing that fails for one record or
+/// look stops the rest: it's said, and the next pass is booked for it.
 pub fn pass(cfg: &Config, api: &mut dyn Api, signer: &Signer) -> Result<Passed, String> {
-    let records = Records::open(&cfg.state.join("records"))
-        .map_err(|e| format!("{}: {e}", cfg.state.join("records").display()))?;
+    let records = Records::open(&cfg.sign.join("records"))
+        .map_err(|e| format!("{}: {e}", cfg.sign.join("records").display()))?;
+    let issued = cfg.sign.join("issued");
+    fs::create_dir_all(&issued).map_err(|e| format!("{}: {e}", issued.display()))?;
     let looks = Looks::open(&cfg.state.join("looks"))?;
-    let mut passed = Passed {
-        finished: publish::reconcile::<Review>(api, &records, signer)?,
-        ..Passed::default()
+    let mut passed = Passed::default();
+    match publish::reconcile::<Review>(api, &records, signer) {
+        Ok(n) => passed.finished = n,
+        Err(why) => passed.failed.push(format!("what a crash left: {why}")),
+    }
+    for look in looks.all()? {
+        let id = look.id.clone();
+        let tag = format!("{}#{}: look {id}", look.repo, look.pr);
+        match one(cfg, api, signer, &records, &looks, &issued, look) {
+            Ok(Some(true)) => passed.signed.push(id),
+            Ok(Some(false)) => passed.waiting.push(id),
+            Ok(None) => {}
+            Err(why) => passed.failed.push(format!("{tag}: {why}")),
+        }
+    }
+    for why in &passed.failed {
+        eprintln!("{why}");
+    }
+    let next = if passed.waiting.is_empty() && passed.failed.is_empty() {
+        json!({})
+    } else {
+        json!({"": now() + AGAIN})
     };
-    for mut look in looks.all()? {
-        if look.signed.is_some() || now() > look.finished.saturating_add(cfg.keep) {
-            if look.signed.is_none() {
-                eprintln!(
-                    "{}#{}: no publication of look {} came; it's let go",
-                    look.repo, look.pr, look.id
-                );
-            }
-            looks.drop(&look.id)?;
-            continue;
-        }
-        match published(cfg, api, &look) {
-            Ok(Some(body)) => {
-                let review = Review {
-                    repo: look.repo.clone(),
-                    role: look.role.clone(),
-                    head: look.head.clone(),
-                    tree: look.tree.clone(),
-                    body: body.clone(),
-                };
-                let mut record = records
-                    .begin::<Review>(review.target())
-                    .map_err(|e| e.to_string())?;
-                records.keep(&mut record, review)?;
-                // Committed before the look says so: a crash between the
-                // two signs it again, the same statement, never not at all.
-                records.commit(&mut record)?;
-                look.signed = Some(issuance(&look.head, &body));
-                looks.keep(&look)?;
-                publish::publish(api, &records, signer, &mut record)?;
-                looks.drop(&look.id)?;
-                passed.signed.push(look.id);
-            }
-            Ok(None) => passed.waiting.push(look.id),
-            Err(why) => {
-                eprintln!("{}#{}: look {}: {why}", look.repo, look.pr, look.id);
-                passed.waiting.push(look.id);
-            }
-        }
-    }
-    if let Some(wake) = &cfg.wake {
-        let next = if passed.waiting.is_empty() {
-            json!({})
-        } else {
-            json!({"": now() + AGAIN})
-        };
-        let tmp = wake.with_extension("tmp");
-        fs::write(&tmp, next.to_string()).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        fs::rename(&tmp, wake).map_err(|e| format!("{}: {e}", wake.display()))?;
-    }
+    let wake = cfg.sign.join("wake.json");
+    let tmp = wake.with_extension("tmp");
+    fs::write(&tmp, next.to_string()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &wake).map_err(|e| format!("{}: {e}", wake.display()))?;
     Ok(passed)
+}
+
+/// One look: signed now (true), still waiting (false), or let go (None).
+fn one(
+    cfg: &Config,
+    api: &mut dyn Api,
+    signer: &Signer,
+    records: &Records,
+    looks: &Looks,
+    issued: &std::path::Path,
+    mut look: Look,
+) -> Result<Option<bool>, String> {
+    if look.signed.is_some() || now() > look.finished.saturating_add(cfg.keep) {
+        if look.signed.is_none() {
+            eprintln!(
+                "{}#{}: no publication of look {} came; it's let go",
+                look.repo, look.pr, look.id
+            );
+        }
+        looks.drop(&look.id)?;
+        return Ok(None);
+    }
+    let body = match published(cfg, api, &look) {
+        Ok(Some(body)) => body,
+        Ok(None) => return Ok(Some(false)),
+        Err(why) => {
+            eprintln!("{}#{}: look {}: {why}", look.repo, look.pr, look.id);
+            return Ok(Some(false));
+        }
+    };
+    // One publication is signed once, whichever of the looks that match it
+    // gets there first: another look with the same findings on the same
+    // head is let go.
+    let publication = issuance(&look.head, &body);
+    let mark = issued.join(crate::digest(&publication));
+    if mark.exists() {
+        looks.drop(&look.id)?;
+        return Ok(None);
+    }
+    let review = Review {
+        repo: look.repo.clone(),
+        role: look.role.clone(),
+        head: look.head.clone(),
+        tree: look.tree.clone(),
+        body,
+    };
+    let mut record = records
+        .begin::<Review>(review.target())
+        .map_err(|e| e.to_string())?;
+    records.keep(&mut record, review)?;
+    // Committed before anything says so: a crash after it publishes it at
+    // the next pass's start, never withdraws it.
+    records.commit(&mut record)?;
+    fs::write(&mark, record.id()).map_err(|e| format!("{}: {e}", mark.display()))?;
+    look.signed = Some(publication);
+    looks.keep(&look)?;
+    publish::publish(api, records, signer, &mut record)?;
+    looks.drop(&look.id)?;
+    Ok(Some(true))
 }
 
 /// The body of `look`'s publication, once there's one that holds all it

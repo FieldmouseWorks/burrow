@@ -12,10 +12,12 @@
 # own and answers in its done/. So the producer is in the reviewers' group,
 # for their queue; the reviewers' user is never in the producer's.
 #
-# The key is the sign pass's alone (autoland-review-sign, the same user,
-# its systemd credential): burrow-events runs it when a review is
+# The key is the sign pass's alone (autoland-review-sign, a user of its
+# own, its systemd credential): burrow-events runs it when a review is
 # submitted, and it signs each look's publication by the flow once it
-# matches what the look recorded.
+# matches what the look recorded. It reads and lets go of the producer's
+# looks through the producer's group; the producer, which reads PRs, never
+# runs as the user the key is lent to.
 #
 # Off by default: Conary#314 turns the flow's plugins on, with the
 # producer's key and its line in the machine's producers file.
@@ -34,8 +36,9 @@ let
   producer = "autoland-review-producer";
   sign = "autoland-review-sign";
   state = "${stateDir}/${producer}";
-  # Where the sign pass books its next pass, which burrow-events reads.
-  wakeDir = "${stateDir}/${sign}";
+  # The sign pass's own: its records, what it signed, and where it books
+  # its next pass, which burrow-events reads.
+  signState = "${stateDir}/${sign}";
   # Null with no controller, which the assertion below refuses.
   socket = if flow.producers == null then null else "${flow.producers}/review/producer.sock";
   configFile = pkgs.writeText "burrow-review-producer.json" (builtins.toJSON cfg.config);
@@ -119,7 +122,7 @@ in
         fresh = freshDir;
         queue = "${reviewDir}/queue";
         done = "${reviewDir}/done";
-        wake = "${wakeDir}/wake.json";
+        sign = signState;
         keep = cfg.keepHours * 3600;
       };
       description = "What the plugin, the producer and the sign pass read.";
@@ -143,8 +146,8 @@ in
         message = "burrow.autoland.plugins.review: only the flow's controller may ask the producer, so it needs burrow.ledger with its controllerUser.";
       }
       {
-        assertion = app != null && lib.elem producer app.users;
-        message = "burrow.autoland.plugins.review: the producer acts on GitHub as an App, so it needs burrow.autoland.plugins.review.app, one of burrow.github.apps, with ${producer} among its users.";
+        assertion = app != null && lib.elem producer app.users && lib.elem sign app.users;
+        message = "burrow.autoland.plugins.review: the producer and its sign pass act on GitHub as an App, so it needs burrow.autoland.plugins.review.app, one of burrow.github.apps, with ${producer} and ${sign} among its users.";
       }
       {
         assertion = autoland.enable && autoland.reviewers.codex.enable && !autoland.dryRun;
@@ -159,15 +162,23 @@ in
       extraGroups = [ reviewer ];
     };
     users.groups.${producer} = { };
+    # The looks, which it reads, marks signed and lets go of.
+    users.users.${sign} = {
+      isSystemUser = true;
+      group = sign;
+      extraGroups = [ producer ];
+    };
+    users.groups.${sign} = { };
 
     # Beside the App's default askers, not instead of them.
     burrow.github.apps = lib.mkIf (cfg.app != null) {
-      ${cfg.app}.users = lib.mkOptionDefault [ producer ];
+      ${cfg.app}.users = lib.mkOptionDefault [ producer sign ];
     };
 
     systemd.tmpfiles.settings.burrow-review-producer = {
-      ${state}.d = { mode = "0700"; user = producer; group = producer; };
-      ${wakeDir}.d = { mode = "0755"; user = producer; group = producer; };
+      ${state}.d = { mode = "0750"; user = producer; group = producer; };
+      "${state}/looks".d = { mode = "2770"; user = producer; group = producer; };
+      ${signState}.d = { mode = "0755"; user = sign; group = sign; };
       # A look's snapshot, for the reviewers' group to read, and its
       # session's home, which the reviewers' service makes there.
       ${freshDir}.d = { mode = "2770"; user = producer; group = reviewer; };
@@ -200,7 +211,7 @@ in
       events = [ "pull_request_review" ];
       perRepo = false;
       unit = sign;
-      wake = "${wakeDir}/wake.json";
+      wake = "${signState}/wake.json";
     };
     systemd.services.${sign} = {
       description = "Conary's review producer: sign each look the flow published";
@@ -210,8 +221,8 @@ in
       path = appPath;
       serviceConfig = {
         Type = "oneshot";
-        User = producer;
-        Group = producer;
+        User = sign;
+        Group = sign;
         ExecStart = "${package}/bin/burrow-review-plugin sign ${configFile}";
         LoadCredential = [ "review-key:${cfg.keyFile}" ];
         UMask = "0022";

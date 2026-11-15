@@ -80,6 +80,35 @@ impl Producer {
         })
     }
 
+    /// At startup: let go of every look a restart left. Their requests
+    /// went with it, so their queue entries are taken off (which stops a
+    /// look under way), and their answers and snapshots cleared. How many
+    /// it let go.
+    pub fn reconcile(&self) -> Result<usize, String> {
+        let entry = |name: &str| {
+            name.strip_prefix(&format!("{REVIEWER}--"))
+                .and_then(|n| n.strip_suffix(".json"))
+                .filter(|n| n.starts_with("fresh-"))
+                .map(str::to_owned)
+        };
+        let mut gone = 0;
+        for dir in [&self.cfg.queue, &self.cfg.done] {
+            for name in names(dir)? {
+                if entry(&name).is_some() {
+                    burrow_review::queue::remove(&dir.join(&name))
+                        .map_err(|e| format!("{}: {e}", dir.join(&name).display()))?;
+                    gone += usize::from(dir == &self.cfg.queue);
+                }
+            }
+        }
+        for name in names(&self.cfg.fresh)? {
+            if name.starts_with("fresh-") && !name.ends_with(".home") {
+                self.snapshots.clear(&name);
+            }
+        }
+        Ok(gone)
+    }
+
     /// One request: its answer, or why there's none.
     pub fn handle(&self, request: Request, work: &Work) -> Result<Response, String> {
         if version(&request.contract).is_none_or(|v| v < 4) {
@@ -331,6 +360,11 @@ fn new_id() -> String {
 pub struct Upkeep {
     pub cfg: burrow_upkeep::config::Config,
     pub state: std::path::PathBuf,
+    /// Each repo's mirror, held while a snapshot is taken from it: two
+    /// requests in one repo would fetch into it at once, and move each
+    /// other's refs.
+    mirrors:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
 }
 
 impl Upkeep {
@@ -347,6 +381,7 @@ impl Upkeep {
         Ok(Self {
             cfg,
             state: state.to_path_buf(),
+            mirrors: Default::default(),
         })
     }
 }
@@ -370,6 +405,14 @@ impl Snapshots for Upkeep {
         if let Some(why) = look.wrong() {
             return Err(why);
         }
+        let mirror = self
+            .mirrors
+            .lock()
+            .map_err(|_| "the mirrors' locks are poisoned")?
+            .entry(repo.to_lowercase())
+            .or_default()
+            .clone();
+        let _held = mirror.lock().map_err(|_| "a mirror's lock is poisoned")?;
         let meta = burrow_upkeep::snapshot::take(&self.cfg, &self.state, repo, &look)?;
         // What it fetched is what the request named, or the base moved
         // under it: then it read another base's rules.
@@ -400,5 +443,17 @@ impl Snapshots for Upkeep {
                 .join(burrow_upkeep::snapshot::META)
                 .join(format!("{name}.json")),
         );
+    }
+}
+
+/// The names in `dir`; none if there's no such directory.
+fn names(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    match std::fs::read_dir(dir) {
+        Ok(d) => Ok(d
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(format!("{}: {e}", dir.display())),
     }
 }

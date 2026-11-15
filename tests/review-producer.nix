@@ -3,8 +3,9 @@
 # controller, with no key; it meets the reviewers' service only where a
 # fresh look needs it to (their queue and answers, and the fresh looks'
 # snapshots and homes), and nothing of its own state is theirs or anyone
-# else's; and the sign pass alone gets the key, runs as the producer, and
-# books its next pass where burrow-events reads it. The crate's tests
+# else's; and the sign pass alone gets the key, runs as a user of its own
+# that the producer never is, and books its next pass where burrow-events
+# reads it. The crate's tests
 # (crates/burrow-review-producer) run the looks and the signing with fakes
 # for GitHub and the service; this is systemd's half.
 #
@@ -77,7 +78,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the producer starts as a user of its own, with no key, for the controller alone"):
         machine.succeed("systemctl start autoland-review-producer.service")
         machine.wait_for_file("/run/conary-producers/review/producer.sock")
-        assert machine.succeed("stat -c '%U %G %a' ${state}").strip() == "autoland-review-producer autoland-review-producer 700"
+        assert machine.succeed("stat -c '%U %G %a' ${state} ${state}/looks").split("\n")[:2] == ["autoland-review-producer autoland-review-producer 750", "autoland-review-producer autoland-review-producer 2770"]
         assert machine.succeed("stat -c '%U %G %a' ${fresh}").strip() == "autoland-review-producer autoland-review 2770"
         machine.fail("runuser -u dev -- test -e /run/conary-producers/review/producer.sock")
         machine.fail("runuser -u autoland-review -- test -e /run/conary-producers/review/producer.sock")
@@ -114,14 +115,20 @@ pkgs.testers.runNixOSTest {
         as_user("dev", "ls ${fresh}", ok=False)
         as_user("conary-flow", "ls ${fresh}", ok=False)
 
-    with subtest("the sign pass alone has the key, runs as the producer, and books its next pass"):
+    with subtest("the sign pass alone has the key, as a user the producer isn't, and books its next pass"):
         machine.succeed("install -d -m 0700 /run/keys && head -c 32 /dev/urandom >/run/keys/review && chmod 0400 /run/keys/review")
         # No look waits: it signs nothing, asks GitHub nothing, and books
         # no pass.
         machine.succeed("systemctl start autoland-review-sign.service")
         assert machine.succeed("systemctl show -P Result autoland-review-sign.service").strip() == "success"
         assert machine.succeed("runuser -u dev -- cat ${stateDir}/autoland-review-sign/wake.json").strip() == "{}"
-        assert machine.succeed("stat -c '%U' ${state}/looks ${state}/records").split() == ["autoland-review-producer"] * 2
+        assert machine.succeed("stat -c '%U' ${stateDir}/autoland-review-sign/records").strip() == "autoland-review-sign"
+        # It reads and lets go of the producer's looks; the producer can't
+        # touch what it signed.
+        as_user("autoland-review-producer", "umask 0027 && echo '{}' >${state}/looks/x.json")
+        as_user("autoland-review-sign", "cat ${state}/looks/x.json && rm ${state}/looks/x.json")
+        as_user("autoland-review-producer", "touch ${stateDir}/autoland-review-sign/records/forged", ok=False)
+        as_user("autoland-review", "ls ${state}/looks", ok=False)
         # Its key was its own while it ran, and is gone with it.
         machine.succeed("test ! -e /run/credentials/autoland-review-sign.service")
 
