@@ -8,7 +8,6 @@ import subprocess
 
 import claims
 import common as C
-import reviewers as V
 from common import CFG
 
 
