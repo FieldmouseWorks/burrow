@@ -98,13 +98,13 @@ in
         git = lib.getExe config.programs.git.package;
         github = "https://github.com";
         inherit state;
-        # The unit's own /var/tmp (PrivateTmp, which DynamicUser brings),
-        # gone when the unit is.
         unit = worker;
         systemctl = "${config.systemd.package}/bin/systemctl";
         timeout = cfg.timeoutMinutes * 60;
         nix = "${config.nix.package}/bin";
         heavy = if config.burrow.cpu.enable then [ "${config.burrow.tools.heavy}/bin/heavy" "--" ] else null;
+        # The unit's own /var/tmp (PrivateTmp, which DynamicUser brings),
+        # gone when the unit is: a run's clone and its home.
         trees = "/var/tmp";
       };
       description = "What the plugin, the producer and the worker read.";
@@ -181,9 +181,6 @@ in
       restartIfChanged = false;
       path = [ pkgs.bash pkgs.coreutils config.programs.git.package config.nix.package ];
       environment = {
-        # Where its programs keep what they cache (nix's fetches, cargo's):
-        # its own /var/tmp, as nothing else is its to write.
-        HOME = "/var/tmp";
         # Its copy of its repo is the producer's, which git (and nix's git)
         # refuses to read unless it's named safe.
         GIT_CONFIG_COUNT = "1";

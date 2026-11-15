@@ -26,8 +26,10 @@ use conary_github::flow::Recipe;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::ops::Deref;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// A proof that passed, or inputs ready with no slot needed.
@@ -60,8 +62,32 @@ pub enum Mode {
 /// The spec's file in a run's folder.
 pub const SPEC: &str = "spec.json";
 
+/// The worker's configuration, with its run's home, which every command
+/// it starts is given.
+struct Worker<'a> {
+    cfg: &'a Config,
+    home: PathBuf,
+}
+
+impl Deref for Worker<'_> {
+    type Target = Config;
+    fn deref(&self) -> &Config {
+        self.cfg
+    }
+}
+
 /// Run `id`'s work, each command fenced by `fence`: its exit.
 pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
+    let cfg = Worker {
+        cfg,
+        home: cfg.home(id),
+    };
+    let ended = within(&cfg, id, fence);
+    let _ = fs::remove_dir_all(&cfg.home);
+    ended
+}
+
+fn within(cfg: &Worker, id: &str, fence: &mut dyn Fence) -> u8 {
     // Its log, which the producer made in the run's folder: the worker
     // writes it and can't swap it for anything else.
     let log = match OpenOptions::new().append(true).open(cfg.log(id)) {
@@ -84,6 +110,15 @@ pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
             return BROKE;
         }
     };
+    let _ = fs::remove_dir_all(&cfg.home);
+    if let Err(e) = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&cfg.home)
+    {
+        note(&format!("can't make its home: {e}"));
+        return BROKE;
+    }
     let mirror = cfg.repo(id);
     let tree = git(cfg, &mirror)
         .args(["rev-parse", "--verify", "-q"])
@@ -118,17 +153,22 @@ pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
     }
 }
 
-fn git(cfg: &Config, dir: &Path) -> Command {
-    let mut c = Command::new(&cfg.git);
-    c.arg("-C").arg(dir).stdin(Stdio::null());
+/// `program`, in the run's home, with nothing to read.
+fn command(cfg: &Worker, program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut c = Command::new(program);
+    c.env("HOME", &cfg.home).stdin(Stdio::null());
+    c
+}
+
+fn git(cfg: &Worker, dir: &Path) -> Command {
+    let mut c = command(cfg, &cfg.git);
+    c.arg("-C").arg(dir);
     c
 }
 
 /// `program` in nix's programs' directory.
-fn nix(cfg: &Config, program: &str) -> Command {
-    let mut c = Command::new(cfg.nix.join(program));
-    c.stdin(Stdio::null());
-    c
+fn nix(cfg: &Worker, program: &str) -> Command {
+    command(cfg, cfg.nix.join(program))
 }
 
 /// What `command` printed, its errors going to `log`, or why it failed.
@@ -147,7 +187,7 @@ fn read(mut command: Command, log: &File) -> Result<String, String> {
 /// The check's derivation: its flake attribute at the commit, as the
 /// mirror has it under `refs/proof/HEAD`.
 fn derivation(
-    cfg: &Config,
+    cfg: &Worker,
     spec: &Spec,
     mirror: &Path,
     attr: &str,
@@ -194,7 +234,7 @@ fn derivation(
 }
 
 /// `argv` in the machine's heavy slot, if it has one.
-fn heavy(cfg: &Config, argv: &[String]) -> Command {
+fn heavy(cfg: &Worker, argv: &[String]) -> Command {
     let words: Vec<String> = cfg
         .heavy
         .iter()
@@ -202,12 +242,12 @@ fn heavy(cfg: &Config, argv: &[String]) -> Command {
         .cloned()
         .chain(argv.iter().cloned())
         .collect();
-    let mut c = Command::new(&words[0]);
-    c.args(&words[1..]).stdin(Stdio::null());
+    let mut c = command(cfg, &words[0]);
+    c.args(&words[1..]);
     c
 }
 
-fn outputs(cfg: &Config, drvs: &[String], log: &File) -> Result<Vec<String>, String> {
+fn outputs(cfg: &Worker, drvs: &[String], log: &File) -> Result<Vec<String>, String> {
     let mut c = nix(cfg, "nix-store");
     c.args(["--query", "--outputs"]).args(drvs);
     Ok(read(c, log)?
@@ -217,7 +257,7 @@ fn outputs(cfg: &Config, drvs: &[String], log: &File) -> Result<Vec<String>, Str
 }
 
 /// Which of `paths` aren't valid in the store.
-fn invalid(cfg: &Config, paths: &[String], log: &File) -> Result<Vec<String>, String> {
+fn invalid(cfg: &Worker, paths: &[String], log: &File) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Ok(vec![]);
     }
@@ -232,7 +272,7 @@ fn invalid(cfg: &Config, paths: &[String], log: &File) -> Result<Vec<String>, St
 /// Ready the derivation: [`PASSED`] when its outputs are all built
 /// already, so proving it needs no slot; else its inputs built in a heavy
 /// slot, and [`FAILED`], ready for a proof that needs one.
-fn prepare(cfg: &Config, drv: &str, log: &File) -> u8 {
+fn prepare(cfg: &Worker, drv: &str, log: &File) -> u8 {
     let ready = || -> Result<u8, String> {
         let outs = outputs(cfg, &[drv.to_owned()], log)?;
         if invalid(cfg, &outs, log)?.is_empty() {
@@ -285,7 +325,7 @@ const BUILD_FAILED: i32 = 100;
 /// are valid, [`FAILED`] on a build failure. Nothing roots them (the
 /// unit's paths are its own, which the daemon can't see), so outputs
 /// collected before they're checked are no verdict.
-fn realise(cfg: &Config, drv: &str, log: &File) -> u8 {
+fn realise(cfg: &Worker, drv: &str, log: &File) -> u8 {
     let argv = [
         cfg.nix.join("nix-store").to_string_lossy().into_owned(),
         "--realise".into(),
@@ -327,7 +367,7 @@ fn realise(cfg: &Config, drv: &str, log: &File) -> u8 {
 /// [`PASSED`] or [`FAILED`] by its exit, and [`BROKE`] when its exit is the
 /// machine's.
 fn run(
-    cfg: &Config,
+    cfg: &Worker,
     id: &str,
     spec: &Spec,
     argv: &[String],
@@ -344,11 +384,10 @@ fn run(
     let tree = cfg.trees.join(id);
     let cloned = (|| -> Result<(), String> {
         let _ = fs::remove_dir_all(&tree);
-        let mut c = Command::new(&cfg.git);
+        let mut c = command(cfg, &cfg.git);
         c.args(["clone", "-q", "--shared", "--no-checkout"])
             .arg(cfg.repo(id))
-            .arg(&tree)
-            .stdin(Stdio::null());
+            .arg(&tree);
         read(c, log)?;
         let mut c = git(cfg, &tree);
         c.args(["checkout", "-q", "--detach", &spec.head]);
@@ -361,7 +400,7 @@ fn run(
     }
     note(&format!("{}: {}", spec.check, argv.join(" ")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let exit = fenced(spec, program, &args, fence, log, &tree);
+    let exit = fenced(cfg, spec, program, &args, fence, log, &tree);
     // What it left goes before its clone does.
     let ended = match fence.clear(0) {
         Err(e) => {
@@ -391,6 +430,7 @@ fn run(
 }
 
 fn fenced(
+    cfg: &Worker,
     spec: &Spec,
     program: &str,
     args: &[&str],
@@ -407,6 +447,7 @@ fn fenced(
     };
     let status = c
         .current_dir(tree)
+        .env("HOME", &cfg.home)
         .env("PROOF_REPO", &spec.repo)
         .env("PROOF_HEAD", &spec.head)
         .env("PROOF_CHECK", &spec.check)

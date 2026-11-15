@@ -81,6 +81,13 @@ impl Config {
     pub fn repo(&self, id: &str) -> PathBuf {
         self.run(id).join("repo.git")
     }
+
+    /// A run's home, which its worker makes as its own user: where its
+    /// programs keep what they cache (nix's fetches, cargo's), as nix
+    /// won't use a home that isn't its user's.
+    pub fn home(&self, id: &str) -> PathBuf {
+        self.trees.join(format!("{id}.home"))
+    }
 }
 
 /// The plugin the flow runs, forwarding to the producer at `cfg.socket`.

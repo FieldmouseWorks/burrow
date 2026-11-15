@@ -696,6 +696,13 @@ fn a_run_recipe_is_its_command_in_a_fresh_clone_and_its_exit_the_verdict() {
     );
     assert_eq!(code, PASSED, "{log}");
     assert!(log.contains(&format!("gate on {}", r.head)), "{log}");
+    // Its home is the run's own, which it may write: nix and cargo cache
+    // there, and nix refuses a home that isn't its user's.
+    let (code, log) = run(
+        &bash(r#"[[ $HOME == */*.home ]] && test -O "$HOME" && touch "$HOME/cached""#),
+        &r.tree,
+    );
+    assert_eq!(code, PASSED, "{log}");
     assert_eq!(run(&bash("exit 3"), &r.tree).0, FAILED);
     assert_eq!(run(&["false"], &r.tree).0, FAILED);
     assert_eq!(
@@ -707,7 +714,7 @@ fn a_run_recipe_is_its_command_in_a_fresh_clone_and_its_exit_the_verdict() {
     assert_eq!(run(&["/nonexistent/program"], &r.tree).0, BROKE);
     assert_eq!(run(&["true"], &"e".repeat(40)).0, BROKE, "another tree");
     assert_eq!(run(&[], &r.tree).0, BROKE);
-    // Its clones are gone.
+    // Its clones and homes are gone.
     assert_eq!(std::fs::read_dir(&r.cfg.trees).unwrap().count(), 0);
     let _ = r.dir;
 }
