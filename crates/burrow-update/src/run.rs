@@ -295,6 +295,7 @@ impl Run<'_> {
                     .git_hushed(&["merge-base", "--is-ancestor", rev, &self.main])
                     .is_ok()
         }) || run.current == cfg.recorded("deployed")
+            || running::was_main(cfg, run, &self.main)
             || running::same_as_running(cfg, run);
         if !in_sync {
             let since = cfg.state.join("held-since");
