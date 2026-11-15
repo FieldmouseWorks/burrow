@@ -175,6 +175,8 @@ in
       # is no one's.
       bindsTo = [ "autoland-proof.service" ];
       after = [ "autoland-proof.service" ];
+      # Anything but 0 or 1 is no verdict: the unit fails, and goes.
+      unitConfig.CollectMode = "inactive-or-failed";
       # A switch leaves a run be: its producer stops it.
       restartIfChanged = false;
       path = [ pkgs.bash pkgs.coreutils config.programs.git.package config.nix.package ];
@@ -193,8 +195,6 @@ in
         RemainAfterExit = true;
         # A fail is a verdict too, kept as the unit's success.
         SuccessExitStatus = "1";
-        # Anything else is no verdict: the unit fails, and goes.
-        CollectMode = "inactive-or-failed";
         # A user of its own, named for the run (an unnamed one would be
         # named for the template, which every run would share), and the
         # producer's group, for its run's folder, the only part of the
