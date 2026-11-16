@@ -91,10 +91,15 @@ fn restoration_receipts_survive_moves_after_an_interrupted_commit() {
         let a = Job::new(&cfg, "a");
         let mut rec = park(&cfg, "a", at, Some(original));
         fs::write(a.path("await"), "sam/up#1\t1\t{}\n").unwrap();
-        fs::create_dir(a.path("await.new")).unwrap();
-        assert!(crate::policy::shift_waits(&a, &mut rec).is_err());
+        // The await rewrite fails once the question's credit is committed:
+        // the job's directory refuses the confined writer's replacement file.
+        let dir = a.path("await").parent().unwrap().to_path_buf();
+        let open = std::os::unix::fs::MetadataExt::mode(&fs::metadata(&dir).unwrap()) & 0o7777;
+        burrow_test::permissions(&dir, 0o555);
+        let failed = crate::policy::shift_waits(&a, &mut rec).is_err();
+        burrow_test::permissions(&dir, open);
+        assert!(failed);
         near(due(&cfg, "a"), original + 600);
-        fs::remove_dir(a.path("await.new")).unwrap();
         // Membership changes before the old restoration can record success.
         merge(&cfg, "destination", &["a".into()]).unwrap();
         let moved = due(&cfg, "a");

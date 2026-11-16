@@ -3,7 +3,7 @@ use super::*;
 use crate::engine::Engine;
 
 fn pending(job: &Job, due: u64, targets: Vec<String>) {
-    swap(
+    crate::state_reads::write(
         job.path(PENDING),
         serde_json::to_vec(&Pending {
             targets,
@@ -15,14 +15,14 @@ fn pending(job: &Job, due: u64, targets: Vec<String>) {
     )
     .unwrap();
     park(job, due as i64).unwrap();
-    swap(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
+    crate::state_reads::write(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
 }
 fn due(job: &Job) {
     if let Some(text) = read(&job.path(PENDING))
         && let Ok(mut p) = serde_json::from_str::<Pending>(&text)
     {
         p.retry_at = 1;
-        swap(job.path(PENDING), serde_json::to_vec(&p).unwrap()).unwrap();
+        crate::state_reads::write(job.path(PENDING), serde_json::to_vec(&p).unwrap()).unwrap();
     }
     for entry in fs::read_dir(job.turn(&job.turns().unwrap(), "github-refusals"))
         .into_iter()
@@ -184,7 +184,7 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         pending(&job, 1, vec![target.into()]);
         due(&job);
         if problem == "malformed" {
-            swap(job.path(PENDING), "{malformed").unwrap();
+            crate::state_reads::write(job.path(PENDING), "{malformed").unwrap();
         }
         if problem == "denied" {
             fs::write(d.path().join("denied"), "").unwrap();
@@ -288,7 +288,7 @@ fn published_waits_win_over_intent_left_by_a_crash() {
     let intent = read(&job.path(PENDING)).unwrap();
     replay(&cfg, &job).unwrap();
     let registered = read(&job.path("await")).unwrap();
-    swap(job.path(PENDING), intent).unwrap(); // crash before retiring intent
+    crate::state_reads::write(job.path(PENDING), intent).unwrap(); // crash before retiring intent
     assert!(!finish(&job, "1").unwrap());
     assert_eq!(read(&job.path("await")).unwrap(), registered);
     assert!(!job.path(PENDING).exists());
@@ -321,10 +321,10 @@ fn host_registration_and_replay_attribute_the_configured_client() {
         cfg.host_github_app = Some("host-app".into());
         let job = job(&cfg);
         if let Some(app) = selected {
-            swap(job.path("app"), app).unwrap();
+            crate::state_reads::write(job.path("app"), app).unwrap();
         }
-        swap(job.turn("1", "engine"), Engine::Codex.name()).unwrap();
-        swap(job.path("link"), "sam/r#7").unwrap();
+        crate::state_reads::write(job.turn("1", "engine"), Engine::Codex.name()).unwrap();
+        crate::state_reads::write(job.path("link"), "sam/r#7").unwrap();
         fs::write(d.path().join("limited"), "").unwrap();
         crate::cmd::record_wait(
             &cfg,
@@ -381,7 +381,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
     fs::create_dir(job.turn("1", "outcome")).unwrap_err(); // existing completed declaration
     fs::remove_file(job.turn("1", "outcome")).unwrap();
     fs::create_dir(job.turn("1", "outcome")).unwrap();
-    swap(job.turn("1", "end"), "await").unwrap();
+    crate::state_reads::write(job.turn("1", "end"), "await").unwrap();
     due(&job);
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(job.turns().as_deref(), Some("1"));
@@ -483,7 +483,7 @@ fn committed_intent_is_recovered_without_a_marker_and_never_before_its_deadline(
     assert_eq!(job.turns().as_deref(), Some("1"));
     // A repeated refusal committed a later reset before replacing its marker.
     pending(&job, (reset + 3600) as u64, vec!["sam/r#7".into()]);
-    swap(job.path("await"), format!("{LIMIT}\t1\t1\n")).unwrap();
+    crate::state_reads::write(job.path("await"), format!("{LIMIT}\t1\t1\n")).unwrap();
     assert_eq!(job.facts().unwrap().quota_reset.unwrap().1, reset + 3600);
     crate::watch::look(&cfg, "").unwrap();
     assert!(
@@ -506,9 +506,9 @@ fn running_and_stopped_jobs_are_not_revived_from_intent() {
         pending(&job, (now() + 3600) as u64, vec!["sam/r#7".into()]);
         fs::remove_file(job.path("await")).unwrap();
         if running {
-            swap(job.turn("1", "slot"), "1").unwrap();
+            crate::state_reads::write(job.turn("1", "slot"), "1").unwrap();
         } else {
-            swap(job.turn("1", "stopped"), "").unwrap();
+            crate::state_reads::write(job.turn("1", "stopped"), "").unwrap();
         }
         crate::watch::look(&cfg, "").unwrap();
         assert!(!job.path("await").exists());
@@ -537,7 +537,7 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     ] {
         let job = Job::new(&cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
-        swap(job.path("app"), app).unwrap();
+        crate::state_reads::write(job.path("app"), app).unwrap();
         crate::policy::bind(
             &job,
             crate::policy::Identity::Local,
@@ -545,9 +545,9 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
         )
         .unwrap();
         job.set_turns(1).unwrap();
-        swap(job.path("link"), "sam/r#7").unwrap();
-        swap(job.turn("1", "engine"), engine.name()).unwrap();
-        swap(job.path("prompt.1"), "queued").unwrap();
+        crate::state_reads::write(job.path("link"), "sam/r#7").unwrap();
+        crate::state_reads::write(job.turn("1", "engine"), engine.name()).unwrap();
+        crate::state_reads::write(job.path("prompt.1"), "queued").unwrap();
         fs::File::open(job.path("prompt.1"))
             .unwrap()
             .set_times(
@@ -557,7 +557,7 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
             )
             .unwrap();
         if emergency {
-            swap(job.path("unstick"), "").unwrap();
+            crate::state_reads::write(job.path("unstick"), "").unwrap();
         }
         crate::waits::rewatch(&cfg, &[id]);
     }
@@ -647,8 +647,8 @@ esac
 fn job_files_cannot_impose_installation_holds_or_meter_readings() {
     let (d, cfg) = fixture();
     let job = job(&cfg);
-    swap(job.path("app"), "workers").unwrap();
-    swap(job.path("link"), "sam/r#7").unwrap();
+    crate::state_reads::write(job.path("app"), "workers").unwrap();
+    crate::state_reads::write(job.path("link"), "sam/r#7").unwrap();
     for (app, owner) in [("workers", "sam"), ("other", "elsewhere")] {
         let mut forged = Meter::new(app, owner, now() as u64);
         forged.remaining = Some(0);
@@ -656,7 +656,7 @@ fn job_files_cannot_impose_installation_holds_or_meter_readings() {
         forged.retry_at = Some(9999999999);
         fs::create_dir_all(job.path("github")).unwrap();
         forged.record(&job.path("github")).unwrap();
-        swap(
+        crate::state_reads::write(
             job.path("github").join("unrelated-filename.json"),
             serde_json::to_vec(&forged).unwrap(),
         )
@@ -673,7 +673,7 @@ fn job_files_cannot_impose_installation_holds_or_meter_readings() {
             .all(|v| v.get("installation").is_none())
     );
     // Replacing a former observation and changing labels are no authority.
-    swap(job.path("app"), "other").unwrap();
+    crate::state_reads::write(job.path("app"), "other").unwrap();
     assert!(held(&cfg, &job, Engine::Codex).is_none());
     let _ = d;
 }
@@ -770,12 +770,12 @@ fn old_markers_and_interrupted_cancellation_cannot_revive_work() {
         pending(&job, 1, vec!["sam/r#7".into()]);
         due(&job);
         remember(&job, "sam/r#1\t1\t{}\n").unwrap();
-        swap(job.path("await.next"), "old unowned baseline").unwrap();
+        crate::state_reads::write(job.path("await.next"), "old unowned baseline").unwrap();
         if stopped {
-            swap(job.turn("1", "stopped"), "").unwrap();
+            crate::state_reads::write(job.turn("1", "stopped"), "").unwrap();
         } else {
             job.set_turns(2).unwrap();
-            swap(job.turn("2", "outcome"), "failed").unwrap();
+            crate::state_reads::write(job.turn("2", "outcome"), "failed").unwrap();
         }
         crate::watch::look(&cfg, "").unwrap();
         if stopped {
@@ -813,7 +813,7 @@ fn replay_records_only_its_own_reset_in_the_installation_meter() {
     let (d, mut cfg) = fixture();
     cfg.host_github_app = Some("host-app".into());
     let job = job(&cfg);
-    swap(job.path("link"), "sam/r#7").unwrap();
+    crate::state_reads::write(job.path("link"), "sam/r#7").unwrap();
     fs::write(d.path().join("limited"), "").unwrap();
     // Another owner's long refusal widens the job's deadline.
     let wide = now() as u64 + 90_000;
@@ -835,10 +835,10 @@ fn an_existing_future_hold_is_not_republished_by_a_watcher_pass() {
     let since = now() - 500;
     let until = now() + 3600;
     pending(&job, until as u64, vec!["sam/r#7".into()]);
-    swap(job.turn("1", LIMIT), format!("{since}\t{until}")).unwrap();
+    crate::state_reads::write(job.turn("1", LIMIT), format!("{since}\t{until}")).unwrap();
     let original = format!("{LIMIT}\t{since}\t{until}");
-    swap(job.path("await"), format!("{original}\n")).unwrap();
-    swap(job.turn("1", "end"), "await\n").unwrap();
+    crate::state_reads::write(job.path("await"), format!("{original}\n")).unwrap();
+    crate::state_reads::write(job.turn("1", "end"), "await\n").unwrap();
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(read(&job.path("await")).as_deref(), Some(original.as_str()));
 }

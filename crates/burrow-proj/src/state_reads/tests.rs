@@ -205,3 +205,208 @@ fn recording_a_choice_never_follows_job_state_links_and_reports_failures() {
     fs::create_dir_all(dir.join("3.engine")).unwrap();
     assert!(job.record_choice("3", &set).is_err());
 }
+
+/// A job's directory is writable inside its sandbox. Links it plants for its
+/// turn's records must not carry the host's end-of-turn writes elsewhere.
+#[test]
+fn a_turns_end_never_writes_through_links_the_job_planted() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = p.join("jobs");
+    cfg.scratch = p.join("scratch");
+    cfg.wake = p.join("wake.json");
+    cfg.kick.clear();
+    cfg.notify = None;
+    cfg.meters = None;
+    cfg.tools.systemctl = p.join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    cfg.tools.systemd_run = "true".into();
+    let job = Job::new(&cfg, "j1");
+    fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("project"), format!("{}\n", p.display())).unwrap();
+    fs::write(job.path("prompt.1"), "the task\n").unwrap();
+    let denied = p.join("denied");
+    fs::write(&denied, "host only\n").unwrap();
+    // The engine's run: the job plants its links, says it's done and answers.
+    let mut plant = String::new();
+    for kind in ["result", "end", "outcome", "result.new", "end.new"] {
+        plant.push_str(&format!(
+            "ln -s '{}' '{}'\n",
+            denied.display(),
+            job.turn("1", kind).display()
+        ));
+    }
+    let engine = p.join("engine");
+    burrow_test::executable(
+        &engine,
+        format!(
+            "#!/bin/sh\n{plant}echo done > '{next}'\n\
+             echo '{{\"type\":\"system\",\"session_id\":\"s\"}}'\n\
+             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"chosen by the job\"}}'\n",
+            next = job.path("end.next").display()
+        ),
+    );
+    let mut run = cfg.clone();
+    run.tools.timeout = engine;
+    let _ = crate::turn::exec(&run, "j1", "normal");
+    assert_eq!(fs::read_to_string(&denied).unwrap(), "host only\n");
+    assert_eq!(
+        crate::read(&job.turn("1", "result")).as_deref(),
+        Some("chosen by the job")
+    );
+    assert_eq!(crate::read(&job.turn("1", "end")).as_deref(), Some("done"));
+}
+
+/// A one-way question past its deadline ends the job with a turn of its own;
+/// links already waiting at that turn's names stay links to untouched files.
+#[test]
+fn a_one_way_timeout_never_writes_through_links_the_job_planted() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = p.join("jobs");
+    cfg.scratch = p.join("scratch");
+    cfg.wake = p.join("wake.json");
+    cfg.kick.clear();
+    cfg.notify = None;
+    cfg.tools.systemctl = p.join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    cfg.tools.systemd_run = "true".into();
+    let job = Job::new(&cfg, "j1");
+    fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("session"), "s1\n").unwrap();
+    fs::write(job.turn("1", "end"), "ask\n").unwrap();
+    fs::write(job.turn("1", "outcome"), "done\n").unwrap();
+    let control = crate::ask::host_path(&job, "");
+    fs::create_dir_all(&control).unwrap();
+    fs::write(
+        control.join("question"),
+        serde_json::json!({"recommendation":{"default":"delete the branch","one_way":true},"due":crate::now() - 1}).to_string(),
+    )
+    .unwrap();
+    let denied = p.join("denied");
+    fs::write(&denied, "host only\n").unwrap();
+    for kind in ["result", "end", "outcome", "jsonl"] {
+        symlink(&denied, job.turn("2", kind)).unwrap();
+        symlink(&denied, job.turn("2", &format!("{kind}.new"))).unwrap();
+    }
+    crate::watch::look(&cfg, "").unwrap();
+    assert_eq!(job.turns().as_deref(), Some("2"));
+    assert_eq!(fs::read_to_string(&denied).unwrap(), "host only\n");
+    assert_eq!(crate::read(&job.turn("2", "end")).as_deref(), Some("done"));
+    for kind in ["result", "end", "outcome", "jsonl"] {
+        assert!(!job.turn("2", kind).is_symlink(), "{kind}");
+    }
+}
+
+/// Whether `text` starts with a path built in a job's directory.
+fn is_job_dir_path(text: &str) -> bool {
+    let text = text.strip_prefix('&').unwrap_or(text);
+    ["job.", "self.", "run.job."].iter().any(|owner| {
+        ["path(", "turn("]
+            .iter()
+            .any(|f| text.starts_with(&format!("{owner}{f}")))
+    })
+}
+
+/// The records `Job::turn` keeps in the host's control root, not the job's.
+fn is_host_record(call: &str) -> bool {
+    call.contains("\"retry-") && !call.contains("\"retry-wake\"") || call.contains("\"execution\"")
+}
+
+/// Every host write into a job's directory goes through `state_reads`: the
+/// plain writers follow a link the job planted at the name, or at `NAME.new`.
+/// A record `Job::turn` keeps in the host's control root is not the job's.
+#[test]
+fn host_writes_into_job_directories_go_through_the_confined_writer() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !matches!(name.as_str(), "tests" | "fixtures") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs") || name.contains("test") || name.starts_with("regression_") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+            // Locals bound to a job-directory path: `let f = job.path("await")`.
+            let mut aliases = Vec::new();
+            for (at, _) in flat.match_indices("let") {
+                let rest = &flat[at + 3..];
+                let rest = rest.strip_prefix("mut").unwrap_or(rest);
+                let Some((name, value)) = rest.split_once('=') else {
+                    continue;
+                };
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let value = &value[..value.len().min(80)];
+                if is_job_dir_path(value) && !is_host_record(value) {
+                    aliases.push(name.to_owned());
+                }
+            }
+            for writer in [
+                "fs::write(",
+                "swap(",
+                "File::create(",
+                ".open(",
+                "create_dir_all(",
+                "fs::rename(",
+                "tempdir_in(",
+            ] {
+                for (at, _) in flat.match_indices(writer) {
+                    let args = &flat[at + writer.len()..];
+                    let args = args.strip_prefix('&').unwrap_or(args);
+                    let call = &args[..args.len().min(80)];
+                    let host = is_host_record(call);
+                    let aliased = aliases.iter().any(|a| {
+                        args.strip_prefix(a.as_str())
+                            .is_some_and(|r| r.starts_with([',', ')', '.']))
+                    });
+                    let into_job = is_job_dir_path(args) || aliased;
+                    if into_job && !host {
+                        found.push(format!(
+                            "{}: {writer}{call}",
+                            path.strip_prefix(&src).unwrap().display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "unconfined job-dir writes:\n{}",
+        found.join("\n")
+    );
+}

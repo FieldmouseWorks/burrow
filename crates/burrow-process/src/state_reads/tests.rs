@@ -110,3 +110,91 @@ fn durable_removal_uses_the_pinned_directory_and_reports_unlink_failures() {
     fs::create_dir(root.join("retained/pending")).unwrap();
     assert!(job.remove_durable("pending").is_err());
 }
+
+#[test]
+fn quarantine_primitives_refuse_planted_links_and_stay_beneath_their_pins() {
+    let t = tempfile::tempdir().unwrap();
+    let host = t.path().join("host");
+    fs::create_dir(&host).unwrap();
+    let job = t.path().join("job");
+    fs::create_dir(&job).unwrap();
+    symlink(&host, job.join(".unstarted")).unwrap();
+    fs::write(job.join("2.result"), "x").unwrap();
+    assert!(directory(&job.join(".unstarted")).is_err());
+    assert_eq!(fs::read_dir(&host).unwrap().count(), 0);
+    fs::remove_file(job.join(".unstarted")).unwrap();
+    let root = directory(&job.join(".unstarted")).unwrap();
+    let (name, attempt) = root.mkdir_unique("attempt-").unwrap();
+    let pinned = Dir::open(&job).unwrap();
+    // The attempt is replaced by a link after pinning: the move still lands
+    // in the pinned inode, never in the host directory.
+    let moved = job.join(".unstarted").join(&name);
+    fs::rename(&moved, job.join(".unstarted").join("gone")).unwrap();
+    symlink(&host, &moved).unwrap();
+    pinned
+        .rename_into("2.result", &attempt, "2.result")
+        .unwrap();
+    assert_eq!(fs::read_dir(&host).unwrap().count(), 0);
+    assert!(job.join(".unstarted/gone/2.result").exists());
+    assert!(pinned.rename_into("../x", &attempt, "y").is_err());
+}
+
+#[test]
+fn rename_refuses_a_planted_link_as_either_parent() {
+    let t = tempfile::tempdir().unwrap();
+    let host = t.path().join("host");
+    fs::create_dir(&host).unwrap();
+    fs::write(host.join("a"), "secret").unwrap();
+    let job = t.path().join("job");
+    fs::create_dir(&job).unwrap();
+    fs::write(job.join("a"), "x").unwrap();
+    symlink(&host, job.join("d")).unwrap();
+    assert!(rename(job.join("a"), job.join("d/a")).is_err());
+    assert!(rename(job.join("d/a"), job.join("b")).is_err());
+    rename(job.join("a"), job.join("b")).unwrap();
+    assert!(job.join("b").exists() && host.join("a").exists());
+}
+
+#[test]
+fn mutation_helpers_reject_nested_names_and_leave_denied_host_state_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let denied = tmp.path().join("denied");
+    let job = tmp.path().join("job");
+    fs::create_dir_all(&denied).unwrap();
+    fs::create_dir_all(job.join("real")).unwrap();
+    fs::write(denied.join("victim"), b"keep").unwrap();
+    fs::write(job.join("mine"), b"x").unwrap();
+    symlink(&denied, job.join("link")).unwrap();
+    let root = Dir::open(&job).unwrap();
+    let other = Dir::open(&job.join("real")).unwrap();
+
+    assert!(root.mkdir_unique("link/attempt-").is_err());
+    assert!(root.mkdir_unique("real/attempt-").is_err());
+    assert!(root.create("link/new", b"x").is_err());
+    assert!(root.create_new("link/new").is_err());
+    assert!(root.remove("link/victim").is_err());
+    assert!(root.rename_into("link/victim", &other, "stolen").is_err());
+    assert!(root.rename_into("mine", &other, "link/moved").is_err());
+    assert!(root.rename_into("mine", &other, "a/b").is_err());
+    for bad in [
+        "link/.", "link//", "link/", "./link", "link/./x", "//x", ".", "..", "", "a\0b",
+    ] {
+        assert!(root.create(bad, b"x").is_err(), "{bad}");
+        assert!(root.create_new(bad).is_err(), "{bad}");
+        assert!(root.remove(bad).is_err(), "{bad}");
+        assert!(root.rename_into(bad, &other, "t").is_err(), "{bad}");
+        assert!(root.rename_into("mine", &other, bad).is_err(), "{bad}");
+    }
+    for bad in ["link/.", "link/", "link//", "a/b", "\0"] {
+        assert!(root.mkdir_unique(bad).is_err(), "{bad}");
+    }
+
+    let names: Vec<_> = fs::read_dir(&denied)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["victim"]);
+    assert_eq!(fs::read(denied.join("victim")).unwrap(), b"keep");
+    assert!(job.join("mine").exists());
+    assert_eq!(fs::read_dir(job.join("real")).unwrap().count(), 0);
+}
