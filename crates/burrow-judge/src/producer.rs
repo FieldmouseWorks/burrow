@@ -197,13 +197,9 @@ impl Producer {
         // describe: what ran is held to this, whatever the settings say by
         // the time the job starts or answers.
         let offer = burrow_producer::jobs::offered(&self.cfg.settings, &self.cfg.role)?;
-        burrow_producer::jobs::runnable(
-            &self.cfg.settings,
-            &self.cfg.role,
-            repo,
-            &offer,
-            request.execution.as_ref().and_then(|e| e.choice.as_ref()),
-        )?;
+        let choice = request.execution.as_ref().and_then(|e| e.choice.as_ref());
+        burrow_producer::jobs::chosen(choice)?;
+        burrow_producer::jobs::runnable(&self.cfg.settings, &self.cfg.role, repo, &offer, choice)?;
         // Before any work: a head another PR's judgment is on can't take
         // this one's.
         self.held_by(repo, *pr, head)?;

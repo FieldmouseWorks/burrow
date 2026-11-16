@@ -274,8 +274,8 @@ pub fn runnable(
 /// Whether an answer by `engine`, which reports `ran`, is what the plugin
 /// offered (`offer`, as it was described, never the settings read again)
 /// and what the flow chose (`choice`): its engine, a model it offers (named
-/// whenever it offers any) at an effort that model takes, and the model
-/// and effort the flow chose, if it chose them. [`runnable`] holds the role
+/// whenever it offers any) at an effort that model takes, and exactly the
+/// model and effort the flow chose, which must name the model ([`chosen`]). [`runnable`] holds the role
 /// to that before a job starts; this holds what actually ran to it before
 /// anything of it is published, since the role can change in between.
 pub fn ran_as(
@@ -293,19 +293,26 @@ pub fn ran_as(
     if let Some(why) = offer.refuses(ran.model.as_ref(), ran.effort.as_ref()) {
         return Err(format!("it didn't run as the plugin offers: {why}"));
     }
-    if let Some(c) = choice
-        && (c.engine != *named
-            || c.model
-                .as_ref()
-                .is_some_and(|m| Some(m) != ran.model.as_ref())
-            || c.effort
-                .as_ref()
-                .is_some_and(|e| Some(e) != ran.effort.as_ref()))
-    {
+    // The offer is read when the request comes, which can be after the
+    // flow's describe: only what the flow chose, which Conary held to the
+    // offers it negotiated, closes that gap. So the choice names a model,
+    // and what ran is exactly it.
+    let c = chosen(choice)?;
+    if c.engine != *named || c.model != ran.model || c.effort != ran.effort {
         return Err(format!(
             "the flow chose {} {:?} {:?}, and {:?} {:?} ran",
             c.engine, c.model, c.effort, ran.model, ran.effort
         ));
     }
     Ok(())
+}
+
+/// The flow's choice, once it names the model work runs on: one that
+/// doesn't leaves what runs to settings that can change after the plugin
+/// described itself, which nothing here could hold to what the flow
+/// negotiated.
+pub fn chosen(choice: Option<&Choice>) -> Result<&Choice, String> {
+    choice.filter(|c| c.model.is_some()).ok_or_else(|| {
+        "the flow chose no model, so what ran couldn't be held to what it negotiated".to_string()
+    })
 }

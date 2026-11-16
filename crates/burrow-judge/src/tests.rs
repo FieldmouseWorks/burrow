@@ -522,21 +522,30 @@ fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
         judges.0.lock().unwrap().during =
             Some(Box::new(move || std::fs::write(&roles, settings).unwrap()));
         let refused = ask(dir.path(), &p, request).unwrap_err();
+        // A request whose choice names no model is refused before any work:
+        // the offer read when it came may already not be the one the flow
+        // negotiated. One that names the model alone holds what ran to no
+        // effort.
         assert!(
-            refused.contains("names itself by") || refused.contains("plugin offers"),
+            refused.contains("chose no model")
+                || refused.contains("the flow chose")
+                || refused.contains("plugin offers"),
             "{answered:?}: {refused}"
         );
+        if request.execution.as_ref().unwrap().choice.is_none() {
+            assert!(judges.0.lock().unwrap().asked.is_empty());
+        }
         assert!(w.posted().is_empty(), "{answered:?}");
         assert!(w.with(|p| p.runs.is_empty()), "{answered:?}");
     }
-    // What was offered when it came still goes out, the settings changed
-    // or not.
+    // What ran as the flow chose still goes out, the settings changed or
+    // not: Conary held the choice to the offers it negotiated.
     let judges = Scripted::answering(vec![answer("judge-1", Judgment::Pass)]);
     let p = producer(dir.path(), &w, judges.clone());
     let changed = model.to_string();
     judges.0.lock().unwrap().during =
         Some(Box::new(move || std::fs::write(&roles, changed).unwrap()));
-    ask(dir.path(), &p, &unchosen).unwrap();
+    ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap();
     assert_eq!(w.posted().len(), 1);
 }
 
