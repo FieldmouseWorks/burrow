@@ -98,7 +98,7 @@ pub(crate) fn requested(
     } else {
         crate::policy::repository(job)
     };
-    resolve(cfg, role, repo.as_deref(), pinned)
+    resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())
 }
 
 /// Turn startup and drain admission share role scopes, overflow and pins.
@@ -108,11 +108,12 @@ pub(crate) fn resolve(
     role: &str,
     repo: Option<&str>,
     pinned: Option<&str>,
+    sandboxed: bool,
 ) -> Result<Choice, String> {
     // One version of the settings: the engine and its tuning can't come
     // from either side of an `engines use`.
     let settings = cfg.role_settings()?;
-    let mut engine = cfg.engine_in(&settings, role, repo)?;
+    let mut engine = cfg.engine_in(&settings, role, repo, sandboxed)?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
@@ -231,12 +232,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         assert_eq!(
-            resolve(&cfg, "planner", None, None).unwrap().engine,
+            resolve(&cfg, "planner", None, None, false).unwrap().engine,
             Engine::Codex
         );
         set(&mut cfg, tmp.path(), &["role planner claude"]);
         assert!(
-            resolve(&cfg, "planner", None, None)
+            resolve(&cfg, "planner", None, None, false)
                 .unwrap_err()
                 .contains("explicit small model")
         );
@@ -248,7 +249,7 @@ mod tests {
                 "model planner claude selected",
             ],
         );
-        let chosen = resolve(&cfg, "planner", None, None).unwrap();
+        let chosen = resolve(&cfg, "planner", None, None, false).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }
@@ -392,7 +393,7 @@ for session in ('writer-session', 'reviewer-session'):
                 "model steward-judged codex selected high",
             ],
         );
-        let chosen = resolve(&cfg, "steward-judged", None, None).unwrap();
+        let chosen = resolve(&cfg, "steward-judged", None, None, false).unwrap();
         assert_eq!(chosen.engine, Engine::Codex);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
         assert_eq!(chosen.effort.as_deref(), Some("high"));
@@ -402,7 +403,9 @@ for session in ('writer-session', 'reviewer-session'):
         assert_eq!(recorded["model"], "selected");
         set(&mut cfg, dir.path(), &["role steward-judged claude"]);
         assert_eq!(
-            resolve(&cfg, "steward-judged", None, None).unwrap().engine,
+            resolve(&cfg, "steward-judged", None, None, false)
+                .unwrap()
+                .engine,
             Engine::Claude
         );
     }

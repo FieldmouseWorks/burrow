@@ -119,8 +119,8 @@
 //! Claude Code refuses because the plan's usage is spent puts the whole
 //! machine out of usage until the limit resets: no turn takes a slot till
 //! then, and the refused one waits in line and runs again ([`usage`]). One
-//! it refuses because its login expired holds the machine the same way,
-//! until someone logs in again.
+//! it refuses because its login here expired holds every turn here the same
+//! way, until someone logs in again; a sandbox's runs on its own token.
 //!
 //! A turn ends at its answer. Claude -p stays up after it while anything it
 //! left in the background runs (a CI watch, say), holding a slot to do

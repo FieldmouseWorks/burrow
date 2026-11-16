@@ -212,7 +212,7 @@ impl Pass<'_> {
                             .ends_with(&format!("/repos/{}", repo.to_lowercase()))
                 })
                 && let Ok(engine) = self.drain_engine(listed, &label, &repo)
-                && !slot::room(self.cfg, engine)
+                && !slot::room(self.cfg, engine, self.inbox.vm)
             {
                 blocked = true;
                 self.no_room(&repo, engine);
@@ -248,7 +248,7 @@ impl Pass<'_> {
                     continue;
                 }
             };
-            if !unstick && !slot::room(self.cfg, engine) {
+            if !unstick && !slot::room(self.cfg, engine, self.inbox.vm) {
                 blocked = true;
                 self.no_room(&repo, engine);
                 continue;
@@ -293,6 +293,7 @@ impl Pass<'_> {
             role.as_deref().unwrap_or_default(),
             Some(repo),
             pinned.map(Engine::name),
+            self.inbox.vm,
         )
         .map(|choice| choice.engine)
     }
@@ -301,7 +302,7 @@ impl Pass<'_> {
     /// usage books the repo's pass for when it resets.
     fn no_room(&mut self, repo: &str, engine: Engine) {
         if engine == Engine::Claude
-            && let Some(spent) = usage::out(self.cfg)
+            && let Some(spent) = usage::login::out_for(self.cfg, self.inbox.vm)
         {
             self.book(repo, spent.until);
         }

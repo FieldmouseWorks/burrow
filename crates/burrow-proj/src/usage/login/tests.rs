@@ -2,6 +2,7 @@
 // 2026-11-16: held like a spent plan, and the owner told to log in.
 
 use crate::engine::claude::LOGGED_OUT;
+use crate::usage::login::{holds_machine, resumed};
 use crate::usage::tests::{rig, told};
 use crate::usage::*;
 
@@ -123,8 +124,9 @@ fn a_standing_holds_notice_follows_its_cause_each_way() {
 }
 
 /// A sandbox's login is its own token, not this machine's: one expired
-/// there holds no turn here, while this machine's login, and a limit met in
-/// a sandbox (the plan is the same), still hold every turn.
+/// there holds no turn here, while this machine's login still holds the
+/// turns here, and a limit met in a sandbox (the plan is the same) every
+/// turn.
 #[test]
 fn only_this_machines_login_holds_the_machine() {
     assert!(!holds_machine(LOGGED_OUT, true));
@@ -133,4 +135,77 @@ fn only_this_machines_login_holds_the_machine() {
     assert!(holds_machine(LIMIT, false));
     assert!(login::SANDBOX.contains("claudeTokenFile"));
     assert!(!login::SANDBOX.contains("/login"));
+}
+
+/// This machine's login is a credential a sandbox doesn't use: its hold
+/// holds no sandbox's turn, nor moves its role to another engine, while a
+/// limit, which every token's plan shares, holds and moves them all.
+#[test]
+fn this_machines_login_hold_lets_a_sandboxs_turn_by() {
+    use crate::engine::Engine;
+    use crate::usage::login::out_for;
+    use burrow_usage_reset::meter::{Snapshot, Window};
+    let (d, mut cfg) = rig();
+    let meters = d.path().join("meters");
+    cfg.meters = Some(meters.clone());
+    Snapshot {
+        windows: [(
+            "seven_day".into(),
+            Window {
+                used: 1.0,
+                resets_at: 0.0,
+            },
+        )]
+        .into(),
+        credits: false,
+        read_at: now() as f64,
+        requested_at: None,
+    }
+    .record(&meters, "codex")
+    .unwrap();
+    crate::config::tests::set(&mut cfg, d.path(), &["role work claude over 80 codex"]);
+    let settings = cfg.role_settings().unwrap();
+    let engine = |sandboxed| cfg.engine_in(&settings, "work", None, sandboxed).unwrap();
+    let t = now();
+    let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
+    assert_eq!(out_for(&cfg, false), Some(s.clone()));
+    assert_eq!(out_for(&cfg, true), None);
+    assert_eq!(
+        (engine(false), engine(true)),
+        (Engine::Codex, Engine::Claude)
+    );
+    // The owner's pause holds every turn, whatever it says.
+    assert!(
+        Spent {
+            owner: true,
+            ..s.clone()
+        }
+        .holds_run(true)
+    );
+    // A limit met meanwhile is what holds now: the sandbox's turn too.
+    record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
+    assert!(out_for(&cfg, true).is_some());
+    assert_eq!(
+        (engine(false), engine(true)),
+        (Engine::Codex, Engine::Codex)
+    );
+}
+
+/// A sandbox's answer proves its own token, not this machine's login: it
+/// ends no login hold here, and ends a limit's, the plan's.
+#[test]
+fn a_sandboxs_answer_ends_a_limit_but_no_login_hold_here() {
+    let (d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
+    answered(&cfg, t + 6, true);
+    assert!(out(&cfg).is_some());
+    assert_eq!(told(&d).len(), 1, "nothing closed");
+    answered(&cfg, t + 6, false);
+    assert_eq!(out(&cfg), None);
+
+    let (_d, cfg) = rig();
+    record(&cfg, "web-1", Some(t + 3600), LIMIT, t).unwrap();
+    answered(&cfg, t + 6, true);
+    assert_eq!(out(&cfg), None);
 }

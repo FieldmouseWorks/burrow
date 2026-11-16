@@ -556,7 +556,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             }
         }
         if let Some((_, said)) = &refusal
-            && !usage::holds_machine(said, agent.is_some())
+            && !usage::login::holds_machine(said, agent.is_some())
         {
             let _ = crate::state_reads::write(
                 job.turn(&n, "result"),
@@ -612,7 +612,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
             None if last.is_some() && choice.engine == Engine::Claude => {
-                usage::back(cfg, Some(started))
+                usage::answered(cfg, started, agent.is_some())
             }
             None => {}
         }

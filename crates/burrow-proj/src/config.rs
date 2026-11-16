@@ -361,20 +361,22 @@ impl Config {
     /// The engine a turn of ROLE in REPO runs on: the closest role key's,
     /// or the engine it moves to when that one is short by its meter.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
-        self.engine_in(&self.role_settings()?, role, repo)
+        self.engine_in(&self.role_settings()?, role, repo, false)
     }
 
-    /// The same, from settings already read.
+    /// The same, from settings already read, for a turn in a sandbox
+    /// (`sandboxed`) or here: a hold that lets it by doesn't move it.
     pub(crate) fn engine_in(
         &self,
         settings: &burrow_settings::roles::InForce,
         role: &str,
         repo: Option<&str>,
+        sandboxed: bool,
     ) -> Result<Engine, String> {
         crate::engine::route(
             settings.route(role, repo),
             self.meters.as_deref(),
-            crate::usage::out(self).is_some(),
+            crate::usage::login::out_for(self, sandboxed).is_some(),
             crate::now(),
         )
     }

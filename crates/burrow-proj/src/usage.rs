@@ -643,6 +643,16 @@ pub fn remind(cfg: &Config) {
 /// one settled or none recorded yet: an earlier proj's or watchdog's limit
 /// taken in after it, but written before, never holds again ([`earlier`]).
 pub fn back(cfg: &Config, started: Option<i64>) {
+    end(cfg, started, false)
+}
+
+/// A run that started at `started` answered, in a sandbox (`sandboxed`) or
+/// here: [`back`], for a hold that held it ([`Spent::holds_run`]).
+pub fn answered(cfg: &Config, started: i64, sandboxed: bool) {
+    end(cfg, Some(started), sandboxed)
+}
+
+fn end(cfg: &Config, started: Option<i64>, sandboxed: bool) {
     let owner = started.is_none();
     if !owner && kept(cfg).is_none() {
         return;
@@ -656,6 +666,10 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     let s = kept(cfg);
     let ends = s.as_ref().is_some_and(|s| s.back.is_none());
     if !owner && s.as_ref().is_some_and(|s| s.owner && s.holds(now)) {
+        return;
+    }
+    // A sandbox's answer says nothing of this machine's login.
+    if ends && s.as_ref().is_some_and(|s| !s.holds_run(sandboxed)) {
         return;
     }
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
@@ -681,8 +695,8 @@ pub fn back(cfg: &Config, started: Option<i64>) {
             // The compatible record is the commit point. A failed journal
             // acknowledgement leaves it intact for settlement to retry.
             let _ = admission_release(cfg, &s);
-            eprintln!("proj: {} (out since {})", closed(&s), when(s.at));
-            tell(cfg, &["close", NOTICE, closed(&s)]);
+            eprintln!("proj: {} (out since {})", login::closed(&s), when(s.at));
+            tell(cfg, &["close", NOTICE, login::closed(&s)]);
             changed(cfg);
         }
         Some(s) => {
@@ -775,7 +789,7 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
     } else if !settled && now - s.told >= RETELL / 12 {
         s.told = now;
         if keep(cfg, &s).is_ok() {
-            tell(cfg, &["close", NOTICE, closed(&s)]);
+            tell(cfg, &["close", NOTICE, login::closed(&s)]);
         }
     }
 }
@@ -852,32 +866,6 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
 }
 
 const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";
-
-/// The owner's notice's close: what's back.
-fn closed(s: &Spent) -> &'static str {
-    if !s.owner && login::is(&s.said) {
-        login::CLOSED
-    } else {
-        CLOSED
-    }
-}
-
-/// Whether a turn refused on `said` holds the machine. A sandbox's login is
-/// the token it's given (burrow.agents.claudeTokenFile), not this machine's:
-/// one expired holds no turn here, and logging in here doesn't renew it, so
-/// it ends that turn alone ([`login::SANDBOX`]).
-pub(crate) fn holds_machine(said: &str, sandboxed: bool) -> bool {
-    !(sandboxed && login::is(said))
-}
-
-/// What a turn refused on `said` is told when it runs again, before its
-/// prompt: what it was refused for, and that it's back.
-pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
-    if login::is(said) {
-        return login::RESUMED.to_owned();
-    }
-    format!("{}\n\n{said}. {}", crate::turn::SPENT, policy(cfg))
-}
 
 /// Whether HOST-notify may still have the notice open: a close that didn't
 /// get through. Only its exit 1 says it's closed (or was never opened); one

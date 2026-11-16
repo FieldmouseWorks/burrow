@@ -136,7 +136,7 @@ impl Checkpoint {
             let prompt = job.turn(n, "spent");
             crate::state_reads::write(
                 &prompt,
-                format!("{}\n\n{asked}", crate::usage::resumed(job.cfg, said)),
+                format!("{}\n\n{asked}", crate::usage::login::resumed(job.cfg, said)),
             )?;
             prompt
         } else {
