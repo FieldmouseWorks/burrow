@@ -4,7 +4,7 @@ use crate::engine::Engine;
 
 fn pending(job: &Job, due: u64, targets: Vec<String>) {
     swap(
-        job.path(PENDING),
+        job.file(crate::record::JobFile::GithubPending),
         serde_json::to_vec(&Pending {
             targets,
             retry_at: due,
@@ -18,11 +18,15 @@ fn pending(job: &Job, due: u64, targets: Vec<String>) {
     swap(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
 }
 fn due(job: &Job) {
-    if let Some(text) = read(&job.path(PENDING))
+    if let Some(text) = read(&job.file(crate::record::JobFile::GithubPending))
         && let Ok(mut p) = serde_json::from_str::<Pending>(&text)
     {
         p.retry_at = 1;
-        swap(job.path(PENDING), serde_json::to_vec(&p).unwrap()).unwrap();
+        swap(
+            job.file(crate::record::JobFile::GithubPending),
+            serde_json::to_vec(&p).unwrap(),
+        )
+        .unwrap();
     }
     for entry in fs::read_dir(job.turn(&job.turns().unwrap(), "github-refusals"))
         .into_iter()
@@ -184,7 +188,11 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         pending(&job, 1, vec![target.into()]);
         due(&job);
         if problem == "malformed" {
-            swap(job.path(PENDING), "{malformed").unwrap();
+            swap(
+                job.file(crate::record::JobFile::GithubPending),
+                "{malformed",
+            )
+            .unwrap();
         }
         if problem == "denied" {
             fs::write(d.path().join("denied"), "").unwrap();
@@ -199,13 +207,16 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         crate::watch::look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("1"));
         assert!(
-            job.path(PENDING).exists(),
+            job.file(crate::record::JobFile::GithubPending).exists(),
             "lost intent on failed start: {problem}"
         );
         fs::remove_file(d.path().join("fail-start")).unwrap();
         crate::watch::look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));
-        assert!(!job.path(PENDING).exists(), "stale intent after {problem}");
+        assert!(
+            !job.file(crate::record::JobFile::GithubPending).exists(),
+            "stale intent after {problem}"
+        );
         assert!(!finish(&job, "2").unwrap());
         let recommendation = crate::ask::Recommendation {
             default: "A real owner decision".into(),
@@ -285,13 +296,13 @@ fn published_waits_win_over_intent_left_by_a_crash() {
     let (_d, cfg) = fixture();
     let job = job(&cfg);
     pending(&job, 1, vec!["github-limit/r#7".into()]);
-    let intent = read(&job.path(PENDING)).unwrap();
+    let intent = read(&job.file(crate::record::JobFile::GithubPending)).unwrap();
     replay(&cfg, &job).unwrap();
     let registered = read(&job.path("await")).unwrap();
-    swap(job.path(PENDING), intent).unwrap(); // crash before retiring intent
+    swap(job.file(crate::record::JobFile::GithubPending), intent).unwrap(); // crash before retiring intent
     assert!(!finish(&job, "1").unwrap());
     assert_eq!(read(&job.path("await")).unwrap(), registered);
-    assert!(!job.path(PENDING).exists());
+    assert!(!job.file(crate::record::JobFile::GithubPending).exists());
 }
 
 #[test]
@@ -376,7 +387,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
     due(&job);
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(job.turns().as_deref(), Some("1"));
-    assert!(job.path(PENDING).exists());
+    assert!(job.file(crate::record::JobFile::GithubPending).exists());
     fs::remove_file(d.path().join("limited")).unwrap();
     fs::create_dir(job.turn("1", "outcome")).unwrap_err(); // existing completed declaration
     fs::remove_file(job.turn("1", "outcome")).unwrap();
@@ -385,7 +396,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
     due(&job);
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(job.turns().as_deref(), Some("1"));
-    assert!(job.path(PENDING).exists());
+    assert!(job.file(crate::record::JobFile::GithubPending).exists());
     assert!(read(&job.path("await")).unwrap().starts_with(LIMIT));
     let captured = read(&job.path("await.next")).unwrap();
     fs::remove_dir(job.turn("1", "outcome")).unwrap();
@@ -393,7 +404,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
     fs::write(d.path().join("denied"), "").unwrap();
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(read(&job.path("await")).unwrap(), captured);
-    assert!(!job.path(PENDING).exists());
+    assert!(!job.file(crate::record::JobFile::GithubPending).exists());
     assert_eq!(job.turns().as_deref(), Some("1"));
 }
 
@@ -515,7 +526,10 @@ fn running_and_stopped_jobs_are_not_revived_from_intent() {
         assert_eq!(job.turns().as_deref(), Some("1"));
         let wake: serde_json::Value = serde_json::from_str(&read(&cfg.wake).unwrap()).unwrap();
         if running {
-            let p: Pending = serde_json::from_str(&read(&job.path(PENDING)).unwrap()).unwrap();
+            let p: Pending = serde_json::from_str(
+                &read(&job.file(crate::record::JobFile::GithubPending)).unwrap(),
+            )
+            .unwrap();
             assert_eq!(wake[""], p.retry_at);
         } else {
             assert!(wake[""].is_null());
@@ -706,13 +720,13 @@ esac
         )
         .is_err()
     );
-    let saved = read(&job.path(PENDING)).unwrap();
+    let saved = read(&job.file(crate::record::JobFile::GithubPending)).unwrap();
     let p: Pending = serde_json::from_str(&saved).unwrap();
     valid_records(&p.baselines, &["sam/r#1"]);
     due(&job);
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(job.turns().as_deref(), Some("1"));
-    assert!(job.path(PENDING).exists());
+    assert!(job.file(crate::record::JobFile::GithubPending).exists());
     fs::remove_dir(job.turn("1", "github-awaits")).unwrap();
     burrow_test::executable(
         &cfg.tools.gh,
@@ -734,7 +748,7 @@ esac
 
 #[test]
 fn unreadable_intent_archive_and_publication_are_retried_without_recapture() {
-    for file in [PENDING, "1.github-awaits", "await", "await.next"] {
+    for file in ["github-await", "1.github-awaits", "await", "await.next"] {
         let (d, cfg) = fixture();
         let job = job(&cfg);
         pending(&job, 1, vec!["sam/r#7".into()]);
@@ -780,7 +794,7 @@ fn old_markers_and_interrupted_cancellation_cannot_revive_work() {
         crate::watch::look(&cfg, "").unwrap();
         if stopped {
             assert_eq!(job.turns().as_deref(), Some("1"));
-            assert!(job.path(PENDING).exists());
+            assert!(job.file(crate::record::JobFile::GithubPending).exists());
         } else {
             assert_eq!(job.turns().as_deref(), Some("2"));
             assert_eq!(read(&job.turn("2", "outcome")).as_deref(), Some("failed"));

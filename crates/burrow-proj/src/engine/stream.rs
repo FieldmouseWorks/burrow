@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::host_jobs::View;
+use crate::record::{JobFile, TurnFile};
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader};
 
@@ -140,10 +141,10 @@ pub fn stream_tail(stream: &Path, view: View) -> String {
 /// Session storage is per engine; `session` remains the active session for job state.
 /// A Claude session made before engine routing has no engine marker.
 pub fn resume(job: &Job, engine: Engine) -> Option<String> {
-    read(&job.path(&format!("session.{}", engine.name())))
+    read(&job.file(JobFile::SessionOf(engine)))
         .or_else(|| {
-            (engine == Engine::Claude && !job.path("session.engine").exists())
-                .then(|| read(&job.path("session")))
+            (engine == Engine::Claude && !job.file(JobFile::SessionEngine).exists())
+                .then(|| read(&job.file(JobFile::Session)))
                 .flatten()
         })
         .filter(|s| !s.is_empty())
@@ -159,7 +160,7 @@ pub struct Said<'a> {
 }
 impl<'a> Said<'a> {
     pub fn new(job: &'a Job<'a>, n: &str, from: u64) -> Self {
-        let file = crate::state_reads::open(&job.turn(n, "jsonl"))
+        let file = crate::state_reads::open(&job.turn_file(n, TurnFile::Jsonl))
             .ok()
             .and_then(|mut f| {
                 f.seek(SeekFrom::Start(from)).ok()?;
@@ -190,20 +191,22 @@ impl<'a> Said<'a> {
             if !self.named
                 && let Some((engine, id)) = session(&line)
             {
-                if !self.job.path("session.engine").exists()
-                    && let Some(previous) = read(&self.job.path("session"))
+                if !self.job.file(JobFile::SessionEngine).exists()
+                    && let Some(previous) = read(&self.job.file(JobFile::Session))
                 {
                     let _ = crate::state_reads::write(
-                        self.job.path("session.claude"),
+                        self.job.file(JobFile::SessionOf(Engine::Claude)),
                         format!("{previous}\n"),
                     );
                 }
                 let _ = crate::state_reads::write(
-                    self.job.path(&format!("session.{}", engine.name())),
+                    self.job.file(JobFile::SessionOf(engine)),
                     format!("{id}\n"),
                 );
-                let _ = crate::state_reads::write(self.job.path("session"), format!("{id}\n"));
-                let _ = crate::state_reads::write(self.job.path("session.engine"), engine.name());
+                let _ =
+                    crate::state_reads::write(self.job.file(JobFile::Session), format!("{id}\n"));
+                let _ =
+                    crate::state_reads::write(self.job.file(JobFile::SessionEngine), engine.name());
                 self.named = true;
             }
             if self.decoder.line(&line).is_some() {

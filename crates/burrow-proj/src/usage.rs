@@ -35,8 +35,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::job::{Job, kick};
+use crate::record::TurnFile;
 use crate::waits::rewatch_all;
-use crate::{filled, mtime, now, swap};
+use crate::{mtime, now, swap};
 
 /// Where it's kept, in jobs.
 pub(crate) const FILE: &str = ".usage.json";
@@ -807,8 +808,8 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
         }
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
-        let f = job.turn(&n, "resets");
-        if !f.exists() || !filled(&job.turn(&n, "outcome")) {
+        let f = job.turn_file(&n, TurnFile::Resets);
+        if !f.exists() || !crate::record::outcome_said(&job, &n) {
             continue;
         }
         let Ok(text) = fs::read_to_string(&f) else {

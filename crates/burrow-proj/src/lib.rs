@@ -157,6 +157,10 @@
 //! A Codex turn with no --app runs in the machine's App's env (machinery),
 //! or not at all: its sandbox keeps the user's logins out ([`turn::github_app`]).
 
+// Tests build a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn) the rest of the crate can't use.
+#![cfg_attr(test, allow(deprecated))]
+
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -170,6 +174,9 @@ pub mod github;
 pub mod github_quota;
 pub mod guest;
 pub mod host_jobs;
+// The inbox still reads a job's files by name (Job::path, Job::turn), until
+// #975 moves it onto the record.
+#[allow(deprecated)]
 pub mod inbox;
 pub mod job;
 pub mod pick;

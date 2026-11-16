@@ -13,8 +13,9 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::github::{changes, fingerprint, over, target};
 use crate::job::{Job, USAGE_LIMIT, awaits};
+use crate::record::{JobFile, TurnFile};
 use crate::turn::{start, start_closed};
-use crate::{Fail, filled, io_fail, now, read, swap, usage};
+use crate::{Fail, io_fail, now, read, swap, usage};
 
 // Usage awaits from old Claude turns become its global hold. Codex turns
 // keep the same wire format but wait independently until the reset.
@@ -38,17 +39,19 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let job = Job::new(cfg, &id);
         if job
             .turns()
-            .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+            .is_some_and(|n| crate::record::transferring(&job, &n))
         {
             continue;
         }
 
         let stopped = job
             .turns()
-            .is_some_and(|n| job.turn(&n, "stopped").exists());
+            .is_some_and(|n| crate::record::stopped(&job, &n));
         let paused = crate::policy::parked(&job) || crate::inbox::job_paused(cfg, &id);
         {
-            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let _held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
             if let Err(e) = crate::question::recover(&job) {
                 eprintln!("proj question recovery: {e}");
                 retry.push((String::new(), now() + RETRY));
@@ -76,7 +79,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                         eprintln!("proj question: {e}");
                         if !job
                             .turns()
-                            .is_some_and(|n| job.turn(&n, "stopped").exists())
+                            .is_some_and(|n| crate::record::stopped(&job, &n))
                         {
                             retry.push((String::new(), now() + RETRY));
                         }
@@ -91,7 +94,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         // Notifications are independent of GitHub waits and include stopped
         // and completed jobs. Serialize with starts so rollback stays atomic.
         {
-            let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
             match crate::question::notify(cfg, &job) {
                 Ok(false) => (),
                 Ok(true) => retry.push((String::new(), now() + RETRY)),
@@ -108,8 +113,8 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         // Pausing stops automatic turns, not question reconciliation or
         // durable notification delivery (including stopped/completed jobs).
         if paused {
-            if filled(&job.path("await"))
-                || job.path(crate::github_quota::PENDING).exists()
+            if crate::record::awaiting(&job)
+                || job.file(JobFile::GithubPending).exists()
                 || !matches!(crate::ask::load(&job), Ok(None))
             {
                 retry.push((String::new(), now() + RETRY));
@@ -119,17 +124,18 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         if crate::ask::host_path(&job, "question-needs-owner").exists() {
             continue;
         }
-        let f = job.path("await");
         if crate::planning::admit(&job).is_err() {
             continue;
         }
-        if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
+        if !crate::record::awaiting(&job) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
         }
         let Some(turn) = job.turns() else { continue };
         // Gone already: another look (burrow-events', or a hand-run one) has
         // started its next turn.
-        let Some(waits) = read(&f) else { continue };
+        let Some(waits) = crate::record::await_text(&job) else {
+            continue;
+        };
         let (mut news, mut lines) = (String::new(), String::new());
         // The first awaited PR or issue this look sees close: it settles a
         // reversible open question (question::Answer::Closed).
@@ -145,20 +151,22 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 if reset > now() {
                     lines.push_str(&a.line());
                     retry.push((String::new(), reset));
-                } else if job.path(crate::github_quota::PENDING).exists()
+                } else if job.file(JobFile::GithubPending).exists()
                     || match crate::github_quota::captured(&job) {
                         Ok(text) => !text.is_empty(),
                         Err(_) => true,
                     }
                 {
-                    let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    let held = job
+                        .lock()
+                        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                     if job.turns().as_deref() != Some(turn.as_str())
-                        || read(&f).as_deref() != Some(waits.as_str())
+                        || crate::record::await_text(&job).as_deref() != Some(waits.as_str())
                     {
                         drop(held);
                         continue 'jobs;
                     }
-                    let replayed = if job.path(crate::github_quota::PENDING).exists() {
+                    let replayed = if job.file(JobFile::GithubPending).exists() {
                         crate::github_quota::replay(cfg, &job)
                     } else {
                         crate::github_quota::restore(&job)
@@ -190,7 +198,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue;
             }
             if a.target == USAGE_LIMIT {
-                if read(&job.turn(&turn, "engine")).as_deref() == Some("codex") {
+                if read(&job.turn_file(&turn, TurnFile::Engine)).as_deref() == Some("codex") {
                     let reset = a.was.parse::<i64>().unwrap_or(0);
                     if reset > now() {
                         lines.push_str(&a.line());
@@ -273,9 +281,11 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         // GitHub was asked without the lock, so a reply may have started a
         // turn meanwhile (that turn owns the job's waits), or proj stop ended
         // the job: either way these are dropped.
-        let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+        let held = job
+            .lock()
+            .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
         if job.turns().as_deref() != Some(turn.as_str())
-            || read(&f).as_deref() != Some(waits.as_str())
+            || crate::record::await_text(&job).as_deref() != Some(waits.as_str())
         {
         } else if !news.is_empty() {
             // The new turn clears what's left: if it still waits, it says so
@@ -292,7 +302,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 eprintln!("{e}");
                 if job
                     .turns()
-                    .is_some_and(|n| job.turn(&n, "stopped").exists())
+                    .is_some_and(|n| crate::record::stopped(&job, &n))
                 {
                     continue 'jobs;
                 }
@@ -303,7 +313,8 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 }
             }
         } else {
-            swap(&f, &lines).map_err(|e| io_fail(&f, e))?;
+            let mark = crate::record::mark(&job, crate::record::Marker::Await);
+            mark.swap(&lines).map_err(|e| mark.fail(e))?;
         }
         drop(held);
     }
@@ -377,10 +388,10 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
             continue;
         }
         let turn = job.turns().unwrap_or_default();
-        if job.turn(&turn, "stopped").exists() {
+        if crate::record::stopped(&job, &turn) {
             continue;
         }
-        let text = read(&job.path("await")).unwrap_or_default();
+        let text = crate::record::await_text(&job).unwrap_or_default();
         if let Some((_, deadline)) = crate::github_quota::reset(&job, &turn) {
             add(
                 "",

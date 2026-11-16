@@ -1,5 +1,9 @@
 //! Exercise the operator migration and answer route through the real CLI.
 //! This test also runs on the feature's base, where merge-questions is absent.
+// It builds a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn).
+#![allow(deprecated)]
+
 use burrow_proj::{
     config::Config,
     job::Job,
