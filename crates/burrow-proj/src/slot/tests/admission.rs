@@ -747,7 +747,7 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
                 fs::write(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
                 if id == "quota-pending" {
                     fs::write(
-                        job.path(crate::github_quota::PENDING),
+                        job.file(crate::record::JobFile::GithubPending),
                         r#"{"targets":["sam/web#1"],"retry_at":2000,"turn":"1"}"#,
                     )
                     .unwrap();

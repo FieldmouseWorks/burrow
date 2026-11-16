@@ -21,8 +21,18 @@ use crate::job::{Await, Job, Request, USAGE_LIMIT, awaits};
 use crate::waits::{Facts, job_wait};
 use crate::{filled, mtime, now, read, systemd, usage};
 
+mod files;
+mod marks;
 #[cfg(test)]
 mod tests;
+
+pub use files::{JobFile, TurnFile};
+pub(crate) use files::{Marker, TurnMarker};
+pub(crate) use marks::{
+    Unread, await_checked, await_text, await_written, awaiting, checkpoint, deadline, end,
+    end_checked, end_said_at, ended_down, has_await, has_outcome, has_slot, left_open, mark,
+    mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped, transferring, unstuck,
+};
 
 /// Where a job stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -199,10 +209,10 @@ pub struct Turn {
 fn turn(job: &Job, n: &str) -> Turn {
     Turn {
         n: n.to_owned(),
-        engine: read(&job.turn(n, "engine")),
-        model: read(&job.turn(n, "model")),
-        effort: read(&job.turn(n, "effort")),
-        session: crate::engine::stream_session(&job.turn(n, "jsonl")),
+        engine: read(&job.turn_file(n, TurnFile::Engine)),
+        model: read(&job.turn_file(n, TurnFile::Model)),
+        effort: read(&job.turn_file(n, TurnFile::Effort)),
+        session: crate::engine::stream_session(&job.turn_file(n, TurnFile::Jsonl)),
     }
 }
 
@@ -359,15 +369,15 @@ pub fn derive(job: &Job) -> Record {
 
 /// Each PR or issue it awaits, as its await says.
 pub(crate) fn awaited(job: &Job) -> Vec<Await> {
-    match read(&job.path("await")) {
-        Some(text) if filled(&job.path("await")) => awaits(&text),
+    match read(&job.marker(Marker::Await)) {
+        Some(text) if filled(&job.marker(Marker::Await)) => awaits(&text),
         _ => Vec::new(),
     }
 }
 
 /// How turn N said it ends, a line each.
 pub(crate) fn ends(job: &Job, n: &str) -> Vec<String> {
-    crate::turn::lines(&job.turn(n, "end"))
+    crate::turn::lines(&job.turn_marker(n, TurnMarker::End))
 }
 
 /// What its stage waits on: the policy for a parked job, a slot for a
@@ -377,7 +387,7 @@ pub(crate) fn stage_waits(job: &Job, stage: &Stage, n: &str) -> Vec<Wait> {
     match stage {
         Stage::Parked => vec![Wait::Policy(crate::policy::waits_for(job))],
         Stage::Queued if !job.retry_pending(n) => vec![Wait::Slot],
-        Stage::Running => crate::turn::lines(&job.turn(n, "wait"))
+        Stage::Running => crate::turn::lines(&job.turn_marker(n, TurnMarker::Wait))
             .into_iter()
             .filter_map(|l| {
                 let mut fields = l.split('\t');
@@ -409,26 +419,63 @@ fn next(stage: &Stage, wait: &[Wait], facts: Option<&Facts>) -> String {
     }
 }
 
-/// Turn N's file of kind `f`, or, for a job from before each turn kept its
+/// A turn's file that jobs from before each turn kept its own have
+/// unnumbered ([`Job::adopt`] moves it into place).
+#[derive(Clone, Copy, PartialEq)]
+enum Kept {
+    Slot,
+    Outcome,
+    Result,
+}
+
+impl Kept {
+    const ALL: [Kept; 3] = [Kept::Slot, Kept::Outcome, Kept::Result];
+
+    /// Turn N's own.
+    fn numbered(self, job: &Job, n: &str) -> PathBuf {
+        match self {
+            Kept::Slot => job.turn_marker(n, TurnMarker::Slot),
+            Kept::Outcome => job.turn_marker(n, TurnMarker::Outcome),
+            Kept::Result => job.turn_file(n, TurnFile::Result),
+        }
+    }
+
+    /// The unnumbered one.
+    fn unnumbered(self, job: &Job) -> PathBuf {
+        job.unnumbered(match self {
+            Kept::Slot => "slot",
+            Kept::Outcome => "outcome",
+            Kept::Result => "result",
+        })
+    }
+}
+
+/// Turn N's `kept` file, or, for a job from before each turn kept its
 /// own, the unnumbered one where [`Job::adopt`] would move it into place:
 /// when the job has a turn, the file is no older than that turn's prompt,
 /// and, for an outcome, the unit that may still read it back is gone.
-pub(crate) fn turn_file(job: &Job, n: &str, f: &str) -> PathBuf {
-    let numbered = job.turn(n, f);
+fn kept(job: &Job, n: &str, kept: Kept) -> PathBuf {
+    let numbered = kept.numbered(job, n);
     if numbered.exists() || !crate::job::valid_turn(n) {
         return numbered;
     }
-    let old = job.path(f);
+    let old = kept.unnumbered(job);
     let mtime = |p: &Path| fs::metadata(p).ok()?.modified().ok();
-    match (mtime(&old), mtime(&job.path(&format!("prompt.{n}")))) {
+    match (mtime(&old), mtime(&job.prompt(n))) {
         (Some(t), prompt)
             if prompt.is_none_or(|p| p <= t)
-                && (f != "outcome" || systemd::gone(job.cfg, &job.unit())) =>
+                && (kept != Kept::Outcome || systemd::gone(job.cfg, &job.unit())) =>
         {
             old
         }
         _ => numbered,
     }
+}
+
+/// Turn N's answer: its N.result, or a job's from before each turn kept its
+/// own, where [`Job::adopt`] would move it from.
+pub(crate) fn result_file(job: &Job, n: &str) -> PathBuf {
+    kept(job, n, Kept::Result)
 }
 
 /// Where it stands: parked while the policy keeps it; queued while a
@@ -443,9 +490,9 @@ pub(crate) fn stage(job: &Job) -> Stage {
     if job.retry_pending(&n) {
         return Stage::Queued;
     }
-    let outcome = turn_file(job, &n, "outcome");
+    let outcome = kept(job, &n, Kept::Outcome);
     if systemd::active(job.cfg, &job.unit()) {
-        if turn_file(job, &n, "slot").exists() {
+        if kept(job, &n, Kept::Slot).exists() {
             Stage::Running
         } else {
             Stage::Queued
@@ -485,10 +532,10 @@ pub(crate) fn holds(job: &Job) -> Result<Vec<Wait>, String> {
     if job.turns().is_some_and(|n| job.retry_pending(&n)) {
         held.push(Wait::Retry);
     }
-    let asked = match text(&job.path("turns"))?.filter(|n| crate::job::valid_turn(n)) {
+    let asked = match text(&job.marker(Marker::Turns))?.filter(|n| crate::job::valid_turn(n)) {
         Some(n) => {
-            !there(&job.turn(&n, "stopped"))?
-                && text(&job.turn(&n, "end"))?.as_deref() == Some("ask")
+            !there(&job.turn_marker(&n, TurnMarker::Stopped))?
+                && text(&job.turn_marker(&n, TurnMarker::End))?.as_deref() == Some("ask")
         }
         None => false,
     };
@@ -498,7 +545,7 @@ pub(crate) fn holds(job: &Job) -> Result<Vec<Wait>, String> {
     } else if asked || question {
         held.push(Wait::Ask);
     }
-    for a in awaits(&text(&job.path("await"))?.unwrap_or_default()) {
+    for a in awaits(&text(&job.marker(Marker::Await))?.unwrap_or_default()) {
         if !a.target.trim().is_empty() {
             held.push(Wait::Await(a.target.trim().to_owned()));
         }
@@ -543,41 +590,44 @@ pub(crate) fn ended_at(job: &Job, n: &str, state: &str, pending: impl FnOnce() -
         return 0;
     }
     let first = |files: &[PathBuf]| files.iter().find_map(|p| mtime(p));
-    first(&[turn_file(job, n, "outcome"), job.turn(n, "ended")])
-        .or_else(|| pending().then(now))
-        .or_else(|| first(&[job.turn(n, "jsonl"), job.path(&format!("prompt.{n}"))]))
-        .unwrap_or(0)
+    first(&[
+        kept(job, n, Kept::Outcome),
+        job.turn_marker(n, TurnMarker::Ended),
+    ])
+    .or_else(|| pending().then(now))
+    .or_else(|| first(&[job.turn_file(n, TurnFile::Jsonl), job.prompt(n)]))
+    .unwrap_or(0)
 }
 
 /// What the stall watchdog's look reads of the latest turn; None before
 /// the first.
 fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
     let n = job.turns()?;
-    let prompt = job.path(&format!("prompt.{n}"));
+    let prompt = job.prompt(&n);
     let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
     Some(Facts {
         id: job.id.to_owned(),
         owned: Request::peek(job).is_ok_and(|r| r.owned),
-        unstick: job.path("unstick").exists(),
-        stopped: job.turn(&n, "stopped").exists(),
-        end: opt(job.turn(&n, "end")),
-        link: opt(job.path("link")),
+        unstick: job.marker(Marker::Unstick).exists(),
+        stopped: job.turn_marker(&n, TurnMarker::Stopped).exists(),
+        end: opt(job.turn_marker(&n, TurnMarker::End)),
+        link: opt(job.file(JobFile::Link)),
         queued: mtime(&prompt).unwrap_or(0),
         slot: if job.retry_pending(&n) {
             0
         } else {
-            mtime(&turn_file(job, &n, "slot")).unwrap_or(0)
+            mtime(&kept(job, &n, Kept::Slot)).unwrap_or(0)
         },
         ended: ended_at(job, &n, state, || job.end_pending()),
         // Its deadline as it stands, to the second (none without a
         // timeout): when it took its slot and its timeout, moved on by
         // any time it waited in line. And what it waits in line for now,
         // if anything.
-        deadline: read(&job.turn(&n, "deadline"))
+        deadline: read(&job.turn_marker(&n, TurnMarker::Deadline))
             .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|t| t.parse::<i64>().ok())
             .map_or(0, |t| t / 1_000_000_000),
-        wait: opt(job.turn(&n, "wait")).map(|w| {
+        wait: opt(job.turn_marker(&n, TurnMarker::Wait)).map(|w| {
             let line = w.lines().next().unwrap_or_default();
             let (since, what) = line.split_once('\t').unwrap_or((line, ""));
             (since.to_owned(), what.to_owned())
@@ -587,7 +637,7 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
             .map(|a| (a.target.clone(), a.since.clone()))
             .collect(),
         quota_reset: if state == "queued" {
-            let engine = read(&job.turn(&n, "engine"))
+            let engine = read(&job.turn_file(&n, TurnFile::Engine))
                 .and_then(|s| crate::engine::Engine::parse(&s).ok())
                 .unwrap_or(crate::engine::Engine::Claude);
             let since = mtime(&prompt).unwrap_or(0);
@@ -603,7 +653,7 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
             .iter()
             .find(|a| a.target == USAGE_LIMIT)
             .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?))),
-        spent: (read(&job.turn(&n, "engine")).as_deref() != Some("codex"))
+        spent: (read(&job.turn_file(&n, TurnFile::Engine)).as_deref() != Some("codex"))
             .then(|| usage::kept(job.cfg))
             .flatten(),
         turn: n,

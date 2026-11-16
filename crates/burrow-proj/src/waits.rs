@@ -357,7 +357,7 @@ fn live(cfg: &Config, id: &str, up: Option<&std::collections::HashSet<String>>) 
     let maybe = up.map_or_else(
         || crate::systemd::active(cfg, &unit),
         |up| up.contains(&unit),
-    ) || crate::filled(&job.path("await"))
+    ) || crate::record::awaiting(&job)
         || job.turns().is_some_and(|n| {
             job.retry_pending(&n) || crate::github_quota::reset(&job, &n).is_some()
         });

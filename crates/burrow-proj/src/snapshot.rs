@@ -24,6 +24,7 @@
 //! Its JSON schema is generated from these types and checked in beside the
 //! crate (`state.schema.json`); a test fails when the two differ.
 
+use crate::record::{JobFile, TurnFile};
 use std::fs;
 
 use schemars::JsonSchema;
@@ -497,7 +498,7 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
     let stage = crate::record::stage(job);
     let waits = crate::record::stage_waits(job, &stage, &n);
     let result =
-        crate::state_reads::bytes(&crate::record::turn_file(job, &n, "result")).unwrap_or_default();
+        crate::state_reads::bytes(&crate::record::result_file(job, &n)).unwrap_or_default();
     // A shortened credential may lose its closing delimiter. The bridge's
     // view redacts the complete answer first, while it still has its
     // logical boundaries.
@@ -515,8 +516,8 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
             Wait::Policy(what) => what.clone(),
             _ => None,
         }),
-        vm: lines(&job.path("agent")),
-        apps: lines(&job.path("app")),
+        vm: lines(&job.file(JobFile::Agent)),
+        apps: lines(&job.file(JobFile::App)),
         demoted: demoted(job.cfg, &job.dir),
         waiting_in_line: waits
             .iter()
@@ -578,13 +579,13 @@ pub(crate) fn job_slot(
     Slot {
         holder: Some(Holder {
             job: Some(id.to_owned()),
-            project: read(&job.path("project")).filter(|p| !p.is_empty()),
+            project: read(&job.file(JobFile::Project)).filter(|p| !p.is_empty()),
             issue: facts.link.clone().or(issue),
-            role: read(&job.path("role")).filter(|r| !r.is_empty()),
+            role: read(&job.file(JobFile::Role)).filter(|r| !r.is_empty()),
             class: None,
-            engine: read(&job.turn(n, "engine")).and_then(|e| Engine::parse(&e).ok()),
-            model: read(&job.turn(n, "model")).filter(|m| !m.is_empty()),
-            effort: read(&job.turn(n, "effort")).filter(|e| !e.is_empty()),
+            engine: read(&job.turn_file(n, TurnFile::Engine)).and_then(|e| Engine::parse(&e).ok()),
+            model: read(&job.turn_file(n, TurnFile::Model)).filter(|m| !m.is_empty()),
+            effort: read(&job.turn_file(n, TurnFile::Effort)).filter(|e| !e.is_empty()),
             awaits: facts.awaits.iter().map(|(t, _)| t.clone()).collect(),
         }),
         ..held(kind, name, state, since.filter(|s| *s > 0), at)

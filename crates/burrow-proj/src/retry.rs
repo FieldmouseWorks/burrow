@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod authority;
 pub(crate) use authority::Identity;
 
+use crate::record::{TurnFile, TurnMarker};
 use crate::{config::Config, engine, job::Job, now_nanos, read, swap, systemd, turn};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,7 +35,7 @@ pub(crate) struct Checkpoint {
 
 impl Checkpoint {
     pub fn load(job: &Job, n: &str) -> io::Result<Option<Self>> {
-        match crate::state_reads::bytes(&job.turn(n, "retry-migration")) {
+        match crate::record::checkpoint(job, n) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 if !Self::valid_place(&state.name, job.id) {
@@ -72,7 +73,7 @@ impl Checkpoint {
             said: Some(said.into()),
             first,
             retained: Some(true),
-            deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
+            deadline: crate::record::deadline(job, n),
             name: crate::slot::entry_at(
                 job,
                 job.id,
@@ -86,7 +87,7 @@ impl Checkpoint {
         };
         loop {
             let held = job.lock()?;
-            if job.turns().as_deref() != Some(n) || job.turn(n, "stopped").exists() {
+            if job.turns().as_deref() != Some(n) || crate::record::stopped(job, n) {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "retry was cancelled or superseded",
@@ -95,10 +96,8 @@ impl Checkpoint {
             Identity::capture(job, n).map_err(io::Error::other)?;
             match census(job, n) {
                 Ok(_census) => {
-                    return swap(
-                        &job.turn(n, "retry-migration"),
-                        &serde_json::to_string(&state)?,
-                    );
+                    return crate::record::mark_turn(job, n, TurnMarker::RetryMigration)
+                        .swap(&serde_json::to_string(&state)?);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // Cancellation and emergency promotion remain available.
@@ -113,8 +112,8 @@ impl Checkpoint {
     pub fn resume(&self, job: &Job, n: &str, first: &Path) -> io::Result<PathBuf> {
         let _job = job.lock()?;
         if job.turns().as_deref() != Some(n)
-            || job.turn(n, "stopped").exists()
-            || !job.turn(n, "retry-migration").exists()
+            || crate::record::stopped(job, n)
+            || !crate::record::transferring(job, n)
         {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -127,13 +126,11 @@ impl Checkpoint {
         if !self.initial()
             && let Some(dl) = self.deadline
         {
-            crate::state_reads::write(
-                job.turn(n, "deadline"),
-                format!("{}\n", dl + now_nanos() - self.waited),
-            )?;
+            crate::record::mark_turn(job, n, TurnMarker::Deadline)
+                .write(format!("{}\n", dl + now_nanos() - self.waited))?;
         }
         let prompt = if let Some(said) = &self.said {
-            let prompt = job.turn(n, "spent");
+            let prompt = job.turn_file(n, TurnFile::Spent);
             crate::state_reads::write(
                 &prompt,
                 format!(
@@ -148,13 +145,13 @@ impl Checkpoint {
         };
         // Match an in-process retry: waiting consumed neither its turn
         // budget nor its next run's idle allowance. Keep the stream contents.
-        if job.turn(n, "quiet").exists() {
-            crate::state_reads::remove(job.turn(n, "quiet"))?;
+        if job.turn_file(n, TurnFile::Quiet).exists() {
+            crate::state_reads::remove(job.turn_file(n, TurnFile::Quiet))?;
         }
-        crate::state_reads::append(&job.turn(n, "jsonl"))?
+        crate::state_reads::append(&job.turn_file(n, TurnFile::Jsonl))?
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
-        crate::state_reads::remove(job.turn(n, "retry-migration"))?;
-        let _ = crate::state_reads::remove(job.turn(n, "retry-startup-failed"));
+        crate::record::mark_turn(job, n, TurnMarker::RetryMigration).remove()?;
+        let _ = crate::record::mark_turn(job, n, TurnMarker::RetryStartupFailed).remove();
         Ok(prompt)
     }
 
@@ -167,13 +164,13 @@ fn is_codex(job: &Job, n: &str) -> io::Result<bool> {
     Ok(Identity::load(job, n)
         .map_err(io::Error::other)?
         .map_or_else(
-            || read(&job.turn(n, "engine")).as_deref() == Some("codex"),
+            || read(&job.turn_file(n, TurnFile::Engine)).as_deref() == Some("codex"),
             |identity| identity.choice.engine == engine::Engine::Codex,
         ))
 }
 
 fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
-    if job.path("unstick").exists() || is_codex(job, n)? {
+    if crate::record::unstuck(job) || is_codex(job, n)? {
         return Ok(None);
     }
     let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
@@ -198,7 +195,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
         if crate::policy::denied(&job)
             || crate::policy::parked(&job)
             || !job.retry_pending(&n)
-            || job.path("unstick").exists()
+            || crate::record::unstuck(&job)
             || is_codex(&job, &n)?
         {
             continue;
@@ -258,7 +255,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         Checkpoint::valid_place(&e.file_name().to_string_lossy(), job.id)
             && read(&e.path()).as_deref() == Some(pid.to_string().as_str())
     });
-    let stream = job.turn(n, "jsonl");
+    let stream = job.turn_file(n, TurnFile::Jsonl);
     let said = engine::last_result(&stream, 0)
         .and_then(|last| {
             engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
@@ -268,12 +265,12 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
     // its place. Publication after reset must not turn that retained refusal
     // into fresh work that can bypass the draining cohort.
     let refusal = said.as_ref().and_then(|_| crate::mtime_nanos(&stream));
-    let awaiting = read(&job.path("await"))
+    let awaiting = crate::record::await_text(job)
         .filter(|s| s.starts_with("usage-limit\t"))
-        .and_then(|_| crate::mtime_nanos(&job.path("await")));
+        .and_then(|_| crate::record::await_written(job));
     let waited = [
         place.as_ref().and_then(|e| crate::mtime_nanos(&e.path())),
-        crate::mtime_nanos(&job.turn(n, "withdrawable")),
+        crate::mtime_nanos(&job.turn_file(n, TurnFile::Withdrawable)),
         refusal,
         awaiting,
     ]
@@ -301,7 +298,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         name,
         first,
         retained: Some(fs::metadata(&stream).is_ok_and(|m| m.len() > 0)),
-        deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
+        deadline: crate::record::deadline(job, n),
     })
 }
 
@@ -329,9 +326,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         // and emergency turns must transfer too: an old initial handover can
         // itself be blocked on the fenced census. Their saved engine/flag
         // sends the replacement straight back to its independent pool.
-        if job.turn(&n, "slot").exists()
-            || job.turn(&n, "outcome").exists()
-            || job.turn(&n, "stopped").exists()
+        if crate::record::has_slot(&job, &n)
+            || crate::record::has_outcome(&job, &n)
+            || crate::record::stopped(&job, &n)
         {
             continue;
         }
@@ -358,10 +355,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
                 }
                 Err(e) => return Err(e),
             };
-            swap(
-                &job.turn(&n, "retry-migration"),
-                &serde_json::to_string(&state)?,
-            )?;
+            crate::record::mark_turn(&job, &n, TurnMarker::RetryMigration)
+                .swap(&serde_json::to_string(&state)?)?;
         }
         // Validate the committed checkpoint before authorizing a stop.
         Checkpoint::load(&job, &n)?
@@ -392,7 +387,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let pending = job
                     .turns()
-                    .is_some_and(|n| job.turn(&n, "retry-migration").exists());
+                    .is_some_and(|n| crate::record::transferring(&job, &n));
                 if !pending {
                     continue;
                 }
@@ -406,8 +401,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         };
         // One locked snapshot owns cancellation, turn identity and launch.
         let Some(n) = job.turns() else { continue };
-        if job.turn(&n, "stopped").exists() || job.retry_completed(&n) {
-            match crate::state_reads::remove(job.turn(&n, "retry-migration")) {
+        if crate::record::stopped(&job, &n) || job.retry_completed(&n) {
+            match crate::record::mark_turn(&job, &n, TurnMarker::RetryMigration).remove() {
                 Ok(()) => (),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e),
@@ -446,7 +441,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             busy = true;
             continue;
         }
-        let attempt = job.turn(&n, "retry-attempt");
+        let attempt = job.turn_file(&n, TurnFile::RetryAttempt);
         if read(&attempt)
             .and_then(|s| s.parse::<i64>().ok())
             .is_some_and(|at| now_nanos() - at < 2_000_000_000)
@@ -459,8 +454,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         let prepare = || -> io::Result<()> {
             swap(&attempt, &now_nanos().to_string())?;
             Identity::restore(&job, &n).map_err(io::Error::other)?;
-            if job.turn(&n, "outcome").exists() {
-                crate::state_reads::remove(job.turn(&n, "outcome"))?;
+            if crate::record::has_outcome(&job, &n) {
+                crate::record::mark_turn(&job, &n, TurnMarker::Outcome).remove()?;
             }
             Ok(())
         };

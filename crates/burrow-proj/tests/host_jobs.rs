@@ -1,5 +1,9 @@
 //! A job sees no host configuration or history in its own view. Its normal
 //! CLI must still inspect and resume a different timed-out job on the host.
+// It builds a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn).
+#![allow(deprecated)]
+
 use burrow_proj::{config::Config, job::Job, probe::Bridge};
 use serde_json::json;
 use std::{

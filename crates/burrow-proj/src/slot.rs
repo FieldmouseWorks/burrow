@@ -47,6 +47,7 @@ use crate::config::Config;
 use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
+use crate::record::{JobFile, TurnFile, TurnMarker};
 use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
 
@@ -148,7 +149,7 @@ pub(crate) fn entry_at(job: &Job, id: &str, given: Class, arrived: i64) -> Strin
         return order;
     }
     let prefix = if given == Class::First { 1 } else { 2 };
-    let since = read(&job.path("since"));
+    let since = read(&job.file(JobFile::Since));
     let began = since.as_deref().and_then(|s| s.lines().next());
     match began.filter(|s| !s.is_empty()) {
         Some(s) => format!("{prefix}-{s}000000000-{id}"),
@@ -200,8 +201,8 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
     let _ = fs::remove_file(crate::policy::path(job, "order"));
-    crate::state_reads::write(job.turn(n, "class"), format!("{class}\n"))?;
-    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
+    crate::state_reads::write(job.turn_file(n, TurnFile::Class), format!("{class}\n"))?;
+    crate::record::mark_turn(job, n, TurnMarker::Slot).write(format!("{s}\n"))?;
     crate::policy::accepted(job).map_err(io::Error::other)?;
     snapshot::stream::notify(job.cfg);
     crate::record::noted(job, &format!("turn {n} took a slot"));
@@ -215,7 +216,7 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
 /// at the top of its [`take`].
 fn unmark(job: &Job, n: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    match crate::state_reads::remove(job.turn(n, "withdrawable")) {
+    match crate::state_reads::remove(job.turn_file(n, TurnFile::Withdrawable)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -390,7 +391,7 @@ fn codex_slot(
     fs::create_dir_all(&slots)?;
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
     let job = Job::new(cfg, id);
-    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn_file(n, TurnFile::Withdrawable), "")?;
     // A turn that waited in Claude's line and was handed to this proj brings
     // its place with it, under this pid. It is Codex's now, and a place left in
     // Claude's line would count as a live waiter there (waiter_alive) while it
@@ -472,7 +473,7 @@ pub fn take(
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
     // from the moment this one hands it over ([`unmark`]).
-    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn_file(n, TurnFile::Withdrawable), "")?;
     // maxWait goes by when this turn came, not its name's WHEN, which for a job
     // run --since is when its work began.
     let retry = crate::retry::Checkpoint::load(&job, n)?;
@@ -496,7 +497,7 @@ pub fn take(
         usage::metered(cfg);
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if !paused && job.path("unstick").exists() {
+        if !paused && crate::record::unstuck(&job) {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             if fs::remove_file(queue.join(&me)).is_ok() {
@@ -558,7 +559,7 @@ pub fn take(
             me = to;
         }
         if spent {
-            if !job.path("unstick").exists() && !publish(cfg, &queue, &me, original)? {
+            if !crate::record::unstuck(&job) && !publish(cfg, &queue, &me, original)? {
                 drop(lk);
                 sleep(Duration::from_secs(2));
                 continue;
@@ -655,7 +656,7 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
-                fs::write(job.turn(n, "queue-order"), &me)?;
+                fs::write(job.turn_file(n, TurnFile::QueueOrder), &me)?;
                 took_slot(&job, n, &n_slot.to_string(), class.name())?;
                 return Ok(slot);
             }
@@ -808,10 +809,11 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
                     let id = owner.job.clone();
                     let job = Job::new(cfg, &id);
                     let n = job.turns().unwrap_or_default();
-                    if read(&job.turn(&n, "slot")).as_deref() == Some(key.as_str()) {
+                    if crate::record::slot(&job, &n).as_deref() == Some(key.as_str()) {
                         let mut s = job_slot(cfg, kind, name, &id, None, at);
                         if let Some(h) = s.holder.as_mut() {
-                            h.class = read(&job.turn(&n, "class")).filter(|c| !c.is_empty());
+                            h.class =
+                                read(&job.turn_file(&n, TurnFile::Class)).filter(|c| !c.is_empty());
                         }
                         s
                     } else {

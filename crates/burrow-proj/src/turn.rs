@@ -15,10 +15,9 @@ use crate::engine::{self, Engine, LONG, NEXT, answer, is_error};
 use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
+use crate::record::{JobFile, Marker, TurnFile, TurnMarker, deadline};
 use crate::waits::{rewatch, rewatch_later};
-use crate::{
-    Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
-};
+use crate::{Fail, filled, nanos, now, now_nanos, read, scratch, slot, systemd, usage};
 use watch::Run;
 
 /// What a run killed for memory before it answered is told in the next.
@@ -91,7 +90,7 @@ fn start_with(
     let unit = job.unit();
     if job
         .turns()
-        .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+        .is_some_and(|n| crate::record::transferring(&job, &n))
     {
         return Err(format!(
             "proj: {id}'s retained retry is being transferred; try again"
@@ -136,11 +135,11 @@ fn start_with(
     let n = last + 1;
     // The last turn's waits are the new turn's to clear (exec), so a turn
     // that can't start, or a start killed partway, leaves the job as it was.
-    let prompt = job.path(&format!("prompt.{n}"));
+    let prompt = job.prompt(&n.to_string());
     let couldnt = || format!("proj: turn {n} of {id} couldn't start");
     let undo = || {
         if n == 1 {
-            let _ = crate::state_reads::remove(job.path("turns"));
+            let _ = crate::record::mark(&job, Marker::Turns).remove();
         } else {
             let _ = job.set_turns(n - 1);
         }
@@ -179,7 +178,7 @@ fn start_with(
     // ExecStopPost with it. The name is doubled up on its backslashes, which
     // systemd-run reads as escapes.
     let _ = fs::write(
-        job.turn(&n.to_string(), "priority"),
+        job.turn_file(&n.to_string(), TurnFile::Priority),
         if first { "first" } else { "normal" },
     );
     // What it parks waiting for: None, not parked; Some(None), behind an
@@ -205,7 +204,7 @@ fn start_with(
     }
     // Accepted resumption owns the previous intent, including an error
     // recovery. A failed launch above leaves it durable for another attempt.
-    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+    let _ = crate::state_reads::remove(job.file(JobFile::GithubPending));
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -256,18 +255,17 @@ pub(crate) fn initialize_deadline(
     total: i64,
 ) -> std::io::Result<()> {
     if retry.is_none_or(|s| s.initial()) {
-        for f in ["deadline", "wait", "late"] {
-            crate::state_reads::remove(job.turn(n, f)).or_else(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
-        }
+        let gone = |removed: std::io::Result<()>| match removed {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        gone(crate::record::mark_turn(job, n, TurnMarker::Deadline).remove())?;
+        gone(crate::record::mark_turn(job, n, TurnMarker::Wait).remove())?;
+        gone(crate::state_reads::remove(job.turn_file(n, TurnFile::Late)))?;
         if total > 0 {
-            let taken = mtime_nanos(&job.turn(n, "slot")).unwrap_or_else(now_nanos);
-            crate::state_reads::write(job.turn(n, "deadline"), format!("{}\n", taken + total))?;
+            let taken = crate::record::slot_taken(job, n).unwrap_or_else(now_nanos);
+            crate::record::mark_turn(job, n, TurnMarker::Deadline)
+                .write(format!("{}\n", taken + total))?;
         }
     }
     Ok(())
@@ -289,26 +287,27 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let outcome = |text: &str| {
         // Distinguish a failed checkpoint-aware startup from a completed old
         // turn whose leftover checkpoint must never replay its conversation.
-        if job.turn(&n, "retry-migration").exists()
-            && crate::state_reads::write(job.turn(&n, "retry-startup-failed"), "").is_err()
+        if crate::record::transferring(&job, &n)
+            && crate::record::mark_turn(&job, &n, TurnMarker::RetryStartupFailed)
+                .write("")
+                .is_err()
         {
             return;
         }
-        let _ = crate::state_reads::write(job.turn(&n, "outcome"), format!("{text}\n"));
+        let _ = crate::record::mark_turn(&job, &n, TurnMarker::Outcome).write(format!("{text}\n"));
     };
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    if !job.turn(&n, "retry-migration").exists() {
+    if !crate::record::transferring(&job, &n) {
         crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
-        for f in ["await", "await.next"] {
-            let _ = crate::state_reads::remove(job.path(f));
-        }
+        let _ = crate::record::mark(&job, Marker::Await).remove();
+        let _ = crate::state_reads::remove(job.file(JobFile::AwaitNext));
     }
-    if read(&job.path(crate::github_quota::PENDING)).is_some_and(|text| {
+    if read(&job.file(JobFile::GithubPending)).is_some_and(|text| {
         serde_json::from_str::<crate::github_quota::Pending>(&text).map_or(true, |p| p.turn != n)
     }) {
-        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+        let _ = crate::state_reads::remove(job.file(JobFile::GithubPending));
     }
     let retry =
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
@@ -385,8 +384,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
-    kick(cfg, lines(&job.path("kick")));
-    let limit = read(&job.path("timeout")).unwrap_or_else(|| cfg.timeout.clone());
+    kick(cfg, lines(&job.file(JobFile::Kick)));
+    let limit = read(&job.file(JobFile::Timeout)).unwrap_or_else(|| cfg.timeout.clone());
     // One budget for the whole turn from the moment it took its slot,
     // however many runs it takes and the clearing up between them, to the
     // nanosecond; 0 is none. Its deadline is kept in N.deadline, which the
@@ -399,7 +398,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     initialize_deadline(&job, &n, retry.as_ref(), total)
         .map_err(|e| Fail::new(1, e.to_string()))?;
     // Where its commands say they're waiting in line (waits::waiting).
-    let waitdir = job.turn(&n, "waits");
+    let waitdir = job.turn_file(&n, TurnFile::Waits);
     if retry.is_none() {
         let _ = fs::remove_dir_all(&waitdir);
     }
@@ -408,7 +407,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // Whether its turns must say what comes next: an --owned job's starter
     // acts on each end itself.
     let must = !request.owned;
-    let stream = job.turn(&n, "jsonl");
+    let stream = job.turn_file(&n, TurnFile::Jsonl);
     if retry.is_none() {
         crate::state_reads::write(&stream, "").map_err(|e| Fail::new(1, e.to_string()))?;
     } else {
@@ -419,7 +418,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
         Fail::new(
             1,
-            format!("proj: {}: {e}", job.turn(&n, "handoff").display()),
+            format!(
+                "proj: {}: {e}",
+                job.turn_file(&n, TurnFile::Handoff).display()
+            ),
         )
     })?;
     let mut prompt = first.clone();
@@ -430,7 +432,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         crate::snapshot::stream::notify(cfg);
     }
     rewatch(cfg, &[id]);
-    let quiet = read(&job.path("idle"))
+    let quiet = read(&job.file(JobFile::Idle))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
         .unwrap_or(0);
@@ -443,7 +445,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         if let Some(dl) = deadline(&job, &n)
             && dl <= now_nanos()
         {
-            touch(&job.turn(&n, "late"));
+            touch(&job.turn_file(&n, TurnFile::Late));
             break (None, 124);
         }
         let ooms = oom_kills();
@@ -490,22 +492,22 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             exit(
                 rc,
                 cut,
-                job.turn(&n, "quiet").exists(),
-                job.turn(&n, "late").exists(),
+                job.turn_file(&n, TurnFile::Quiet).exists(),
+                job.turn_file(&n, TurnFile::Late).exists(),
                 oomed,
             ),
-            &read(&job.turn(&n, "stderr")).unwrap_or_default(),
+            &read(&job.turn_file(&n, TurnFile::Stderr)).unwrap_or_default(),
         );
         let declaration_error = agent
             .as_deref()
             .and_then(|a| crate::guest::collect(cfg, &job, &n, a).err());
         // The turn's next run, in the same conversation and slot, is told
         // `text`, kept in its N.KIND.
-        let again = |text: &str, kind: &str| -> PathBuf {
-            let told = job.turn(&n, kind);
+        let again = |text: &str, kind: TurnFile| -> PathBuf {
+            let told = job.turn_file(&n, kind);
             let _ = crate::state_reads::write(&told, format!("{text}\n"));
             // The next run's quiet counts from its start, and is its own.
-            let _ = crate::state_reads::remove(job.turn(&n, "quiet"));
+            let _ = crate::state_reads::remove(job.turn_file(&n, TurnFile::Quiet));
             touch(&stream);
             // The last run's look telling the watchdog its wait was over may
             // not have got through before the rest of it went: told again.
@@ -530,15 +532,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if choice.engine == Engine::Codex {
             if let Some((Some(due), _)) = &refusal {
-                if let Err(e) = crate::state_reads::write(
-                    job.path("await"),
-                    format!("{USAGE_LIMIT}\t{}\t{due}\n", now()),
-                ) {
+                if let Err(e) = crate::record::mark(&job, Marker::Await)
+                    .write(format!("{USAGE_LIMIT}\t{}\t{due}\n", now()))
+                {
                     outcome(&format!("couldn't keep Codex's usage wait: {e}"));
                     return Err(Fail::quiet(1));
                 }
                 let _ = crate::state_reads::write(
-                    job.turn(&n, "result"),
+                    job.turn_file(&n, TurnFile::Result),
                     format!("{}\n", answer(&stream)),
                 );
                 outcome("usage limit; waiting for Codex's reset");
@@ -548,7 +549,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 is_error(l) && burrow_codex::logged_out(l["result"].as_str().unwrap_or_default())
             }) {
                 let _ = crate::state_reads::write(
-                    job.turn(&n, "result"),
+                    job.turn_file(&n, TurnFile::Result),
                     "codex is logged out; run autoland-codex-login job\n",
                 );
                 outcome("codex is logged out; run autoland-codex-login job on the machine");
@@ -579,7 +580,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     // took_slot).
                     {
                         let _lock = job.lock();
-                        let _ = crate::state_reads::remove(job.turn(&n, "slot"));
+                        let _ = crate::record::mark_turn(&job, &n, TurnMarker::Slot).remove();
                     }
                     drop(held.take());
                     rewatch(cfg, &[id]);
@@ -588,7 +589,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         .map_err(|e| Fail::new(1, e.to_string()))?;
                     crate::snapshot::stream::notify(cfg);
                     let _ = held.insert(take(true)?);
-                    kick(cfg, lines(&job.path("kick")));
+                    kick(cfg, lines(&job.file(JobFile::Kick)));
                     let state = crate::retry::Checkpoint::load(&job, &n)
                         .map_err(|e| Fail::new(1, e.to_string()))?
                         .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
@@ -613,14 +614,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // sandbox's, whose work in the VM may outlive its unit's.
         if last.is_none()
             && killed < 2
-            && !job.turn(&n, "quiet").exists()
+            && !job.turn_file(&n, TurnFile::Quiet).exists()
             && agent.is_none()
             && oomed
             && engine::stream_names_session(&stream, from)
             && reap()
         {
             killed += 1;
-            prompt = again(KILLED, "killed");
+            prompt = again(KILLED, TurnFile::Killed);
             continue;
         }
         // Still up after its answer, it was waiting on something it left in
@@ -634,13 +635,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         let mut told = String::new();
         if let Some(error) = declaration_error {
             crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
-            let _ = crate::state_reads::remove(job.path("await.next"));
+            let _ = crate::state_reads::remove(job.file(JobFile::AwaitNext));
             told.push_str(&format!("The host couldn't register your sandbox next step: {error}. Check what you await and declare the next step again. "));
         }
         if cut {
             told.push_str("Your answer ended the turn while something you left running in the background was still going, and it was stopped with it: nothing more from it reaches you, and the turn isn't over. If you were waiting on it, run it again and wait for it now.");
         }
-        if must && !filled(&job.path("end.next")) {
+        if must && !filled(&job.file(JobFile::EndNext)) {
             if !told.is_empty() {
                 told.push(' ');
             }
@@ -651,12 +652,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             ));
         }
         if !told.is_empty()
-            && !job.turn(&n, "cut").exists()
+            && !job.turn_file(&n, TurnFile::Cut).exists()
             && last.as_ref().is_some_and(|l| !is_error(l))
             && reap()
             && agent.as_deref().is_none_or(|a| stopped("agent", a))
         {
-            prompt = again(&format!("{told} Then answer again."), "cut");
+            prompt = again(&format!("{told} Then answer again."), TurnFile::Cut);
             continue;
         }
         if let Some(a) = agent.as_deref()
@@ -670,18 +671,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The turn ends as its last run did; its answer is every run's.
     let text = answer(&stream);
     if !text.is_empty() {
-        let _ = crate::state_reads::write(job.turn(&n, "result"), format!("{text}\n"));
+        let _ = crate::state_reads::write(job.turn_file(&n, TurnFile::Result), format!("{text}\n"));
     }
     if let Some(last) = last {
         rc = 0;
         // How it said it ends (before its outcome, which the watchdog's look
         // reads it with), or that it wouldn't when it must.
-        let mut end = read(&job.path("end.next")).unwrap_or_default();
+        let mut end = read(&job.file(JobFile::EndNext)).unwrap_or_default();
         if end.is_empty() && must {
             end = "undeclared".into();
         }
         if !is_error(&last) && !end.is_empty() {
-            let _ = crate::state_reads::write(job.turn(&n, "end"), format!("{end}\n"));
+            let _ = crate::record::mark_turn(&job, &n, TurnMarker::End).write(format!("{end}\n"));
         }
         let done = !is_error(&last);
         if done {
@@ -690,10 +691,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome(if done { "done" } else { "error" });
         // What it awaits, from the baseline `proj await` took; one line per
         // target, the first await of it in the turn.
-        if done && end == "await" && filled(&job.path("await.next")) {
+        if done && end == "await" && filled(&job.file(JobFile::AwaitNext)) {
             let mut seen = Vec::new();
             let mut kept = String::new();
-            for line in read(&job.path("await.next")).unwrap_or_default().lines() {
+            for line in read(&job.file(JobFile::AwaitNext))
+                .unwrap_or_default()
+                .lines()
+            {
                 let target = line.split('\t').next().unwrap_or_default();
                 if !seen.contains(&target) {
                     seen.push(target);
@@ -702,15 +706,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 }
             }
             // Swapped in whole, so _watch never reads half of it.
-            let _ = crate::state_reads::write(job.path("await"), &kept);
+            let _ = crate::record::mark(&job, Marker::Await).write(&kept);
         }
-        for f in ["await.next", "end.next"] {
-            let _ = crate::state_reads::remove(job.path(f));
+        for f in [JobFile::AwaitNext, JobFile::EndNext] {
+            let _ = crate::state_reads::remove(job.file(f));
         }
-    } else if job.turn(&n, "quiet").exists() {
-        let idle = read(&job.path("idle")).unwrap_or_default();
+    } else if job.turn_file(&n, TurnFile::Quiet).exists() {
+        let idle = read(&job.file(JobFile::Idle)).unwrap_or_default();
         outcome(&format!("went quiet for {idle}"));
-    } else if job.turn(&n, "late").exists() {
+    } else if job.turn_file(&n, TurnFile::Late).exists() {
         outcome(&format!("timed out after {limit}"));
         rc = 124;
     } else {
@@ -749,11 +753,6 @@ pub fn lines(path: &Path) -> Vec<String> {
     read(path)
         .map(|t| t.lines().map(str::to_owned).collect())
         .unwrap_or_default()
-}
-
-/// A turn's deadline as it stands, in nanoseconds; None for none.
-fn deadline(job: &Job, n: &str) -> Option<i64> {
-    read(&job.turn(n, "deadline")).and_then(|d| d.parse().ok())
 }
 
 /// The file's mtime moved on to now, made if it isn't there.
