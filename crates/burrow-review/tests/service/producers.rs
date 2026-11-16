@@ -50,6 +50,30 @@ fn back(rig: &Rig, name: &str) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
+/// Model an asker: read the completed answer before releasing its snapshot.
+/// The worker now owns that answer until release, rather than exiting while
+/// a polling asker can still remove the snapshot behind its final sweep.
+fn answered<T>(rig: &Rig, inspect: impl FnOnce() -> T) -> T {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let worker = thread::spawn({
+        let s = rig.service();
+        move || burrow_review::work(s)
+    });
+    let end = Instant::now() + Duration::from_secs(20);
+    while !rig.names("producer-queue").is_empty() || !rig.names("judge-queue").is_empty() {
+        assert!(Instant::now() < end, "look never finished");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let got = inspect();
+    fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
+    worker.join().unwrap();
+    assert!(rig.names("producer-done").is_empty());
+    got
+}
+
 #[test]
 fn judges_run_fresh_with_their_schema_and_execution() {
     let rig = rig();
@@ -59,33 +83,35 @@ fn judges_run_fresh_with_their_schema_and_execution() {
         true,
         json!({"fresh":{"model":"test-model","effort":"high"}}),
     );
-    rig.work();
-    let answer = back(&rig, &name);
-    assert_eq!(answer["result"], "judgment");
-    assert_eq!(answer["digest"], burrow_review::answer::digest(&bytes));
-    assert_eq!(answer["ran"]["engine"], "codex");
-    assert_eq!(answer["ran"]["model"], "test-model");
-    assert_eq!(answer["ran"]["effort"], "high");
-    let run = &rig.runs()[0];
-    assert_eq!(answer["ran"]["session"], run["session"]);
-    assert_eq!(run["schema"], burrow_review::judgment::schema());
-    let args = run["args"].as_array().unwrap();
-    assert!(args.contains(&json!("model=\"test-model\"")));
-    assert!(args.contains(&json!("model_reasoning_effort=high")));
-    assert!(args.contains(&json!("default_permissions=\"review\"")));
-    assert_eq!(run["resumed"], false);
-    assert!(rig.names("producer-sessions").is_empty());
-    assert!(rig.names("sessions").is_empty());
-    assert!(rig.names("done").is_empty());
-    let first = answer["ran"]["session"].clone();
+    let first = answered(&rig, || {
+        let answer = back(&rig, &name);
+        assert_eq!(answer["result"], "judgment");
+        assert_eq!(answer["digest"], burrow_review::answer::digest(&bytes));
+        assert_eq!(answer["ran"]["engine"], "codex");
+        assert_eq!(answer["ran"]["model"], "test-model");
+        assert_eq!(answer["ran"]["effort"], "high");
+        let run = &rig.runs()[0];
+        assert_eq!(answer["ran"]["session"], run["session"]);
+        assert_eq!(run["schema"], burrow_review::judgment::schema());
+        let args = run["args"].as_array().unwrap();
+        assert!(args.contains(&json!("model=\"test-model\"")));
+        assert!(args.contains(&json!("model_reasoning_effort=high")));
+        assert!(args.contains(&json!("default_permissions=\"review\"")));
+        assert_eq!(run["resumed"], false);
+        assert!(rig.names("producer-sessions").is_empty());
+        assert!(rig.names("sessions").is_empty());
+        assert!(rig.names("done").is_empty());
+        answer["ran"]["session"].clone()
+    });
     queue(
         &rig,
         true,
         json!({"fresh":{"model":"test-model","effort":"high"}}),
     );
-    rig.work();
-    assert_ne!(back(&rig, &name)["ran"]["session"], first);
-    assert_eq!(rig.runs()[1]["resumed"], false);
+    answered(&rig, || {
+        assert_ne!(back(&rig, &name)["ran"]["session"], first);
+        assert_eq!(rig.runs()[1]["resumed"], false);
+    });
 }
 
 #[test]
@@ -96,14 +122,12 @@ fn a_fresh_queue_cannot_select_judgment_with_a_field() {
         false,
         json!({"kind":"judge", "fresh":{"model":null,"effort":null}}),
     );
-    rig.work();
-    let answer = back(&rig, &name);
-    assert_eq!(answer["result"], "review");
-    assert_eq!(answer["digest"], burrow_review::answer::digest(&bytes));
-    assert_eq!(rig.runs()[0]["schema"], burrow_review::codex::schema());
-    fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
-    rig.work();
-    assert!(rig.names("producer-done").is_empty());
+    answered(&rig, || {
+        let answer = back(&rig, &name);
+        assert_eq!(answer["result"], "review");
+        assert_eq!(answer["digest"], burrow_review::answer::digest(&bytes));
+        assert_eq!(rig.runs()[0]["schema"], burrow_review::codex::schema());
+    });
 }
 
 #[test]
@@ -147,8 +171,7 @@ fn judges_require_execution_options_and_valid_verdicts_and_reasons() {
         let rig = rig();
         rig.agent(json!({"answer":said}));
         let (name, _) = queue(&rig, true, json!({"fresh":fresh}));
-        rig.work();
-        assert_eq!(back(&rig, &name)["result"], "error");
+        answered(&rig, || assert_eq!(back(&rig, &name)["result"], "error"));
     }
 }
 
@@ -274,5 +297,49 @@ fn answers_published_after_snapshot_removal_are_collected_before_exit() {
             .join(name)
             .exists()
         );
+    }
+}
+
+#[test]
+fn retained_answers_keep_the_last_worker_until_the_asker_releases_them() {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    for judge in [false, true] {
+        let rig = rig();
+        let (name, _) = queue(
+            &rig,
+            judge,
+            json!({"fresh":{"model":"test-model","effort":"high"}}),
+        );
+        let worker = thread::spawn({
+            let s = rig.service();
+            move || burrow_review::work(s)
+        });
+        let end = Instant::now() + Duration::from_secs(20);
+        let path = rig.path("producer-done").join(name);
+        while !path.exists() {
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Keep the answer beyond an idle polling interval. With the old final
+        // sweep the worker terminates here and no unrelated request will wake it.
+        thread::sleep(Duration::from_secs(6));
+        assert!(
+            !worker.is_finished(),
+            "left a release dependent on a lost path event"
+        );
+        assert!(
+            path.exists(),
+            "discarded an answer whose snapshot is retained"
+        );
+        fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
+        while !worker.is_finished() {
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(20));
+        }
+        worker.join().unwrap();
+        assert!(!path.exists());
     }
 }

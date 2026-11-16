@@ -74,6 +74,7 @@ with subtest("drained workers receive fresh execution contexts on deploy and rol
     result = json.loads(machine.succeed(f"cat {answer}"))
     assert "execution options" in result["error"], result
     assert len(result["digest"]) == 64, result
+    machine.succeed("rm -r /var/lib/burrow-review-looks/snapshots/context-active")
 
     # A real parked worker, then starts from a not-yet-reloaded unit, in
     # both directions. The queued request and snapshot survive each drain.
@@ -95,5 +96,7 @@ with subtest("drained workers receive fresh execution contexts on deploy and rol
         machine.succeed("systemctl daemon-reload")
         machine.wait_until_succeeds(f"test -e {answer}")
         machine.succeed(f"test ! -e {path}; rm {parked_path}")
+        if target == "protected":
+            machine.succeed("rm -r /var/lib/burrow-review-looks/snapshots/context-protected")
 
     machine.succeed("systemctl stop autoland-review.service; rm /run/systemd/system/autoland-review.service.d/context.conf; systemctl daemon-reload")

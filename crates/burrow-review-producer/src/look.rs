@@ -120,6 +120,26 @@ pub struct Queue {
     /// How often the answer is looked for.
     pub every: Duration,
     pub reviewer_uid: u32,
+    /// Unit fixtures can establish a private directory boundary even when
+    /// their build ancestors are writable. No production configuration or
+    /// executable can select this boundary.
+    #[cfg(test)]
+    pub(crate) answer_root: Option<fs::File>,
+}
+
+impl Queue {
+    fn read_answer(&self, path: &Path, request: &[u8]) -> std::io::Result<Value> {
+        #[cfg(test)]
+        if let Some(root) = &self.answer_root {
+            return burrow_review::answer::read_from(
+                root.try_clone()?,
+                Path::new(path.file_name().expect("answer name")),
+                self.reviewer_uid,
+                request,
+            );
+        }
+        burrow_review::answer::read(path, self.reviewer_uid, request)
+    }
 }
 
 impl Looker for Queue {
@@ -137,7 +157,7 @@ impl Looker for Queue {
 
                 return Err("its request was abandoned: the look is stopped".into());
             }
-            match burrow_review::answer::read(&back, self.reviewer_uid, &request) {
+            match self.read_answer(&back, &request) {
                 Ok(answer) => break answer,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -221,3 +241,7 @@ pub fn findings(answer: &Value) -> Result<Vec<Finding>, String> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "look_tests.rs"]
+mod tests;

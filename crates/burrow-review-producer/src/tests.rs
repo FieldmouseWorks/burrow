@@ -190,7 +190,7 @@ fn rig() -> Rig {
 
 /// A rig whose producer runs its looks on `looker`, if it gives one.
 fn rig_with(looker: impl FnOnce(&Config) -> Option<Box<dyn Looker>>) -> Rig {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let world = World(Arc::new(Mutex::new(Pr {
         head: HEAD.into(),
@@ -309,7 +309,7 @@ fn finding() -> Finding {
 
 #[test]
 fn the_plugin_offers_what_codex_offers_and_answers_its_fixture() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let Answer::Describe { kinds, models, .. } = describe(&cfg).unwrap() else {
         panic!("not a describe");
@@ -450,6 +450,7 @@ fn an_abandoned_look_is_stopped_and_keeps_nothing() {
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
             reviewer_uid: rustix_uid(),
+            answer_root: Some(std::fs::File::open(&cfg.done).unwrap()),
         }))
     });
     let me = Controller(rustix_uid());
@@ -465,7 +466,12 @@ fn an_abandoned_look_is_stopped_and_keeps_nothing() {
         .unwrap();
     // The look is queued for the reviewers' service, which never answers.
     let queued = || std::fs::read_dir(&r.cfg.queue).unwrap().count();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
     while queued() == 0 {
+        assert!(
+            std::time::Instant::now() < until,
+            "look never stayed queued"
+        );
         thread::sleep(Duration::from_millis(10));
     }
     drop(stream);
@@ -487,6 +493,7 @@ fn the_queue_reads_what_the_service_left() {
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
             reviewer_uid: rustix_uid(),
+            answer_root: Some(std::fs::File::open(&cfg.done).unwrap()),
         }))
     });
     // The service: it answers the one look queued, as work.rs does.

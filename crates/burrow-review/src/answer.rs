@@ -58,10 +58,11 @@ pub fn read(path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
     read_from(File::open("/")?, path, uid, request)
 }
 
-// The same descriptor walk from an explicitly supplied trust boundary.
-// Production always starts at `/`; tests need a private boundary because
-// build sandboxes deliberately put their sources under writable ancestors.
-fn read_from(mut dir: File, path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
+/// Read beneath an already established trust boundary. The caller must
+/// supply a trusted directory descriptor; every component beneath it still
+/// gets ownership, mode and symlink checks, and the answer's digest is held
+/// to the exact request. The absolute-path entry point always starts at `/`.
+pub fn read_from(mut dir: File, path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
     check(&dir, uid, false)?;
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
@@ -132,9 +133,13 @@ mod tests {
     fn public_reader_refuses_writable_ancestors() {
         let (dir, path, uid) = fixture();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
-        // Exercise the production entry point even under a private TMPDIR.
+        // The absolute reader may reject an earlier ancestor first (for
+        // example a build directory owned by another user). It must refuse
+        // the path in either case. Isolate the intended mode failure with
+        // the private descriptor boundary, so its exact cause is still held.
+        assert!(read(&path, uid, b"request").is_err());
         assert!(
-            read(&path, uid, b"request")
+            read_fixture(&path, uid, b"request")
                 .unwrap_err()
                 .to_string()
                 .contains("writable")

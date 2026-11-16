@@ -128,6 +128,7 @@ pkgs.testers.runNixOSTest {
         unit = machine.succeed("systemctl cat autoland-review.path")
         assert "DirectoryNotEmpty=${review}/queue" in unit, unit
         assert "DirectoryNotEmpty=${review}/judge-queue" in unit, unit
+        assert "PathExistsGlob=${review}/done/*.json" in unit, unit
 
     with subtest("a steward queue field cannot request a protected judgment"):
         import json
@@ -142,6 +143,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test ! -e ${review}/done/codex--judge-forged.json")
 
     ${builtins.readFile ./review-context.py}
+    ${builtins.readFile ./review-release.py}
 
     with subtest("the sign pass alone has the key, as a user the producer isn't, and books its next pass"):
         machine.succeed("install -d -m 0700 /run/keys && head -c 32 /dev/urandom >/run/keys/review && chmod 0400 /run/keys/review")

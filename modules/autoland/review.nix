@@ -208,7 +208,10 @@ in
       pathConfig = {
         DirectoryNotEmpty = [ "${reviewDir}/queue" "${producerReviewDir}/queue" "${producerReviewDir}/judge-queue" ];
         PathChanged = freshDir;
-        PathExistsGlob = "${reviewDir}/sessions/.gone-*";
+        # Answers survive a crash or a release while path watches are
+        # suspended. Keep cleanup pending until every answer is reclaimed;
+        # the worker waits while any answer still has a retained snapshot.
+        PathExistsGlob = [ "${reviewDir}/sessions/.gone-*" "${producerReviewDir}/done/*.json" ];
       };
     };
   };

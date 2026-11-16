@@ -427,20 +427,23 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// Askers release an answer by removing its snapshot. Run while parked or
 /// busy, and after the last worker publishes (even if its snapshot already
 /// disappeared), so no invocation or path activation is needed to collect it.
-fn reclaim(s: &Service) {
-    // Askers cannot delete answers. Removing their snapshot releases an
-    // answer; the path unit wakes us for that change as well as requests.
+fn reclaim(s: &Service) -> bool {
+    let mut retained = false;
     if let Some(p) = &s.cfg.producers {
         for entry in fs::read_dir(&p.done).into_iter().flatten().flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some((_, snap)) = name.strip_suffix(".json").and_then(|n| n.split_once("--"))
-                && !p.snapshots.join(snap).exists()
-            {
-                let _ = queue::remove(&entry.path());
+            if let Some((_, snap)) = name.strip_suffix(".json").and_then(|n| n.split_once("--")) {
+                // A retained answer is work still in hand, even with empty
+                // queues. PathChanged can miss a release during shutdown.
+                // Exit normally only once every protected answer is gone.
+                if p.snapshots.join(snap).exists() || queue::remove(&entry.path()).is_err() {
+                    retained = true;
+                }
             }
         }
     }
+    retained
 }
 
 /// Every queued look, `parallel` at a time for each reviewer, until the
@@ -552,7 +555,7 @@ pub fn work(s: Arc<Service>) -> Ended {
                 forget(&s);
                 return Ended::Moved;
             }
-            if parked {
+            if parked || reclaim(&s) {
                 thread::sleep(AGAIN_EVERY);
                 continue;
             }
@@ -563,7 +566,6 @@ pub fn work(s: Arc<Service>) -> Ended {
             busy.remove(&name);
         }
     }
-    reclaim(&s);
     forget(&s);
     Ended::Done
 }
