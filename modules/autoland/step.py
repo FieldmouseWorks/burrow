@@ -61,16 +61,23 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
 
 
 class Pass(Context, Jobs, Actions):
+    def day_from(self):
+        """When its day with the pipeline began: when it was opened, or the
+        first pass that saw it back from being set aside (aside.py: a hold,
+        a draft, a stack), since the days it spent there were someone
+        else's to end, not the pipeline's."""
+        return max(ts(self.pr["createdAt"]), self.st.get("back", 0))
+
     def open_a_day(self, what, swept=False):
-        """Anything not merged a day after it was opened, reviewed clean or
-        not (a check that never reports keeps it pending), is listed, unless
-        it's listed already, watchdog or not. A Renovate update's own stuck
-        ones are renovate-sweep's (swept)."""
+        """Anything not merged a day after its day began (day_from), reviewed
+        clean or not (a check that never reports keeps it pending), is
+        listed, unless it's listed already, watchdog or not. A Renovate
+        update's own stuck ones are renovate-sweep's (swept)."""
         if C.paused(self.repo):
             return
         if (release := self.usage_grace()) and C.NOW < release + C.repo_cfg(self.repo)["stallAfter"] * MIN:
             return
-        if not swept and C.NOW - ts(self.pr["createdAt"]) > 86400 and not any(x[1] == self.line for x in self.digest):
+        if not swept and C.NOW - self.day_from() > 86400 and not any(x[1] == self.line for x in self.digest):
             self.digest.append(("Open over a day", self.line, what))
 
     def owner_decides(self):
@@ -102,7 +109,7 @@ class Pass(Context, Jobs, Actions):
         else:
             self.strike("stop")
         # Open a day, it's listed for the owner (below): a pass then says so.
-        self.after(ts(self.pr["createdAt"]), 24 * 60)  # ends: listed for the owner
+        self.after(self.day_from(), 24 * 60)  # ends: listed for the owner
 
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
 
@@ -112,9 +119,12 @@ class Pass(Context, Jobs, Actions):
             save(self.key, self.st)
             return
         if set_aside := aside(self.tag, self.pr, self.labels, self.held, self.below):
+            self.st["aside"] = True
             self.settle("pending", *set_aside[:2], stage=set_aside[2], wait=set_aside[3])
             save(self.key, self.st)
             return
+        if self.st.pop("aside", None):
+            self.st["back"] = C.NOW
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
         self.ci, self.ci_names, docs = self.ci_checks()

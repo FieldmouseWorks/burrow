@@ -232,6 +232,20 @@ assert "sam/r#5" not in run(86400 + 100)
 assert any(x[1].startswith("[sam/r#5](") for x in published[0]), published
 print("waits listed: ok")
 
+# Days on hold were the owner's: off it, its day starts then, and it's
+# listed a day on from that, not as soon as the hold comes off.
+fresh_pr_state()
+OPEN["sam/r"] = [pr("sam/r", 5, labels=["hold"])]
+assert run(100)["sam/r#5"]["phase"].startswith("On hold")
+run(3 * 86400)
+OPEN["sam/r"] = [pr("sam/r", 5)]
+assert "sam/r#5" in run(3 * 86400 + 100)
+assert not any(x[1].startswith("[sam/r#5](") for x in published[0]), published
+assert "sam/r#5" in run(4 * 86400)
+assert "sam/r#5" not in run(4 * 86400 + 200)
+assert any(x[1].startswith("[sam/r#5](") for x in published[0]), published
+print("waits listed a day after a hold: ok")
+
 # What the watchdog escalated goes on the stuck issue with the rest, each
 # entry once; a broken file is none.
 entry = ["Stalled past its deadline, and a Claude job couldn't move it", "[sam/r#5](https://github.com/sam/r/pull/5)",
