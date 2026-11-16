@@ -16,6 +16,11 @@
 //! until its deadline or `usage back`; running turns and fresh meters cannot
 //! release it early.
 //!
+//! A run refused because Claude Code's login expired holds the machine the
+//! same way, for the same reason: every other run is refused too, until
+//! someone logs in again. It has no reset, so it's a try at a time (UNSAID),
+//! and its words tell the owner to log in (login.rs).
+//!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
 //! outlives the hold: until the owner's notice is surely closed, and for a
@@ -542,11 +547,18 @@ fn put(
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
     let spent = match &was {
         // Every running turn is refused at once: the first tells the owner,
-        // the rest move the reset on, and when it was last refused.
+        // the rest move the reset on, and when it was last refused. Its
+        // words are those of the refusal its reset is from: a login gone
+        // after a limit lapsed, or the other way round, is told as itself.
         Some(w) => Spent {
             until: w.until.max(until),
             last: Some(w.refused().max(last)),
             told: if lapsed { now() } else { w.told },
+            said: if lapsed || until > w.until {
+                crate::engine::claude::normalize_refusal(said)
+            } else {
+                w.said.clone()
+            },
             ..w.clone()
         },
         None => Spent {
@@ -657,8 +669,8 @@ pub fn back(cfg: &Config, started: Option<i64>) {
             // The compatible record is the commit point. A failed journal
             // acknowledgement leaves it intact for settlement to retry.
             let _ = admission_release(cfg, &s);
-            eprintln!("proj: Claude has usage again (out since {})", when(s.at));
-            tell(cfg, &["close", NOTICE, CLOSED]);
+            eprintln!("proj: {} (out since {})", closed(&s), when(s.at));
+            tell(cfg, &["close", NOTICE, closed(&s)]);
             changed(cfg);
         }
         Some(s) => {
@@ -751,7 +763,7 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
     } else if !settled && now - s.told >= RETELL / 12 {
         s.told = now;
         if keep(cfg, &s).is_ok() {
-            tell(cfg, &["close", NOTICE, CLOSED]);
+            tell(cfg, &["close", NOTICE, closed(&s)]);
         }
     }
 }
@@ -829,6 +841,24 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
 
 const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";
 
+/// The owner's notice's close: what's back.
+fn closed(s: &Spent) -> &'static str {
+    if !s.owner && login::is(&s.said) {
+        login::CLOSED
+    } else {
+        CLOSED
+    }
+}
+
+/// What a turn refused on `said` is told when it runs again, before its
+/// prompt: what it was refused for, and that it's back.
+pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
+    if login::is(said) {
+        return login::RESUMED.to_owned();
+    }
+    format!("{}\n\n{said}. {}", crate::turn::SPENT, policy(cfg))
+}
+
 /// Whether HOST-notify may still have the notice open: a close that didn't
 /// get through. Only its exit 1 says it's closed (or was never opened); one
 /// that couldn't run, was killed or answered anything else may still have
@@ -857,6 +887,9 @@ pub fn hold_line(owner: bool, until: i64, said: &str) -> String {
             when(until)
         );
     }
+    if login::is(said) {
+        return login::line(until);
+    }
     format!(
         "Claude is out of usage until {}: no Claude turn starts till then (\"{said}\")",
         when(until)
@@ -866,6 +899,9 @@ pub fn hold_line(owner: bool, until: i64, said: &str) -> String {
 fn title(s: &Spent) -> String {
     if s.owner {
         return format!("Claude work paused by the owner until {}", when(s.until));
+    }
+    if login::is(&s.said) {
+        return login::TITLE.to_owned();
     }
     format!("Claude is out of usage until {}", when(s.until))
 }
@@ -877,6 +913,9 @@ fn body(cfg: &Config, s: &Spent) -> String {
             when(s.until),
             s.said
         );
+    }
+    if login::is(&s.said) {
+        return login::body(s);
     }
     format!(
         "Since {}, Claude Code refuses every Claude job here. It answered job {}:\n\n> {}\n\n\
@@ -922,6 +961,8 @@ fn tell(cfg: &Config, args: &[&str]) {
         eprintln!("proj: {}: {e}", notify.display());
     }
 }
+
+mod login;
 
 #[cfg(test)]
 pub(crate) mod tests;
