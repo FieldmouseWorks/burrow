@@ -534,6 +534,31 @@ them.
 """
 
 
+def listing(digest, nrepo, number):
+    """The digest as issue `number` in nrepo lists it: its body, and what's
+    news there, by what each entry is known by. An entry that links the issue
+    itself is that issue's own job: what it asks is already on the issue, the
+    inbox's post of its answer, so listing it there again, or announcing it,
+    would read as news on the job's own issue and resume the very job it
+    reports, which asks again, and the steward lists that, round and round
+    (burrow#1100). It still keeps the issue open: its job is waiting there."""
+    own = re.compile(rf"\(https://github\.com/{re.escape(nrepo)}/issues/{number}\)", re.I) if number else None
+    shown = [x for x in digest if not (own and own.search(x[1]))]
+    groups = {}
+    for why, line, desc in shown:
+        groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
+    body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
+    if digest and not shown:
+        body = "Nothing else: this issue's own job is waiting for an answer to the question it asked here."
+    # What's news, by what it's known by: the whole entry, so a PR listed
+    # again for something else, or for the same thing with another
+    # diagnosis, is news too; but a kind whose words are the PR's own status
+    # (MOVING) by its kind and PR alone.
+    news = {f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else ""):
+            f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in shown}
+    return body, news
+
+
 def issue(key, title, label, assignee, intro, digest, done, also="", immutable=False):
     """One issue in config.notify.repo listing digest, kept up to date: each
     new or changed entry is a comment too, and it's closed once there's none.
@@ -546,21 +571,11 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
     if not label and digest:
         raise ValueError("an issue with work needs a routing label")
     nrepo = CFG["notify"]["repo"]
-    groups = {}
-    for why, line, desc in digest:
-        groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
-    body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
-    # What's news, by what it's known by: the whole entry, so a PR listed
-    # again for something else, or for the same thing with another
-    # diagnosis, is news too; but a kind whose words are the PR's own status
-    # (MOVING) by its kind and PR alone.
-    news = {f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else ""):
-            f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
-    entries = sorted(news)
     if DRY or not nrepo:
-        log(f"--- {title} ---\n" + (body or "(nothing)"))
+        log(f"--- {title} ---\n" + (listing(digest, "", None)[0] or "(nothing)"))
         return
     prev = load(key, {"entries": []})
+    body, news = listing(digest, nrepo, prev.get("number"))
     # Unchanged since the last look, under an hour ago: nothing to read or write.
     if (not immutable or prev.get("immutable")) and prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
@@ -569,6 +584,10 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
+    number = found[0]["number"] if found else None
+    if number != prev.get("number"):
+        body, news = listing(digest, nrepo, number)
+    entries = sorted(news)
     # Recorded as published only once every call went through, so a failed
     # one is tried again next pass rather than an hour later.
     ok = True
@@ -585,7 +604,9 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
         if C.gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment",
                 "Replaced by a fresh issue with an immutable body; updated stall lists will be fresh comments.", check=False) is None:
             return
-        found = []
+        found, number = [], None
+        body, news = listing(digest, nrepo, number)
+        entries = sorted(news)
     full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
         for name in (label, also):
@@ -611,4 +632,4 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
                 comment += "\n\nCurrent complete stall list (replaces all earlier lists):\n" + body
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", comment, check=False) is not None
     if ok:
-        save(key, {"entries": entries, "body": body, "checked": C.NOW, "immutable": immutable})
+        save(key, {"entries": entries, "body": body, "checked": C.NOW, "immutable": immutable, "number": number})

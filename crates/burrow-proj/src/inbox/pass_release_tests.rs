@@ -217,3 +217,90 @@ fn only_the_locked_refresh_rewrites_a_parks_reason() {
     crate::policy::mark(&job, "queued", true, Some(crate::policy::DENIED)).unwrap();
     assert_eq!(fs::read(crate::policy::path(&job, "park")).unwrap(), before);
 }
+
+/// "waiting" asks a reversible question; its deadline as it stands.
+fn asking(fixture: &Box) -> i64 {
+    let job = Job::new(&fixture.cfg, "waiting");
+    fs::write(job.turn("1", "end"), "ask\n").unwrap();
+    let recommendation = crate::ask::Recommendation {
+        default: "leave it".into(),
+        one_way: false,
+        about: None,
+    };
+    crate::ask::record(&job, &recommendation).unwrap();
+    crate::ask::finish(&fixture.cfg, &job, "ask").unwrap();
+    crate::ask::load(&job).unwrap().unwrap().due
+}
+
+/// Moves the park's clocks back, as if it had waited `secs` already.
+fn waited(job: &Job, secs: i64) {
+    let path = crate::policy::path(job, "park");
+    let mut park: crate::policy::Park = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    park.at -= secs;
+    park.paused_since = park.paused_since.map(|since| since - secs);
+    fs::write(&path, serde_json::to_string(&park).unwrap()).unwrap();
+}
+
+// burrow#1100: an update that resumes an asking job (the steward's tracker,
+// say) waits for a drain slot, and that wait was credited to the question,
+// so each lap moved the deadline on and the default might never come. Only
+// a pause of the repository's work gives its time back, and only its own
+// stretch of the park.
+#[test]
+fn only_a_pause_moves_the_deadline_of_a_question_whose_update_waited() {
+    let mut fixture = Box::new();
+    let launched = drained_pair(&mut fixture);
+    let overlay = fixture.path("settings.json");
+    fixture.cfg.settings.as_mut().unwrap().overlay = overlay;
+    let settings = |cfg: &crate::config::Config, verb: &str| {
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(&[verb.into(), "sam/box".into()], "test")
+            .unwrap()
+    };
+    let cfg = &fixture.cfg;
+    let job = Job::new(cfg, "waiting");
+    let due = asking(&fixture);
+    let deadline = || crate::ask::load(&job).unwrap().unwrap().due;
+
+    // Waits ten minutes for a slot, then goes: the deadline stays.
+    crate::turn::start(cfg, job.id, "the steward updated the issue", false).unwrap();
+    assert_eq!(
+        crate::policy::waits_for(&job).as_deref(),
+        Some(Wait::Drain.says())
+    );
+    waited(&job, 600);
+    fs::remove_file(fixture.path("active")).unwrap();
+    crate::policy::reconcile(cfg).unwrap();
+    assert!(launched.exists() && !crate::policy::parked(&job));
+    assert_eq!(deadline(), due);
+
+    // The next update waits for a slot ten minutes, then for its paused
+    // repository five, then for a slot again: the pause's five come back.
+    fs::remove_file(&launched).unwrap();
+    fs::write(job.turn("2", "end"), "ask\n").unwrap();
+    fs::write(job.turn("2", "outcome"), "done\n").unwrap();
+    fs::write(fixture.path("active"), "").unwrap();
+    crate::turn::start(cfg, job.id, "the steward updated it again", false).unwrap();
+    waited(&job, 600);
+    settings(cfg, "pause");
+    crate::policy::reconcile(cfg).unwrap();
+    assert_eq!(
+        crate::policy::waits_for(&job).as_deref(),
+        Some(crate::policy::DENIED)
+    );
+    waited(&job, 300);
+    settings(cfg, "allow");
+    crate::policy::reconcile(cfg).unwrap();
+    assert_eq!(
+        crate::policy::waits_for(&job).as_deref(),
+        Some(Wait::Drain.says())
+    );
+    waited(&job, 600);
+    fs::remove_file(fixture.path("active")).unwrap();
+    crate::policy::reconcile(cfg).unwrap();
+    assert!(launched.exists() && !crate::policy::parked(&job));
+    let moved = deadline() - due;
+    assert!((300..=305).contains(&moved), "moved {moved}s");
+}
