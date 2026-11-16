@@ -653,8 +653,9 @@ in
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
       `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
       `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
-      `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
-      a comment, and the steward settles it like any other.
+      `undo --since RFC3339_TIME --repo OWNER/REPO`, then `--reason WHY`, which
+      the undo keeps for good (no secrets or prompt text). The undo's PR comes
+      back as a comment, and the steward settles it like any other.
     '');
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.

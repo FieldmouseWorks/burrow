@@ -192,9 +192,11 @@ probe's repo and from its authors unless set otherwise (`door.repo`,
 - **Ask:** one line, in `cn undo`'s words: `undo OWNER/REPO#N` (the change
   that PR is), `undo --actor SESSION_URL` (everything an agent session
   landed, one PR per repo) or `undo --since TIME --repo OWNER/REPO`
-  (everything that landed there after an RFC 3339 time). Which repos it
-  reaches is the ledger's to say: cn refuses a change or a repo it keeps
-  nothing of.
+  (everything that landed there after an RFC 3339 time), then `--reason`
+  and why, to the end of the line. Every undo needs its reason: the ledger
+  keeps it for good and the undo's PR opens with it, so it carries no
+  secrets, personal data or prompt text. Which repos it reaches is the
+  ledger's to say: cn refuses a change or a repo it keeps nothing of.
 - **Answer:** `cn undo` runs as the ledger's writers do, as the machine's
   App, and the comment links each undo's PR, with any change left out (its
   revert conflicts with the rest: ask again) or already gone from trunk.

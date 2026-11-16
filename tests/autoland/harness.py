@@ -459,8 +459,16 @@ def ci_upkeep(*args, **kw):
 C.upkeep = ci_upkeep
 
 
+# An Actions job's log, by its REST path, or what reading it raises.
+LOGS = {}
+
+
 def gh_stub(*a, **k):
     acting()
+    if a[:1] == ("api",) and a[1] in LOGS:
+        if isinstance(LOGS[a[1]], Exception):
+            raise LOGS[a[1]]
+        return LOGS[a[1]]
     if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):
         got = RULES.get(a[1].removeprefix("repos/sam/r/rules/branches/").partition("?")[0], [])
         if isinstance(got, Exception):

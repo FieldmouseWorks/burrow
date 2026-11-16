@@ -66,8 +66,11 @@ OLDER = {"reviews": "author { login __typename } state body submittedAt commit {
 # The default branch's tip, read with the PRs each pass: how its CI stands,
 # and what repos.landed_alone asks of it (its first parent's CI, the PR it
 # landed, how its check runs ended), so a red one landing caused is undone
-# with no further call.
-TIP = ("oid statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { conclusion } } } } "
+# with no further call; and which checks failed on it, and in which runs,
+# the reason an undo of the red is asked with (repos.red_reason).
+TIP = ("oid statusCheckRollup { state contexts(first: 100) { nodes { "
+       "... on CheckRun { conclusion name databaseId detailsUrl title completedAt checkSuite { workflowRun { url workflow { name } } } } "
+       "... on StatusContext { context state targetUrl description createdAt } } } } "
        "parents(first: 1) { nodes { statusCheckRollup { state } } } "
        "associatedPullRequests(first: 5) { nodes { number state headRefName baseRefName body mergeCommit { oid } } }")
 PRS = PRS % (TIP, OLDER["reviews"], OLDER["comments"])
