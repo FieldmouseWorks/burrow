@@ -141,6 +141,8 @@ pkgs.testers.runNixOSTest {
         assert "protected queue" in result["error"], result
         machine.succeed("test ! -e ${review}/done/codex--judge-forged.json")
 
+    ${builtins.readFile ./review-context.py}
+
     with subtest("the sign pass alone has the key, as a user the producer isn't, and books its next pass"):
         machine.succeed("install -d -m 0700 /run/keys && head -c 32 /dev/urandom >/run/keys/review && chmod 0400 /run/keys/review")
         # No look waits: it signs nothing, asks GitHub nothing, and books

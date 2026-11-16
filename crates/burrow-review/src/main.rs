@@ -5,9 +5,8 @@
 //! `Deployed`).
 
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -56,7 +55,18 @@ fn command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("work") if args.len() == 1 => {
             let cfg = Config::load()?;
-            let deployed = cfg.deployed.clone();
+            // An old worker can exec this program after draining, retaining
+            // its mount namespace and groups. Only systemd can refresh those.
+            // Do this before work() touches any configured paths.
+            if cfg.deployed.is_some()
+                && std::env::var_os("REVIEW_CONTEXT") != std::env::var_os("REVIEW_CONFIG")
+            {
+                println!("the unit execution context is stale: waiting for systemd to restart it");
+                // Units from before the restart protocol rely on their path
+                // activation. Pace those starts until daemon-reload catches up.
+                thread::sleep(Duration::from_secs(5));
+                return Ok(75);
+            }
             let exe = std::env::current_exe().map_err(|e| format!("can't find itself: {e}"))?;
             let home = std::env::var_os("HOME").ok_or("HOME isn't set")?;
             let s = Service::new(
@@ -66,26 +76,11 @@ fn command(args: &[OsString]) -> Result<u8, String> {
                 Arc::new(egress::dial),
                 Arc::new(|line| println!("{line}")),
             );
-            if work(Arc::new(s)) == Ended::Moved
-                && let Some(d) = deployed
-            {
-                let next = d.program();
-                if next.exists() {
-                    // The deployed program and its own config, one
-                    // generation's, whatever unit systemd started: its
-                    // wrapper names its config.
-                    let e = Command::new(&next)
-                        .arg("work")
-                        .env_remove("REVIEW_CONFIG")
-                        .exec();
-                    return Err(format!("couldn't start {}: {e}", next.display()));
-                }
-                // A generation without one (from before it had one): its
-                // own unit, once systemd has it, starts its run. Not at
-                // once, so a start before then can't spend the unit's
-                // start limit.
-                println!("the deployed generation has no {}", next.display());
-                thread::sleep(Duration::from_secs(5));
+            if work(Arc::new(s)) == Ended::Moved {
+                // Drained: leave requests and resumable sessions intact. A
+                // fresh systemd start uses the loaded unit's groups and mounts;
+                // a not-yet-reloaded unit will yield again before doing work.
+                return Ok(75);
             }
             Ok(0)
         }

@@ -179,10 +179,17 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       environment.HOME = reviewerHome;
+      # Inherited across an old worker's exec: the receiving binary refuses
+      # to consume queues until systemd has supplied its own execution context.
+      environment.REVIEW_CONTEXT = toString reviewConfig;
       environment.REVIEW_DEPLOYED = "/etc/${deployedDir}";
       serviceConfig = {
         Type = "oneshot";
         User = reviewer;
+        # Generation handovers exit only after draining. Restart from the
+        # loaded unit instead of exec, refreshing mount access and groups.
+        RestartForceExitStatus = [ 75 ];
+        RestartSec = 5;
         ExecStart = "${review}/bin/burrow-review work";
         # However long an agent thinks: no pass gives up on a queued review either.
         TimeoutStartSec = "infinity";

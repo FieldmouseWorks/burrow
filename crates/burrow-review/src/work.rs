@@ -424,17 +424,10 @@ fn remove_all(path: &Path) -> io::Result<()> {
     fs::remove_dir(path)
 }
 
-/// Every queued look, `parallel` at a time for each reviewer, until the
-/// queue is empty (passes may add to it meanwhile). A free place goes to
-/// the lead repos' looks first (`leadRepos`), then to the rest of the
-/// pipeline's own (`pipelineRepos`), then to the oldest PR's: by when it
-/// was opened, not when its head came, so a PR pushed again keeps its
-/// place. One look at a time in a session: a PR's next head waits for the
-/// look at its last one, and resumes it. Looks the admission policy holds
-/// back wait here for it, until another generation is deployed: then this
-/// run ends, for that generation's program to take the queue (main.rs).
-pub fn work(s: Arc<Service>) -> Ended {
-    forget(&s);
+/// Askers release an answer by removing its snapshot. Run while parked or
+/// busy, and after the last worker publishes (even if its snapshot already
+/// disappeared), so no invocation or path activation is needed to collect it.
+fn reclaim(s: &Service) {
     // Askers cannot delete answers. Removing their snapshot releases an
     // answer; the path unit wakes us for that change as well as requests.
     if let Some(p) = &s.cfg.producers {
@@ -448,12 +441,26 @@ pub fn work(s: Arc<Service>) -> Ended {
             }
         }
     }
+}
+
+/// Every queued look, `parallel` at a time for each reviewer, until the
+/// queue is empty (passes may add to it meanwhile). A free place goes to
+/// the lead repos' looks first (`leadRepos`), then to the rest of the
+/// pipeline's own (`pipelineRepos`), then to the oldest PR's: by when it
+/// was opened, not when its head came, so a PR pushed again keeps its
+/// place. One look at a time in a session: a PR's next head waits for the
+/// look at its last one, and resumes it. Looks the admission policy holds
+/// back wait here for it, until another generation is deployed: then this
+/// run ends, for that generation's program to take the queue (main.rs).
+pub fn work(s: Arc<Service>) -> Ended {
+    forget(&s);
     let _watch = s.logins.watch();
     let (done_tx, done) = mpsc::channel::<Job>();
     // Only what's in hand: a name done with and queued again (a retry, a
     // second look) is taken again.
     let mut busy: HashSet<Job> = HashSet::new();
     loop {
+        reclaim(&s);
         while let Ok(name) = done.try_recv() {
             busy.remove(&name);
         }
@@ -541,6 +548,7 @@ pub fn work(s: Arc<Service>) -> Ended {
                 if handed {
                     s.say("another generation is deployed: its program takes the queue");
                 }
+                reclaim(&s);
                 forget(&s);
                 return Ended::Moved;
             }
@@ -555,6 +563,7 @@ pub fn work(s: Arc<Service>) -> Ended {
             busy.remove(&name);
         }
     }
+    reclaim(&s);
     forget(&s);
     Ended::Done
 }
@@ -565,6 +574,6 @@ pub enum Ended {
     /// Nothing left that it can take.
     Done,
     /// Another generation is deployed, and nothing is under way: the
-    /// deployed program, with its own config, takes the queue from here.
+    /// loaded systemd unit starts a fresh context to take the queue.
     Moved,
 }

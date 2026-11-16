@@ -151,3 +151,128 @@ fn judges_require_execution_options_and_valid_verdicts_and_reasons() {
         assert_eq!(back(&rig, &name)["result"], "error");
     }
 }
+
+// Run the real worker loop while a different repo is either parked or
+// actively reviewing. Each lifecycle case runs for both protected queues.
+#[test]
+fn released_answers_are_reclaimed_throughout_the_worker_lifecycle() {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    fn until(mut ready: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !ready() {
+            assert!(Instant::now() < end, "answer lifecycle did not advance");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    for judge in [false, true] {
+        for parked in [false, true] {
+            let rig = rig();
+            rig.agent(json!({"sleep":{"keeper":600}}));
+            let snap = rig.snapshot(9, HEAD);
+            let keeper = rig.queue(
+                &snap,
+                9,
+                HEAD,
+                json!({
+                    "repo": if parked {"sam/parked"} else {"sam/r"}, "prompt":"keeper"
+                }),
+            );
+            let (name, _) = queue(
+                &rig,
+                judge,
+                json!({"fresh":{"model":"test-model","effort":"high"}}),
+            );
+            // A completed answer retained across a restart: must stay while
+            // its snapshot is present, then go when its owner releases it.
+            burrow_review::answer::save(
+                &rig.path("producer-done").join(&name),
+                &json!({"old":true}),
+            )
+            .unwrap();
+            let service = rig.service();
+            let policy = service.cfg.settings.as_ref().unwrap().clone();
+            let worker = thread::spawn(move || burrow_review::work(service));
+            let answer = rig.path("producer-done").join(&name);
+            until(|| {
+                !rig.path(if judge {
+                    "judge-queue"
+                } else {
+                    "producer-queue"
+                })
+                .join(&name)
+                .exists()
+            });
+            assert!(
+                answer.exists(),
+                "collected an answer with a retained snapshot"
+            );
+            fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
+            until(|| !answer.exists());
+            assert!(!worker.is_finished(), "did not exercise a retained worker");
+
+            // Abandonment while queued or running, including an answer
+            // published after its snapshot disappeared, must also be swept.
+            let (again, _) = queue(
+                &rig,
+                judge,
+                json!({"repo":"sam/parked", "fresh":{"model":"test-model","effort":"high"}}),
+            );
+            let again_answer = rig.path("producer-done").join(&again);
+            fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
+            fs::remove_file(
+                rig.path(if judge {
+                    "judge-queue"
+                } else {
+                    "producer-queue"
+                })
+                .join(&again),
+            )
+            .unwrap();
+            burrow_review::answer::save(&again_answer, &json!({"late":true})).unwrap();
+            until(|| !again_answer.exists());
+
+            // Release the other request without waiting for its fake agent.
+            // The live admission overlay vacates running reviews as well.
+            fs::remove_file(rig.path("queue").join(keeper)).unwrap();
+            policy
+                .command(&["pause".into(), "sam/r".into()], "test")
+                .unwrap();
+            until(|| worker.is_finished());
+            worker.join().unwrap();
+
+            // Restart cleanup covers abandoned answers left by a stopped run.
+            burrow_review::answer::save(&again_answer, &json!({"orphan":true})).unwrap();
+            rig.work();
+            assert!(!again_answer.exists());
+        }
+    }
+}
+
+#[test]
+fn answers_published_after_snapshot_removal_are_collected_before_exit() {
+    for judge in [false, true] {
+        let rig = rig();
+        let (name, _) = queue(
+            &rig,
+            judge,
+            json!({"fresh":{"model":"test-model","effort":"high"}}),
+        );
+        fs::remove_dir_all(rig.path("fresh/fresh-one")).unwrap();
+        // The queued entry survives abandonment (or a crash in cleanup).
+        // queued() publishes its error after seeing the missing snapshot.
+        rig.work();
+        assert!(rig.names("producer-done").is_empty());
+        assert!(
+            !rig.path(if judge {
+                "judge-queue"
+            } else {
+                "producer-queue"
+            })
+            .join(name)
+            .exists()
+        );
+    }
+}

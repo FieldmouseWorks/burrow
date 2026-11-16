@@ -55,7 +55,13 @@ pub fn read(path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
     if !path.is_absolute() {
         return Err(io::Error::other("protected answer path must be absolute"));
     }
-    let mut dir = File::open("/")?;
+    read_from(File::open("/")?, path, uid, request)
+}
+
+// The same descriptor walk from an explicitly supplied trust boundary.
+// Production always starts at `/`; tests need a private boundary because
+// build sandboxes deliberately put their sources under writable ancestors.
+fn read_from(mut dir: File, path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
     check(&dir, uid, false)?;
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
@@ -101,8 +107,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, u32) {
-        // /tmp is deliberately world writable: production must reject it.
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("answer.json");
         fs::write(
             &path,
@@ -110,14 +115,36 @@ mod tests {
         )
         .unwrap();
         let uid = fs::metadata(&path).unwrap().uid();
-        assert!(read(&path, uid, b"request").is_ok());
+        assert!(read_fixture(&path, uid, b"request").is_ok());
         (dir, path, uid)
+    }
+
+    fn read_fixture(path: &Path, uid: u32, request: &[u8]) -> io::Result<Value> {
+        read_from(
+            File::open(path.parent().unwrap())?,
+            Path::new(path.file_name().unwrap()),
+            uid,
+            request,
+        )
+    }
+
+    #[test]
+    fn public_reader_refuses_writable_ancestors() {
+        let (dir, path, uid) = fixture();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        // Exercise the production entry point even under a private TMPDIR.
+        assert!(
+            read(&path, uid, b"request")
+                .unwrap_err()
+                .to_string()
+                .contains("writable")
+        );
     }
 
     #[test]
     fn refuses_foreign_owned_answer() {
         let (_dir, path, uid) = fixture();
-        let error = read(&path, uid + 1, b"request").unwrap_err();
+        let error = read_fixture(&path, uid + 1, b"request").unwrap_err();
         assert!(error.to_string().contains("foreign owner"));
         // Also exercise the file check independently of its ancestors.
         let error = check(&File::open(path).unwrap(), uid + 1, true).unwrap_err();
@@ -130,7 +157,7 @@ mod tests {
         for mode in [0o770, 0o707] {
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
             assert!(
-                read(&path, uid, b"request")
+                read_fixture(&path, uid, b"request")
                     .unwrap_err()
                     .to_string()
                     .contains("writable")
@@ -142,7 +169,7 @@ mod tests {
     fn refuses_mismatched_digest() {
         let (_dir, path, uid) = fixture();
         assert!(
-            read(&path, uid, b"other request")
+            read_fixture(&path, uid, b"other request")
                 .unwrap_err()
                 .to_string()
                 .contains("digest")
@@ -153,10 +180,10 @@ mod tests {
     fn refuses_writable_file_and_symlink() {
         let (dir, path, uid) = fixture();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
-        assert!(read(&path, uid, b"request").is_err());
+        assert!(read_fixture(&path, uid, b"request").is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(read(&link, uid, b"request").is_err());
+        assert!(read_fixture(&link, uid, b"request").is_err());
     }
 }

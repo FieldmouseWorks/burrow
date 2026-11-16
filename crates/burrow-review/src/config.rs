@@ -138,7 +138,7 @@ impl Config {
     /// Whether the deployed generation isn't this run's: a switch (or a
     /// rollback) put another in place, or this run was started from a unit
     /// systemd hadn't reloaded yet. It takes no more looks, and hands the
-    /// queue to the deployed program (main.rs).
+    /// queue to a fresh systemd invocation (main.rs).
     pub fn moved(&self) -> bool {
         self.deployed
             .as_ref()

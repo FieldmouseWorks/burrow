@@ -108,10 +108,10 @@ fn a_run_from_a_unit_not_yet_reloaded_takes_nothing() {
     assert_eq!(rig.back(&name)["result"], "review");
 }
 
-/// The hand-over itself, as systemd runs the service: the deployed program
-/// takes the run's place, with its own config, not this run's.
+/// A drained generation exits with the systemd restart status, without
+/// executing its successor inside the old mount namespace and groups.
 #[test]
-fn the_service_hands_over_to_the_deployed_program() {
+fn the_service_yields_to_a_fresh_systemd_execution_context() {
     let mut rig = Rig::new();
     let old = rig.path("own.json");
     fs::write(&old, rig.cfg.to_string()).unwrap();
@@ -121,7 +121,7 @@ fn the_service_hands_over_to_the_deployed_program() {
     burrow_test::executable(
         dir.join("burrow-review"),
         format!(
-            "#!{}\necho \"${{REVIEW_CONFIG-none}} $*\" > {}\n",
+            "#!{}\ntouch {}\n",
             crate::rig::which("bash").display(),
             said.display()
         ),
@@ -129,12 +129,42 @@ fn the_service_hands_over_to_the_deployed_program() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_burrow-review"))
         .arg("work")
         .env("REVIEW_CONFIG", &old)
+        .env("REVIEW_CONTEXT", &old)
         .env("REVIEW_DEPLOYED", &dir)
         .env("HOME", rig.home())
         .output()
         .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    assert_eq!(fs::read_to_string(&said).unwrap(), "none work\n");
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    assert!(!said.exists(), "executed the successor in the old context");
+}
+
+/// Older deployed programs still exec their successor. A new binary must
+/// reject both that inherited context (no marker) and a stale loaded unit's
+/// marker before it even reclaims answers or reads the protected queues.
+#[test]
+fn an_inherited_execution_context_cannot_touch_the_new_queues() {
+    let rig = Rig::new();
+    let snap = rig.snapshot(5, HEAD);
+    let name = rig.queue(&snap, 5, HEAD, json!({}));
+    let own = rig.path("own.json");
+    fs::write(&own, rig.cfg.to_string()).unwrap();
+    let dir = rig.deploy();
+    for marker in [None, Some(rig.path("previous.json"))] {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_burrow-review"));
+        cmd.arg("work")
+            .env("REVIEW_CONFIG", &own)
+            .env_remove("REVIEW_CONTEXT")
+            .env("REVIEW_DEPLOYED", &dir)
+            .env("HOME", rig.home());
+        if let Some(marker) = marker {
+            cmd.env("REVIEW_CONTEXT", marker);
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(75), "{out:?}");
+        assert!(rig.path("queue").join(&name).exists());
+        assert!(rig.runs().is_empty());
+        assert!(rig.names("done").is_empty());
+    }
 }
 
 /// The generation that takes the queue runs its agents with its own tools,

@@ -24,8 +24,11 @@ in
 # takes its queue after a switch: `check` holds the deployed generation to
 # both (#711), and the service tests exercise the handover.
 assert !unit.restartIfChanged;
+assert unit.serviceConfig.RestartForceExitStatus == [ 75 ];
+assert unit.serviceConfig.RestartSec == 5;
 assert lib.all (group: lib.all (refused group) memberships) [ "autoland-review" "autoland-review-askers" ];
 pkgs.runCommand "review-config-check" { } ''
+  test "$(readlink -f ${deployed}/config.json)" = ${unit.environment.REVIEW_CONTEXT}
   REVIEW_DEPLOYED=${deployed} ${program} check
   touch $out
 ''
