@@ -17,11 +17,10 @@ import os
 import re
 import shutil
 import sys
-from unittest.mock import patch
 
 import proofs as P
 import waits
-from harness import C, CI_GREEN, FAIL, JOBS, REAL, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+from harness import C, CI_GREEN, status_run, FAIL, JOBS, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -215,35 +214,11 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
 # failure of theirs still standing is theirs, one more in their run of
 # strikes and no more however often status runs; and a head they haven't
 # worked out yet is no failure at all, and no strike.
-AUTOLAND = os.path.dirname(P.__file__)
 
 
 def dry(n, t, checks=None):
     """A status run's pass on PR n, t seconds on; its status, its state."""
-    mods = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == AUTOLAND
-            and isinstance(vars(m).get("DRY"), bool)]
-    live = {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")}
-    state_mods = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == AUTOLAND
-                  and vars(m).get("STATE") == C.STATE]
-    kept_state, C.STATE = C.STATE, f"{tmp}/state/dry"
-    for m in state_mods:
-        m.STATE = C.STATE
-    os.makedirs(C.STATE, exist_ok=True)
-    waits.begin()
-    for m in mods:
-        m.DRY = True
-    try:
-        with patch.object(C, "write", wraps=REAL["write"]) as writes:
-            line(n, t, checks)
-        status = " ".join(" ".join(call.args) for call in writes.call_args_list)
-    finally:
-        for m in mods:
-            m.DRY = False
-        C.STATE = kept_state
-        for m in state_mods:
-            m.STATE = kept_state
-    assert {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")} == live
-    assert WROTE == [] and not waits.FAILING, (WROTE, waits.FAILING)
+    status = status_run(lambda: line(n, t, checks))[1]
     return status, json.load(open(f"{tmp}/state/dry/pr-sam_r-{n}.json"))
 
 

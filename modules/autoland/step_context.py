@@ -40,6 +40,9 @@ STRIKES = {
 }
 # What a status run takes from the live passes' state of a PR (Context).
 LIVE_FACTS = ("strikes", "proofOutputs", "mergedOutputs")
+# What the live passes saw of the PR whatever its head: whether it was set
+# aside, and when it came back (step.py's day_from).
+LIVE_PR_FACTS = ("aside", "back")
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 CHECKS_START = 5 * 60  # how long GitHub gets to show a new head's first check
 # What the steward's own proofs are doing while they're at work.
@@ -95,10 +98,16 @@ class Context:
             # A status run keeps state of its own, but takes what the live
             # passes found on this head from theirs: their failures in a row,
             # not the status runs' own, and what its proof builds, which a
-            # status run never works out (proofs.outputs).
+            # status run never works out (proofs.outputs); and on the PR
+            # whatever its head, when it came back from being set aside.
             live = load(self.key, {}, live=True)
             for k in LIVE_FACTS:
                 if live.get("head") == self.head and k in live:
+                    self.st[k] = live[k]
+                else:
+                    self.st.pop(k, None)
+            for k in LIVE_PR_FACTS:
+                if k in live:
                     self.st[k] = live[k]
                 else:
                     self.st.pop(k, None)

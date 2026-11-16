@@ -722,6 +722,40 @@ def fresh_pr_state():
 
 REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
         "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
+
+
+def status_run(thunk):
+    """thunk run as `autoland-steward status` runs a pass: every module DRY,
+    on state of its own under state/dry. What it returned, and the status it
+    would have written; it writes nothing, and the live state is untouched."""
+    import waits
+    from unittest.mock import patch
+
+    here = os.path.dirname(C.__file__)
+    ours = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == here]
+    mods = [m for m in ours if isinstance(vars(m).get("DRY"), bool)]
+    live = {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")}
+    state_mods = [m for m in ours if vars(m).get("STATE") == C.STATE]
+    kept_state, C.STATE = C.STATE, f"{tmp}/state/dry"
+    for m in state_mods:
+        m.STATE = C.STATE
+    os.makedirs(C.STATE, exist_ok=True)
+    waits.begin()
+    for m in mods:
+        m.DRY = True
+    try:
+        with patch.object(C, "write", wraps=REAL["write"]) as writes:
+            got = thunk()
+        status = " ".join(" ".join(call.args) for call in writes.call_args_list)
+    finally:
+        for m in mods:
+            m.DRY = False
+        C.STATE = kept_state
+        for m in state_mods:
+            m.STATE = kept_state
+    assert {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")} == live
+    assert WROTE == [] and not waits.FAILING, (WROTE, waits.FAILING)
+    return got, status
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
