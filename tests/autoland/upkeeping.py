@@ -202,6 +202,9 @@ assert state("flaky")["issues"]["4"] == {"test": "browser/stream", "handed": T, 
 assert [(j["pipeline"], j["timeout"], j["role"]) for j in JOBS] == [(True, 60, "dependency-dashboard")], JOBS
 assert "Errored: chore(deps): update npm packages (branch renovate/npm-packages)" in JOBS[0]["task"], JOBS
 assert S.SEARCHED == [0] and ["repos/sam/r/issues/7", 'W/"d"'] in [[c["path"], c["etag"]] for c in called()], called()
+# Before handing the branch on, it asked whether Renovate has opened a PR
+# from it since it was first seen: one that had would have moved it.
+assert "repos/sam/r/pulls?state=all&sort=created&direction=desc&per_page=100&head=sam:renovate%2Fnpm-packages" in [c["path"] for c in called()], called()
 assert C.WAKE == {"sam/r": T + DAY + 15 * 60}, C.WAKE
 # Still queued hours on, the dashboard's job is found, and none other
 # starts beside it.
