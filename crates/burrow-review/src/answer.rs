@@ -105,7 +105,6 @@ pub fn read_from(mut dir: File, path: &Path, uid: u32, request: &[u8]) -> io::Re
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, u32) {
         let dir = tempfile::tempdir().unwrap();
@@ -132,7 +131,7 @@ mod tests {
     #[test]
     fn public_reader_refuses_writable_ancestors() {
         let (dir, path, uid) = fixture();
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        burrow_test::permissions(dir.path(), 0o777);
         // The absolute reader may reject an earlier ancestor first (for
         // example a build directory owned by another user). It must refuse
         // the path in either case. Isolate the intended mode failure with
@@ -160,7 +159,7 @@ mod tests {
     fn refuses_writable_directory() {
         let (dir, path, uid) = fixture();
         for mode in [0o770, 0o707] {
-            fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+            burrow_test::permissions(dir.path(), mode);
             assert!(
                 read_fixture(&path, uid, b"request")
                     .unwrap_err()
@@ -184,9 +183,9 @@ mod tests {
     #[test]
     fn refuses_writable_file_and_symlink() {
         let (dir, path, uid) = fixture();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+        burrow_test::permissions(&path, 0o660);
         assert!(read_fixture(&path, uid, b"request").is_err());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        burrow_test::permissions(&path, 0o640);
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read_fixture(&link, uid, b"request").is_err());

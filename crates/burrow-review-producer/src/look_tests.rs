@@ -1,6 +1,6 @@
 //! Queue fixtures use the shared reader with an explicit private boundary.
 use super::*;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 
 #[test]
 fn a_private_queue_boundary_preserves_answer_checks() {
@@ -24,7 +24,7 @@ fn a_private_queue_boundary_preserves_answer_checks() {
     )
     .unwrap();
     // A normal temporary checkout or Nix build can have this ancestor.
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).unwrap();
+    burrow_test::permissions(dir.path(), 0o770);
     assert!(queue.read_answer(&path, b"request").is_ok());
     queue.reviewer_uid = uid + 1;
     assert!(
@@ -42,7 +42,7 @@ fn a_private_queue_boundary_preserves_answer_checks() {
             .to_string()
             .contains("digest")
     );
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+    burrow_test::permissions(&path, 0o660);
     assert!(
         queue
             .read_answer(&path, b"request")
@@ -50,8 +50,8 @@ fn a_private_queue_boundary_preserves_answer_checks() {
             .to_string()
             .contains("writable")
     );
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-    fs::set_permissions(&done, fs::Permissions::from_mode(0o770)).unwrap();
+    burrow_test::permissions(&path, 0o640);
+    burrow_test::permissions(&done, 0o770);
     assert!(
         queue
             .read_answer(&path, b"request")
@@ -59,7 +59,7 @@ fn a_private_queue_boundary_preserves_answer_checks() {
             .to_string()
             .contains("writable")
     );
-    fs::set_permissions(&done, fs::Permissions::from_mode(0o700)).unwrap();
+    burrow_test::permissions(&done, 0o700);
     let link = done.join("link.json");
     std::os::unix::fs::symlink(&path, &link).unwrap();
     assert!(queue.read_answer(&link, b"request").is_err());
