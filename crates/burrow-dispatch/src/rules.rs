@@ -392,6 +392,19 @@ fn going_live(
     }
 }
 
+/// What a wait on HOST-update (going_live's phase) waited for: the phase
+/// up to what it says of HOST-update.
+fn waited_for<'a>(phase: &'a str, unit: &str) -> Option<&'a str> {
+    [
+        format!("; behind {unit}'s own PR #"),
+        format!("; {unit}'s last run: "),
+    ]
+    .iter()
+    .filter_map(|m| phase.find(m.as_str()))
+    .min()
+    .map(|at| &phase[..at])
+}
+
 /// A wait the pass couldn't read (GitHub or the live record failed), as the
 /// last pass `was` left it: unchanged while it's waiting on HOST-update, but
 /// a run's progress is local, so one under way (or since ended) is taken
@@ -417,7 +430,26 @@ fn retained(
         .filter(|_| update.state == "activating")
         .is_some_and(|start| start >= was.since);
     if !ours && !was_run {
-        return was.clone();
+        // Waiting on HOST-update: what it waited for and since when are as
+        // the last pass saw them, but its deadline follows what HOST-update
+        // says now (behind its PR, held for a switch not on main, failed).
+        let Some(waiting) = waited_for(&was.phase, &dep.unit) else {
+            return was.clone();
+        };
+        return going_live(
+            dep,
+            update,
+            said,
+            progress,
+            behind,
+            off_main,
+            was.what.clone(),
+            waiting,
+            was.since,
+            was.link.clone(),
+            false,
+            &cfg.handler,
+        );
     }
     going_live(
         dep,

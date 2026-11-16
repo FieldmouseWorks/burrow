@@ -521,15 +521,42 @@ fn deploy_unknown() {
     let d = decide(&cfg, &s, &d.state, &d.items, T + 120.0);
     let it = &d.items["deploy/sam/box"];
     assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
-    // Its record unreadable: the wait and its age as they were.
-    let unread = Snapshot {
+    // Its record unreadable: what it waits for, its age and link as they
+    // were, and what HOST-update says now.
+    let mut unread = Snapshot {
         unread: BTreeMap::from([("sam/box".into(), "live.json: bad".into())]),
         update: idle("ok at then: up to date"),
         ..Snapshot::default()
     };
     let e = decide(&cfg, &unread, &d.state, &d.items, T + 180.0);
-    assert_eq!(e.items["deploy/sam/box"], d.items["deploy/sam/box"]);
+    assert_eq!(
+        e.items["deploy/sam/box"],
+        Item {
+            phase: "no record; box-update's last run: ok at then: up to date".into(),
+            ..d.items["deploy/sam/box"].clone()
+        }
+    );
     assert_eq!(e.state.going_live["sam/box"], T - 600.0);
+    // Held since for a switch not on main: not due before the owner hears;
+    // its unit failed, or the hold gone, the short wait again.
+    unread.off_main = Some(T + 6.0 * 3600.0);
+    let h = decide(&cfg, &unread, &e.state, &e.items, T + 200.0);
+    let it = &h.items["deploy/sam/box"];
+    assert_eq!((it.since, it.due), (T - 600.0, T + 6.0 * 3600.0));
+    assert!(
+        it.phase.starts_with(
+            "no record; box-update's last run: ok at then: up to date; the owner hears"
+        ),
+        "{}",
+        it.phase
+    );
+    let mut failed = unread.clone();
+    failed.update.as_mut().unwrap().0.state = "failed".into();
+    let f = decide(&cfg, &failed, &h.state, &h.items, T + 220.0);
+    assert_eq!(f.items["deploy/sam/box"].due, T - 600.0 + 1800.0);
+    unread.off_main = None;
+    let c = decide(&cfg, &unread, &h.state, &h.items, T + 240.0);
+    assert_eq!(c.items["deploy/sam/box"], e.items["deploy/sam/box"]);
     // Found live: nothing waits, and the age goes.
     let live = Snapshot {
         deploys: BTreeMap::from([("sam/box".into(), Behind::default())]),
@@ -740,5 +767,14 @@ fn deploy_unread_progress() {
         // Not at work, not on a run: as it was.
         let e4 = decide(&cfg, &ended, &d.state, &d.items, T + 1200.0);
         assert_eq!(e4.items[&key], d.items[&key]);
+        // Held since for a switch not on main: not due before the owner hears.
+        let mut held = ended.clone();
+        held.off_main = Some(T + 6.0 * 3600.0);
+        let e5 = decide(&cfg, &held, &d.state, &d.items, T + 1200.0);
+        assert_eq!(
+            (e5.items[&key].since, e5.items[&key].due),
+            (T - 600.0, T + 6.0 * 3600.0),
+            "{repo}"
+        );
     }
 }
