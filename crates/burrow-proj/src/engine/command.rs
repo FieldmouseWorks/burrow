@@ -2,6 +2,7 @@
 
 use super::sandbox::{self, Env};
 use super::{Choice, Engine, stream::resume};
+use crate::record::{JobFile, TurnFile};
 use crate::{config::Config, job::Job, scratch};
 
 use std::path::{Path, PathBuf};
@@ -90,7 +91,7 @@ pub fn spawn(
     choice: &Choice,
 ) -> std::io::Result<Child> {
     let mut args = args(choice, resume(job, choice.engine));
-    let out = crate::state_reads::append(&job.turn(n, "jsonl"))?;
+    let out = crate::state_reads::append(&job.turn_file(n, TurnFile::Jsonl))?;
     let mut c = Command::new(&cfg.tools.timeout);
     // No claude.ai connectors (mail, calendar, drive, design tools): one of
     // 2,188 jobs in 14 days called one, and their tools were a ninth of
@@ -100,8 +101,10 @@ pub fn spawn(
         c.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
     } else {
         // Login/config failures may precede the first JSON event.
-        crate::state_reads::write(job.turn(n, "stderr"), "")?;
-        c.stderr(crate::state_reads::append(&job.turn(n, "stderr"))?);
+        crate::state_reads::write(job.turn_file(n, TurnFile::Stderr), "")?;
+        c.stderr(crate::state_reads::append(
+            &job.turn_file(n, TurnFile::Stderr),
+        )?);
     }
     if let Some(agent) = agent {
         let next = if must {
@@ -141,12 +144,13 @@ pub fn spawn(
             "This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped."
         )
     };
-    let split =
-        if job.path("inbox-issue").exists() && cfg.inbox.as_ref().is_some_and(|i| i.planning) {
-            SPLIT
-        } else {
-            ""
-        };
+    let split = if job.file(JobFile::InboxIssue).exists()
+        && cfg.inbox.as_ref().is_some_and(|i| i.planning)
+    {
+        SPLIT
+    } else {
+        ""
+    };
     let instructions = format!("{instructions} {FACTS}{split}");
     if choice.engine == Engine::Claude {
         args.extend(["--append-system-prompt".into(), instructions]);
@@ -180,7 +184,7 @@ pub fn spawn(
             crate::host_jobs::socket(cfg, job, n),
         )
         .env("PROJ_JOB", id)
-        .env("PROJ_GITHUB_DIR", job.path("github"))
+        .env("PROJ_GITHUB_DIR", job.file(JobFile::Github))
         .env(
             "PROJ_GITHUB_KICK",
             if cfg.kick.is_empty() {
@@ -189,7 +193,10 @@ pub fn spawn(
                 format!("{}/proj-watch", cfg.kick)
             },
         )
-        .env("PROJ_GITHUB_REFUSALS", job.turn(n, "github-refusals"))
+        .env(
+            "PROJ_GITHUB_REFUSALS",
+            job.turn_file(n, TurnFile::GithubRefusals),
+        )
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env);

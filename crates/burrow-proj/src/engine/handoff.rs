@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use super::Engine;
 use super::stream::{answer, resume, stream_names_session};
+use crate::record::TurnFile;
 use crate::{job::Job, read};
 
 /// How much of one answer is passed on: a long one is cut in its middle,
@@ -23,7 +24,7 @@ const KEEP: usize = 16_000;
 /// The engine turn `m` ran on. One from before engines were chosen ran on
 /// Claude.
 fn engine_of(job: &Job, m: u64) -> Engine {
-    read(&job.turn(&m.to_string(), "engine"))
+    read(&job.turn_file(&m.to_string(), TurnFile::Engine))
         .and_then(|e| Engine::parse(&e).ok())
         .unwrap_or(Engine::Claude)
 }
@@ -33,7 +34,8 @@ fn engine_of(job: &Job, m: u64) -> Engine {
 /// no conversation to resume.
 fn unseen(job: &Job, n: u64, engine: Engine) -> Vec<u64> {
     let saw = |m: &u64| {
-        engine_of(job, *m) == engine && stream_names_session(&job.turn(&m.to_string(), "jsonl"), 0)
+        engine_of(job, *m) == engine
+            && stream_names_session(&job.turn_file(&m.to_string(), TurnFile::Jsonl), 0)
     };
     let from = if resume(job, engine).is_some() {
         (1..n).rev().find(saw).map_or(1, |m| m + 1)
@@ -63,7 +65,7 @@ fn cut(text: &str, whole: &str) -> String {
 /// that engine's conversation missed some of the job, `N.handoff`, those
 /// turns and then this one's prompt.
 pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathBuf> {
-    let prompt = job.path(&format!("prompt.{n}"));
+    let prompt = job.prompt(n);
     let Ok(number) = n.parse::<u64>() else {
         return Ok(prompt);
     };
@@ -78,8 +80,8 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
     };
     for m in missed {
         let m = m.to_string();
-        let asked = read(&job.path(&format!("prompt.{m}"))).unwrap_or_default();
-        let transcript = job.turn(&m, "jsonl");
+        let asked = read(&job.prompt(&m)).unwrap_or_default();
+        let transcript = job.turn_file(&m, TurnFile::Jsonl);
         let said = answer(&transcript);
         let said = if said.trim().is_empty() {
             "(nothing: the turn ended without an answer)".to_owned()
@@ -95,7 +97,7 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
     }
     let asked = String::from_utf8_lossy(&crate::state_reads::bytes(&prompt)?).into_owned();
     text.push_str(&format!("\n\n## This turn, asked\n\n{asked}\n"));
-    let handoff = job.turn(n, "handoff");
+    let handoff = job.turn_file(n, TurnFile::Handoff);
     crate::state_reads::write(&handoff, &text)?;
     Ok(handoff)
 }
