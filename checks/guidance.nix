@@ -2,7 +2,9 @@
 # an option given with a value, or the file a live one is kept in, anywhere
 # but the generated settings reference fails, and so does an AGENTS.md whose
 # house blocks aren't house/'s. Only the Markdown is its input,
-# so a code change doesn't run it again.
+# so a code change doesn't run it again. The paths the Markdown cites are
+# lib/project.nix's guidance-paths check (crates-guidance-paths here),
+# which needs the whole tree.
 { self, pkgs, system, ... }:
 let
   markdown = pkgs.lib.fileset.toSource {
