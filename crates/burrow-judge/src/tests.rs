@@ -427,12 +427,112 @@ fn a_judge_session_that_is_the_authors_a_reviewers_or_a_past_judges_is_refused()
     let refused = ask(dir.path(), &p, &request).unwrap_err();
     assert!(refused.contains("can't judge this"), "{refused}");
     assert_eq!(w.posted().len(), 1);
-    // Each refused one's run was cancelled: nothing but the one judgment
-    // succeeded.
+    // A refused one started no check run: the one judgment's is the only
+    // one, and the latest.
     let conclusions: Vec<String> = w.completed().into_iter().map(|c| c.0).collect();
+    assert_eq!(conclusions, ["success"]);
+    assert_eq!(w.with(|p| p.runs.len()), 2);
+}
+
+#[test]
+fn what_ran_must_be_what_the_plugin_offers_and_the_flow_chose() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    let ran = |engine: &str, model: Option<&str>, effort: Option<&str>| {
+        let mut a = answer("judge-1", Judgment::Pass);
+        a.by.engine = engine.into();
+        a.execution = Some(Executed {
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+            context: Context::Fresh,
+        });
+        a
+    };
+    let judges = Scripted::answering(vec![
+        ran("codex", Some("a-model"), Some("high")),
+        ran("claude", Some("b-model"), Some("high")),
+        ran("claude", Some("a-model"), Some("low")),
+        ran("claude", None, None),
+    ]);
+    let p = producer(dir.path(), &w, judges);
+    let request = judge_request(&w, vec![Trigger::Asked]);
+    for i in 0..4 {
+        let got = ask(dir.path(), &p, &request);
+        assert!(got.is_err(), "{i}: {got:?}");
+    }
+    assert!(w.posted().is_empty());
+    assert!(w.with(|p| p.runs.is_empty()));
+    // With no choice, an offered model and effort is still required.
+    let mut unchosen = judge_request(&w, vec![Trigger::Asked]);
+    unchosen.execution.as_mut().unwrap().choice = None;
+    let judges = Scripted::answering(vec![ran("claude", Some("b-model"), None)]);
+    let p = producer(dir.path(), &w, judges);
+    assert!(ask(dir.path(), &p, &unchosen).is_err());
+    assert!(w.posted().is_empty());
+}
+
+#[test]
+fn a_judgment_overtaken_while_it_was_judged_publishes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    let judges = Scripted::answering(vec![answer("judge-1", Judgment::Pass)]);
+    let during = w.clone();
+    judges.0.lock().unwrap().during = Some(Box::new(move || {
+        during.with(|p| {
+            p.comments
+                .push(json!({"user": {"login": FLOW, "type": "Bot"},
+                "body": "<!-- autoland-judgment:v3 {\"issued\":{\"generation\":2}} -->"}))
+        })
+    }));
+    let p = producer(dir.path(), &w, judges);
+    let refused = ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap_err();
+    assert!(refused.contains("superseded"), "{refused}");
+    assert_eq!(w.posted().len(), 1);
+    assert!(w.with(|p| p.runs.is_empty()));
+}
+
+#[test]
+fn a_judgment_whose_publication_failed_goes_out_before_the_prs_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    w.with(|p| p.refusing = 1);
+    let judges = Scripted::answering(vec![
+        answer("judge-1", Judgment::Fail),
+        answer("judge-2", Judgment::Pass),
+    ]);
+    let p = producer(dir.path(), &w, judges);
+    let request = judge_request(&w, vec![Trigger::Asked]);
+    // Its comment wasn't taken: committed, it waits, with no run.
+    assert!(ask(dir.path(), &p, &request).is_err());
+    assert!(w.posted().is_empty());
+    assert!(w.with(|p| p.runs.is_empty()));
+    // The next one sends it first, so the newest run is the newest
+    // generation's.
+    ask(dir.path(), &p, &request).unwrap();
+    let posted = w.posted();
+    assert_eq!(posted.len(), 2);
+    assert!(posted[0].contains(r#""generation":1"#), "{}", posted[0]);
+    assert!(posted[1].contains(r#""generation":2"#), "{}", posted[1]);
+    let completed = w.completed();
+    assert_eq!(completed.len(), 2);
+    let (_, log) = verify(&completed[1].1, HEAD).unwrap();
+    let basis = Basis {
+        why: vec![Trigger::Asked],
+        context: w.context(),
+    };
+    let provenance = Provenance {
+        by: answer("judge-2", Judgment::Pass).by,
+        execution: answer("judge-2", Judgment::Pass).execution.unwrap(),
+    };
     assert_eq!(
-        conclusions,
-        ["cancelled", "cancelled", "success", "cancelled"]
+        log.unwrap(),
+        flow::receipt_digest(&flow::judgment_receipt_by(
+            &w.revision(),
+            2,
+            Some(Judgment::Pass),
+            Some(&provenance),
+            Some(&basis),
+        ))
     );
 }
 
@@ -503,8 +603,7 @@ fn a_stale_head_base_description_or_discussion_is_refused() {
             "{refused}"
         );
         assert!(w.posted().is_empty());
-        let conclusions: Vec<String> = w.completed().into_iter().map(|c| c.0).collect();
-        assert_eq!(conclusions, ["cancelled"]);
+        assert!(w.with(|p| p.runs.is_empty()));
     }
 }
 
@@ -711,7 +810,7 @@ fn the_runners_context_is_conarys_own_reading() {
 }
 
 #[test]
-fn an_abandoned_judgment_publishes_nothing_and_its_run_is_cancelled() {
+fn an_abandoned_judgment_publishes_nothing_and_starts_no_run() {
     let dir = tempfile::tempdir().unwrap();
     let w = world();
     let (hang_up, told) = std::sync::mpsc::channel();
@@ -730,6 +829,5 @@ fn an_abandoned_judgment_publishes_nothing_and_its_run_is_cancelled() {
         .is_err()
     );
     assert!(w.posted().is_empty());
-    let conclusions: Vec<String> = w.completed().into_iter().map(|c| c.0).collect();
-    assert_eq!(conclusions, ["cancelled"]);
+    assert!(w.with(|p| p.runs.is_empty()));
 }

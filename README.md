@@ -355,7 +355,9 @@ Each has an entry below, and each can be imported on its own.
   judging role (`plugins.judge.role`) by a runner as burrow.user, and
   published by the producer, a user of its own, as the sealed comment
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
-  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.
+  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`,
+  and stays off until #1186 moves the judging engine out of authoring
+  sessions' reach.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

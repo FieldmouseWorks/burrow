@@ -26,6 +26,8 @@ pub struct Pr {
     pub comments: Vec<Value>,
     /// Each check run started (its name), and each completed (its body).
     pub runs: Vec<Value>,
+    /// How many comment posts GitHub refuses before it takes one.
+    pub refusing: u32,
 }
 
 #[derive(Clone)]
@@ -59,6 +61,7 @@ pub fn world() -> World {
         ],
         comments: vec![],
         runs: vec![],
+        refusing: 0,
     })))
 }
 
@@ -115,6 +118,10 @@ impl Api for World {
         let mut pr = self.0.lock().unwrap();
         let rest = path.strip_prefix(&format!("repos/{REPO}")).unwrap_or(path);
         match (method, rest) {
+            ("POST", "/issues/5/comments") if pr.refusing > 0 => {
+                pr.refusing -= 1;
+                ok(502, json!({}), &[])
+            }
             ("POST", "/issues/5/comments") => {
                 pr.comments
                     .push(json!({"user": {"login": FLOW, "type": "Bot"},

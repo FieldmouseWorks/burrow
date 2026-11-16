@@ -13,15 +13,24 @@
 //!   One persisted and never published is burned.
 //! - Every request is a new judgment: the runner runs it as a fresh proj
 //!   job ([`crate::runner`]). The producer refuses its answer unless its
-//!   session is independent: not the author's, a reviewer's or one judged
-//!   before, by Conary's own `Sessions::accept`.
+//!   session is independent (not the author's, a reviewer's or one judged
+//!   before, by Conary's own `Sessions::accept`) and what ran is what the
+//!   plugin offers and the flow chose.
 //! - It holds the PR to GitHub again, then keeps the judgment, commits it,
 //!   posts the sealed comment (`SealKey::judgment_by`, sealing `why` and
-//!   `context`) and completes `conary/judgment` over
+//!   `context`) and only then starts and completes `conary/judgment` over
 //!   `judgment_receipt_by(revision, generation, verdict, provenance,
-//!   basis)`. Abandoned before it commits, it publishes nothing and its
-//!   check run is cancelled; committed, it's published whatever happens to
-//!   its request, at startup if a crash came between ([`Producer::reconcile`]).
+//!   basis)`. Abandoned before it commits, it publishes nothing and has no
+//!   check run; committed, it's published whatever happens to its request.
+//! - Conary reads a head's latest `conary/judgment` run, so that run is
+//!   always the highest generation's: one PR's judgments are published one
+//!   at a time, one whose publication failed goes out before that PR's
+//!   next, at startup if a crash came between ([`Producer::reconcile`]),
+//!   and one a later generation overtook while it was judged is refused.
+//!
+//! The runner's answers come from a `burrow.user` proj job, which an
+//! authoring session could forge: the judge stays off until #1186 moves
+//! the judging engine out of that user's reach.
 use crate::discussion::{self, current, highest_generation};
 use crate::{Config, Read};
 use burrow_github::{Api, call};
@@ -32,6 +41,7 @@ use burrow_producer::sign::{Judgment, Signer};
 use conary_core::plugin::{Answer, Context, Provenance, Request, Response, Sessions, Task};
 use conary_github::flow::{Basis, SealKey};
 use serde_json::json;
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -70,6 +80,16 @@ pub struct Producer {
     sessions: Sessions,
     /// Held while a generation is allocated.
     generations: Mutex<()>,
+    /// Held while a judgment is published, with each PR's committed
+    /// judgment whose publication failed, by [`pr_key`]: finished before
+    /// that PR's next one goes out, so the latest `conary/judgment` run on
+    /// a head is always the highest generation's, the one Conary reads.
+    publishing: Mutex<HashMap<String, Record<Judgment>>>,
+}
+
+/// A PR's key among the judgments waiting to be published.
+fn pr_key(repo: &str, pr: u64) -> String {
+    format!("{}#{pr}", repo.to_lowercase())
 }
 
 /// The flow's seal key, from the systemd credential named `name`: 64
@@ -124,6 +144,7 @@ impl Producer {
             records,
             sessions: Sessions::default(),
             generations: Mutex::new(()),
+            publishing: Mutex::default(),
         })
     }
 
@@ -199,7 +220,7 @@ impl Producer {
         drop(source);
 
         let mut api = (self.github)();
-        let mut record = self
+        let record = self
             .records
             .begin::<Judgment>(Target {
                 repo: repo.clone(),
@@ -207,31 +228,113 @@ impl Producer {
                 check: CHECK.into(),
             })
             .map_err(|e| e.to_string())?;
-        let issued = self.issue(
+        self.issue(
             &mut *api,
             &request,
             work,
-            &mut record,
+            record,
             (revision, tree, generation),
-        );
-        if issued.is_err() && !record.committed() && record.end().is_none() {
-            // Nothing went out: its check run, if started, is cancelled, and
-            // its generation is burned.
-            let _ = publish::withdraw(&mut *api, &self.records, &mut record);
-        }
-        issued
+        )
     }
 
     /// The judgment `record` is for, judged, held to GitHub again and
-    /// published.
+    /// published. Until it's committed, an error withdraws it: no check run
+    /// was started for it, and its generation is burned.
     fn issue(
         &self,
         api: &mut dyn Api,
         request: &Request,
         work: &Work,
-        record: &mut Record<Judgment>,
-        (revision, tree, generation): (conary_github::flow::Revision, String, u64),
+        mut record: Record<Judgment>,
+        judged: (conary_github::flow::Revision, String, u64),
     ) -> Result<Response, String> {
+        let (judgment, response) = match self.judge(request, work, judged) {
+            Ok(done) => done,
+            Err(why) => {
+                let _ = publish::withdraw(api, &self.records, &mut record);
+                return Err(why);
+            }
+        };
+        let body = comment(&self.seal, &judgment)?;
+        let key = pr_key(&judgment.repo, judgment.pr);
+        let (repo, pr, generation) = (judgment.repo.clone(), judgment.pr, judgment.generation);
+        let mut pending = self
+            .publishing
+            .lock()
+            .map_err(|_| "the publishing lock is poisoned")?;
+        // What an earlier judgment of this PR left goes out first, so this
+        // one's run is the newest.
+        let earlier = match pending.remove(&key) {
+            Some(mut earlier) => self.finish(api, &mut earlier).inspect_err(|_| {
+                pending.insert(key.clone(), earlier);
+            }),
+            None => Ok(()),
+        };
+        let superseded = earlier.and_then(|()| self.superseded(&repo, pr, generation));
+        if let Err(why) = superseded {
+            let _ = publish::withdraw(api, &self.records, &mut record);
+            return Err(why);
+        }
+        if let Err(why) = self.records.keep(&mut record, judgment) {
+            let _ = publish::withdraw(api, &self.records, &mut record);
+            return Err(why);
+        }
+        if work.abandoned() {
+            let _ = publish::withdraw(api, &self.records, &mut record);
+            return Err("its request was abandoned: it publishes nothing".into());
+        }
+        // Past here what goes out stands: what fails is finished before this
+        // PR's next judgment goes out, or at startup.
+        self.records.commit(&mut record)?;
+        let published = post(api, &repo, pr, &body)
+            .and_then(|()| publish::complete(api, &self.records, &self.signer, work, &mut record));
+        if let Err(why) = published {
+            pending.insert(key, record);
+            return Err(why);
+        }
+        Ok(response)
+    }
+
+    /// A committed judgment published: its comment, unless it's there, and
+    /// then its check run.
+    fn finish(&self, api: &mut dyn Api, record: &mut Record<Judgment>) -> Result<(), String> {
+        let j = record
+            .data()
+            .ok_or_else(|| format!("record {} holds no judgment", record.id()))?;
+        let body = comment(&self.seal, j)?;
+        let (repo, pr) = (j.repo.clone(), j.pr);
+        if !posted(api, &repo, pr, &body)? {
+            post(api, &repo, pr, &body)?;
+        }
+        publish::publish(api, &self.records, &self.signer, record).map(drop)
+    }
+
+    /// Why generation `generation` would no longer be the latest on
+    /// `repo`'s PR `pr`: a verdict account posted it or a later one while
+    /// it was judged. Its run would then hide that one's receipt.
+    fn superseded(&self, repo: &str, pr: u64, generation: u64) -> Result<(), String> {
+        let flow = self.cfg.flow(repo)?;
+        let source = (self.read)()?;
+        let comments = source
+            .comments(repo, pr)
+            .map_err(|e| format!("{repo}#{pr}'s comments: {e}"))?;
+        if highest_generation(&comments, &flow.settings.verdict_authors) >= generation {
+            return Err(format!(
+                "{repo}#{pr} has a judgment of a later generation than {generation} now, so this one is superseded"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The runner's judgment of `request`, held to the request, to the
+    /// flow's choice and to GitHub again, ready to keep, and the answer
+    /// the flow gets.
+    fn judge(
+        &self,
+        request: &Request,
+        work: &Work,
+        (revision, tree, generation): (conary_github::flow::Revision, String, u64),
+    ) -> Result<(Judgment, Response), String> {
         let Task::Judge {
             repo,
             pr,
@@ -244,7 +347,6 @@ impl Producer {
         else {
             return Err("the judge judges alone".into());
         };
-        publish::start(api, &self.records, record)?;
         let answer = self.judges.judge(request, work)?;
         if work.abandoned() {
             return Err("its request was abandoned: it publishes nothing".into());
@@ -274,6 +376,15 @@ impl Producer {
         self.sessions
             .accept(&request.task, &Context::Fresh, &answer.by)
             .map_err(|e| format!("the judge's session can't judge this: {e}"))?;
+        // What ran is what the plugin offers and the flow chose, before it's
+        // sealed: Conary would refuse the answer, but not what went out.
+        burrow_producer::jobs::ran_as(
+            &self.cfg.settings,
+            &self.cfg.role,
+            request.execution.as_ref().and_then(|e| e.choice.as_ref()),
+            &answer.by.engine,
+            &execution,
+        )?;
         let provenance = Provenance {
             by: answer.by.clone(),
             execution: execution.clone(),
@@ -310,16 +421,7 @@ impl Producer {
             }),
             reasons: reasons.clone(),
         };
-        let body = comment(&self.seal, &judgment)?;
-        self.records.keep(record, judgment)?;
-        if work.abandoned() {
-            return Err("its request was abandoned: it publishes nothing".into());
-        }
-        // Past here what goes out stands: a crash is finished at startup.
-        self.records.commit(record)?;
-        post(api, repo, *pr, &body)?;
-        publish::complete(api, &self.records, &self.signer, work, record)?;
-        Ok(Response {
+        let response = Response {
             contract: request.contract.clone(),
             by: answer.by,
             execution: Some(execution),
@@ -327,7 +429,8 @@ impl Producer {
                 verdict,
                 why: reasons,
             },
-        })
+        };
+        Ok((judgment, response))
     }
 
     /// The next generation for `repo`'s PR `pr`, past every one it issued

@@ -242,3 +242,58 @@ pub fn runnable(
     }
     Ok(())
 }
+
+/// Whether an answer by `engine`, which reports `ran`, is what a plugin
+/// whose work runs on `role` offers and what the flow chose (`choice`):
+/// the role's engine, a model it offers (named whenever it offers any) at
+/// an effort that model takes, and the model and effort the flow chose, if
+/// it chose them. [`runnable`] holds the role to that before a job starts;
+/// this holds what actually ran to it before anything of it is published,
+/// since the role can change in between.
+pub fn ran_as(
+    settings: &burrow_settings::Config,
+    role: &str,
+    choice: Option<&Choice>,
+    engine: &str,
+    ran: &conary_core::plugin::Executed,
+) -> Result<(), String> {
+    let (named, models) = offered(settings, role)?;
+    if engine != named {
+        return Err(format!(
+            "it ran on {engine}, and the plugin names itself by {named}"
+        ));
+    }
+    match &ran.model {
+        None if !models.is_empty() => {
+            return Err(format!("it doesn't say which of {named}'s models ran"));
+        }
+        None if ran.effort.is_some() => return Err("it names an effort but no model".into()),
+        None => {}
+        Some(model) => {
+            let offer = models
+                .iter()
+                .find(|m| m.id == *model)
+                .ok_or_else(|| format!("{model} isn't a model the plugin offers"))?;
+            if let Some(effort) = &ran.effort
+                && !offer.efforts.contains(effort)
+            {
+                return Err(format!("{model} isn't offered at {effort}"));
+            }
+        }
+    }
+    if let Some(c) = choice
+        && (c.engine != named
+            || c.model
+                .as_ref()
+                .is_some_and(|m| Some(m) != ran.model.as_ref())
+            || c.effort
+                .as_ref()
+                .is_some_and(|e| Some(e) != ran.effort.as_ref()))
+    {
+        return Err(format!(
+            "the flow chose {} {:?} {:?}, and {:?} {:?} ran",
+            c.engine, c.model, c.effort, ran.model, ran.effort
+        ));
+    }
+    Ok(())
+}

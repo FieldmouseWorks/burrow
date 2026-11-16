@@ -15,7 +15,9 @@
 #
 # Off by default: Conary#314 turns the flow's plugins on, with the
 # producer's key, the seal key and the producer's line in the machine's
-# producers file.
+# producers file. Not before burrow#1186: the job, its answers and the
+# runner are burrow.user's, so an authoring session could answer in the
+# judge's place, and the judging engine must first move out of its reach.
 # Part of burrow.autoland, which imports it.
 inputs:
 { config, lib, pkgs, ... }:
