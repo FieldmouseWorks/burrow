@@ -4,6 +4,7 @@
 config:
 let
   inherit (config.burrow) stateDir;
+  producerReviewDir = "/var/lib/burrow-review-looks";
 in
 {
   # The user the review agents run as: it has no GitHub login, and reads
@@ -18,9 +19,11 @@ in
   snapDir = "/var/cache/autoland/snap";
   # The review producer's fresh looks (autoland/review-producer.nix): each
   # one's snapshot, which the producer takes and the reviewers' group
-  # reads, and its session's home, which the reviewers' service makes.
-  # Nothing in it is resumed; a cache too.
-  freshDir = "/var/cache/autoland/fresh";
+  # reads. Session homes are private to the reviewers' service in the
+  # protected root, which no authoring user can replace.
+  inherit producerReviewDir;
+  askerGroup = "autoland-review-askers";
+  freshDir = "${producerReviewDir}/snapshots";
   # Where a repo's pass is kicked: the reviewers' service kicks it when an
   # answer comes back, the steward when it books one.
   stewardKick = "${config.burrow.events.kick}/autoland";

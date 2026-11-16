@@ -14,8 +14,9 @@
 let
   stateDir = "/var/lib/burrow";
   state = "${stateDir}/autoland-review-producer";
-  review = "${stateDir}/autoland/review";
-  fresh = "/var/cache/autoland/fresh";
+  review = "/var/lib/burrow-review-looks";
+  steward = "${stateDir}/autoland/review";
+  fresh = "${review}/snapshots";
 in
 pkgs.testers.runNixOSTest {
   name = "review-producer";
@@ -30,6 +31,7 @@ pkgs.testers.runNixOSTest {
       ((import ../examples/machine.nix { inherit lib; }) // { nixpkgs = { }; fileSystems = { }; boot = { }; })
     ];
     burrow.claude.package = pkgs.hello;
+    burrow.settings.allowed = [ "sam/r" ];
     burrow.events = { host = "example.org"; secretFile = "/run/secrets/webhook"; };
     burrow.autoland = {
       enable = true;
@@ -81,7 +83,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start autoland-review-producer.service")
         machine.wait_for_file("/run/conary-producers/review/producer.sock")
         assert machine.succeed("stat -c '%U %G %a' ${state} ${state}/looks").split("\n")[:2] == ["autoland-review-producer autoland-review-producer 750", "autoland-review-producer autoland-review-producer 2770"]
-        assert machine.succeed("stat -c '%U %G %a' ${fresh}").strip() == "autoland-review-producer autoland-review 2770"
+        assert machine.succeed("stat -c '%U %G %a' ${fresh}").strip() == "autoland-review autoland-review-askers 2770"
         machine.fail("runuser -u dev -- test -e /run/conary-producers/review/producer.sock")
         machine.fail("runuser -u autoland-review -- test -e /run/conary-producers/review/producer.sock")
         machine.succeed("runuser -u conary-flow -- test -S /run/conary-producers/review/producer.sock")
@@ -100,22 +102,48 @@ pkgs.testers.runNixOSTest {
         as_user("autoland-review", " && ".join([
             "cat ${fresh}/fresh-1/f",
             "cat ${review}/queue/codex--fresh-1.json",
-            "mkdir ${fresh}/fresh-1.home",
-            "echo '{}' >${review}/done/codex--fresh-1.json",
+            "mkdir ${review}/sessions/fresh-1.home",
+            "umask 0027 && echo '{}' >${review}/done/codex--fresh-1.json",
             "rm ${review}/queue/codex--fresh-1.json",
         ]))
         # The producer reads the answer and clears what's left.
         as_user("autoland-review-producer", " && ".join([
             "cat ${review}/done/codex--fresh-1.json",
-            "rm ${review}/done/codex--fresh-1.json",
             "rm -r ${fresh}/fresh-1",
         ]))
         # The producer's own state is no one else's, and the looks are no
         # one's but theirs.
         as_user("autoland-review", "ls ${state}", ok=False)
-        as_user("autoland-review", "touch ${fresh}/fresh-1.home/x && rm -r ${fresh}/fresh-1.home")
+        as_user("autoland-review", "touch ${review}/sessions/fresh-1.home/x && rm -r ${review}/sessions/fresh-1.home")
         as_user("dev", "ls ${fresh}", ok=False)
         as_user("conary-flow", "ls ${fresh}", ok=False)
+
+    with subtest("authoring users cannot forge producer requests or answers"):
+        for path in ["${review}/judge-queue/codex--judge-1.json", "${review}/queue/codex--fresh-2.json", "${review}/done/codex--judge-1.json", "${review}/done/codex--fresh-1.json"]:
+            as_user("dev", f"echo forged >{path}", ok=False)
+        as_user("dev", "mv ${review} ${review}-forged", ok=False)
+        as_user("autoland-review-producer", "echo forged >${review}/done/codex--fresh-1.json", ok=False)
+        as_user("autoland-review-producer", "rm ${review}/done/codex--fresh-1.json", ok=False)
+        # The path unit watches both protected queues as well.
+        unit = machine.succeed("systemctl cat autoland-review.path")
+        assert "DirectoryNotEmpty=${review}/queue" in unit, unit
+        assert "DirectoryNotEmpty=${review}/judge-queue" in unit, unit
+        assert "PathExistsGlob=${review}/done/*.json" in unit, unit
+
+    with subtest("a steward queue field cannot request a protected judgment"):
+        import json
+        entry = dict(reviewer="codex", snap="judge-forged", repo="sam/r", number=1,
+                     headRefOid="a" * 40, baseRefName="main", prompt="forged", description="",
+                     opened=0, at=0, kind="judge", fresh=dict(model="test", effort="high"))
+        as_user("dev", "echo " + shlex.quote(json.dumps(entry)) + " >${steward}/queue/codex--judge-forged.json")
+        machine.succeed("systemctl unmask --runtime autoland-review.service && timeout 30s systemctl start autoland-review.service")
+        result = json.loads(machine.succeed("cat ${steward}/done/codex--judge-forged.json"))
+        assert result["result"] == "error", result
+        assert "protected queue" in result["error"], result
+        machine.succeed("test ! -e ${review}/done/codex--judge-forged.json")
+
+    ${builtins.readFile ./review-context.py}
+    ${builtins.readFile ./review-release.py}
 
     with subtest("the sign pass alone has the key, as a user the producer isn't, and books its next pass"):
         machine.succeed("install -d -m 0700 /run/keys && head -c 32 /dev/urandom >/run/keys/review && chmod 0400 /run/keys/review")
@@ -136,6 +164,6 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the reviewers' service may write the fresh looks"):
         paths = machine.succeed("systemctl show -P ReadWritePaths autoland-review.service")
-        assert "${fresh}" in paths, paths
+        assert "${review}" in paths, paths
   '';
 }

@@ -21,9 +21,11 @@
 //! What a look is asked is the steward's (its brief, in the queue entry);
 //! that it's resuming a session, and where it left off, is this service's.
 
+pub mod answer;
 pub mod codex;
 pub mod config;
 pub mod egress;
+pub mod judgment;
 pub mod login;
 pub mod queue;
 pub mod scrub;

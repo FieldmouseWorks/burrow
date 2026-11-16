@@ -449,6 +449,8 @@ fn an_abandoned_look_is_stopped_and_keeps_nothing() {
             queue: cfg.queue.clone(),
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
+            reviewer_uid: rustix_uid(),
+            answer_root: Some(std::fs::File::open(&cfg.done).unwrap()),
         }))
     });
     let me = Controller(rustix_uid());
@@ -464,7 +466,12 @@ fn an_abandoned_look_is_stopped_and_keeps_nothing() {
         .unwrap();
     // The look is queued for the reviewers' service, which never answers.
     let queued = || std::fs::read_dir(&r.cfg.queue).unwrap().count();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
     while queued() == 0 {
+        assert!(
+            std::time::Instant::now() < until,
+            "look never stayed queued"
+        );
         thread::sleep(Duration::from_millis(10));
     }
     drop(stream);
@@ -485,6 +492,8 @@ fn the_queue_reads_what_the_service_left() {
             queue: cfg.queue.clone(),
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
+            reviewer_uid: rustix_uid(),
+            answer_root: Some(std::fs::File::open(&cfg.done).unwrap()),
         }))
     });
     // The service: it answers the one look queued, as work.rs does.
@@ -499,7 +508,8 @@ fn the_queue_reads_what_the_service_left() {
                 burrow_review::queue::save(
                     &done.join(entry.file_name()),
                     &json!({"result": "review", "answer": ran.answer,
-                        "ran": {"session": "codex-s7", "model": "m-1", "effort": "high"}}),
+                        "ran": {"session": "codex-s7", "model": "m-1", "effort": "high"},
+                        "digest": burrow_review::answer::digest(&std::fs::read(entry.path()).unwrap())}),
                 )
                 .unwrap();
                 return;
@@ -511,7 +521,7 @@ fn the_queue_reads_what_the_service_left() {
     service.join().unwrap();
     assert_eq!(got["by"]["session"], "codex-s7");
     assert_eq!(got["findings"], json!([finding()]));
-    assert_eq!(std::fs::read_dir(&r.cfg.done).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&r.cfg.done).unwrap().count(), 1);
 }
 
 /// A rig with one look answered and kept, and that look.
@@ -873,6 +883,9 @@ fn a_restart_lets_go_of_the_looks_it_left_and_nothing_else() {
     // The steward's looks are its own.
     let steward = ["codex--pr-acme__widget-5-111111111111-22222222.json"];
     assert_eq!(left(&r.cfg.queue), steward);
-    assert_eq!(left(&r.cfg.done), steward);
+    assert_eq!(
+        left(&r.cfg.done),
+        vec!["codex--fresh-1.json".to_owned(), steward[0].to_owned()]
+    );
     assert_eq!(r.snaps.0.lock().unwrap().1, ["fresh-1"]);
 }

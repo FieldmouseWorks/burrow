@@ -37,8 +37,9 @@ pub struct Item {
     pub opened: f64,
     pub at: f64,
     /// The review producer's look: in a session of its own, never resumed,
-    /// on its own snapshot (config.rs `fresh`), on the model and effort
-    /// the flow chose. None for the steward's.
+    /// on its own snapshot (config.rs `producers`), on the model and effort
+    /// the flow chose. Only protected queues accept this; their directory
+    /// selects review or judgment. None for the steward's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh: Option<Fresh>,
 }

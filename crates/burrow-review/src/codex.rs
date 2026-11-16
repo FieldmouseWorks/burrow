@@ -265,6 +265,7 @@ pub fn look(
     repo: &str,
     fresh: Option<&Fresh>,
     stop: &dyn Fn() -> bool,
+    schema: Value,
 ) -> Result<(Value, String), Failed> {
     let err = |e: io::Error| Failed::Error(e.to_string());
     let login = s.home.join(".codex");
@@ -276,7 +277,7 @@ pub fn look(
     let lent = s.logins.lend(home).map_err(err)?;
     let t = tempfile::tempdir().map_err(err)?;
     let t = t.path();
-    fs::write(t.join("schema.json"), schema().to_string()).map_err(err)?;
+    fs::write(t.join("schema.json"), schema.to_string()).map_err(err)?;
     let quoted = |p: &Path| Value::String(p.to_string_lossy().into_owned()).to_string();
     let mut flags: Vec<OsString> = vec![
         "--json".into(),

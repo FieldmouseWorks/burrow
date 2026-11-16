@@ -826,10 +826,12 @@ dependencies = [
  "burrow-process",
  "burrow-settings",
  "burrow-test",
+ "conary-core",
  "jiff",
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

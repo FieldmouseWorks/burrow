@@ -32,7 +32,7 @@ let
   apps = config.burrow.github.apps;
   app = if cfg.app == null then null else apps.${cfg.app} or null;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review-producer;
-  inherit (import ./paths.nix config) reviewer reviewDir freshDir;
+  inherit (import ./paths.nix config) producerReviewDir freshDir askerGroup;
   producer = "autoland-review-producer";
   sign = "autoland-review-sign";
   state = "${stateDir}/${producer}";
@@ -120,8 +120,8 @@ in
         gh = if app == null then null else "${app.gh}/bin/gh";
         inherit state;
         fresh = freshDir;
-        queue = "${reviewDir}/queue";
-        done = "${reviewDir}/done";
+        queue = "${producerReviewDir}/queue";
+        done = "${producerReviewDir}/done";
         sign = signState;
         keep = cfg.keepHours * 3600;
       };
@@ -158,8 +158,8 @@ in
     users.users.${producer} = {
       isSystemUser = true;
       group = producer;
-      # The reviewers' queue and answers, which their group writes.
-      extraGroups = [ reviewer ];
+      # Submit protected requests and read answers; never write answers.
+      extraGroups = [ askerGroup ];
     };
     users.groups.${producer} = { };
     # The looks, which it reads, marks signed and lets go of.
@@ -179,9 +179,6 @@ in
       ${state}.d = { mode = "0750"; user = producer; group = producer; };
       "${state}/looks".d = { mode = "2770"; user = producer; group = producer; };
       ${signState}.d = { mode = "0755"; user = sign; group = sign; };
-      # A look's snapshot, for the reviewers' group to read, and its
-      # session's home, which the reviewers' service makes there.
-      ${freshDir}.d = { mode = "2770"; user = producer; group = reviewer; };
     };
 
     systemd.services.${producer} = {

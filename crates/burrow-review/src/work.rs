@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::queue::{self, Fresh, Item};
+use crate::queue::{self, Item};
 use crate::scrub::{head, said, scrub};
 use crate::{Failed, Service, codex, now};
 
@@ -30,18 +30,71 @@ const AGAIN_EVERY: Duration = Duration::from_secs(5);
 /// sweep took off the queue first (its PR moved on before it began) leaves
 /// nothing to do.
 pub fn review(s: &Service, name: &str) {
-    let path = s.cfg.queue.join(name);
-    let held = match queue::open(&path) {
+    queued(
+        s,
+        &Job {
+            name: name.into(),
+            kind: Kind::Steward,
+        },
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Kind {
+    Steward,
+    Fresh,
+    Judge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Job {
+    name: String,
+    kind: Kind,
+}
+
+impl Job {
+    fn queue<'a>(&self, s: &'a Service) -> &'a Path {
+        match self.kind {
+            Kind::Steward => &s.cfg.queue,
+            Kind::Fresh => &s.cfg.producers.as_ref().expect("producer queue").queue,
+            Kind::Judge => {
+                &s.cfg
+                    .producers
+                    .as_ref()
+                    .expect("producer queue")
+                    .judge_queue
+            }
+        }
+    }
+    fn done<'a>(&self, s: &'a Service) -> &'a Path {
+        match self.kind {
+            Kind::Steward => &s.cfg.done,
+            _ => &s.cfg.producers.as_ref().expect("producer queue").done,
+        }
+    }
+    fn save(&self, s: &Service, value: &Value) -> io::Result<()> {
+        let path = self.done(s).join(&self.name);
+        match self.kind {
+            Kind::Steward => queue::save(&path, value),
+            _ => crate::answer::save(&path, value),
+        }
+    }
+    fn session(&self) -> (Kind, String) {
+        (self.kind, queue::session_of(&self.name))
+    }
+}
+
+fn queued(s: &Service, job: &Job) {
+    let name = &job.name;
+    let path = job.queue(s).join(name);
+    let mut held = match queue::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => {
             // One it can't open is answered, or it'd be handed out forever.
             let why = head(&format!("its queue entry can't be opened: {e}"), 300, &[]);
             s.say(&format!("{name}: review failed: {why}"));
-            let _ = queue::save(
-                &s.cfg.done.join(name),
-                &json!({"result": "error", "error": why, "at": now()}),
-            );
+            let _ = job.save(s, &json!({"result": "error", "error": why, "at": now()}));
             let _ = queue::remove(&path);
             return;
         }
@@ -52,7 +105,12 @@ pub fn review(s: &Service, name: &str) {
     if held.lock_shared().is_err() || held.metadata().is_ok_and(|m| m.nlink() == 0) {
         return;
     }
-    let raw = queue::load(&path);
+    // Hash exactly the bytes parsed, not a second read of a mutable entry.
+    let mut bytes = Vec::new();
+    if held.read_to_end(&mut bytes).is_err() {
+        bytes.clear();
+    }
+    let raw: Option<Value> = serde_json::from_slice(&bytes).ok();
     let item = match &raw {
         None => Err("its queue entry is unreadable".to_owned()),
         Some(v) => serde_json::from_value::<Item>(v.clone())
@@ -60,9 +118,16 @@ pub fn review(s: &Service, name: &str) {
     };
     let out = match &item {
         Err(e) => Err(Failed::Error(e.clone())),
-        Ok(item) => match &item.fresh {
-            None => look(s, item).map(|answer| (answer, Value::Null)),
-            Some(fresh) => fresh_look(s, item, fresh, &path),
+        Ok(item) => match job.kind {
+            Kind::Steward
+                if item.fresh.is_some() || raw.as_ref().is_some_and(|v| !v["kind"].is_null()) =>
+            {
+                Err(Failed::Error(
+                    "producer looks require a protected queue".into(),
+                ))
+            }
+            Kind::Steward => look(s, item).map(|answer| (answer, Value::Null)),
+            kind => fresh_look(s, item, &path, kind),
         },
     };
     // Read once it's done: a refresh while it ran is scrubbed too.
@@ -78,7 +143,7 @@ pub fn review(s: &Service, name: &str) {
     let mut back = match out {
         Err(Failed::Paused { .. }) => return,
         Ok((answer, ran)) => {
-            let mut back = json!({"result": "review", "answer": scrub(&answer, &keys),
+            let mut back = json!({"result": if job.kind == Kind::Judge { "judgment" } else { "review" }, "answer": scrub(&answer, &keys),
                                   "description": item.as_ref().map(|i| i.description.clone())});
             if !ran.is_null() {
                 back["ran"] = ran;
@@ -101,6 +166,9 @@ pub fn review(s: &Service, name: &str) {
         }
     };
     back["at"] = json!(now());
+    if job.kind != Kind::Steward {
+        back["digest"] = json!(crate::answer::digest(&bytes));
+    }
     // The head it read, for a PR that has moved on since (the steward's
     // `overtaken`).
     if raw.as_ref().is_some_and(Value::is_object) {
@@ -109,14 +177,14 @@ pub fn review(s: &Service, name: &str) {
     }
     // Out of the queue even if the answer can't be kept: with nothing back
     // the steward counts it lost and queues it again.
-    if let Err(e) = queue::save(&s.cfg.done.join(name), &back) {
+    if let Err(e) = job.save(s, &back) {
         s.say(&format!("{name}: couldn't keep its answer: {e}"));
     }
     let _ = fs::remove_file(&path);
     // A fresh look's answer is the review producer's, which waits on it:
     // there's nothing in it for the steward's pass.
     if let Some(repo) = tag(&raw, "repo").as_str()
-        && tag(&raw, "fresh").is_null()
+        && job.kind == Kind::Steward
     {
         let url = format!("{}/{repo}", s.cfg.kick);
         if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
@@ -198,6 +266,7 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
         &item.repo,
         None,
         &|| false,
+        codex::schema(),
     ) {
         Ok(got) => got,
         Err(e) => {
@@ -242,13 +311,13 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
 fn fresh_look(
     s: &Service,
     item: &Item,
-    fresh: &Fresh,
     entry: &Path,
+    kind: Kind,
 ) -> Result<(Value, Value), Failed> {
     if s.cfg.paused(&item.repo) {
         return Err(Failed::Paused { session: None });
     }
-    let Some(dir) = &s.cfg.fresh else {
+    let Some(paths) = &s.cfg.producers else {
         return Err(Failed::Error("this machine has no review producer".into()));
     };
     if !on(s, &item.reviewer, &item.repo) {
@@ -257,12 +326,24 @@ fn fresh_look(
             item.repo, item.reviewer
         )));
     }
-    let snap = dir.join(&item.snap);
+    let fresh = item
+        .fresh
+        .as_ref()
+        .ok_or_else(|| Failed::Error("a producer look needs execution options".into()))?;
+    if kind == Kind::Judge
+        && (fresh.model.as_deref().is_none_or(str::is_empty)
+            || fresh.effort.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(Failed::Error(
+            "a judgment requires its model and effort".into(),
+        ));
+    }
+    let snap = paths.snapshots.join(&item.snap);
     if item.snap.contains('/') || item.snap.starts_with('.') || !snap.is_dir() {
         return Err(Failed::Error("its snapshot is gone".into()));
     }
-    let home = dir.join(format!("{}.home", item.snap));
-    let _ = remove_all(&home);
+    let home = tempfile::tempdir_in(&paths.sessions).map_err(|e| Failed::Error(e.to_string()))?;
+    let home_path = home.path();
     let pr = format!("{}#{}", item.repo, item.number);
     s.say(&format!(
         "{pr}: {} is reviewing {} afresh, for the review producer",
@@ -273,21 +354,29 @@ fn fresh_look(
         s,
         &snap,
         &item.prompt,
-        &home,
+        home_path,
         None,
         &item.repo,
         Some(fresh),
         &|| !entry.exists(),
+        if kind == Kind::Judge {
+            crate::judgment::schema()
+        } else {
+            codex::schema()
+        },
     );
-    let _ = remove_all(&home);
+    let _ = remove_all(home_path);
     let (answer, sid) = got?;
+    if kind == Kind::Judge {
+        crate::judgment::validate(&answer).map_err(Failed::Error)?;
+    }
     let effort = fresh
         .effort
         .clone()
         .unwrap_or_else(|| s.cfg.reviewers.codex.effort.clone());
     Ok((
         answer,
-        json!({"session": sid, "model": fresh.model, "effort": effort}),
+        json!({"engine": "codex", "session": sid, "model": fresh.model, "effort": effort}),
     ))
 }
 
@@ -335,6 +424,28 @@ fn remove_all(path: &Path) -> io::Result<()> {
     fs::remove_dir(path)
 }
 
+/// Askers release an answer by removing its snapshot. Run while parked or
+/// busy, and after the last worker publishes (even if its snapshot already
+/// disappeared), so no invocation or path activation is needed to collect it.
+fn reclaim(s: &Service) -> bool {
+    let mut retained = false;
+    if let Some(p) = &s.cfg.producers {
+        for entry in fs::read_dir(&p.done).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some((_, snap)) = name.strip_suffix(".json").and_then(|n| n.split_once("--")) {
+                // A retained answer is work still in hand, even with empty
+                // queues. PathChanged can miss a release during shutdown.
+                // Exit normally only once every protected answer is gone.
+                if p.snapshots.join(snap).exists() || queue::remove(&entry.path()).is_err() {
+                    retained = true;
+                }
+            }
+        }
+    }
+    retained
+}
+
 /// Every queued look, `parallel` at a time for each reviewer, until the
 /// queue is empty (passes may add to it meanwhile). A free place goes to
 /// the lead repos' looks first (`leadRepos`), then to the rest of the
@@ -347,57 +458,61 @@ fn remove_all(path: &Path) -> io::Result<()> {
 pub fn work(s: Arc<Service>) -> Ended {
     forget(&s);
     let _watch = s.logins.watch();
-    let (done_tx, done) = mpsc::channel::<String>();
+    let (done_tx, done) = mpsc::channel::<Job>();
     // Only what's in hand: a name done with and queued again (a retry, a
     // second look) is taken again.
-    let mut busy: HashSet<String> = HashSet::new();
+    let mut busy: HashSet<Job> = HashSet::new();
     loop {
+        reclaim(&s);
         while let Ok(name) = done.try_recv() {
             busy.remove(&name);
         }
-        let mut waiting: BTreeMap<String, Vec<(u8, f64, f64, String)>> = BTreeMap::new();
+        let mut waiting: BTreeMap<String, Vec<(u8, f64, f64, Job)>> = BTreeMap::new();
         let mut parked = false;
-        let names = match fs::read_dir(&s.cfg.queue) {
-            Ok(d) => d
+        let mut sources = vec![(Kind::Steward, &s.cfg.queue)];
+        if let Some(p) = &s.cfg.producers {
+            sources.extend([(Kind::Fresh, &p.queue), (Kind::Judge, &p.judge_queue)]);
+        }
+        let jobs = sources.into_iter().flat_map(|(kind, dir)| {
+            fs::read_dir(dir)
+                .into_iter()
                 .flatten()
-                .map(|x| x.file_name().to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                s.say(&format!("couldn't read the queue: {e}"));
-                Vec::new()
-            }
-        };
-        for name in names {
-            if !name.ends_with(".json") || busy.contains(&name) {
+                .flatten()
+                .map(move |e| Job {
+                    kind,
+                    name: e.file_name().to_string_lossy().into_owned(),
+                })
+        });
+        for job in jobs {
+            let name = &job.name;
+            if !name.ends_with(".json") || busy.contains(&job) {
                 continue;
             }
-            let r = queue::reviewer_of(&name);
+            let r = queue::reviewer_of(name);
             if s.cfg.reviewer(r).is_none() {
                 // A reviewer this machine no longer has (one removed since
                 // it was queued): nothing would ever take it, and the queue
                 // watcher would start this again and again until systemd
                 // gave up on it, and on every other review with it. Taken
                 // off unanswered, unless a worker from before is still on it.
-                if queue::taken(&s.cfg.queue.join(&name)) {
+                if queue::taken(&job.queue(&s).join(name)) {
                     s.say(&format!(
                         "{name}: dropped from the queue: there's no reviewer {r} here"
                     ));
                 }
                 continue;
             }
-            let item = queue::load(&s.cfg.queue.join(&name)).unwrap_or(Value::Null);
+            let item = queue::load(&job.queue(&s).join(name)).unwrap_or(Value::Null);
             if item["repo"].as_str().is_some_and(|repo| s.cfg.paused(repo)) {
                 parked = true;
                 continue;
             }
             let num = |k: &str| item[k].as_f64().unwrap_or(0.0);
             let rank = s.cfg.rank(item["repo"].as_str());
-            waiting.entry(r.to_owned()).or_default().push((
-                rank,
-                num("opened"),
-                num("at"),
-                name.clone(),
-            ));
+            waiting
+                .entry(r.to_owned())
+                .or_default()
+                .push((rank, num("opened"), num("at"), job));
         }
         // Another generation is deployed: the looks under way finish (the
         // policy they're held to is the deployed one's), none starts, and
@@ -407,20 +522,23 @@ pub fn work(s: Arc<Service>) -> Ended {
         if moved {
             waiting.clear();
         }
-        let mut sessions: HashSet<String> = busy.iter().map(|n| queue::session_of(n)).collect();
+        let mut sessions: HashSet<_> = busy.iter().map(Job::session).collect();
         for (r, mut names) in waiting {
             let parallel = s.cfg.reviewer(&r).map_or(0, |(_, rv)| rv.parallel);
-            let mut free =
-                parallel.saturating_sub(busy.iter().filter(|n| queue::reviewer_of(n) == r).count());
+            let mut free = parallel.saturating_sub(
+                busy.iter()
+                    .filter(|n| queue::reviewer_of(&n.name) == r)
+                    .count(),
+            );
             names.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             for (.., name) in names {
                 if free == 0 {
                     break;
                 }
-                if sessions.insert(queue::session_of(&name)) {
+                if sessions.insert(name.session()) {
                     let (s, tx, n) = (s.clone(), done_tx.clone(), name.clone());
                     thread::spawn(move || {
-                        review(&s, &n);
+                        queued(&s, &n);
                         let _ = tx.send(n);
                     });
                     busy.insert(name);
@@ -433,10 +551,11 @@ pub fn work(s: Arc<Service>) -> Ended {
                 if handed {
                     s.say("another generation is deployed: its program takes the queue");
                 }
+                reclaim(&s);
                 forget(&s);
                 return Ended::Moved;
             }
-            if parked {
+            if parked || reclaim(&s) {
                 thread::sleep(AGAIN_EVERY);
                 continue;
             }
@@ -457,6 +576,6 @@ pub enum Ended {
     /// Nothing left that it can take.
     Done,
     /// Another generation is deployed, and nothing is under way: the
-    /// deployed program, with its own config, takes the queue from here.
+    /// loaded systemd unit starts a fresh context to take the queue.
     Moved,
 }

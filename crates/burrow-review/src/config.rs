@@ -23,12 +23,9 @@ pub struct Config {
     pub sessions: PathBuf,
     /// The snapshots' checkouts, by name: what a look reads.
     pub snapshots: PathBuf,
-    /// The review producer's looks (crates/burrow-review-producer), when
-    /// it's on: each one's snapshot, `NAME`, which the producer takes and
-    /// clears, and its session's home, `NAME.home`, which a look makes
-    /// and clears. Nothing in it is resumed.
+    /// Producer queues and answers, outside the authoring user's state.
     #[serde(default)]
-    pub fresh: Option<PathBuf>,
+    pub producers: Option<ProducerPaths>,
     pub reviewers: Reviewers,
     /// How long one look may take, in minutes.
     pub timeout_minutes: f64,
@@ -141,7 +138,7 @@ impl Config {
     /// Whether the deployed generation isn't this run's: a switch (or a
     /// rollback) put another in place, or this run was started from a unit
     /// systemd hadn't reloaded yet. It takes no more looks, and hands the
-    /// queue to the deployed program (main.rs).
+    /// queue to a fresh systemd invocation (main.rs).
     pub fn moved(&self) -> bool {
         self.deployed
             .as_ref()
@@ -214,4 +211,15 @@ impl Config {
             2
         }
     }
+}
+
+/// Each queue selects its own kind; untrusted entries cannot select it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProducerPaths {
+    pub queue: PathBuf,
+    pub judge_queue: PathBuf,
+    pub done: PathBuf,
+    pub snapshots: PathBuf,
+    pub sessions: PathBuf,
 }

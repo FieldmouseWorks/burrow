@@ -82,7 +82,8 @@ impl Producer {
 
     /// At startup: let go of every look a restart left. Their requests
     /// went with it, so their queue entries are taken off (which stops a
-    /// look under way), and their answers and snapshots cleared. How many
+    /// look under way), and their snapshots cleared. The reviewers reclaim
+    /// protected answers when their snapshots go. How many
     /// it let go.
     pub fn reconcile(&self) -> Result<usize, String> {
         let entry = |name: &str| {
@@ -92,13 +93,11 @@ impl Producer {
                 .map(str::to_owned)
         };
         let mut gone = 0;
-        for dir in [&self.cfg.queue, &self.cfg.done] {
-            for name in names(dir)? {
-                if entry(&name).is_some() {
-                    burrow_review::queue::remove(&dir.join(&name))
-                        .map_err(|e| format!("{}: {e}", dir.join(&name).display()))?;
-                    gone += usize::from(dir == &self.cfg.queue);
-                }
+        for name in names(&self.cfg.queue)? {
+            if entry(&name).is_some() {
+                burrow_review::queue::remove(&self.cfg.queue.join(&name))
+                    .map_err(|e| format!("{}: {e}", self.cfg.queue.join(&name).display()))?;
+                gone += 1;
             }
         }
         for name in names(&self.cfg.fresh)? {
