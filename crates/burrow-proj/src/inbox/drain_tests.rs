@@ -74,7 +74,7 @@ fn the_drain_picks() {
 fn room_for_the_drain() {
     let b = Box::new();
     let cfg = &b.cfg;
-    assert!(crate::slot::room(cfg, Engine::Codex));
+    assert!(crate::slot::room(cfg, Engine::Codex, false));
     let held: Vec<fs::File> = (1..=cfg.codex_slots)
         .map(|i| {
             let f = fs::File::create(cfg.jobs.join(".codex-slots").join(i.to_string())).unwrap();
@@ -82,11 +82,11 @@ fn room_for_the_drain() {
             f
         })
         .collect();
-    assert!(!crate::slot::room(cfg, Engine::Codex));
+    assert!(!crate::slot::room(cfg, Engine::Codex, false));
     drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Codex)));
+    assert!(soon(|| crate::slot::room(cfg, Engine::Codex, false)));
 
-    assert!(crate::slot::room(cfg, Engine::Claude));
+    assert!(crate::slot::room(cfg, Engine::Claude, false));
     let slots = cfg.jobs.join(".slots");
     let held: Vec<fs::File> = (1..cfg.max_jobs)
         .map(|i| {
@@ -96,9 +96,9 @@ fn room_for_the_drain() {
         })
         .collect();
     // One free, and it's the pipeline's.
-    assert!(!crate::slot::room(cfg, Engine::Claude));
+    assert!(!crate::slot::room(cfg, Engine::Claude, false));
     drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Claude)));
+    assert!(soon(|| crate::slot::room(cfg, Engine::Claude, false)));
 }
 
 /// Whether `f` holds within a second. A slot's lock dropped here can still

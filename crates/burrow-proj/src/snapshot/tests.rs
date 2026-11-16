@@ -360,7 +360,7 @@ fn held_slots_say_whose_and_since_when() {
             "{states:?}"
         );
         assert!(
-            !crate::slot::room(&cfg, Engine::Codex),
+            !crate::slot::room(&cfg, Engine::Codex, false),
             "an unknown slot was room"
         );
     }

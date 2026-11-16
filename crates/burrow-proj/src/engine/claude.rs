@@ -4,7 +4,9 @@ use super::{claude_limit, is_error};
 use serde_json::Value;
 
 /// Whether a run ended refused for usage, and if so when Claude Code says
-/// the limit resets (None when it doesn't) and a normalized limit name. `last` is the
+/// the limit resets (None when it doesn't) and a normalized limit name; or
+/// refused because its login expired ([`LOGGED_OUT`]), which resets at no
+/// time it can say. `last` is the
 /// run's result; `stream` its lines, where the reset time is as a
 /// timestamp; failing that, its words say it ([`crate::limit`]), read at
 /// `now`.
@@ -28,7 +30,9 @@ pub(super) fn refused_records(
     }
     let said = last["result"].as_str().unwrap_or_default().trim();
     if last["api_error"] != "usage_limit_reached" && !limit_words(said) {
-        return None;
+        // Not a limit, so no reset to read: the hold is tried again when
+        // usage.rs says (UNSAID), and ends with the first run that answers.
+        return logged_out(said, records).then(|| (None, LOGGED_OUT.to_owned()));
     }
     let mut until = None;
     let mut named = None;
@@ -65,6 +69,25 @@ pub(super) fn refused_records(
             named.unwrap_or_else(|| limit_name(said))
         ),
     ))
+}
+
+/// What a run Claude Code couldn't authenticate is recorded as saying. Its
+/// login here expired, so every other run is refused the same way until
+/// someone logs in again: on 2026-11-16, 21 turns in 70 minutes, each ended
+/// as an error and none resumed. Held like a spent plan (usage.rs), with
+/// words of its own for the owner (usage/login.rs).
+pub(crate) const LOGGED_OUT: &str = "Claude Code couldn't authenticate: its login here expired";
+
+/// Whether a run that ended in an error on `said` ended there because Claude
+/// Code couldn't authenticate: by its words for it ("Failed to authenticate:
+/// OAuth session expired and could not be refreshed"), or by the stream's
+/// record of that answer, which is marked `authentication_failed`.
+fn logged_out(said: &str, mut records: impl Iterator<Item = Value>) -> bool {
+    said.starts_with("Failed to authenticate")
+        || records.any(|v| {
+            v["error"] == "authentication_failed"
+                && v["message"]["content"][0]["text"].as_str().map(str::trim) == Some(said)
+        })
 }
 
 /// Claude Code's words for a spent plan, when its result doesn't carry the

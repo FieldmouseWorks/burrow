@@ -172,7 +172,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some()
+    if usage::login::out_for(cfg, usage::login::sandboxed(cfg, id)).is_some()
         || automation_paused(cfg, &job)
         || crate::github_quota::held(cfg, &job, Engine::Claude).is_some()
     {
@@ -469,6 +469,7 @@ pub fn take(
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
+    let sandboxed = usage::login::sandboxed(cfg, id);
     // This turn says it has its slot only under its job's lock ([`took_slot`]),
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
@@ -493,9 +494,10 @@ pub fn take(
     loop {
         let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
-        // run would be refused, an --unstick turn's too.
+        // run would be refused, an --unstick turn's too. A sandbox's isn't
+        // by this machine's expired login (usage/login.rs).
         usage::metered(cfg);
-        let spent = usage::out(cfg).is_some();
+        let spent = usage::login::out_for(cfg, sandboxed).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if !paused && crate::record::unstuck(&job) {
             // Leaving the line needs no census lock: stale looks retain the
@@ -601,12 +603,20 @@ pub fn take(
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
-        if !due(&slots, &queue.join(&me), looked) || usage::out(cfg).is_some() {
+        let hold = usage::out(cfg);
+        if !due(&slots, &queue.join(&me), looked)
+            || hold.as_ref().is_some_and(|h| h.holds_run(sandboxed))
+        {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;
         }
-        let seen = look(cfg, &me, &job.dir, class)?;
+        let mut seen = look(cfg, &me, &job.dir, class)?;
+        // Only the turns a hold lets by take what's free.
+        if let Some(h) = &hold {
+            seen.line
+                .retain(|w| !h.holds_run(usage::login::sandboxed(cfg, job_of(&w.name))));
+        }
         looked = now();
         let cutoff = match usage::admission_cutoff(cfg) {
             Ok(cutoff) => cutoff,
@@ -905,12 +915,12 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
 }
 
 /// Whether a turn on this engine started now would get a slot, as far as a
-/// look from outside the line can tell: for Claude, usage not spent, nobody
-/// in line and a slot free beyond the ones kept for the pipeline; for Codex,
-/// one of its pool free. Advisory: a turn already on its way may take the
-/// slot first, and the new one then waits in line like any other. For what
-/// work nobody is waiting on (proj-inbox's drain) starts only on idle slots.
-pub fn room(cfg: &Config, engine: Engine) -> bool {
+/// look from outside the line can tell: for Claude, no hold on its turn (in
+/// a sandbox, `sandboxed`, or here), nobody in line a hold lets by and a slot
+/// free past the pipeline's; for Codex, one of its pool free. Advisory: one on
+/// its way may take it first, and the new one then waits in line like any
+/// other. For what work nobody waits on (proj-inbox's drain) starts on idle slots.
+pub fn room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
     let free = |dir: &str, n: usize| -> usize {
         let dir = cfg.jobs.join(dir);
         if fs::create_dir_all(&dir).is_err() {
@@ -924,9 +934,13 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
     match engine {
         Engine::Claude => {
             usage::metered(cfg);
-            usage::out(cfg).is_none()
+            let hold = usage::out(cfg);
+            let held = |sandboxed| hold.as_ref().is_some_and(|h| h.holds_run(sandboxed));
+            !held(sandboxed)
                 && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
-                && line(cfg).is_empty()
+                && line(cfg)
+                    .iter()
+                    .all(|w| held(usage::login::sandboxed(cfg, &w.job)))
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
         Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
