@@ -555,6 +555,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 return Err(Fail::quiet(1));
             }
         }
+        if let Some((_, said)) = &refusal
+            && !usage::holds_machine(said, agent.is_some())
+        {
+            let _ = crate::state_reads::write(
+                job.turn(&n, "result"),
+                format!("{}\n", usage::login::SANDBOX),
+            );
+            outcome(usage::login::SANDBOX);
+            return Err(Fail::quiet(1));
+        }
         match refusal {
             Some((until, said)) => {
                 // A hold that can't be written holds nothing: this turn

@@ -6,7 +6,7 @@
 use super::{Spent, when};
 
 /// Whether the hold recorded as saying `said` is an expired login's.
-pub(super) fn is(said: &str) -> bool {
+pub(crate) fn is(said: &str) -> bool {
     said == crate::engine::claude::LOGGED_OUT
 }
 
@@ -35,6 +35,10 @@ pub(super) fn body(s: &Spent) -> String {
 }
 
 pub(super) const CLOSED: &str = "Claude Code is logged in again, and proj's jobs are running.";
+
+/// What a sandbox's turn refused for it ends saying: its token, not this
+/// machine's login, is what's gone ([`super::holds_machine`]).
+pub(crate) const SANDBOX: &str = "Claude Code couldn't authenticate in the sandbox: its token (burrow.agents.claudeTokenFile, from `claude setup-token`) expired or was revoked; make a new one and run the job again";
 
 /// What a run refused for it is told in the next, once it's back, before
 /// the turn's prompt.

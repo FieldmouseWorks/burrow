@@ -66,7 +66,7 @@ fn the_refused_turn_is_told_its_login_was_gone() {
 
 /// A hold says what its reset is from: a login gone once a limit's hold
 /// lapsed is told as a login, and a limit met while logged out, resetting
-/// later, as that limit.
+/// later, as that limit, the owner's notice told again at once.
 #[test]
 fn the_hold_is_told_as_the_refusal_its_reset_is_from() {
     let (d, cfg) = rig();
@@ -86,5 +86,51 @@ fn the_hold_is_told_as_the_refusal_its_reset_is_from() {
         (s.until, s.said.as_str()),
         (t + 2 * UNSAID, "Claude reached its extra-usage cap")
     );
+    assert_eq!(told(&d).len(), 3);
+    assert!(told(&d)[2].starts_with("open proj-usage Claude is out of usage until"));
+}
+
+/// While a hold stands, the owner's notice follows what it's for at once,
+/// each way, not at the reminder: a short limit's hold that a login gone
+/// outlasts tells them to log in, even refused in the same second, and a
+/// limit outlasting that tells them of the limit. The same cause again
+/// tells nothing new.
+#[test]
+fn a_standing_holds_notice_follows_its_cause_each_way() {
+    let (d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", Some(t + 60), LIMIT, t).unwrap();
+    assert!(told(&d)[0].starts_with("open proj-usage Claude is out of usage until"));
+    // Refused for the login in the same second: the hold is the login's now.
+    let s = record(&cfg, "web-2", None, LOGGED_OUT, t).unwrap();
+    assert_eq!((s.until, s.said.as_str()), (t + UNSAID, LOGGED_OUT));
+    assert_eq!(
+        told(&d)[1..],
+        ["open proj-usage Claude Code's login expired: log in again on this machine"]
+    );
+    assert!(body(&cfg, &s).contains("/login"));
+    // The same cause again: deduplicated, as before.
+    record(&cfg, "web-3", None, LOGGED_OUT, t + 5).unwrap();
     assert_eq!(told(&d).len(), 2);
+    // A limit that outlasts it: told as the limit again, at once.
+    let s = record(&cfg, "web-4", Some(t + 2 * UNSAID), LIMIT, t + 6).unwrap();
+    assert_eq!(s.until, t + 2 * UNSAID);
+    assert_eq!(told(&d).len(), 3);
+    assert!(told(&d)[2].starts_with("open proj-usage Claude is out of usage until"));
+    // And another limit refusal changes nothing told.
+    record(&cfg, "web-5", Some(t + 2 * UNSAID + 60), LIMIT, t + 7).unwrap();
+    assert_eq!(told(&d).len(), 3);
+}
+
+/// A sandbox's login is its own token, not this machine's: one expired
+/// there holds no turn here, while this machine's login, and a limit met in
+/// a sandbox (the plan is the same), still hold every turn.
+#[test]
+fn only_this_machines_login_holds_the_machine() {
+    assert!(!holds_machine(LOGGED_OUT, true));
+    assert!(holds_machine(LOGGED_OUT, false));
+    assert!(holds_machine(LIMIT, true));
+    assert!(holds_machine(LIMIT, false));
+    assert!(login::SANDBOX.contains("claudeTokenFile"));
+    assert!(!login::SANDBOX.contains("/login"));
 }

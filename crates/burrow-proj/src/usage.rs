@@ -549,18 +549,22 @@ fn put(
         // Every running turn is refused at once: the first tells the owner,
         // the rest move the reset on, and when it was last refused. Its
         // words are those of the refusal its reset is from: a login gone
-        // after a limit lapsed, or the other way round, is told as itself.
-        Some(w) => Spent {
-            until: w.until.max(until),
-            last: Some(w.refused().max(last)),
-            told: if lapsed { now() } else { w.told },
-            said: if lapsed || until > w.until {
+        // after a limit, or the other way round, is told as itself.
+        Some(w) => {
+            let said = if lapsed || until > w.until {
                 crate::engine::claude::normalize_refusal(said)
             } else {
                 w.said.clone()
-            },
-            ..w.clone()
-        },
+            };
+            let retold = lapsed || login::is(&said) != login::is(&w.said);
+            Spent {
+                until: w.until.max(until),
+                last: Some(w.refused().max(last)),
+                told: if retold { now() } else { w.told },
+                said,
+                ..w.clone()
+            }
+        }
         None => Spent {
             owner: false,
             until,
@@ -577,7 +581,15 @@ fn put(
         return Ok(spent);
     }
     keep(cfg, &spent)?;
-    if lapsed {
+    // Opened when the hold starts, and told again at once when what it's
+    // for changes (a limit to a login, or back): the owner's to-do changes
+    // with it, so it can't wait for the reminder. The same cause again is
+    // the reminder's to tell.
+    if lapsed
+        || was
+            .as_ref()
+            .is_some_and(|w| login::is(&w.said) != login::is(&spent.said))
+    {
         tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
     }
     if lapsed || was.as_ref().is_some_and(|w| w.until != spent.until) {
@@ -850,6 +862,14 @@ fn closed(s: &Spent) -> &'static str {
     }
 }
 
+/// Whether a turn refused on `said` holds the machine. A sandbox's login is
+/// the token it's given (burrow.agents.claudeTokenFile), not this machine's:
+/// one expired holds no turn here, and logging in here doesn't renew it, so
+/// it ends that turn alone ([`login::SANDBOX`]).
+pub(crate) fn holds_machine(said: &str, sandboxed: bool) -> bool {
+    !(sandboxed && login::is(said))
+}
+
 /// What a turn refused on `said` is told when it runs again, before its
 /// prompt: what it was refused for, and that it's back.
 pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
@@ -962,7 +982,7 @@ fn tell(cfg: &Config, args: &[&str]) {
     }
 }
 
-mod login;
+pub(crate) mod login;
 
 #[cfg(test)]
 pub(crate) mod tests;
