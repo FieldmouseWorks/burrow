@@ -4,7 +4,9 @@
 # enter, which alone gets the signing key and the seal key; a runner unit as
 # burrow.user (proj's jobs are that user's) with neither; and a plugin
 # wrapper the flow configuration names. With no controller it's refused:
-# the producer would trust burrow.user, the user authoring jobs run as.
+# the producer would trust burrow.user, the user authoring jobs run as. And
+# on at all it's refused until burrow#1186: the runner and its jobs are
+# burrow.user's, so the wiring is checked with that one assertion failing.
 { self, pkgs, nixpkgs, ... }:
 let
   lib = nixpkgs.lib;
@@ -20,7 +22,9 @@ let
     burrow.autoland.plugins.judge = plugin // { enable = true; };
   }];
   uncontrolled = machine [{ burrow.autoland.plugins.judge = plugin // { enable = true; }; }];
-  failed = map (a: a.message) (lib.filter (a: !a.assertion) uncontrolled.assertions);
+  failing = machine: map (a: a.message) (lib.filter (a: !a.assertion) machine.assertions);
+  failed = failing uncontrolled;
+  gate = lib.hasInfix "can't be turned on before burrow#1186";
   producer = on.systemd.services.autoland-judge;
   runner = on.systemd.services.burrow-judge-runner;
   read = on.burrow.autoland.plugins.judge.config;
@@ -28,7 +32,10 @@ let
   plain = builtins.unsafeDiscardStringContext;
   wiring = {
     offByDefault = !(off.systemd.services ? autoland-judge) && !(off.systemd.services ? burrow-judge-runner);
-    holds = lib.all (a: a.assertion) on.assertions;
+    # On, the isolation gate is the one assertion that fails, so no
+    # machine can run the signer before burrow#1186.
+    gated = lib.length (failing on) == 1 && gate (lib.head (failing on));
+    gatedWithoutController = lib.any gate failed;
     refusedWithoutController = lib.any (lib.hasInfix "plugins.judge: only the flow's controller may ask") failed;
     # The keys are the producer's alone, and it is no authoring user.
     ownUser = producer.serviceConfig.User == "autoland-judge"

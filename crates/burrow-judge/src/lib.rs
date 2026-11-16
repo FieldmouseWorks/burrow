@@ -117,7 +117,8 @@ impl Config {
 /// that engine offers, read when it's asked: Conary holds every answer to
 /// both.
 pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
-    let (engine, models) = burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
+    let burrow_producer::jobs::Offer { engine, models } =
+        burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
     Ok(burrow_producer::plugin::Plugin {
         describe: Answer::Describe {
             versions: vec![conary_core::plugin::CONTRACT.into()],

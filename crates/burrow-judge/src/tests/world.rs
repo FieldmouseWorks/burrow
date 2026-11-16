@@ -28,6 +28,8 @@ pub struct Pr {
     pub runs: Vec<Value>,
     /// How many comment posts GitHub refuses before it takes one.
     pub refusing: u32,
+    /// The comments on another PR on the same head, by its number.
+    pub others: BTreeMap<u64, Vec<Value>>,
 }
 
 #[derive(Clone)]
@@ -62,6 +64,7 @@ pub fn world() -> World {
         comments: vec![],
         runs: vec![],
         refusing: 0,
+        others: BTreeMap::new(),
     })))
 }
 
@@ -129,6 +132,23 @@ impl Api for World {
                 ok(201, json!({}), &[])
             }
             ("GET", p) if p.starts_with("/issues/5/comments") => ok(200, json!(pr.comments), &[]),
+            ("POST", p) if other(p).is_some() => {
+                let comment = json!({"user": {"login": FLOW, "type": "Bot"},
+                    "body": body.unwrap()["body"]});
+                pr.others
+                    .entry(other(p).unwrap())
+                    .or_default()
+                    .push(comment);
+                ok(201, json!({}), &[])
+            }
+            ("GET", p) if other(p).is_some() => {
+                let n = other(p).unwrap();
+                ok(
+                    200,
+                    json!(pr.others.get(&n).cloned().unwrap_or_default()),
+                    &[],
+                )
+            }
             ("GET", p) if p.starts_with("/commits/") && p.contains("/check-runs") => {
                 ok(200, json!({"total_count": 0, "check_runs": []}), &[])
             }
@@ -145,19 +165,36 @@ impl Api for World {
     }
 }
 
+/// The number of another PR than `PR` a comments path is for.
+fn other(path: &str) -> Option<u64> {
+    let n: u64 = path
+        .strip_prefix("/issues/")?
+        .split_once("/comments")?
+        .0
+        .parse()
+        .ok()?;
+    (n != PR).then_some(n)
+}
+
 impl conary_github::Source for World {
-    fn pull(&self, _: &str, _: u64) -> Result<PullRequest, ApiError> {
+    fn pull(&self, _: &str, n: u64) -> Result<PullRequest, ApiError> {
         let p = self.0.lock().unwrap();
         Ok(serde_json::from_value(json!({
-            "number": PR, "state": "open", "title": p.title, "body": p.body,
+            "number": n, "state": "open", "title": p.title, "body": p.body,
             "user": {"login": "someone", "type": "User"},
             "head": {"sha": p.head, "ref": "topic", "repo": null},
             "base": {"sha": "3333333333333333333333333333333333333333", "ref": p.base, "repo": null},
         }))
         .unwrap())
     }
-    fn comments(&self, _: &str, _: u64) -> Result<Vec<Comment>, ApiError> {
-        Ok(serde_json::from_value(json!(self.0.lock().unwrap().comments)).unwrap())
+    fn comments(&self, _: &str, n: u64) -> Result<Vec<Comment>, ApiError> {
+        let p = self.0.lock().unwrap();
+        let comments = if n == PR {
+            p.comments.clone()
+        } else {
+            p.others.get(&n).cloned().unwrap_or_default()
+        };
+        Ok(serde_json::from_value(json!(comments)).unwrap())
     }
     fn reviews(&self, _: &str, _: u64) -> Result<Vec<Review>, ApiError> {
         Ok(serde_json::from_value(json!(self.0.lock().unwrap().reviews)).unwrap())

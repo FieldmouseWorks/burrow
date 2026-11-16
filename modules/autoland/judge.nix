@@ -15,9 +15,11 @@
 #
 # Off by default: Conary#314 turns the flow's plugins on, with the
 # producer's key, the seal key and the producer's line in the machine's
-# producers file. Not before burrow#1186: the job, its answers and the
-# runner are burrow.user's, so an authoring session could answer in the
-# judge's place, and the judging engine must first move out of its reach.
+# producers file. Not before burrow#1186, and an assertion holds that: the
+# job, its answers and the runner are burrow.user's, so an authoring session
+# could stand in for the runner or answer in the judge's place, and the
+# judging engine must first move out of its reach. Until then a machine
+# that turns it on doesn't build, so nothing is ever sealed or signed.
 # Part of burrow.autoland, which imports it.
 inputs:
 { config, lib, pkgs, ... }:
@@ -50,13 +52,17 @@ let
     ''
     else appToken machineApp.socket;
   configFile = pkgs.writeText "burrow-judge.json" (builtins.toJSON cfg.config);
+  # Whether the judging engine runs out of authoring sessions' reach: not
+  # until burrow#1186, which moves it and makes this true.
+  isolated = false;
 in
 {
   options.burrow.autoland.plugins.judge = {
     enable = lib.mkEnableOption ''
       Conary's judge plugin and its producer, whose judgments run as proj
       jobs on the judging role and whose keys seal and sign each. Off until
-      Conary#314 turns the flow's plugins on; it needs
+      Conary#314 turns the flow's plugins on, and refused until burrow#1186
+      moves the judging engine out of authoring sessions' reach; it needs
       burrow.ledger.controllerUser, an App, a signing key and the flow's
       seal key'';
 
@@ -159,6 +165,10 @@ in
 
   config = lib.mkIf (autoland.enable && cfg.enable) {
     assertions = [
+      {
+        assertion = isolated;
+        message = "burrow.autoland.plugins.judge: the runner, its socket, its jobs and their answers are burrow.user's, the user authoring sessions run as, so one could answer in the judge's place and have it sealed and signed. It can't be turned on before burrow#1186 moves the judging engine out of their reach.";
+      }
       {
         assertion = config.burrow.ledger.enable && flow.controller != null;
         message = "burrow.autoland.plugins.judge: only the flow's controller may ask the producer, so it needs burrow.ledger with its controllerUser.";

@@ -472,6 +472,144 @@ fn what_ran_must_be_what_the_plugin_offers_and_the_flow_chose() {
 }
 
 #[test]
+fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
+    let dir = tempfile::tempdir().unwrap();
+    let roles = dir.path().join("overlay.roles.json");
+    // The settings as they're changed while a job judges: the role moved to
+    // another engine, a model or an effort newly offered.
+    let moved = json!({"routing": {"roles": {"judge": {"engine": "codex", "over": null}},
+        "models": {"judge codex": {"model": "c-model", "effort": "high"}}},
+        "offers": {"claude": {"models": ["a-model"], "efforts": ["high"]},
+            "codex": {"models": ["c-model"], "efforts": ["high"]}}, "migrated": 1});
+    let model = json!({"routing": {"models": {"judge claude": {"model": "b-model", "effort": "high"}}},
+        "offers": {"claude": {"models": ["a-model", "b-model"], "efforts": ["high"]}}, "migrated": 1});
+    let effort = json!({"routing": {"models": {"judge claude": {"model": "a-model", "effort": "low"}}},
+        "offers": {"claude": {"models": ["a-model"], "efforts": ["high", "low"]}}, "migrated": 1});
+    let ran = |engine: &str, model: &str, effort: &str| {
+        let mut a = answer("judge-1", Judgment::Pass);
+        a.by.engine = engine.into();
+        a.execution = Some(Executed {
+            model: Some(model.into()),
+            effort: Some(effort.into()),
+            context: Context::Fresh,
+        });
+        a
+    };
+    // No choice, and a choice of the model alone.
+    let w = world();
+    let mut unchosen = judge_request(&w, vec![Trigger::Asked]);
+    unchosen.execution.as_mut().unwrap().choice = None;
+    let mut model_only = judge_request(&w, vec![Trigger::Asked]);
+    model_only
+        .execution
+        .as_mut()
+        .unwrap()
+        .choice
+        .as_mut()
+        .unwrap()
+        .effort = None;
+    for (request, settings, answered) in [
+        (&unchosen, &moved, ran("codex", "c-model", "high")),
+        (&unchosen, &model, ran("claude", "b-model", "high")),
+        (&unchosen, &effort, ran("claude", "a-model", "low")),
+        (&model_only, &effort, ran("claude", "a-model", "low")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let w = world();
+        let judges = Scripted::answering(vec![answered.clone()]);
+        let (roles, settings) = (dir.path().join("overlay.roles.json"), settings.to_string());
+        let p = producer(dir.path(), &w, judges.clone());
+        judges.0.lock().unwrap().during =
+            Some(Box::new(move || std::fs::write(&roles, settings).unwrap()));
+        let refused = ask(dir.path(), &p, request).unwrap_err();
+        assert!(
+            refused.contains("names itself by") || refused.contains("plugin offers"),
+            "{answered:?}: {refused}"
+        );
+        assert!(w.posted().is_empty(), "{answered:?}");
+        assert!(w.with(|p| p.runs.is_empty()), "{answered:?}");
+    }
+    // What was offered when it came still goes out, the settings changed
+    // or not.
+    let judges = Scripted::answering(vec![answer("judge-1", Judgment::Pass)]);
+    let p = producer(dir.path(), &w, judges.clone());
+    let changed = model.to_string();
+    judges.0.lock().unwrap().during =
+        Some(Box::new(move || std::fs::write(&roles, changed).unwrap()));
+    ask(dir.path(), &p, &unchosen).unwrap();
+    assert_eq!(w.posted().len(), 1);
+}
+
+#[test]
+fn a_commit_carries_one_prs_judgments() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    let other = |w: &World| {
+        let mut r = judge_request(w, vec![Trigger::Asked]);
+        let Task::Judge { pr, .. } = &mut r.task else {
+            unreachable!()
+        };
+        *pr = 6;
+        r
+    };
+    let runs = |w: &World| w.with(|p| p.runs.len());
+    // #6 is judged while #5, on the same commit, has its own judged and
+    // published: #6's would be the commit's latest run and hide #5's
+    // receipt, so it's refused before it commits.
+    let five = Scripted::answering(vec![answer("judge-5", Judgment::Pass)]);
+    let p5 = producer(dir.path(), &w, five);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let six = Scripted::answering(vec![answer("judge-6", Judgment::Pass)]);
+    let (during, sock, request) = (
+        w.clone(),
+        elsewhere.path().to_owned(),
+        judge_request(&w, vec![Trigger::Asked]),
+    );
+    six.0.lock().unwrap().during = Some(Box::new(move || {
+        ask(&sock, &p5, &request).unwrap();
+        assert_eq!(during.posted().len(), 1);
+    }));
+    let p6 = producer(dir.path(), &w, six.clone());
+    let refused = ask(dir.path(), &p6, &other(&w)).unwrap_err();
+    assert!(refused.contains("carries #5's judgment"), "{refused}");
+    assert!(w.with(|p| p.others.is_empty()));
+    assert_eq!(runs(&w), 2);
+    let completed = w.completed();
+    assert_eq!(completed.len(), 1);
+    assert!(verify(&completed[0].1, HEAD).is_ok());
+    // Once #5's is on it, #6 is refused before any work, a restart or not.
+    for _ in 0..2 {
+        let judges = Scripted::answering(vec![answer("judge-7", Judgment::Pass)]);
+        let p = producer(dir.path(), &w, judges.clone());
+        let refused = ask(dir.path(), &p, &other(&w)).unwrap_err();
+        assert!(refused.contains("carries #5's judgment"), "{refused}");
+        assert!(judges.0.lock().unwrap().asked.is_empty());
+    }
+    assert!(w.with(|p| p.others.is_empty()));
+    assert_eq!(runs(&w), 2);
+    // #5 itself is judged again on it.
+    let judges = Scripted::answering(vec![answer("judge-8", Judgment::Fail)]);
+    let p = producer(dir.path(), &w, judges);
+    ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap();
+    assert_eq!(w.posted().len(), 2);
+    assert_eq!(runs(&w), 4);
+
+    // A judgment committed whose publication failed holds its commit too.
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    w.with(|p| p.refusing = 1);
+    let judges = Scripted::answering(vec![
+        answer("judge-5", Judgment::Pass),
+        answer("judge-6", Judgment::Pass),
+    ]);
+    let p = producer(dir.path(), &w, judges);
+    assert!(ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).is_err());
+    let refused = ask(dir.path(), &p, &other(&w)).unwrap_err();
+    assert!(refused.contains("carries #5's judgment"), "{refused}");
+    assert!(w.with(|p| p.others.is_empty() && p.runs.is_empty()));
+}
+
+#[test]
 fn a_judgment_overtaken_while_it_was_judged_publishes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let w = world();

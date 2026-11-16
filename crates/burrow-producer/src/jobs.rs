@@ -176,13 +176,40 @@ pub fn wait(jobs: &dyn Jobs, id: &str, work: &Work, look: Duration) -> Result<Re
     }
 }
 
-/// The engine `role` is routed to anywhere, and the models that engine
-/// offers with their efforts: what a plugin whose work runs on the role
-/// names itself by and offers. Conary holds every answer to both.
-pub fn offered(
-    settings: &burrow_settings::Config,
-    role: &str,
-) -> Result<(String, Vec<Model>), String> {
+/// What a plugin whose work runs on a role names itself by and offers,
+/// read once: the engine the role is routed to anywhere, and the models
+/// that engine offers with their efforts. Conary holds every answer to
+/// both, as the plugin described them, so a producer reads this once when a
+/// request comes and holds the request's work to that reading
+/// ([`runnable`], [`ran_as`]), whatever the settings say later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub engine: String,
+    pub models: Vec<Model>,
+}
+
+impl Offer {
+    /// Why `model` at `effort` isn't what this offers: a model that isn't
+    /// one of its models, an effort that model doesn't take, or no model
+    /// when it offers any.
+    fn refuses(&self, model: Option<&String>, effort: Option<&String>) -> Option<String> {
+        let engine = &self.engine;
+        match model {
+            None if !self.models.is_empty() => Some(format!("it names no model of {engine}'s")),
+            None => effort.map(|e| format!("it names an effort, {e}, but no model")),
+            Some(model) => match self.models.iter().find(|m| m.id == *model) {
+                None => Some(format!("{model} isn't a model the plugin offers")),
+                Some(offer) => effort
+                    .filter(|e| !offer.efforts.contains(e))
+                    .map(|e| format!("{model} isn't offered at {e}")),
+            },
+        }
+    }
+}
+
+/// What a plugin whose work runs on `role` names itself by and offers, as
+/// the settings say now.
+pub fn offered(settings: &burrow_settings::Config, role: &str) -> Result<Offer, String> {
     let settings = settings.role_view()?.in_force;
     let engine = settings.route(role, None).engine.clone();
     let offer = settings.offers.get(&engine).cloned().unwrap_or_default();
@@ -196,23 +223,25 @@ pub fn offered(
             max_output_tokens: None,
         })
         .collect();
-    Ok((engine, models))
+    Ok(Offer { engine, models })
 }
 
 /// Whether a job on `role` in `repo` would run as the flow asks, before one
 /// starts: proj runs it on the role's route and tuning, and Conary refuses
-/// an answer on another engine than the plugin names (the role's route
-/// anywhere, [`offered`]), a model it didn't offer, or another model or
-/// effort than the flow chose. So the role's route for the repo is that
-/// engine, moves to no other, names its model, and is what the flow chose.
+/// an answer on another engine than the plugin names, a model or effort it
+/// didn't offer (`offer`, as it was described), or another model or effort
+/// than the flow chose. So the role's route for the repo is that engine,
+/// moves to no other, names an offered model at an offered effort, and is
+/// what the flow chose.
 pub fn runnable(
     settings: &burrow_settings::Config,
     role: &str,
     repo: &str,
+    offer: &Offer,
     choice: Option<&Choice>,
 ) -> Result<(), String> {
     let settings = settings.role_view()?.in_force;
-    let named = &settings.route(role, None).engine;
+    let named = &offer.engine;
     let route = settings.route(role, Some(repo));
     if route.engine != *named || route.over.is_some() {
         return Err(format!(
@@ -220,10 +249,9 @@ pub fn runnable(
         ));
     }
     let tuning = settings.tuning(role, Some(repo), named);
-    let offers = settings.offers.get(named).cloned().unwrap_or_default();
-    if tuning.model.is_none() && !offers.models.is_empty() {
+    if let Some(why) = offer.refuses(tuning.model.as_ref(), tuning.effort.as_ref()) {
         return Err(format!(
-            "the {role} role names no model on {named}, so its answer couldn't say what ran"
+            "the {role} role in {repo} wouldn't run as the plugin offers, so its answer would be refused: {why}"
         ));
     }
     if let Some(c) = choice
@@ -243,46 +271,30 @@ pub fn runnable(
     Ok(())
 }
 
-/// Whether an answer by `engine`, which reports `ran`, is what a plugin
-/// whose work runs on `role` offers and what the flow chose (`choice`):
-/// the role's engine, a model it offers (named whenever it offers any) at
-/// an effort that model takes, and the model and effort the flow chose, if
-/// it chose them. [`runnable`] holds the role to that before a job starts;
-/// this holds what actually ran to it before anything of it is published,
-/// since the role can change in between.
+/// Whether an answer by `engine`, which reports `ran`, is what the plugin
+/// offered (`offer`, as it was described, never the settings read again)
+/// and what the flow chose (`choice`): its engine, a model it offers (named
+/// whenever it offers any) at an effort that model takes, and the model
+/// and effort the flow chose, if it chose them. [`runnable`] holds the role
+/// to that before a job starts; this holds what actually ran to it before
+/// anything of it is published, since the role can change in between.
 pub fn ran_as(
-    settings: &burrow_settings::Config,
-    role: &str,
+    offer: &Offer,
     choice: Option<&Choice>,
     engine: &str,
     ran: &conary_core::plugin::Executed,
 ) -> Result<(), String> {
-    let (named, models) = offered(settings, role)?;
+    let named = &offer.engine;
     if engine != named {
         return Err(format!(
             "it ran on {engine}, and the plugin names itself by {named}"
         ));
     }
-    match &ran.model {
-        None if !models.is_empty() => {
-            return Err(format!("it doesn't say which of {named}'s models ran"));
-        }
-        None if ran.effort.is_some() => return Err("it names an effort but no model".into()),
-        None => {}
-        Some(model) => {
-            let offer = models
-                .iter()
-                .find(|m| m.id == *model)
-                .ok_or_else(|| format!("{model} isn't a model the plugin offers"))?;
-            if let Some(effort) = &ran.effort
-                && !offer.efforts.contains(effort)
-            {
-                return Err(format!("{model} isn't offered at {effort}"));
-            }
-        }
+    if let Some(why) = offer.refuses(ran.model.as_ref(), ran.effort.as_ref()) {
+        return Err(format!("it didn't run as the plugin offers: {why}"));
     }
     if let Some(c) = choice
-        && (c.engine != named
+        && (c.engine != *named
             || c.model
                 .as_ref()
                 .is_some_and(|m| Some(m) != ran.model.as_ref())

@@ -27,13 +27,19 @@
 //!   at a time, one whose publication failed goes out before that PR's
 //!   next, at startup if a crash came between ([`Producer::reconcile`]),
 //!   and one a later generation overtook while it was judged is refused.
+//!   A head carries one PR's judgments: Conary picks a head's latest run
+//!   whichever PR it's for, so another PR on the same commit is refused,
+//!   before any work and again before its judgment commits.
+//! - What ran is held to what the plugin offered when the request came,
+//!   read once then, never to the settings read again later.
 //!
 //! The runner's answers come from a `burrow.user` proj job, which an
-//! authoring session could forge: the judge stays off until #1186 moves
-//! the judging engine out of that user's reach.
+//! authoring session could forge: the module refuses to turn the judge on
+//! until #1186 moves the judging engine out of that user's reach.
 use crate::discussion::{self, current, highest_generation};
 use crate::{Config, Read};
 use burrow_github::{Api, call};
+use burrow_producer::jobs::Offer;
 use burrow_producer::publish;
 use burrow_producer::records::{Record, Records, Target};
 use burrow_producer::serve::Work;
@@ -187,12 +193,20 @@ impl Producer {
         else {
             return Err("the judge judges alone".into());
         };
+        // What the plugin offers, read once, now, next to the flow's
+        // describe: what ran is held to this, whatever the settings say by
+        // the time the job starts or answers.
+        let offer = burrow_producer::jobs::offered(&self.cfg.settings, &self.cfg.role)?;
         burrow_producer::jobs::runnable(
             &self.cfg.settings,
             &self.cfg.role,
             repo,
+            &offer,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
+        // Before any work: a head another PR's judgment is on can't take
+        // this one's.
+        self.held_by(repo, *pr, head)?;
         let flow = self.cfg.flow(repo)?;
         let authors = &flow.settings.verdict_authors;
         if authors.is_empty() {
@@ -233,6 +247,7 @@ impl Producer {
             &request,
             work,
             record,
+            &offer,
             (revision, tree, generation),
         )
     }
@@ -246,9 +261,10 @@ impl Producer {
         request: &Request,
         work: &Work,
         mut record: Record<Judgment>,
+        offer: &Offer,
         judged: (conary_github::flow::Revision, String, u64),
     ) -> Result<Response, String> {
-        let (judgment, response) = match self.judge(request, work, judged) {
+        let (judgment, response) = match self.judge(request, work, offer, judged) {
             Ok(done) => done,
             Err(why) => {
                 let _ = publish::withdraw(api, &self.records, &mut record);
@@ -258,6 +274,7 @@ impl Producer {
         let body = comment(&self.seal, &judgment)?;
         let key = pr_key(&judgment.repo, judgment.pr);
         let (repo, pr, generation) = (judgment.repo.clone(), judgment.pr, judgment.generation);
+        let head = judgment.revision.head.clone();
         let mut pending = self
             .publishing
             .lock()
@@ -282,6 +299,12 @@ impl Producer {
         if work.abandoned() {
             let _ = publish::withdraw(api, &self.records, &mut record);
             return Err("its request was abandoned: it publishes nothing".into());
+        }
+        // The head is this PR's from here on: no other PR's judgment
+        // publishes a run on it.
+        if let Err(why) = self.claim(&repo, pr, &head) {
+            let _ = publish::withdraw(api, &self.records, &mut record);
+            return Err(why);
         }
         // Past here what goes out stands: what fails is finished before this
         // PR's next judgment goes out, or at startup.
@@ -326,6 +349,58 @@ impl Producer {
         Ok(())
     }
 
+    /// The file that says which PR's judgments `repo`'s head `head` carries.
+    fn head_file(&self, repo: &str, head: &str) -> PathBuf {
+        self.cfg
+            .state
+            .join("heads")
+            .join(format!("{}+{head}", repo.to_lowercase().replace('/', "+")))
+    }
+
+    /// Why `repo`'s PR `pr` can't have a judgment on `head`: another PR's
+    /// judgment was committed on it. Conary reads only a head's latest
+    /// `conary/judgment` run, whichever PR it's for, so a second PR's run
+    /// on a head would hide the first's receipt, and the first's
+    /// judgment would no longer verify.
+    fn held_by(&self, repo: &str, pr: u64, head: &str) -> Result<(), String> {
+        let path = self.head_file(repo, head);
+        let held = match std::fs::read_to_string(&path) {
+            Ok(text) => text
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{} isn't a PR", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        if held != pr {
+            return Err(format!(
+                "{repo}'s commit {head} carries #{held}'s judgment, and Conary reads one judgment's run a commit: #{pr} needs a commit of its own to be judged"
+            ));
+        }
+        Ok(())
+    }
+
+    /// `head` made `repo`'s PR `pr`'s, kept before its judgment commits,
+    /// unless another PR's it is. Called with the publishing lock held, so
+    /// two PRs on one head can't both claim it.
+    fn claim(&self, repo: &str, pr: u64, head: &str) -> Result<(), String> {
+        self.held_by(repo, pr, head)?;
+        let path = self.head_file(repo, head);
+        if path.exists() {
+            return Ok(());
+        }
+        let dir = path.parent().ok_or("a head file has a directory")?;
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(dir)?;
+            let mut file = tempfile::NamedTempFile::new_in(dir)?;
+            file.write_all(pr.to_string().as_bytes())?;
+            file.as_file().sync_all()?;
+            file.persist(&path).map_err(|e| e.error)?;
+            std::fs::File::open(dir)?.sync_all()
+        };
+        write().map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     /// The runner's judgment of `request`, held to the request, to the
     /// flow's choice and to GitHub again, ready to keep, and the answer
     /// the flow gets.
@@ -333,6 +408,7 @@ impl Producer {
         &self,
         request: &Request,
         work: &Work,
+        offer: &Offer,
         (revision, tree, generation): (conary_github::flow::Revision, String, u64),
     ) -> Result<(Judgment, Response), String> {
         let Task::Judge {
@@ -376,11 +452,11 @@ impl Producer {
         self.sessions
             .accept(&request.task, &Context::Fresh, &answer.by)
             .map_err(|e| format!("the judge's session can't judge this: {e}"))?;
-        // What ran is what the plugin offers and the flow chose, before it's
-        // sealed: Conary would refuse the answer, but not what went out.
+        // What ran is what the plugin offered when the request came and the
+        // flow chose, before it's sealed: Conary would refuse the answer,
+        // but not what went out.
         burrow_producer::jobs::ran_as(
-            &self.cfg.settings,
-            &self.cfg.role,
+            offer,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
             &answer.by.engine,
             &execution,

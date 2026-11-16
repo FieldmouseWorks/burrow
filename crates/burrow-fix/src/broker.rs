@@ -199,6 +199,7 @@ impl Broker {
             &self.cfg.settings,
             &self.cfg.role,
             repo,
+            &jobs::offered(&self.cfg.settings, &self.cfg.role)?,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
         let held = self.hold(repo, *pr)?;

@@ -68,7 +68,8 @@ impl Config {
 /// what that engine offers: Conary holds every answer to both, so a fix
 /// job that ran elsewhere, or on a model it didn't offer, is refused there.
 pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
-    let (engine, models) = burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
+    let burrow_producer::jobs::Offer { engine, models } =
+        burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
     Ok(burrow_producer::plugin::Plugin {
         describe: Answer::Describe {
             versions: vec![conary_core::plugin::CONTRACT.into()],
