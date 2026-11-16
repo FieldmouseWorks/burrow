@@ -613,8 +613,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         .iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
-            (read(&e.path()).as_deref() == Some("ask")).then_some(t)
+            let stem = name.strip_suffix(".end")?;
+            let t = stem.parse::<u64>().ok()?;
+            (crate::record::end(job, stem).as_deref() == Some("ask")).then_some(t)
         })
         .max()
         .unwrap_or(0);
