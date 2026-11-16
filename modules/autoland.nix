@@ -315,6 +315,7 @@ in
     (import ./common.nix inputs)
     (import ./autoland/review.nix inputs)
     (import ./autoland/fix.nix inputs)
+    (import ./autoland/judge.nix inputs)
     (import ./autoland/proof.nix inputs)
     (import ./autoland/review-producer.nix inputs)
     (import ./updates/renovate-identity.nix inputs)

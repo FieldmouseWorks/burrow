@@ -2,8 +2,8 @@
 //! the plugin and the kit's socket, as the flow reaches it.
 use super::*;
 use crate::broker::{Broker, GitHub, key};
-use crate::jobs::{Jobs, Record, Turn};
 use burrow_github::{Api, Failed, Response as GhResponse};
+use burrow_producer::jobs::{Jobs, Record, Turn};
 use burrow_producer::serve::{Controller, Server};
 use conary_core::plugin::{Request, fixtures};
 use serde_json::{Value, json};

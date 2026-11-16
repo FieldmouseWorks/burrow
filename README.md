@@ -349,6 +349,15 @@ Each has an entry below, and each can be imported on its own.
   signs the flow's publication with the producer's own key
   (`plugins.review.keyFile`) only once it holds all the look recorded; it
   needs `burrow.ledger.controllerUser` and Codex as a reviewer.
+  `plugins.judge.enable` (off) runs Conary's judge plugin and its producer
+  (crates/burrow-judge): each request held to the PR's head, base,
+  description and discussion on GitHub, judged as a fresh proj job on the
+  judging role (`plugins.judge.role`) by a runner as burrow.user, and
+  published by the producer, a user of its own, as the sealed comment
+  (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
+  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`,
+  and a machine that turns it on fails to build until #1186 moves the
+  judging engine out of authoring sessions' reach.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

@@ -5,13 +5,18 @@
 //! writes the producer's answer. Any producer error is an error here, which
 //! the plugin's `main` turns into a nonzero exit: Conary takes that as the
 //! plugin failing, never as a verdict.
+use crate::serve::Work;
 use crate::wire::{self, Reply};
 use conary_core::plugin::{
     Answer, Executed, Execution, Identity, Request, Response, Task, fixtures, version,
 };
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 /// One plugin: what it says it is, how it answers the fixtures, and where
 /// its producer listens.
@@ -97,37 +102,80 @@ impl Plugin {
             .ok_or_else(|| "it serves no fixture of this kind".into())
     }
 
-    /// The producer's answer to `request`. The connection stays open until
-    /// the answer comes, and it ending first is the producer's error: the
-    /// producer reads it ending as this plugin gone, and stops the work.
+    /// The producer's answer to `request`.
     fn forward(&self, request: &Request) -> Result<Response, String> {
-        let mut stream = UnixStream::connect(&self.socket).map_err(|e| {
-            format!(
-                "couldn't reach the producer at {}: {e}",
-                self.socket.display()
-            )
-        })?;
-        // A producer that refuses may close before the whole request is
-        // sent: its reason is still there to read, and says more.
-        let sent = wire::send(&mut stream, request);
-        let line = match (wire::line(&mut BufReader::new(&stream)), sent) {
-            (Ok(Some(line)), _) => line,
-            (_, Err(e)) => return Err(format!("couldn't ask the producer: {e}")),
-            (Err(e), Ok(())) => return Err(format!("couldn't read the producer's answer: {e}")),
-            (Ok(None), Ok(())) => {
-                return Err("the producer closed the connection without answering".into());
-            }
-        };
-        let reply: Reply = serde_json::from_str(&line)
-            .map_err(|e| format!("the producer's answer doesn't read: {e}"))?;
-        match reply {
-            Reply::Answer(response) if response.contract == request.contract => Ok(*response),
-            Reply::Answer(response) => Err(format!(
-                "the producer answered in {:?}, not {:?}",
-                response.contract, request.contract
-            )),
-            Reply::Refused(why) => Err(format!("the producer refused: {why}")),
+        exchange(&self.socket, request, None)
+    }
+}
+
+/// The answer of the server at `socket` (a producer's, or a producer's own
+/// helper's) to `request`, on behalf of `work`: the connection is shut as
+/// soon as `work` is abandoned, so the server stops what it does for it.
+pub fn forward(socket: &Path, request: &Request, work: &Work) -> Result<Response, String> {
+    exchange(socket, request, Some(work))
+}
+
+/// `request`'s answer from `socket`. The connection stays open until the
+/// answer comes, and it ending first is the server's error: the server
+/// reads it ending as its asker gone, and stops the work. With `work`, it's
+/// shut once that's abandoned.
+fn exchange(socket: &Path, request: &Request, work: Option<&Work>) -> Result<Response, String> {
+    let stream = UnixStream::connect(socket)
+        .map_err(|e| format!("couldn't reach the producer at {}: {e}", socket.display()))?;
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = match work {
+        Some(work) => {
+            let (work, done, stream) = (
+                work.clone(),
+                done.clone(),
+                stream
+                    .try_clone()
+                    .map_err(|e| format!("the connection can't be watched: {e}"))?,
+            );
+            Some(thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    if work.abandoned() {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }))
         }
+        None => None,
+    };
+    let answered = answer_on(&stream, request);
+    done.store(true, Ordering::SeqCst);
+    if let Some(watch) = watch {
+        let _ = watch.join();
+    }
+    if work.is_some_and(Work::abandoned) {
+        return Err("its request was abandoned".into());
+    }
+    answered
+}
+
+fn answer_on(mut stream: &UnixStream, request: &Request) -> Result<Response, String> {
+    // A producer that refuses may close before the whole request is
+    // sent: its reason is still there to read, and says more.
+    let sent = wire::send(&mut stream, request);
+    let line = match (wire::line(&mut BufReader::new(stream)), sent) {
+        (Ok(Some(line)), _) => line,
+        (_, Err(e)) => return Err(format!("couldn't ask the producer: {e}")),
+        (Err(e), Ok(())) => return Err(format!("couldn't read the producer's answer: {e}")),
+        (Ok(None), Ok(())) => {
+            return Err("the producer closed the connection without answering".into());
+        }
+    };
+    let reply: Reply = serde_json::from_str(&line)
+        .map_err(|e| format!("the producer's answer doesn't read: {e}"))?;
+    match reply {
+        Reply::Answer(response) if response.contract == request.contract => Ok(*response),
+        Reply::Answer(response) => Err(format!(
+            "the producer answered in {:?}, not {:?}",
+            response.contract, request.contract
+        )),
+        Reply::Refused(why) => Err(format!("the producer refused: {why}")),
     }
 }
 
