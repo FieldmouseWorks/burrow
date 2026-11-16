@@ -560,7 +560,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             && !usage::login::holds_machine(said, agent.is_some())
         {
             let _ = crate::state_reads::write(
-                job.turn(&n, "result"),
+                job.turn_file(&n, TurnFile::Result),
                 format!("{}\n", usage::login::SANDBOX),
             );
             outcome(usage::login::SANDBOX);
