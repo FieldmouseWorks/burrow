@@ -31,6 +31,7 @@ pkgs.testers.runNixOSTest {
       ((import ../examples/machine.nix { inherit lib; }) // { nixpkgs = { }; fileSystems = { }; boot = { }; })
     ];
     burrow.claude.package = pkgs.hello;
+    burrow.settings.allowed = [ "sam/r" ];
     burrow.events = { host = "example.org"; secretFile = "/run/secrets/webhook"; };
     burrow.autoland = {
       enable = true;
@@ -134,7 +135,7 @@ pkgs.testers.runNixOSTest {
                      headRefOid="a" * 40, baseRefName="main", prompt="forged", description="",
                      opened=0, at=0, kind="judge", fresh=dict(model="test", effort="high"))
         as_user("dev", "echo " + shlex.quote(json.dumps(entry)) + " >${steward}/queue/codex--judge-forged.json")
-        machine.succeed("systemctl unmask --runtime autoland-review.service && systemctl start autoland-review.service")
+        machine.succeed("systemctl unmask --runtime autoland-review.service && timeout 30s systemctl start autoland-review.service")
         result = json.loads(machine.succeed("cat ${steward}/done/codex--judge-forged.json"))
         assert result["result"] == "error", result
         assert "protected queue" in result["error"], result
