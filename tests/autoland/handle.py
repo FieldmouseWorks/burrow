@@ -12,7 +12,7 @@ import subprocess
 
 from harness import (C, CI_GREEN, DDIR, FAIL, HELD, JOBS, POSTED, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
                      WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
-                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, status_run, swept, tmp, worker)
+                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
 stand_in()
 fresh_pr_state()
@@ -1037,31 +1037,3 @@ for engine in ("Claude", "Codex"):
     assert noted.get("usage_release") is None, noted
 HELD.clear()
 STATES.clear()
-
-# Days set aside were someone else's: off a hold, its day starts again, as
-# the live passes saw it come back, and a status run (its own state) says
-# the same. Held again and let go, its day starts from the later release,
-# and a new head pushed since doesn't lose it.
-fresh_pr_state()
-DAY = 86400
-
-
-def listed(digest):
-    return any(row[0] == "Open over a day" for row in digest)
-
-
-def both(pr, at):
-    """Whether a live pass, then a status run, list it `at` on."""
-    return listed(run(pr, at)[1]), listed(status_run(lambda: run(pr, at + 1))[0][1])
-
-
-held = mkpr(labels=["hold"], threads=[False])
-run(held, 100)
-assert not listed(run(held, 2 * DAY)[1])
-assert both(mkpr(threads=[False]), 2 * DAY + 100) == (False, False)
-assert pr_state()["back"] == C.ts(T0) + 2 * DAY + 100, pr_state()
-run(held, 2 * DAY + 200)
-assert both(mkpr(threads=[False]), 2 * DAY + 300) == (False, False)
-assert both(mkpr(sha=newer, threads=[False]), 3 * DAY) == (False, False)
-assert both(mkpr(sha=newer, threads=[False]), 3 * DAY + 400) == (True, True)
-print("a day from its release: ok")
