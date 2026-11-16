@@ -63,14 +63,24 @@ fn a_private_queue_boundary_preserves_answer_checks() {
     let link = done.join("link.json");
     std::os::unix::fs::symlink(&path, &link).unwrap();
     assert!(queue.read_answer(&link, b"request").is_err());
-    // Without the fixture-only capability, Queue still checks from `/` and
-    // rejects the same writable ancestor. Production cannot select a root.
-    queue.answer_root = None;
+    // Check the writable ancestor itself from a controlled descriptor, so
+    // an earlier host-owned directory cannot hide a missing mode check.
     assert!(
-        queue
-            .read_answer(&path, b"request")
-            .unwrap_err()
-            .to_string()
-            .contains("writable")
+        burrow_review::answer::read_from(
+            fs::File::open(dir.path()).unwrap(),
+            Path::new("done/answer.json"),
+            uid,
+            b"request",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("writable")
     );
+    // Without the fixture-only capability, Queue still checks from `/`.
+    // A Nix build can have a foreign-owned ancestor before our writable
+    // directory, so either check can reject this path first. The precise
+    // mode failures are checked above through the controlled boundary.
+    // Production cannot select that boundary.
+    queue.answer_root = None;
+    assert!(queue.read_answer(&path, b"request").is_err());
 }
