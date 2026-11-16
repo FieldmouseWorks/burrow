@@ -354,6 +354,28 @@ fn deploy() {
     assert_eq!(it.due, T + 1800.0);
     s.update.as_mut().unwrap().0.state = "inactive".into();
     s.behind = None;
+    // Held while the box runs changes that aren't on main: they're whoever
+    // switched to them's to land, so nothing is due before the owner hears
+    // of it, and it says when; a short wait past then stays short.
+    s.off_main = Some(T + 6.0 * 3600.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 6.0 * 3600.0);
+    assert!(
+        it.phase.ends_with(&format!(
+            "box-update's last run: ok at then: deployed; the owner hears of it at {} if it still does",
+            clock(T + 6.0 * 3600.0)
+        )),
+        "{}",
+        it.phase
+    );
+    s.off_main = Some(T - 3600.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 1800.0);
+    s.off_main = None;
     // A run under way that started before the oldest commit doesn't
     // have it; one that started after does.
     s.update.as_mut().unwrap().0 = Unit {

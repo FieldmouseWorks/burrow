@@ -12,7 +12,7 @@ fn a_run_keeps_what_it_did_whole() {
     let m = Machine::new();
     let a = m.system("a", "");
     m.runs(&a);
-    note(&m.cfg, Outcome::Held, "holding", Some(7));
+    note(&m.cfg, Outcome::Held, "holding", Some(7), None);
     let s = m.status();
     assert_eq!(
         (&s["result"], &s["message"], &s["running"], &s["behind"]),
@@ -25,14 +25,19 @@ fn a_run_keeps_what_it_did_whole() {
         "{time}"
     );
     // A failure is the run's own to fix: nothing it's behind.
-    note(&m.cfg, Outcome::Failed, "broke", Some(7));
+    note(&m.cfg, Outcome::Failed, "broke", Some(7), Some(9));
     assert_eq!(m.status().get("behind"), None);
-    note(&m.cfg, Outcome::Ok, "live", None);
+    // When the owner hears the box runs what isn't on main: said on a hold alone.
+    assert_eq!(m.status().get("offMain"), None);
+    note(&m.cfg, Outcome::Ok, "live", None, Some(9));
     assert_eq!(m.status().get("behind"), None);
+    assert_eq!(m.status().get("offMain"), None);
+    note(&m.cfg, Outcome::Held, "holding", None, Some(9));
+    assert_eq!(m.status()["offMain"], json!(9));
     assert!(!m.cfg.state.join("status.json.new").exists());
     // What runs, unread: nothing.
     fs::remove_file(&m.cfg.current_system).unwrap();
-    note(&m.cfg, Outcome::Current, "up to date", None);
+    note(&m.cfg, Outcome::Current, "up to date", None, None);
     assert_eq!(m.status()["running"], json!(""));
 }
 

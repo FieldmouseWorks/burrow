@@ -173,6 +173,8 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     let since: i64 = m.recorded("held-since").unwrap().parse().unwrap();
     assert!((epoch() - since).abs() < 60);
     assert_eq!(m.did("notices"), "");
+    // Its status says when the owner hears of it, for burrow-dispatch.
+    assert_eq!(m.status()["offMain"], serde_json::json!(since + 6 * 3600));
     // Six hours on, the owner hears of it.
     fs::write(
         m.cfg.state.join("held-since"),
@@ -198,6 +200,7 @@ fn a_box_running_changes_that_arent_on_main_holds() {
             .contains("close not-on-main: box is back on main.\n")
     );
     assert_eq!(said(&m).0, "ok");
+    assert_eq!(m.status().get("offMain"), None);
 }
 
 #[test]

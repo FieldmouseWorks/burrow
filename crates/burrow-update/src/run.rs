@@ -70,6 +70,9 @@ pub struct Run<'a> {
     /// Its open PR's number, while it brings in nothing newer for that to
     /// land (main still deploys).
     pub(crate) behind: Option<u64>,
+    /// Held while the box runs changes that aren't on main: when the owner
+    /// hears of it (status.rs's note).
+    pub(crate) off_main: Option<i64>,
     /// Whether this run brings in anything new: not while main isn't live
     /// yet or an open PR of its own waits for the train.
     pub(crate) bumping: bool,
@@ -146,6 +149,7 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         inputs: Vec::new(),
         replacing: None,
         behind: None,
+        off_main: None,
         bumping: false,
         changed: false,
         unfetched: Vec::new(),
@@ -201,7 +205,7 @@ impl Run<'_> {
 
     /// Says what the run did, and ends it: 1 when it failed, 0 otherwise.
     pub(crate) fn end(&self, outcome: Outcome, message: &str) -> End {
-        note(self.cfg, outcome, message, self.behind);
+        note(self.cfg, outcome, message, self.behind, self.off_main);
         End::Exit(if outcome == Outcome::Failed { 1 } else { 0 })
     }
 
@@ -316,6 +320,7 @@ impl Run<'_> {
                     ),
                 );
             }
+            self.off_main = Some(held + HELD_FOR);
             return Err(self.end(
                 Outcome::Held,
                 &format!(
@@ -676,7 +681,7 @@ impl Run<'_> {
                 .unwrap_or_default(),
             self.held_back()
         );
-        note(cfg, Outcome::Ok, &message, self.behind);
+        note(cfg, Outcome::Ok, &message, self.behind, None);
         if let Some(boot) = &cfg.tools.boot {
             let queued = Command::new(boot)
                 .arg("status")
@@ -721,7 +726,7 @@ impl Run<'_> {
             self.url.as_deref().unwrap_or(""),
             self.held_back()
         );
-        note(cfg, Outcome::Ok, &message, self.behind);
+        note(cfg, Outcome::Ok, &message, self.behind, None);
         Ok(())
     }
 

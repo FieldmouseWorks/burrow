@@ -214,6 +214,7 @@ pub fn decide(
         // Its last attempt failed without saying so (killed, timed out, a
         // command's error): what the run before it said no longer holds.
         let behind = snap.behind.filter(|_| update.state != "failed");
+        let off_main = snap.off_main.filter(|_| update.state != "failed");
         for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
             if let Some(why) = snap.unknown.get(repo) {
@@ -233,6 +234,7 @@ pub fn decide(
                     said,
                     snap.progress,
                     behind,
+                    off_main,
                     what,
                     why,
                     since,
@@ -256,6 +258,7 @@ pub fn decide(
                             said,
                             snap.progress,
                             behind,
+                            off_main,
                             it,
                             since,
                             now,
@@ -290,6 +293,7 @@ pub fn decide(
                 said,
                 snap.progress,
                 behind,
+                off_main,
                 what,
                 &waiting,
                 b.oldest,
@@ -316,7 +320,10 @@ pub fn decide(
 /// stalled. Otherwise on HOST-update, which
 /// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
-/// after it lands and has a wait of its own with the steward.
+/// after it lands and has a wait of its own with the steward, and not before
+/// `off_main`, when the owner hears that the box runs changes that aren't on
+/// main: held for those, it waits on whoever switched to them (their PR in
+/// the train, say), not on HOST-update.
 #[allow(clippy::too_many_arguments)]
 fn going_live(
     dep: &Deploy,
@@ -324,6 +331,7 @@ fn going_live(
     said: &str,
     progress: Option<f64>,
     behind: Option<u64>,
+    off_main: Option<f64>,
     what: String,
     waiting: &str,
     since: f64,
@@ -360,15 +368,20 @@ fn going_live(
         _ => Item {
             repo: None,
             what,
-            phase: match behind {
-                Some(pr) => format!(
+            phase: match (behind, off_main) {
+                (Some(pr), _) => format!(
                     "{waiting}; behind {}'s own PR #{pr}, until that lands; its last run: {said}",
                     dep.unit
                 ),
-                None => format!("{waiting}; {}'s last run: {said}", dep.unit),
+                (None, Some(at)) => format!(
+                    "{waiting}; {}'s last run: {said}; the owner hears of it at {} if it still does",
+                    dep.unit,
+                    clock(at)
+                ),
+                (None, None) => format!("{waiting}; {}'s last run: {said}", dep.unit),
             },
             since,
-            due: since + behind.map_or(dep.after, |_| dep.ride),
+            due: (since + behind.map_or(dep.after, |_| dep.ride)).max(off_main.unwrap_or(0.0)),
             link,
             kick: Some(dep.handler.clone()),
             line: false,
@@ -390,6 +403,7 @@ fn retained(
     said: &str,
     progress: Option<f64>,
     behind: Option<u64>,
+    off_main: Option<f64>,
     was: &Item,
     since: Option<f64>,
     now: f64,
@@ -411,6 +425,7 @@ fn retained(
         said,
         progress,
         behind,
+        off_main,
         was.what.clone(),
         if was_run {
             "its commits aren't live yet"
