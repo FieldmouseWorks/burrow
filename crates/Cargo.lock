@@ -664,6 +664,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-judge"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "burrow-brief",
+ "burrow-github",
+ "burrow-producer",
+ "burrow-settings",
+ "burrow-test",
+ "conary-core",
+ "conary-github",
+ "ed25519-dalek",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-keep"
 version = "0.0.0"
 dependencies = [
@@ -728,6 +747,7 @@ dependencies = [
  "base64 0.23.1",
  "burrow-github",
  "burrow-process",
+ "burrow-settings",
  "burrow-test",
  "conary-core",
  "conary-github",
@@ -1081,7 +1101,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=53c6b35c3875b0d57993e896507235ff4a39bd07#53c6b35c3875b0d57993e896507235ff4a39bd07"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=292aa71ecde12e34c22761ab050abcfddb12bbf4#292aa71ecde12e34c22761ab050abcfddb12bbf4"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1096,7 +1116,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=53c6b35c3875b0d57993e896507235ff4a39bd07#53c6b35c3875b0d57993e896507235ff4a39bd07"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=292aa71ecde12e34c22761ab050abcfddb12bbf4#292aa71ecde12e34c22761ab050abcfddb12bbf4"
 dependencies = [
  "base64 0.23.1",
  "chrono",

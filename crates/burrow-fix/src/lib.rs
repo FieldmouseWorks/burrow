@@ -12,12 +12,13 @@
 //!
 //! - [`broker`]: one request's fix, one live fix a PR, stopped with its
 //!   connection, and a restart that stops what it was waiting on.
-//! - [`jobs`]: the proj job a fix runs as, through proj's own commands.
+//! - burrow-producer's `jobs`: the proj job a fix runs as, through proj's
+//!   own commands, shared with the judge's runner.
 //! - [`answers`]: what the job says it did, held to the problems it was
 //!   handed.
 //! - [`brief`]: what the job is told.
 use conary_core::plugin::{
-    Answer, Capabilities, FindingAnswer, FixResult, Identity, Kind, Model, Problem, Sandbox, Task,
+    Answer, Capabilities, FindingAnswer, FixResult, Identity, Kind, Problem, Sandbox, Task,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,6 @@ use std::path::{Path, PathBuf};
 pub mod answers;
 pub mod brief;
 pub mod broker;
-pub mod jobs;
 
 /// What the module tells the plugin and the broker, one file for both.
 #[derive(Debug, Clone, Deserialize)]
@@ -68,25 +68,14 @@ impl Config {
 /// what that engine offers: Conary holds every answer to both, so a fix
 /// job that ran elsewhere, or on a model it didn't offer, is refused there.
 pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
-    let settings = cfg.settings.role_view()?.in_force;
-    let engine = settings.route(&cfg.role, None).engine.clone();
-    let offer = settings.offers.get(&engine).cloned().unwrap_or_default();
+    let (engine, models) = burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
     Ok(burrow_producer::plugin::Plugin {
         describe: Answer::Describe {
             versions: vec![conary_core::plugin::CONTRACT.into()],
             kinds: vec![Kind::Fix],
             v2_kinds: vec![],
             v4_kinds: vec![],
-            models: offer
-                .models
-                .iter()
-                .map(|id| Model {
-                    id: id.clone(),
-                    efforts: offer.efforts.clone(),
-                    context_tokens: None,
-                    max_output_tokens: None,
-                })
-                .collect(),
+            models,
             // The job runs in proj's own sandbox and engine, with the network
             // its push needs.
             capabilities: Some(Capabilities {
@@ -104,6 +93,18 @@ pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
         fixture,
         socket: cfg.socket.clone(),
     })
+}
+
+/// The proj the broker starts its fixes with.
+pub fn proj(cfg: &Config) -> burrow_producer::jobs::Proj {
+    burrow_producer::jobs::Proj {
+        proj: cfg.proj.clone(),
+        jobs: cfg.jobs.clone(),
+        role: cfg.role.clone(),
+        app: cfg.app.clone(),
+        timeout: cfg.timeout.clone(),
+        idle: cfg.idle.clone(),
+    }
 }
 
 /// Conary's fix fixtures, answered with no job: nothing is writable on the

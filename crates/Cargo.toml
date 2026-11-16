@@ -25,6 +25,7 @@ members = [
     "burrow-heartbeat",
     "burrow-heavy",
     "burrow-house",
+    "burrow-judge",
     "burrow-keep",
     "burrow-ledger-door",
     "burrow-notify",

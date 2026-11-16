@@ -109,11 +109,30 @@ pub fn reconcile<T: Signable>(
     records: &Records,
     signer: &Signer,
 ) -> Result<usize, String> {
+    reconcile_with::<T>(api, records, signer, &mut |_, _| Ok(()))
+}
+
+/// What [`reconcile_with`] finishes for a committed record before its
+/// check run.
+pub type Before<'a, T> = dyn FnMut(&mut dyn Api, &Record<T>) -> Result<(), String> + 'a;
+
+/// [`reconcile`], finishing first, for each committed record, what went
+/// out before its check run (`before`: a judgment's sealed comment, posted
+/// if a crash kept it from going out, and left alone if it's there), and
+/// only then its check run. A record whose `before` fails is left for the
+/// next start.
+pub fn reconcile_with<T: Signable>(
+    api: &mut dyn Api,
+    records: &Records,
+    signer: &Signer,
+    before: &mut Before<'_, T>,
+) -> Result<usize, String> {
     let mut finished = 0;
     let mut failed = Vec::new();
     for mut record in records.unfinished::<T>().map_err(|e| e.to_string())? {
         let done = found(api, records, &mut record).and_then(|()| {
             if record.committed() {
+                before(api, &record)?;
                 finish(api, records, signer, false, &mut record).map(drop)
             } else {
                 withdraw(api, records, &mut record)
