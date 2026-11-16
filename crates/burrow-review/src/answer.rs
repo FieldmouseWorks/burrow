@@ -117,7 +117,9 @@ mod tests {
     #[test]
     fn refuses_foreign_owned_answer() {
         let (_dir, path, uid) = fixture();
-        // Check a real file's metadata, using the wrong expected reviewer.
+        let error = read(&path, uid + 1, b"request").unwrap_err();
+        assert!(error.to_string().contains("foreign owner"));
+        // Also exercise the file check independently of its ancestors.
         let error = check(&File::open(path).unwrap(), uid + 1, true).unwrap_err();
         assert!(error.to_string().contains("foreign owner"));
     }
