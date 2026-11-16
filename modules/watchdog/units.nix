@@ -6,9 +6,9 @@
 # or is reset, and a crash older than crashHours, leave the file.
 #
 # burrow-units-watch follows the journal for systemd's word that a unit
-# failed and systemd-coredump's that a program dumped core, and asks for a
-# pass: it kicks burrow-units' burrow-events handler, which also passes on
-# the hourly catch-up. No timer of its own, and no unit's OnFailure= or
+# failed or recovered and systemd-coredump's that a program dumped core,
+# and asks for a pass: it kicks burrow-units' burrow-events handler, which
+# also passes on the hourly catch-up. No timer of its own, and no unit's OnFailure= or
 # OnSuccess= touched, so whatever a service says of its own failures holds.
 # Only burrow-units.service passes, with the whole journal: `burrow-units`
 # run by hand, and its `clear`, ask it to. A burrow-units that stops
@@ -149,7 +149,7 @@ in
       };
     };
     systemd.services."${name}-watch" = {
-      description = "burrow-units' watcher: a pass each time a unit fails or a program dumps core";
+      description = "burrow-units' watcher: a pass each time a unit fails, recovers or a program dumps core";
       wantedBy = [ "multi-user.target" ];
       after = [ "burrow-events.service" ];
       # A watcher that can't keep going fails for good, which the hourly
