@@ -11,6 +11,8 @@ burrow-codex = { path = "../burrow-codex" }
 burrow-events = { path = "../burrow-events" }
 burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "292aa71ecde12e34c22761ab050abcfddb12bbf4" }
+sha2.workspace = true
 jiff.workspace = true
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde.workspace = true

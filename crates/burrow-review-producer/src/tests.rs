@@ -190,7 +190,7 @@ fn rig() -> Rig {
 
 /// A rig whose producer runs its looks on `looker`, if it gives one.
 fn rig_with(looker: impl FnOnce(&Config) -> Option<Box<dyn Looker>>) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let cfg = config(dir.path());
     let world = World(Arc::new(Mutex::new(Pr {
         head: HEAD.into(),
@@ -309,7 +309,7 @@ fn finding() -> Finding {
 
 #[test]
 fn the_plugin_offers_what_codex_offers_and_answers_its_fixture() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let cfg = config(dir.path());
     let Answer::Describe { kinds, models, .. } = describe(&cfg).unwrap() else {
         panic!("not a describe");
@@ -449,6 +449,7 @@ fn an_abandoned_look_is_stopped_and_keeps_nothing() {
             queue: cfg.queue.clone(),
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
+            reviewer_uid: rustix_uid(),
         }))
     });
     let me = Controller(rustix_uid());
@@ -485,6 +486,7 @@ fn the_queue_reads_what_the_service_left() {
             queue: cfg.queue.clone(),
             done: cfg.done.clone(),
             every: Duration::from_millis(10),
+            reviewer_uid: rustix_uid(),
         }))
     });
     // The service: it answers the one look queued, as work.rs does.
@@ -499,7 +501,8 @@ fn the_queue_reads_what_the_service_left() {
                 burrow_review::queue::save(
                     &done.join(entry.file_name()),
                     &json!({"result": "review", "answer": ran.answer,
-                        "ran": {"session": "codex-s7", "model": "m-1", "effort": "high"}}),
+                        "ran": {"session": "codex-s7", "model": "m-1", "effort": "high"},
+                        "digest": burrow_review::answer::digest(&std::fs::read(entry.path()).unwrap())}),
                 )
                 .unwrap();
                 return;
@@ -511,7 +514,7 @@ fn the_queue_reads_what_the_service_left() {
     service.join().unwrap();
     assert_eq!(got["by"]["session"], "codex-s7");
     assert_eq!(got["findings"], json!([finding()]));
-    assert_eq!(std::fs::read_dir(&r.cfg.done).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&r.cfg.done).unwrap().count(), 1);
 }
 
 /// A rig with one look answered and kept, and that look.
@@ -873,6 +876,9 @@ fn a_restart_lets_go_of_the_looks_it_left_and_nothing_else() {
     // The steward's looks are its own.
     let steward = ["codex--pr-acme__widget-5-111111111111-22222222.json"];
     assert_eq!(left(&r.cfg.queue), steward);
-    assert_eq!(left(&r.cfg.done), steward);
+    assert_eq!(
+        left(&r.cfg.done),
+        vec!["codex--fresh-1.json".to_owned(), steward[0].to_owned()]
+    );
     assert_eq!(r.snaps.0.lock().unwrap().1, ["fresh-1"]);
 }

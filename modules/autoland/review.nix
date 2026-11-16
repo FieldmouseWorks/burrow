@@ -10,9 +10,7 @@ let
   inherit (lib) mkOption types;
   cfg = config.burrow.autoland;
   rv = cfg.reviewers;
-  inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir freshDir stewardKick;
-  # The review producer's fresh looks, when it's on.
-  fresh = if cfg.plugins.review.enable then freshDir else null;
+  inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir freshDir producerReviewDir askerGroup stewardKick;
   # The reviewers' service's program.
   service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
@@ -49,7 +47,13 @@ let
     done = "${reviewDir}/done";
     sessions = "${reviewDir}/sessions";
     snapshots = snapDir;
-    inherit fresh;
+    producers = {
+      queue = "${producerReviewDir}/queue";
+      judgeQueue = "${producerReviewDir}/judge-queue";
+      done = "${producerReviewDir}/done";
+      snapshots = freshDir;
+      sessions = "${producerReviewDir}/sessions";
+    };
     reviewers.codex = {
       inherit (rv.codex) enable effort parallel;
       off = lib.attrNames (lib.filterAttrs (_: r: !(r.codex or true)) cfg.repos);
@@ -139,10 +143,31 @@ in
     users.users.${reviewer} = {
       isSystemUser = true;
       group = reviewer;
+      extraGroups = [ askerGroup ];
       home = reviewerHome;
       createHome = true;
     };
     users.groups.${reviewer} = { };
+    users.groups.${askerGroup} = { };
+    assertions = let
+      author = config.users.users.${config.burrow.user};
+      member = group: author.group == group || lib.elem group author.extraGroups
+        || lib.elem config.burrow.user config.users.groups.${group}.members;
+    in [{
+      assertion = config.burrow.user != reviewer && !(member reviewer) && !(member askerGroup);
+      message = "burrow.autoland.reviewers: burrow.user must be neither the reviewer nor a member of the reviewers' or askers' group.";
+    }];
+    # Kept outside burrow.user's state tree, including its parents.
+    systemd.tmpfiles.settings.burrow-review-looks = let
+      dir = mode: group: { d = { inherit mode group; user = reviewer; }; };
+    in {
+      ${producerReviewDir} = dir "0750" askerGroup;
+      "${producerReviewDir}/queue" = dir "2770" askerGroup;
+      "${producerReviewDir}/judge-queue" = dir "2770" askerGroup;
+      "${producerReviewDir}/done" = dir "2750" askerGroup;
+      "${producerReviewDir}/sessions" = dir "0700" reviewer;
+      ${freshDir} = dir "2770" askerGroup;
+    };
 
     # The reviews the passes queue, as soon as there are any, as the
     # reviewers' own user: no GitHub login, and the snapshots are all it
@@ -166,7 +191,7 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ]
-          ++ lib.optional (fresh != null) fresh;
+          ++ [ producerReviewDir ];
       };
     };
     environment.etc.${deployedDir} = lib.mkIf (!cfg.dryRun) { source = deployed; };
@@ -174,7 +199,8 @@ in
       wantedBy = [ "paths.target" ];
       # A review to do, or a closed PR's sessions to delete.
       pathConfig = {
-        DirectoryNotEmpty = "${reviewDir}/queue";
+        DirectoryNotEmpty = [ "${reviewDir}/queue" "${producerReviewDir}/queue" "${producerReviewDir}/judge-queue" ];
+        PathChanged = freshDir;
         PathExistsGlob = "${reviewDir}/sessions/.gone-*";
       };
     };

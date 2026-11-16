@@ -39,7 +39,7 @@ let
       && sign.serviceConfig.User == "autoland-review-sign"
       && on.users.users.autoland-review-sign.extraGroups == [ "autoland-review-producer" ]
       && !(lib.elem "autoland-review-sign" on.users.users.autoland-review-producer.extraGroups)
-      && lib.elem "autoland-review" on.users.users.autoland-review-producer.extraGroups
+      && lib.elem "autoland-review-askers" on.users.users.autoland-review-producer.extraGroups
       && !(lib.elem "autoland-review-producer" (on.users.users.autoland-review.extraGroups or [ ]));
     socketDir = producer.serviceConfig.RuntimeDirectory == "conary-producers/review"
       && producer.serviceConfig.SupplementaryGroups == [ "conary-flow" ];
@@ -53,20 +53,20 @@ let
       && lib.hasSuffix "/bin/burrow-review-plugin sign ${configFile}" (plain sign.serviceConfig.ExecStart)
       && lib.hasInfix "/bin/burrow-review-plugin plugin ${configFile}" (plain on.burrow.autoland.plugins.review.plugin.text);
     config = read.socket == "/run/conary-producers/review/producer.sock" && read.controller == "conary-flow"
-      && read.role == "codex" && read.fresh == "/var/cache/autoland/fresh"
-      && read.queue == "${on.burrow.stateDir}/autoland/review/queue"
-      && read.done == "${on.burrow.stateDir}/autoland/review/done"
+      && read.role == "codex" && read.fresh == "/var/lib/burrow-review-looks/snapshots"
+      && read.queue == "/var/lib/burrow-review-looks/queue"
+      && read.done == "/var/lib/burrow-review-looks/done"
       && read.upkeep == on.burrow.autoland.upkeepConfig
       && read.sign == "${on.burrow.stateDir}/autoland-review-sign"
       && read.settings == on.burrow.settings.effective;
     # The reviewers' service runs fresh looks there, and may write it.
-    reviewers = lib.elem "/var/cache/autoland/fresh" review.serviceConfig.ReadWritePaths;
+    reviewers = lib.elem "/var/lib/burrow-review-looks" review.serviceConfig.ReadWritePaths;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
 in pkgs.runCommand "autoland-review-producer-check" { } ''
   fail() { echo "$*"; exit 1; }
   ${lib.concatMapStrings (w: "fail 'the review producer is wrong: ${w}'\n") wrong}
-  ${pkgs.jq}/bin/jq -e '.fresh == "/var/cache/autoland/fresh"' ${reviewConfig} >/dev/null \
+  ${pkgs.jq}/bin/jq -e '.producers.snapshots == "/var/lib/burrow-review-looks/snapshots"' ${reviewConfig} >/dev/null \
     || fail "the reviewers' service isn't told where fresh looks are"
   touch $out
 ''

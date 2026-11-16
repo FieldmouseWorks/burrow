@@ -75,9 +75,9 @@ pub struct Config {
     /// still to come or something failed.
     pub sign: PathBuf,
     /// The snapshots the reviewers' service reads a fresh look from, one a
-    /// look, which the producer takes and clears (burrow-review's `fresh`).
+    /// look, which the producer takes and clears (burrow-review's protected snapshots).
     pub fresh: PathBuf,
-    /// The reviewers' service's queue and the answers it leaves.
+    /// The protected producer queue and reviewer-owned answers it leaves.
     pub queue: PathBuf,
     pub done: PathBuf,
     /// Seconds a look waits for its publication before it's let go.

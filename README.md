@@ -348,7 +348,14 @@ Each has an entry below, and each can be imported on its own.
   role's earlier findings, and a sign pass, on each submitted review, that
   signs the flow's publication with the producer's own key
   (`plugins.review.keyFile`) only once it holds all the look recorded; it
-  needs `burrow.ledger.controllerUser` and Codex as a reviewer.
+  needs `burrow.ledger.controllerUser` and Codex as a reviewer. Producer
+  looks use the protected queues in `/var/lib/burrow-review-looks`: only
+  `autoland-review-askers` may submit requests, and only `autoland-review`
+  writes answers. The shared `burrow-review::answer` reader checks path
+  ownership, write permissions and the digest of the exact queued bytes.
+  The separate judge queue selects fresh, read-only Codex judgments with
+  an explicit model and effort and Conary's verdict schema; this transport
+  does not enable the judge plugin.
   `plugins.judge.enable` (off) runs Conary's judge plugin and its producer
   (crates/burrow-judge): each request held to the PR's head, base,
   description and discussion on GitHub, judged as a fresh proj job on the

@@ -9,3 +9,5 @@ mod pause;
 mod queue;
 mod rig;
 mod sessions;
+
+mod producers;

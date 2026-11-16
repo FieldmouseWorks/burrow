@@ -119,6 +119,7 @@ pub struct Queue {
     pub done: PathBuf,
     /// How often the answer is looked for.
     pub every: Duration,
+    pub reviewer_uid: u32,
 }
 
 impl Looker for Queue {
@@ -127,20 +128,26 @@ impl Looker for Queue {
         let entry = self.queue.join(&name);
         let back = self.done.join(&name);
         let value = serde_json::to_value(item).map_err(|e| e.to_string())?;
+        let request = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
         queue::save(&entry, &value).map_err(|e| format!("{}: {e}", entry.display()))?;
         // Its entry going is how the service learns the look is to stop.
         let answer = loop {
             if work.abandoned() {
                 let _ = queue::remove(&entry);
-                let _ = queue::remove(&back);
+
                 return Err("its request was abandoned: the look is stopped".into());
             }
-            if let Some(answer) = queue::load(&back) {
-                break answer;
+            match burrow_review::answer::read(&back, self.reviewer_uid, &request) {
+                Ok(answer) => break answer,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let _ = queue::remove(&entry);
+                    return Err(format!("untrusted review answer: {e}"));
+                }
             }
             std::thread::sleep(self.every);
         };
-        let _ = queue::remove(&back);
+
         let _ = queue::remove(&entry);
         ran(&answer)
     }

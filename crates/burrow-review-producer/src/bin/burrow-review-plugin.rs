@@ -42,6 +42,7 @@ fn main() -> ExitCode {
                     queue: cfg.queue.clone(),
                     done: cfg.done.clone(),
                     every: Duration::from_secs(1),
+                    reviewer_uid: Controller::named("autoland-review")?.0,
                 };
                 let producer = Arc::new(Producer::new(
                     cfg,

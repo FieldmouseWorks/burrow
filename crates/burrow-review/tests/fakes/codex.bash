@@ -22,6 +22,10 @@ prompt=${prompt%x}
 # Its session: the one it's told to resume (an unknown one is an error, as
 # codex has it), or a new one, kept in its home.
 sid=
+schema='{}'
+for ((i = 0; i < ${#args[@]}; i++)); do
+  [ "${args[i]}" != --output-schema ] || schema=$(cat "${args[i + 1]}")
+done
 resumed=false
 if [ "${args[0]:-}" = exec ] && [ "${args[1]:-}" = resume ]; then
   sid=${args[-2]}
@@ -35,9 +39,9 @@ fi
 mkdir -p "$CODEX_HOME/sessions"
 printf '%s' "$prompt" >>"$CODEX_HOME/sessions/$sid"
 jq -cn --arg cwd "$PWD" --arg prompt "$prompt" --arg sid "$sid" --argjson resumed "$resumed" \
-  --arg began "$(date +%s.%N)" \
+  --argjson schema "$schema" --arg began "$(date +%s.%N)" \
   '{args: $ARGS.positional, cwd: $cwd, env: env, prompt: $prompt, session: $sid,
-    resumed: $resumed, began: ($began | tonumber)}' --args -- "${args[@]}" >>"$fake/codex.log"
+    resumed: $resumed, schema: $schema, began: ($began | tonumber)}' --args -- "${args[@]}" >>"$fake/codex.log"
 
 # What codex.json says to do, for this look's prompt: $2 if it says nothing.
 todo() {
