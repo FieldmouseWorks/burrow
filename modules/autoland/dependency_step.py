@@ -11,7 +11,7 @@ import train as T
 import waits
 from common import CFG
 from seal import MAJOR as MAJOR_VERDICT
-from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED
+from tasks import DEP_SEEN, PAST_LIMIT
 from touches import automerge_spent, automerges, provenance
 
 

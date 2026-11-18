@@ -72,4 +72,3 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
             else:
                 after(C.NOW - waited, LOST)  # ends: listed for the owner
     return Looked(names, said, rounds, clean, capped, waiting, stuck, unreviewed)
-
