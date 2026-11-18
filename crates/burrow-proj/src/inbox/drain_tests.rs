@@ -22,10 +22,9 @@ fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value
 fn the_drain_picks() {
     let b = Box::new();
     let mut p = b.pass();
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let old = "2026-10-01T00:00:00Z";
     let new = "2026-11-01T00:00:00Z";
-    let mut pick = |items: &[Value]| p.pick_ready(&t, items);
+    let mut pick = |items: &[Value]| p.pick_ready(items);
 
     let game = found("sam/game", 4, "sam", &["ready"], old);
     let game_newer = found("sam/game", 5, "sam", &["ready"], new);
@@ -202,7 +201,7 @@ fn the_drain_comes_back() {
         })
         .collect();
     b.pass().drain().unwrap();
-    let waiting = state(&b).join(super::WAITING);
+    let waiting = super::record::files::drain_waiting(&state(&b));
     assert_eq!(fs::read_to_string(&waiting).unwrap(), "sam/game\n");
     drop(held);
     assert!(
@@ -379,7 +378,7 @@ fn running_handed_references_are_not_drained() {
     fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
     let mut p = b.pass();
-    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(p.pick_ready(std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
     assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
@@ -391,7 +390,7 @@ fn running_handed_references_are_not_drained() {
         ("sam/game", 7, false),
     ] {
         let i = found(repo, n, "sam", &["ready"], "2026-10-01T00:00:00Z");
-        assert_eq!(p.pick_ready(t, &[i]).is_none(), claimed);
+        assert_eq!(p.pick_ready(&[i]).is_none(), claimed);
     }
     p.note_ready("sam/box", std::slice::from_ref(&seven))
         .unwrap();
@@ -400,7 +399,7 @@ fn running_handed_references_are_not_drained() {
     assert!(!b.log().contains("labels[]=codex"));
     // Waiting for a slot still owns the brief.
     fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
-    assert_eq!(b.pass().pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(b.pass().pick_ready(std::slice::from_ref(&seven)), None);
     fs::remove_file(b.path("active")).unwrap();
     assert!(
         !b.pass()
@@ -494,13 +493,7 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
                 b.log()
             );
             assert_eq!(
-                b.cfg
-                    .inbox
-                    .as_ref()
-                    .unwrap()
-                    .state
-                    .join(super::WAITING)
-                    .exists(),
+                super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists(),
                 !admitted
             );
         }
@@ -569,13 +562,7 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
                 assert_ne!(p.wake.get("sam/game"), Some(&until));
             }
             assert_eq!(
-                b.cfg
-                    .inbox
-                    .as_ref()
-                    .unwrap()
-                    .state
-                    .join(super::WAITING)
-                    .exists(),
+                super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists(),
                 !admitted
             );
         }
@@ -618,7 +605,7 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
     );
     let state = &b.cfg.inbox.as_ref().unwrap().state;
     assert!(
-        state.join(super::WAITING).exists(),
+        super::record::files::drain_waiting(state).exists(),
         "the blocked engine still needs a wake-up"
     );
     // The successful enrollment is now visible on the live issue snapshot.
@@ -653,9 +640,9 @@ fn awaiting_handed_references_are_not_drained() {
     // A declaration for a future turn and an empty live wait do not own work.
     fs::write(job.join("await.next"), &wait).unwrap();
     fs::write(job.join("await"), "").unwrap();
-    assert!(p.pick_ready(t, std::slice::from_ref(&seven)).is_some());
+    assert!(p.pick_ready(std::slice::from_ref(&seven)).is_some());
     fs::write(job.join("await"), &wait).unwrap();
-    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(p.pick_ready(std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
     assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
@@ -703,9 +690,8 @@ fn paused_ready_issues_wait_without_relabelling() {
         .unwrap()
         .allowed
         .push("sam/box".into());
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     assert_eq!(
-        b.pass().pick_ready(&t, &[paused]),
+        b.pass().pick_ready(&[paused]),
         Some(("sam/box".into(), "8".into()))
     );
 }
@@ -734,12 +720,12 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         .unwrap()
         .at_once = 1;
     let p = b.pass();
-    assert!(!p.sorting_slot(&sorting));
+    assert!(!p.holds_sorting_slot(&sorting));
     assert!(!p.record_uses_capacity(&drained));
     // A genuinely active paused turn still consumes shared capacity.
     fs::write(b.path("active"), "").unwrap();
     fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
-    assert!(p.sorting_slot(&sorting));
+    assert!(p.holds_sorting_slot(&sorting));
     assert!(p.record_uses_capacity(&drained));
     // A queued automated worker of a paused repository is held, not counted.
     fs::write(b.cfg.jobs.join("s1/role"), "work\n").unwrap();
@@ -766,7 +752,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert_eq!(
         super::dirs(&state.join(".triage"), "")
             .iter()
-            .filter(|d| b.pass().sorting_slot(d))
+            .filter(|d| b.pass().holds_sorting_slot(d))
             .count(),
         0
     );
@@ -811,7 +797,7 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         ),
     ];
     for i in &items {
-        let (repo, n) = p.pick_ready(&t, std::slice::from_ref(i)).unwrap();
+        let (repo, n) = p.pick_ready(std::slice::from_ref(i)).unwrap();
         p.note_ready(
             &repo,
             &items

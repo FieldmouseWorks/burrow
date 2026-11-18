@@ -163,7 +163,7 @@ fn no_room_asks_nothing() {
         .collect();
     b.pass().drain().unwrap();
     let state = &b.cfg.inbox.as_ref().unwrap().state;
-    assert!(state.join(super::WAITING).exists());
+    assert!(super::record::files::drain_waiting(state).exists());
     assert!(
         !b.log().contains("api repos/sam/box/issues/"),
         "{}",

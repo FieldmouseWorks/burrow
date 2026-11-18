@@ -5,48 +5,6 @@ use serde_json::Value;
 use std::{fs, path::Path};
 
 impl Pass<'_> {
-    pub(super) fn sorting_slot(&self, d: &Path) -> bool {
-        self.holds_sorting_slot(d, true)
-    }
-
-    /// Whether a sorting record holds one of the `at_once` slots: its job's,
-    /// unless its job is settled ([`super::settle`]), its question has
-    /// been left for the owner, or it has ended with no outstanding holds.
-    /// The pass, proj's queue and the live snapshot all count with this, so
-    /// none of them can see a slot the others don't. `settle` first
-    /// recovers the question's state under the job's lock, as a pass does;
-    /// the live snapshot only reads, and takes it as it stands.
-    pub(super) fn holds_sorting_slot(&self, d: &Path, settle: bool) -> bool {
-        read(&d.join("job")).is_some_and(|id| {
-            let job = Job::new(self.cfg, &id);
-            // Serializes with new starts and question recovery, including in
-            // snapshots. The running turn itself publishes without this lock.
-            let held = if settle { job.lock() } else { job.read_lock() };
-            let Ok(_held) = held else { return true };
-            if super::settle::settled(&job).is_some() {
-                return false;
-            }
-            if settle && crate::question::recover(&job).is_err() {
-                return true;
-            }
-            // Establish completion before sampling holds. Both the turn and
-            // its _ended recovery can publish final holds without this lock;
-            // neither may still be running or queued when we release capacity.
-            let terminated = crate::systemd::terminated(self.cfg, &job.unit())
-                && crate::systemd::terminated(self.cfg, &job.end_unit());
-            let Ok(holds) = job.holds() else { return true };
-            if holds.iter().any(|h| h == "owner") {
-                return false;
-            }
-            if !terminated {
-                return true;
-            }
-            // Policy-paused records keep their existing exception once their
-            // units are known terminal. Retries and other holds retain capacity.
-            self.record_uses_capacity(d) && !holds.is_empty()
-        })
-    }
-
     /// An outstanding question is never a sorting verdict. Timed-out one-way
     /// questions retain a reply route, but no longer occupy a sorting slot.
     pub(super) fn sorting_question(

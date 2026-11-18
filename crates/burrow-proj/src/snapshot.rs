@@ -673,20 +673,6 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
-/// The issues the inbox says wait for sorting, each with why.
-fn waiting(cfg: &Config) -> Vec<String> {
-    let Some(i) = cfg.inbox.as_ref() else {
-        return Vec::new();
-    };
-    let mut lines: Vec<String> = std::fs::read_dir(i.state.join(".triage-waiting"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| crate::read(&e.ok()?.path()))
-        .collect();
-    lines.sort();
-    lines
-}
-
 fn holds(cfg: &Config) -> Holds {
     Holds {
         paused: cfg.paused_repos(),
@@ -703,7 +689,7 @@ fn holds(cfg: &Config) -> Holds {
                 drain: t.drain,
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
-                waiting: waiting(cfg),
+                waiting: crate::inbox::record::sorting_waits(cfg),
             }),
     }
 }

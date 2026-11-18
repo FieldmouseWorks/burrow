@@ -16,7 +16,7 @@
 //!
 //! What's ready comes from the passes' own lists of each repo's open
 //! issues, every page of them: each repo's pass keeps its ready ones in
-//! [`READY_LISTS`], and the drain picks from all of them, then asks GitHub
+//! its ready list ([`files::ready_lists`]), and the drain picks from all of them, then asks GitHub
 //! for the one it picked before it labels it. What GitHub says of it then
 //! replaces what the list had, so a list gone stale is put right by the
 //! drain's own read, not by listing the repo again.
@@ -32,22 +32,13 @@ use std::fs;
 
 use serde_json::Value;
 
+use super::record::files;
 use super::triage::READY;
 use super::{Pass, RETRY, dirs, key, raw};
-use crate::config::Triage;
 use crate::engine::Engine;
 use crate::github::api;
 use crate::snapshot::Priority;
 use crate::{Fail, io_fail, mtime, now, slot, swap, usage};
-
-/// In the inbox's state while a ready issue waits for a slot: the repo it's
-/// in. Every turn's end then kicks the drain's own pass ([`DRAIN_KICK`],
-/// `proj _ended`), since a slot freed by any job is room for it.
-pub(crate) const WAITING: &str = ".drain-waiting";
-
-/// In the inbox's state: a file for each repo (its key), its ready issues
-/// as its last pass saw them.
-pub(crate) const READY_LISTS: &str = ".ready";
 
 /// What a turn's end kicks while a ready issue waits for a slot: the
 /// drain's own pass (burrow-events' handler of that name runs
@@ -121,7 +112,7 @@ impl Pass<'_> {
     /// One ready issue handed on, if there's room for it. Whatever holds it
     /// back has an event or a wake-up that brings the drain back: its own
     /// jobs' turns kick their repos' passes as they end; one waiting on a
-    /// slot leaves [`WAITING`], and every turn's end then kicks the drain's
+    /// slot leaves its waiting mark ([`files::drain_waiting`]), and every turn's end then kicks the drain's
     /// pass (`proj _ended`); a usage hold books a pass for when it resets, and
     /// GitHub not answering about the issue picked, or not taking its label,
     /// one for five minutes on.
@@ -150,7 +141,7 @@ impl Pass<'_> {
         else {
             return Ok(());
         };
-        let waiting = self.inbox.state.join(WAITING);
+        let waiting = files::drain_waiting(&self.inbox.state);
         // Count queued/running turns in enabled repos, plus enrollments
         // whose job hasn't started yet. One that hasn't after ten minutes is
         // let go only once GitHub says the issue no longer carries the label
@@ -175,7 +166,7 @@ impl Pass<'_> {
             }
         }
         let items = self.ready_items();
-        let ranked = self.ranked(&t, &items);
+        let ranked = self.ranked(&items);
         let Some(Candidate { repo: first, .. }) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
@@ -224,9 +215,7 @@ impl Pass<'_> {
                 continue;
             };
             if now_issue["state"] != "open"
-                || self
-                    .pick_ready(&t, std::slice::from_ref(&now_issue))
-                    .is_none()
+                || self.pick_ready(std::slice::from_ref(&now_issue)).is_none()
             {
                 // Its list had it wrong: what GitHub just said replaces it
                 // there, and the next one is looked at.
@@ -393,7 +382,7 @@ impl Pass<'_> {
     /// for the drain: what [`Pass::pick_ready`] reads of each. A pass that
     /// looked at some issues alone changes only theirs.
     pub(super) fn note_ready(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
-        let dir = self.inbox.state.join(READY_LISTS);
+        let dir = files::ready_lists(&self.inbox.state);
         let f = dir.join(key(repo));
         let others: Vec<Value> = if self.scope.is_some() {
             fs::read(&f)
@@ -413,7 +402,7 @@ impl Pass<'_> {
     /// Issue N of the repo's ready list as GitHub has it now: in the list
     /// while it's open and ready, out of it otherwise.
     fn renote_ready(&self, repo: &str, n: &str, now_issue: &Value) -> Result<(), Fail> {
-        let f = self.inbox.state.join(READY_LISTS).join(key(repo));
+        let f = files::ready_lists(&self.inbox.state).join(key(repo));
         let kept = fs::read(&f)
             .ok()
             .and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
@@ -428,14 +417,14 @@ impl Pass<'_> {
 
     /// The ready issues to hand on, next first, from every repo's last pass.
     /// Repair status comes from the cached labels.
-    pub(super) fn next_ready(&mut self, t: &Triage) -> Vec<Candidate> {
+    pub(super) fn next_ready(&mut self) -> Vec<Candidate> {
         let items = self.ready_items();
-        self.ranked(t, &items)
+        self.ranked(&items)
     }
 
     /// Every repo's ready list, as its last pass (or the drain) left it.
     fn ready_items(&self) -> Vec<Value> {
-        let dir = self.inbox.state.join(READY_LISTS);
+        let dir = files::ready_lists(&self.inbox.state);
         fs::read_dir(&dir)
             .map(|d| {
                 d.filter_map(|e| e.ok())
@@ -450,78 +439,54 @@ impl Pass<'_> {
     }
 
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
-    pub(super) fn pick_ready(&mut self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
-        self.ranked(t, items)
-            .into_iter()
-            .next()
-            .map(|c| (c.repo, c.n))
+    pub(super) fn pick_ready(&mut self, items: &[Value]) -> Option<(String, String)> {
+        self.ranked(items).into_iter().next().map(|c| (c.repo, c.n))
     }
 
-    /// Of ready issues, the ones to hand on, in order: a project's, opened by
-    /// an author, nobody else's to work, and without a record here; the
-    /// priority first, then pipeline repos, then oldest first.
-    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
-        let claimed: std::collections::BTreeMap<_, _> = self
-            .project
-            .keys()
-            .map(|repo| (repo.clone(), self.claimed(repo)))
-            .collect();
+    /// Of ready issues, the ones to hand on, in order: those whose record
+    /// ([`super::record`]) has them ready and held by nothing but the
+    /// drain's room, and whose plan lets them go ([`Pass::child_admissible`]);
+    /// the priority first, then pipeline repos, then oldest first.
+    fn ranked(&mut self, items: &[Value]) -> Vec<Candidate> {
         let cfg = self.cfg;
         let rank = |repo: &str| {
             !cfg.pipeline_repos
                 .iter()
                 .any(|r| r.eq_ignore_ascii_case(repo))
         };
-        items
-            .iter()
-            .filter(|i| i.get("pull_request").is_none())
-            .filter_map(|i| {
-                let url = raw(&i["repository_url"]);
-                let named = url.rsplit('/').take(2).collect::<Vec<_>>();
-                let [name, owner] = named[..] else {
-                    return None;
-                };
-                let repo = self
-                    .project
-                    .keys()
-                    .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
-                    .clone();
-                if !self.eligible(&repo, i)
-                    || self.cfg.paused(&repo)
-                    || super::enrollment::automatic_parked(self.inbox, &repo, i)
-                {
-                    return None;
-                }
-                let labels: Vec<&str> = i["labels"]
-                    .as_array()
-                    .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect())
-                    .unwrap_or_default();
-                let theirs = labels.iter().any(|l| {
-                    self.inbox.labels.contains_key(*l)
-                        || *l == t.owner_label
-                        || t.skip.iter().any(|s| s == l)
-                });
-                let n = raw(&i["number"]);
-                if (self.inbox.planning && self.has_task_list(Some(&repo), &n))
-                    || !self.child_admissible(&repo, &n)
-                {
-                    return None;
-                }
-                let kept = self
-                    .inbox
-                    .state
-                    .join(format!("{}-{n}", key(&repo)))
-                    .exists();
-                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n)).then(
-                    || Candidate {
-                        priority: priority(i),
-                        outside: rank(&repo),
-                        opened: raw(&i["created_at"]),
-                        repair: self.lane(i),
-                        repo,
-                        n,
-                    },
-                )
+        let ready: Vec<(String, &Value)> = {
+            let look = self.look();
+            items
+                .iter()
+                .filter(|i| i.get("pull_request").is_none())
+                .filter_map(|i| {
+                    let url = raw(&i["repository_url"]);
+                    let named = url.rsplit('/').take(2).collect::<Vec<_>>();
+                    let [name, owner] = named[..] else {
+                        return None;
+                    };
+                    let repo = self
+                        .project
+                        .keys()
+                        .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
+                        .clone();
+                    look.drains(&repo, i).then_some((repo, i))
+                })
+                .collect()
+        };
+        let admitted: Vec<(String, &Value)> = ready
+            .into_iter()
+            .filter(|(repo, i)| self.child_admissible(repo, &raw(&i["number"])))
+            .collect();
+        admitted
+            .into_iter()
+            .map(|(repo, i)| Candidate {
+                priority: priority(i),
+                outside: rank(&repo),
+                opened: raw(&i["created_at"]),
+                repair: self.lane(i),
+                n: raw(&i["number"]),
+                repo,
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -562,7 +527,7 @@ fn save_ready(f: &std::path::Path, ready: Vec<Value>) -> Result<(), Fail> {
 
 /// Whether any repo's ready list holds an issue.
 fn has_ready(state: &std::path::Path) -> bool {
-    fs::read_dir(state.join(READY_LISTS)).is_ok_and(|d| {
+    fs::read_dir(files::ready_lists(state)).is_ok_and(|d| {
         d.filter_map(|e| e.ok())
             .any(|e| !e.file_name().to_string_lossy().ends_with(".new"))
     })
