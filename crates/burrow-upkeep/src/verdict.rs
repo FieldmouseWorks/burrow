@@ -10,11 +10,15 @@
 //!
 //! The connector reviews each push itself, so there's no look to carry from
 //! an earlier head: a head is clean only once a review of that exact commit
-//! finished with nothing found. Nor from before the PR last changed without
-//! a push: a retarget onto another base is another change, and an edited
-//! description is text the review didn't read. What the connector said
-//! before the later of the two is no word on the PR as it is (its rounds
-//! still count), as GitHub dates them, not as a pass first saw them.
+//! finished with nothing found. Its word binds only the commit, though: a
+//! retarget onto another base is another diff, and an edited description is
+//! text a review may not have read, and nothing the connector posts says
+//! which base or description it read, or when a review began. So a PR that
+//! changed either way after its head was pushed, as GitHub dates both, is
+//! `changed`: whatever Codex says of it, its word can't land it, and the
+//! steward has the PR judged, whose verdict binds the base and description
+//! as well as the head (tasks.py `judged_on`). One changed before the push
+//! is what every review of the push read.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -41,6 +45,10 @@ pub struct Asked {
     /// When it was last retargeted (its last `BaseRefChangedEvent`).
     #[serde(default)]
     pub retargeted: Option<String>,
+    /// When GitHub got its head, in seconds, as near as it says (prs.py
+    /// `pushed`), or null when it can't say.
+    #[serde(default)]
+    pub pushed: Option<f64>,
 }
 
 /// One of a PR's reviews, as GraphQL gives it.
@@ -93,9 +101,11 @@ pub struct Said {
     /// Its reviews of the PR that had findings, at any head: each one is a
     /// round.
     pub rounds: u64,
-    /// When the PR last changed without a push (0 if never): nothing it
-    /// said before then counts.
-    pub since: f64,
+    /// Whether the PR was retargeted or its description edited after its
+    /// head was pushed (or at some time when GitHub can't say when it was
+    /// pushed): Codex's word binds no base or description, so it can't
+    /// settle the PR alone.
+    pub changed: bool,
 }
 
 /// The summary comment's state for one kind of review.
@@ -120,10 +130,10 @@ pub fn said(asked: &Asked) -> Result<Said, String> {
         verdict: Verdict::None,
         at: 0.0,
         rounds: 0,
-        since,
+        changed: since > 0.0 && asked.pushed.is_none_or(|p| since >= p),
     };
     let mut saw = |verdict, at: f64| {
-        if at > since && at >= s.at {
+        if at >= s.at {
             s.verdict = verdict;
             s.at = at;
         }
@@ -166,7 +176,7 @@ pub fn said(asked: &Asked) -> Result<Said, String> {
         let on = r.commit.as_ref().map(|c| c.oid.as_str());
         if on == Some(asked.head.as_str()) && asked.head.starts_with(&read[1]) {
             let at = when(&r.submitted_at)?;
-            if at > since && at >= s.at {
+            if at >= s.at {
                 s.verdict = Verdict::Findings;
                 s.at = at;
             }

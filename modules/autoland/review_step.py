@@ -18,13 +18,14 @@ QUIET, LOST = 30, 120
 class Looked(NamedTuple):
     """What the PR's reviewers come to on its head, for its step."""
     live: list  # the reviewers this repo has
-    said: dict  # each one's verdict on this head: (verdict, when, rounds with findings)
+    said: dict  # each one's verdict on this head: (verdict, when, rounds with findings, changed)
     rounds: int  # the most rounds with findings any reviewer has
     clean: bool  # every one found nothing on this head
     capped: bool  # past the repo's round limit, and not clean
     waiting: list  # what it still waits on from the reviewers, in words
     stuck: list  # what the owner hears of, in words
     unreviewed: bool  # it needs no review round: documentation alone, not R2
+    changed: bool  # retargeted or edited after its push: clean isn't the reviewers' to settle alone
 
 
 def look(repo, pr, st, digest, line, age, after, tried, needed):
@@ -35,11 +36,7 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
     needed, whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     names = V.on(repo)
-    said = {r: V.verdict(repo, pr, st) for r in names}
-    # A retarget or an edit is a change to review too, which the connector
-    # doesn't look at by itself: it's asked at once (the push's QUIET has
-    # long gone), and the owner's wait runs from the change.
-    waited = min(age, C.NOW - st.get("since", 0))
+    said = {r: V.verdict(repo, pr) for r in names}
     rounds = max((said[r][2] for r in names), default=0)
     clean = bool(names) and all(said[r][0] == "clean" for r in names)
     # Past the limit the steward stops waiting on the reviewers: a Claude
@@ -62,13 +59,17 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
         elif v == "none":
             waiting.append(f"Waiting for {V.NAMES[r]}'s review of this commit")
             if age >= QUIET * MIN:
-                tried("ask", V.ask(repo, pr, st, f"No review of {pr['headRefOid'][:7]} came after its push, retarget or edit."))
+                tried("ask", V.ask(repo, pr, st, f"No review of {pr['headRefOid'][:7]} came after its push."))
             else:
                 after(C.NOW - age, QUIET)  # ends: asked once, then listed
-            if waited >= LOST * MIN:
-                x = f"no review of {pr['headRefOid'][:7]} after {int(waited // MIN)} minutes"
+            if age >= LOST * MIN:
+                x = f"no review of {pr['headRefOid'][:7]} after {int(age // MIN)} minutes"
                 stuck.append(f"{V.NAMES[r]}: {x}")
                 digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, x + " (its usage, or the connector's setup)"))
             else:
-                after(C.NOW - waited, LOST)  # ends: listed for the owner
-    return Looked(names, said, rounds, clean, capped, waiting, stuck, unreviewed)
+                after(C.NOW - age, LOST)  # ends: listed for the owner
+    # Retargeted or edited after its push, Codex's clean can't settle it: it
+    # binds no base or description (burrow-upkeep's verdict), so a judge,
+    # whose verdict binds both, decides (step.py).
+    changed = clean and not unreviewed and any(said[r][3] for r in names)
+    return Looked(names, said, rounds, clean, capped, waiting, stuck, unreviewed, changed)

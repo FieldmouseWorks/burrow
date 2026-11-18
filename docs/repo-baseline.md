@@ -153,9 +153,12 @@ root only.
    naming the commit it reviewed; the steward reads its verdict from those
    (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
    half an hour after its push is asked for once (`@codex review`), and after
-   two hours the stuck issue says so. A PR retargeted onto another base, or
-   whose description is edited, is another change: Codex's word from before
-   (as GitHub dates the change) doesn't count, and it's asked again. A
+   two hours the stuck issue says so. Codex's word binds only the commit:
+   nothing it posts says which base or description it read, or when a review
+   began. So a PR retargeted onto another base, or whose description is
+   edited, after its head was pushed (as GitHub dates both) isn't Codex's to
+   settle: clean, it's judged (step 6), and the judge's verdict binds the base
+   and description too. A
    repo can turn the wait off (its `codex` override, in the
    [settings reference](settings-reference.md)), and then nothing settles it
    but the owner. A change to documentation
@@ -188,8 +191,8 @@ root only.
    that judges it: an R2 one (Conary's class policy, `burrow.ledger.policy`:
    CODEOWNERS, secrets, by default), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
-   nothing to test), an R2 dependency update, and a
-   Dependabot major. The job lands anything a revert or a follow-up can undo,
+   nothing to test), one retargeted or edited after its push (step 2), an R2
+   dependency update, and a Dependabot major. The job lands anything a revert or a follow-up can undo,
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a
    comment ending `<!-- autoland-judgment: land|owner|failed SHA SEAL -->`,

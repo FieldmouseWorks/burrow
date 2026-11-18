@@ -54,6 +54,7 @@ fn of(reviews: Vec<Review>, comments: Vec<Comment>) -> (Verdict, f64, u64) {
         comments,
         edited: None,
         retargeted: None,
+        pushed: None,
     })
     .unwrap();
     (s.verdict, s.at, s.rounds)
@@ -158,40 +159,56 @@ fn the_newest_word_on_the_head_wins() {
     );
 }
 
-/// What it says once the PR was edited or retargeted at `changed`.
+/// What it says of a PR edited or retargeted at `changed`, its head pushed
+/// at `pushed`.
 fn after(
     changed: (Option<&str>, Option<&str>),
-    reviews: Vec<Review>,
+    pushed: Option<&str>,
     comments: Vec<Comment>,
 ) -> Said {
     said(&Asked {
         head: HEAD.into(),
-        reviews,
+        reviews: vec![],
         comments,
         edited: changed.0.map(Into::into),
         retargeted: changed.1.map(Into::into),
+        pushed: pushed.map(|p| crate::ts(p).unwrap()),
     })
     .unwrap()
 }
 
 #[test]
-fn a_review_from_before_a_retarget_or_an_edit_is_no_word_on_the_pr() {
+fn a_pr_retargeted_or_edited_after_its_push_is_more_than_codex_can_settle() {
     const T2: &str = "2026-10-24T02:00:00Z";
-    let clean = || vec![summary(connector(), HEAD, "completed", Some(false), T1)];
-    let found = || vec![receipt(connector(), HEAD, &HEAD[..10], T1)];
-    for changed in [(Some(T2), None), (None, Some(T2)), (Some(T0), Some(T2))] {
-        // Clean or findings, from before: nothing, though its round counts.
-        let s = after(changed, vec![], clean());
-        assert_eq!((s.verdict, s.at), (Verdict::None, 0.0), "{changed:?}");
-        assert_eq!(s.since, crate::ts(T2).unwrap());
-        let s = after(changed, found(), vec![]);
-        assert_eq!((s.verdict, s.rounds), (Verdict::None, 1), "{changed:?}");
+    let clean = || vec![summary(connector(), HEAD, "completed", Some(false), T2)];
+    // After the push, or the same second, or with no word of when it was
+    // pushed: Codex's clean, however late it came (a review begun before the
+    // change can end after it), isn't the PR's.
+    for (changed, pushed) in [
+        ((Some(T1), None), Some(T0)),
+        ((None, Some(T1)), Some(T0)),
+        ((Some(T0), Some(T1)), Some(T0)),
+        ((None, Some(T1)), Some(T1)),
+        ((Some(T0), None), None),
+    ] {
+        let s = after(changed, pushed, clean());
+        assert_eq!(
+            (s.verdict, s.changed),
+            (Verdict::Clean, true),
+            "{changed:?} {pushed:?}"
+        );
     }
-    // One from after the change counts, as GitHub dates both: however late
-    // a pass first sees the retarget.
-    let s = after((None, Some(T0)), vec![], clean());
-    assert_eq!(s.verdict, Verdict::Clean);
-    // A summary edited the same second as the change isn't after it.
-    let s = after((Some(T1), None), vec![], clean());
-    assert_eq!(s.verdict, Verdict::None);
+    // Before the push, every review of the push read it; never changed, nothing to bind.
+    for (changed, pushed) in [
+        ((Some(T0), Some(T0)), Some(T1)),
+        ((None, None), None),
+        ((None, None), Some(T1)),
+    ] {
+        let s = after(changed, pushed, clean());
+        assert_eq!(
+            (s.verdict, s.changed),
+            (Verdict::Clean, false),
+            "{changed:?} {pushed:?}"
+        );
+    }
 }

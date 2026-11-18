@@ -228,7 +228,7 @@ class Pass(Context, Jobs, Actions):
             self.open_a_day(our_status(self.pr)[1] or "unsettled")
             save(self.key, self.st)
             return
-        live, said, rounds, clean, capped, waiting, stuck, unreviewed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
 
         # 2. The reviewers are clean on this head and nothing is open: CI, then land.
         if self.ci == "red":
@@ -243,7 +243,7 @@ class Pass(Context, Jobs, Actions):
             self.prove()
         elif self.ci == "pending":
             self.settle("pending", "Settled; waiting for CI: " + ", ".join(self.ci_names)[:90], stage=S.CI)
-        elif self.gate() or self.ci == "none" or asked or capped:
+        elif self.gate() or self.ci == "none" or asked or capped or changed:
             self.judged(
                 f"it touches {self.gate()}"
                 if self.gate()
@@ -251,6 +251,8 @@ class Pass(Context, Jobs, Actions):
                 if self.ci == "none"
                 else "a Claude job was asked to judge this head"
                 if asked
+                else "it was retargeted or its description edited after its push, which Codex's review can't vouch for"
+                if changed
                 else f"it went past the review-round limit ({rounds} rounds with findings)",
                 PAST_LIMIT if capped else REVIEWED,
             )
@@ -281,7 +283,7 @@ class Pass(Context, Jobs, Actions):
             lambda: T.review(self.repo, self.pr),
         )
 
-        live, said, rounds, clean, capped, waiting, stuck, unreviewed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
 
         what = []
         if open_threads:

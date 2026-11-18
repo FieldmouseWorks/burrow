@@ -56,7 +56,7 @@ assert "Codex found nothing in this commit's change" in status and merged() and 
 fresh_pr_state()
 run(mkpr(), 0)
 status, digest = run(mkpr(), 30 * 60)
-assert len(asks()) == 1 and "No review of aaaaaaa came after its push, retarget or edit." in asks()[0] and digest == [], (WROTE, digest)
+assert len(asks()) == 1 and "No review of aaaaaaa came after its push." in asks()[0] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 31 * 60)
 assert asks() == [] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 120 * 60)
@@ -93,30 +93,28 @@ assert len(asks()) == 1 and "Every finding is answered" in asks()[0] and not mer
 status, _ = run(answered, 960)
 assert asks() == [], WROTE
 
-# Retargeted, the same head is another change: what the connector said of it
-# before the move (as GitHub dates the move) doesn't count, even on a pass
-# that never saw it on its old base; it's asked for once the head has sat
-# still long enough, as after a push.
+# Codex's word binds only the commit: retargeted, or its description edited,
+# after its push (as GitHub dates both, however late a pass first sees it), a
+# clean PR is judged, since a review begun before the change can end after
+# it. The judge's verdict, sealed on the base and description as they are,
+# lands it.
+pushed = [{"createdAt": T0, "conclusion": "SUCCESS", "workflowRun": None}]
+later = "2026-10-24T00:40:00Z"
+for kw in ({"edited": later}, {"retargeted": later, "base": "release"}, {"edited": later, "retargeted": later}):
+    fresh_pr_state()
+    status, _ = run(clean(suites=pushed, **kw), 3600)
+    assert not merged() and len(JOBS) == 1 and "judging it" in status, (kw, status, JOBS)
+    assert "retargeted or its description edited after its push" in status and asks() == [], (kw, status)
+    status, _ = run(clean(suites=pushed, comments=[said(judgment("land", n=5, base=kw.get("base", "main")))], **kw), 3700)
+    assert merged(), (kw, status)
+# The same with no word of when it was pushed: the change may have come after.
 fresh_pr_state()
-moved = "2026-10-24T00:50:00Z"
-status, _ = run(clean(base="release", retargeted=moved), 3600)
-assert not merged() and "Waiting for Codex's review of this commit" in status, (status, WROTE)
-status, _ = run(clean(base="release", retargeted=moved), 5400)
-assert not merged() and len(asks()) == 1, (status, WROTE)
-# Its word after the move does.
-status, _ = run(clean(base="release", retargeted=moved, comments=[summary(at="2026-10-24T01:35:00Z")]), 5700)
-assert merged(), (status, WROTE)
-# So does an edited description: the review didn't read the new text. It's
-# asked again though it was asked within the hour, and its wait runs from
-# the edit, so the owner doesn't hear of it at once.
+status, _ = run(clean(edited=later), 3600)
+assert not merged() and len(JOBS) == 1 and "judging it" in status, status
+# Changed before its push, every review of the push read it: Codex's clean lands it.
 fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 1900)
-assert len(asks()) == 1, WROTE
-status, digest = run(clean(edited="2026-10-24T00:40:00Z"), 2700)
-assert not merged() and len(asks()) == 1 and digest == [], (status, WROTE, digest)
-status, _ = run(clean(edited="2026-10-24T00:40:00Z", comments=[summary(at="2026-10-24T00:50:00Z")]), 3000)
-assert merged(), (status, WROTE)
+status, _ = run(clean(suites=pushed, edited="2026-10-23T23:50:00Z", retargeted="2026-10-23T23:55:00Z"), 600)
+assert merged() and JOBS == [], status
 
 # A repo with Codex off has no reviewer: it waits, and the owner hears.
 fresh_pr_state()
