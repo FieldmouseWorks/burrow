@@ -155,8 +155,9 @@ root only.
    half an hour after its push is asked for once (`@codex review`), and after
    two hours the stuck issue says so. A PR retargeted onto another base is
    another change: Codex's word on the head before the move doesn't count. A
-   repo can turn the wait off (`codex = false` in its `burrow.autoland.repos`
-   entry), and then nothing settles it but the owner. A change to documentation
+   repo can turn the wait off (its `codex` override, in the
+   [settings reference](settings-reference.md)), and then nothing settles it
+   but the owner. A change to documentation
    alone (Conary's class policy, `burrow.ledger.policy`'s `docs`) gets no
    review round, unless it's R2: it lands once CI is green and nothing is
    open on it.
