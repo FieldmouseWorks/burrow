@@ -450,9 +450,16 @@ impl Look<'_, '_> {
             .since(mtime(&worker.join("refused")));
         }
         // Its sorting record: a sorting job is reading it, or its verdict is
-        // being carried out.
+        // being carried out. One whose sorting ended without an answer gives
+        // way to its labels: the pass never sorts an issue an author has
+        // closed or labelled `ready` again, so it keeps that record forever.
         if let Some(r) = self.sorting(repo, &name, &files::sorting(state, &k, n), paused) {
-            return r;
+            if r.job.is_some() {
+                return r;
+            }
+            return self
+                .closed_or_ready(repo, &name, n, issue, paused)
+                .unwrap_or(r);
         }
         let waiting = files::sorting_waits(state).join(format!("{}-{n}", k.to_lowercase()));
         if waiting.exists() {
@@ -482,14 +489,8 @@ impl Look<'_, '_> {
             };
             return self.gated(r, repo, paused);
         }
-        let listed = self.listed(repo, n);
-        if let Some(i) = issue.or(listed.as_ref()) {
-            if issue.is_some_and(|i| i["state"] == "closed") {
-                return Record::new(&name, Stage::Closed, "nothing: it's closed");
-            }
-            if let Some(r) = self.ready(repo, &name, n, i) {
-                return self.gated(r, repo, paused);
-            }
+        if let Some(r) = self.closed_or_ready(repo, &name, n, issue, paused) {
+            return r;
         }
         if !dirs(&files::retired(state, &k, n), "").is_empty()
             || files::parked(state, &k, n).exists()
@@ -660,6 +661,31 @@ impl Look<'_, '_> {
             Some(reset) => r.waiting(Wait::Quota(reset)),
             None => r,
         }
+    }
+
+    /// Issue N's record when it's closed, or ready, as GitHub (`issue`) has
+    /// it, or else its repo's ready list: None when it's neither.
+    fn closed_or_ready(
+        &self,
+        repo: &str,
+        name: &str,
+        n: &str,
+        issue: Option<&Value>,
+        paused: bool,
+    ) -> Option<Record> {
+        let listed;
+        let i = match issue {
+            Some(i) if i["state"] == "closed" => {
+                return Some(Record::new(name, Stage::Closed, "nothing: it's closed"));
+            }
+            Some(i) => i,
+            None => {
+                listed = self.listed(repo, n)?;
+                &listed
+            }
+        };
+        self.ready(repo, name, n, i)
+            .map(|r| self.gated(r, repo, paused))
     }
 
     /// Issue N as its repo's ready list has it, if it does.

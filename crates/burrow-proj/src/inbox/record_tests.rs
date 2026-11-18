@@ -245,6 +245,51 @@ fn a_planned_parent_waits_on_its_next_child_and_a_later_child_on_it() {
     assert_eq!(behind.wait, Some(Wait::Plan("sam/box#22".into())));
 }
 
+// A sorting job ended without an answer, and an author then labelled the
+// issue `ready` themselves. The pass never sorts it again, so it keeps the
+// failed record; the record gives way to the label, and the drain hands the
+// issue on, as its ranking did before there was a record.
+#[test]
+fn a_ready_label_outranks_a_sorting_that_ended_without_an_answer() {
+    let b = Box::new();
+    let d = state(&b).join(".triage").join("sam_box-14");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("failed"), "2026-11-01T00:00:00Z").unwrap();
+    let p = b.pass();
+    let r = p.look().record("sam/box", "14", None);
+    assert_eq!(
+        (r.stage, r.wait),
+        (Stage::Sorting, None),
+        "unlabelled, it waits"
+    );
+
+    let mut ready = issue(14, "sam", &["ready"]);
+    ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    ready["created_at"] = json!("2026-11-01T00:00:00Z");
+    let lists = state(&b).join(".ready");
+    fs::create_dir_all(&lists).unwrap();
+    fs::write(lists.join("sam_box"), json!([ready]).to_string()).unwrap();
+    let p = b.pass();
+    let look = p.look();
+    for given in [None, Some(&ready)] {
+        let r = look.record("sam/box", "14", given);
+        assert_eq!(
+            (r.stage.clone(), r.wait.clone()),
+            (Stage::Ready, None),
+            "{r:?}"
+        );
+    }
+    assert!(look.drains("sam/box", &ready));
+    assert_eq!(
+        b.pass()
+            .next_ready()
+            .iter()
+            .map(|c| (c.repo.clone(), c.n.clone()))
+            .collect::<Vec<_>>(),
+        [("sam/box".to_owned(), "14".to_owned())],
+    );
+}
+
 #[test]
 fn proj_why_names_the_wait_and_what_ends_it_and_follows_the_issue_into_its_job() {
     let b = Box::new();
