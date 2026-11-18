@@ -1,42 +1,36 @@
-//! What each of a PR's reviewers last said of its head, read back from the
-//! reviews the steward posted for them (post.rs). Each such review carries
-//! a mark of what it was a look at, `<!-- REVIEWER-review:v1 {...} -->`:
-//! the head and base the reviewer read, how many findings it had, and the
-//! description it was shown. The mark is written here (`mark`) and read
-//! here (`said`), and only the steward's own count, since anyone can write
-//! one. The pass hands over the PR's reviews as it read them
-//! (review_step.py) and gets each reviewer's verdict back.
+//! What Codex last said of a PR's head, read from what its GitHub connector
+//! (the ChatGPT Codex Connector App, [`CONNECTOR`]) posts on the PR: the
+//! summary comment it keeps up to date, whose `codex-review-state:v1` mark
+//! names the commit it reviewed, whether that review is done and whether it
+//! found anything; and a review with inline findings for each look that
+//! found some, naming the commit it read. Only the connector's own posts
+//! count, since anyone can write the marks. The pass hands over the PR's
+//! reviews and comments as it read them (review_step.py) and gets the
+//! verdict back.
 //!
-//! A look at an earlier head covers this one too when this head is that
-//! head's change merged onto a newer base and nothing else (carry.rs says
-//! which heads are): what the base brought had its own review, and CI
-//! tests every head. Its findings don't carry as findings, but they stop an
-//! older clean look carrying: the reviewer then looks at this head.
-
-use std::collections::BTreeMap;
+//! The connector reviews each push itself, so there's no look to carry from
+//! an earlier head: a head is clean only once a review of that exact commit
+//! finished with nothing found.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::flaky::login;
-use crate::post::number;
+
+/// The connector's login, as REST gives it (GraphQL's with `[bot]` added:
+/// flaky.rs `login`).
+pub const CONNECTOR: &str = "chatgpt-codex-connector[bot]";
 
 /// What the pass hands `verdict`, on stdin: the PR as it is now.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Asked {
     pub head: String,
-    pub base: String,
-    /// The fingerprint of its description (common.py `fingerprint`).
-    pub description: String,
-    /// The earlier heads whose looks cover this one (carry.rs).
-    #[serde(default)]
-    pub carried: Vec<String>,
-    /// The reviewers to say of, as their marks name them.
-    pub reviewers: Vec<String>,
     /// Its reviews, as GraphQL gives them (prs.py).
     pub reviews: Vec<Review>,
+    /// Its comments, as GraphQL gives them (prs.py).
+    pub comments: Vec<Comment>,
 }
 
 /// One of a PR's reviews, as GraphQL gives it.
@@ -57,170 +51,110 @@ pub struct Commit {
     pub oid: String,
 }
 
-/// What a reviewer last said of the head.
+/// One of a PR's comments, as GraphQL gives it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    #[serde(default)]
+    pub author: Value,
+    pub body: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// What Codex last said of the head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Nothing that covers the PR as it is now.
+    /// Nothing about this head yet.
     None,
+    /// A review of this head is under way.
+    Running,
     Clean,
     Findings,
 }
 
-/// Each reviewer's verdict on the PR, for its step.
+/// Codex's verdict on the PR, for its step.
 #[derive(Debug, PartialEq, Serialize)]
 pub struct Said {
-    /// What the reviewer last said of this head on this base, shown this
-    /// description.
+    /// What it last said of this head.
     pub verdict: Verdict,
-    /// When it said it: its review's time, in seconds (0 with none).
+    /// When it said it, in seconds (0 with nothing).
     pub at: f64,
-    /// Its reviews of the PR that had findings, at any head, on any base:
-    /// each one is a round.
+    /// Its reviews of the PR that had findings, at any head: each one is a
+    /// round.
     pub rounds: u64,
 }
 
-impl Asked {
-    /// Why it can't be read as given: a reviewer whose name isn't one.
-    pub fn wrong(&self) -> Option<String> {
-        self.reviewers
-            .iter()
-            .find(|r| !named(r))
-            .map(|r| format!("{r:?} isn't a reviewer's name"))
-    }
+/// The summary comment's state for one kind of review.
+#[derive(Debug, Deserialize)]
+struct State {
+    commit_sha: Option<String>,
+    status: Option<String>,
+    has_any_findings: Option<bool>,
 }
 
-/// Whether `r` is a reviewer's name: lowercase letters, which name its
-/// queue entries, its sessions and its marks.
-pub fn named(r: &str) -> bool {
-    !r.is_empty() && r.bytes().all(|b| b.is_ascii_lowercase())
-}
-
-/// The mark on the reviewer's review of `head` on `base`: how many
-/// findings it had, and the fingerprint of the description it was shown,
-/// or None when that isn't known (the review then covers no description).
-pub fn mark(
-    reviewer: &str,
-    head: &str,
-    base: &str,
-    findings: usize,
-    description: Option<&str>,
-) -> String {
-    let said =
-        json!({"commit_sha": head, "base": base, "findings": findings, "description": description});
-    format!("<!-- {reviewer}-review:v1 {said} -->")
-}
-
-/// Whether a review shown the description `shown` (its fingerprint, None
-/// when its mark doesn't say) covers the PR's now, `now`. The reasons a
-/// description gives are part of what a reviewer judges, so a review of
-/// another one doesn't cover the PR: a `Why not Rust:` line written in
-/// after a clean review (CI wanted one) has had nobody weigh it.
-pub fn covers(shown: Option<&str>, now: &str) -> bool {
-    shown == Some(now)
-}
-
-/// What each reviewer last said of the PR as it is now, from the reviews
-/// `me` (the steward, as REST gives its login) posted: the newest of them
-/// marked for this head, or one carried to it, on this base, shown this
-/// description, and on the commit its mark names. Retargeted, the PR is
-/// another change on the same head, so what was said on its old base
-/// doesn't count. Fails on a review whose time isn't one.
-pub fn said(me: &str, asked: &Asked) -> Result<BTreeMap<String, Said>, String> {
-    asked
-        .reviewers
-        .iter()
-        .map(|r| Ok((r.clone(), one(me, asked, r)?)))
-        .collect()
-}
-
-/// A mark the steward put on one of its reviews for a reviewer.
-pub struct Mark {
-    /// The head it was a look at, if its mark names one, and that's the
-    /// commit the review is on.
-    pub of: Option<String>,
-    pub base: Option<String>,
-    /// The description it was shown, if its mark says.
-    pub description: Option<String>,
-    /// Whether it had findings.
-    pub found: bool,
-    /// When it was posted, as GitHub gives it.
-    pub at: Option<String>,
-}
-
-/// The marks on the reviews `me` posted for `reviewer`, in their order. A
-/// mark whose count of findings isn't one is no mark.
-pub fn marks(me: &str, reviews: &[Review], reviewer: &str) -> Result<Vec<Mark>, String> {
-    let pat = Regex::new(&format!(
-        r"<!-- {}-review:v1 (\{{.*?\}}) -->",
-        regex::escape(reviewer)
-    ))
-    .map_err(|e| e.to_string())?;
-    let mut out = vec![];
-    for x in reviews {
-        if login(&x.author) != me {
-            continue;
-        }
-        let Some(m) = x
-            .body
-            .as_deref()
-            .and_then(|b| pat.captures(b))
-            .and_then(|c| serde_json::from_str::<Map<String, Value>>(&c[1]).ok())
-        else {
-            continue;
-        };
-        let found = match m.get("findings") {
-            None => 0,
-            Some(k) => match number(k) {
-                Some(k) => k,
-                None => continue,
-            },
-        } > 0;
-        let text = |k: &str| m.get(k).and_then(Value::as_str).map(String::from);
-        let on = x.commit.as_ref().map(|c| c.oid.as_str());
-        out.push(Mark {
-            of: text("commit_sha").filter(|of| Some(of.as_str()) == on),
-            base: text("base"),
-            description: text("description"),
-            found,
-            at: x.submitted_at.clone(),
-        });
-    }
-    Ok(out)
-}
-
-fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
+/// What Codex last said of the PR as it is now. Fails on a time that isn't
+/// one.
+pub fn said(asked: &Asked) -> Result<Said, String> {
+    let state = Regex::new(r"(?s)<!-- codex-review-state:v1 (\{.*?\}) -->").expect("pattern");
+    let receipt = Regex::new(r"Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`").expect("pattern");
+    let when = |t: &Option<String>| match t.as_deref() {
+        None | Some("") => Ok(0.0),
+        Some(t) => crate::ts(t),
+    };
     let mut s = Said {
         verdict: Verdict::None,
         at: 0.0,
         rounds: 0,
     };
-    for m in marks(me, &asked.reviews, reviewer)? {
-        s.rounds += u64::from(m.found);
-        let Some(of) = &m.of else {
-            continue;
-        };
-        let here = *of == asked.head;
-        if !(here || asked.carried.contains(of))
-            || m.base.as_deref() != Some(&asked.base)
-            || !covers(m.description.as_deref(), &asked.description)
-        {
+    let mut saw = |verdict, at: f64| {
+        if at >= s.at {
+            s.verdict = verdict;
+            s.at = at;
+        }
+    };
+    for c in &asked.comments {
+        if login(&c.author) != CONNECTOR {
             continue;
         }
-        let at = match m.at.as_deref() {
-            None | Some("") => 0.0,
-            Some(t) => crate::ts(t)?,
+        let Some(m) = c.body.as_deref().and_then(|b| state.captures(b)) else {
+            continue;
         };
-        if at >= s.at {
-            s.verdict = match (m.found, here) {
-                (false, _) => Verdict::Clean,
-                (true, true) => Verdict::Findings,
-                // Findings on a head carried here: their threads are this
-                // PR's to answer, and the clean look before them no longer
-                // stands, so the reviewer looks at this head.
-                (true, false) => Verdict::None,
-            };
-            s.at = at;
+        let Ok(all) = serde_json::from_str::<Value>(&m[1]) else {
+            continue;
+        };
+        let Ok(code) = serde_json::from_value::<State>(all["code_review"].clone()) else {
+            continue;
+        };
+        if code.commit_sha.as_deref() != Some(asked.head.as_str()) {
+            continue;
+        }
+        let verdict = match (code.status.as_deref(), code.has_any_findings) {
+            (Some("completed"), Some(false)) => Verdict::Clean,
+            (Some("completed"), Some(true)) => Verdict::Findings,
+            // Begun, or a state this doesn't know: not a verdict yet.
+            _ => Verdict::Running,
+        };
+        saw(verdict, when(&c.updated_at)?);
+    }
+    for r in &asked.reviews {
+        if login(&r.author) != CONNECTOR {
+            continue;
+        }
+        let Some(read) = r.body.as_deref().and_then(|b| receipt.captures(b)) else {
+            continue;
+        };
+        s.rounds += 1;
+        // A receipt names only a prefix of the commit, so it counts only on
+        // the commit the review is on: findings there, never clean (the
+        // summary says that).
+        let on = r.commit.as_ref().map(|c| c.oid.as_str());
+        if on == Some(asked.head.as_str()) && asked.head.starts_with(&read[1]) {
+            let at = when(&r.submitted_at)?;
+            if at >= s.at {
+                s.verdict = Verdict::Findings;
+                s.at = at;
+            }
         }
     }
     Ok(s)

@@ -72,17 +72,6 @@ class Context:
         self.judged_at = f"{self.head} {judged_on(self.pr)}"
         self.key = f"pr-{self.repo.replace('/', '_')}-{self.n}.json"
         self.st = load(self.key, {})
-        # Findings a reviewer couldn't post: by reviewer, then base (on another
-        # base the PR is another change), the head they were on, until it posts
-        # a look at the PR's head on that base. Kept across heads, since past
-        # the round limit no new head's look would cover them. State from
-        # before kept the loss in its head's rv: moved here before a new head
-        # clears that.
-        self.lost_on = self.st.setdefault("lostOn", {})
-        for r, rs in self.st.get("rv", {}).items():
-            if rs.get("lost"):
-                was, base = rs.pop("lost")
-                self.lost_on.setdefault(r, {})[base] = was
         if self.st.get("head") != self.head:
             stopping.moved(self.repo, self.pr, self.st)  # its jobs on the last head, to be stopped below
             # Still since it was pushed, as near as GitHub says (prs.pushed),
@@ -90,7 +79,7 @@ class Context:
             # delay before the steward came round is asked about now.
             got = pushed(self.pr)
             seen = C.NOW if got is None else min(got, C.NOW)
-            self.st.update(head=self.head, seen=seen, handed=None, strikes={}, rv={})
+            self.st.update(head=self.head, seen=seen, handed=None, strikes={})
         if DRY:
             # A status run keeps state of its own, but takes what the live
             # passes found on this head from theirs: their failures in a row,
@@ -102,7 +91,6 @@ class Context:
                     self.st[k] = live[k]
                 else:
                     self.st.pop(k, None)
-        self.st.setdefault("rv", {})
         self.labels = {x["name"] for x in self.pr["labels"]["nodes"]}
         self.merging = MERGE_STEPS.get(self.pr.get("mergeStateStatus"), "refused")
         self.age = C.NOW - self.st["seen"]  # how long its head has been still

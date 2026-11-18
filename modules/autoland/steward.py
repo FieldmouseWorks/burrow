@@ -15,8 +15,8 @@ event reports):
      one's Claude jobs are stopped, its clones moved aside and what the
      steward kept about it forgotten: before anything else acts on it.
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing (step.py): queue a review of its head from each
-     reviewer (Codex, reviewers.py), post what they found, hand open
+     the next thing (step.py): read what Codex's GitHub connector said of
+     its head (reviewers.py), asking it again when a look is owed, hand open
      findings, red CI or a conflict with its base to a Claude job, build
      the checks only a machine of the owner's runs that are a build
      (proofBuilds, proofs.py), run those that are a command (proofRuns)
@@ -38,12 +38,12 @@ event reports):
 5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
 delivery (the App's own, for a repo just made), a Claude job's turn
-ending, a reviewer's answer coming back, or a wait the last pass booked
+ending, a review or comment on a PR, or a wait the last pass booked
 ending (common.wake). Its settings cost nothing unless they're due, so a
 repo is set up from the first event about it.
 
 Everything talks to GitHub as the steward's own GitHub App (common.py), so
-its statuses, merges and the reviewers' reviews are posted as the App, and
+its statuses, merges and comments are posted as the App, and
 nobody else's count as its word. Its Claude jobs work as the machine user.
 Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
 in config.stateDir: one JSON file per PR, one per repo.
@@ -56,9 +56,8 @@ for it (proofs.py): the steward builds a proof check that's only a build
 itself, with no Claude job. One that's only a command is crates/burrow-proof's
 to run, in a unit of its own.
 
-The reviews the passes queue are worked through by the reviewers' own
-service (crates/burrow-review, `autoland-review`), as a user of their own. A
-careful look takes an agent many minutes, so no pass waits for it.
+Codex reviews through its GitHub connector, on the owner's ChatGPT account:
+it reviews each push on its own, and a pass reads what it posted.
 
 In a repo with `train` on, a settled PR goes into its merge train instead of
 being merged, and a pass ends with a step of the train (train.py). `cn`, which
@@ -75,7 +74,7 @@ import common as C
 from batch import Batch
 import proofs as P
 import repos as R
-import reviewers as V
+import mirror as M
 import step
 import train as T
 import waits
@@ -111,7 +110,7 @@ def main():
         # Its derivations built, in its heavy slot (proofs.run).
         sys.exit(P.realise(sys.argv[2]))
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+        for d in ("", M.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -269,7 +268,6 @@ def run_pass(kick, continuing=False):
     if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
-    live = {}  # the repos whose PRs it read: their heads' snapshots
     covered = []
     seen = set()
     deferred = set()
@@ -344,7 +342,6 @@ def run_pass(kick, continuing=False):
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
-                snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
                 # own step below).
@@ -373,7 +370,6 @@ def run_pass(kick, continuing=False):
                     batch.turn(repo, pending)
                     pr = left.pop(min(range(len(left)), key=lambda i: order(left[i])))
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
-                    snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
                     try:
@@ -393,14 +389,11 @@ def run_pass(kick, continuing=False):
                     batch.left = True
                     continue
                 op = "train"
-                # A partial traversal leaves all reviewer files alone. Once
-                # complete, include the snapshots carried from earlier batches
-                # before sweeping, just as a single complete pass does.
+                # Complete: the branches of the PRs seen to in earlier
+                # batches are in use too.
                 for pr in prs:
                     if pr not in pending:
                         in_use.update((pr["headRefName"], pr["baseRefName"]))
-                        snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
-                live[repo] = snaps
                 if why := batch.stopped(repo):
                     T.stop(repo, why)
                     # Receipts keep the train safe across batches; a fresh
@@ -483,12 +476,6 @@ def run_pass(kick, continuing=False):
         save("repos.json", coverage)
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
-    if not DRY:
-        for repo, snaps in live.items():
-            try:
-                V.sweep(repo, snaps)
-            except Exception as e:  # one repo's mustn't stop the rest, or the pass's end
-                log(f"{repo}: couldn't sweep what its reviewers left: {e}")
     if not complete:
         # Wake-ups are persisted before publishing GitHub issues: their
         # failure mustn't lose the remainder of this batch.

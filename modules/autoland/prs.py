@@ -7,7 +7,7 @@ import subprocess
 import urllib.parse
 
 import common as C
-import reviewers as V
+import mirror as M
 import train as T
 from common import CFG, CONTEXT, DRY, log
 
@@ -290,9 +290,9 @@ def onto(repo, pr):
     if DRY:
         return None, False
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
-    mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
-    tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
-    if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
+    mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
+    tip = M.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
+    if M.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
         return tip, False
     merged = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
                             capture_output=True, text=True)
@@ -301,7 +301,7 @@ def onto(repo, pr):
         return tip, False
     if merged.returncode:
         raise RuntimeError(f"git merge-tree: {merged.stderr.strip()[-300:]}")
-    return tip, merged.stdout.split()[0] == V.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
+    return tip, merged.stdout.split()[0] == M.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
 
 
 def land(repo, pr, repo_info):

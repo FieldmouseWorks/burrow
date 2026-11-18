@@ -1,297 +1,52 @@
-"""The steward's reviewers: Codex (the codex CLI), an agent that reads a
-snapshot of the PR and answers with its findings.
+"""The steward's reviewer: Codex, through its GitHub connector (the ChatGPT
+Codex Connector App, set up on the owner's ChatGPT account to review every
+push). It reviews each head on its own and posts on the PR: findings as a
+review with inline threads, and a summary comment naming the commit it last
+reviewed and whether it found anything. The steward reads its verdict from
+those (`verdict`, burrow-upkeep's, crates/burrow-upkeep/src/verdict.rs) and
+asks for a look only when one is owed and no push will bring it (`ask`)."""
 
-A pass queues the review (`queue`, burrow-upkeep's, which takes the
-snapshot and writes the brief);
-the reviewers' service (crates/burrow-review) runs the agents as a user of
-their own, with no GitHub access and no secrets paths in what they read;
-the next pass posts what came back (`post`, burrow-upkeep's), as the
-steward's App and marked as that reviewer's, and reads each reviewer's
-verdict back from those posts (`verdicts`, burrow-upkeep's), those on
-earlier heads too where they carry to this one (`carry`, burrow-upkeep's);
-and each pass
-sweeps away what no open PR needs any more (`sweep`, burrow-upkeep's)."""
-
-import fcntl
-import hashlib
 import json
-import os
-import shutil
-import subprocess
 
 import common as C
-from common import CFG, DRY, MIN, STATE, load, log, ts
+from common import DRY, MIN, log
 
 NAMES = {"codex": "Codex"}
-# Under STATE: what's asked for, what each snapshot keeps of its base (its
-# NAME.json: the review rules, and the paths the reviewers weren't shown,
-# which a judge looks at before the PR lands), what came back, and a clone
-# per repo the snapshots are taken from.
-QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
-# Each snapshot's checkout, the tree a reviewer reads: rewritten for every
-# head and taken again from GitHub whenever it's missing, so it's a cache,
-# kept out of STATE and whatever snapshots the machine keeps of its state
-# (a big repo's runs to the best part of a gigabyte a head). Absolute, so
-# os.path.join(STATE, TREES) is TREES.
-TREES = CFG["snapDir"]
-# Each reviewer's session for each open PR, which every look at it resumes.
-# The reviewers' service owns what's in them; the sweep marks a closed PR's
-# gone (burrow-upkeep's sweep.rs), and the service deletes it.
-SESSIONS = "review/sessions"
-OUT = "reviewers.json"  # a reviewer out of service, and until when
+# What asks the connector for a review, as its docs give it.
+ASK = "@codex review"
 
 
 def on(repo):
-    """The reviewers this repo has, in a fixed order."""
+    """The reviewers this repo has: Codex, unless the repo turned it off."""
     rc = C.repo_cfg(repo)
-    return [r for r in NAMES if CFG["reviewers"][r]["enable"] and rc[r]]
+    return [r for r in NAMES if rc[r]]
 
 
-def out(r):
-    """Why the reviewer is out of service (usage spent, not logged in), or
-    None. Out, it isn't asked and isn't waited for."""
-    o = load(OUT, {}).get(r)
-    return o["why"] if o and C.NOW < o["until"] else None
-
-
-def finding(r):
-    return f"<!-- {r}-finding -->"
-
-
-def verdicts(repo, pr, names, carried):
-    """What each of the reviewers `names` last said of the PR's head on its
-    base, or of one of the earlier heads `carried` (`carry`'s), shown its
-    description as it is now (clean, findings or none), when, and how many
-    of its reviews on the PR had findings, by burrow-upkeep
-    (crates/burrow-upkeep/src/verdict.rs): read back from the reviews the
-    steward posted, since anyone can write the mark. Asks GitHub nothing;
-    raises when it couldn't tell."""
+def verdict(repo, pr):
+    """What Codex last said of the PR's head (none, running, clean or
+    findings), when, and how many of its reviews of the PR had findings, by
+    burrow-upkeep's `verdict`, from the connector's own posts. Asks GitHub
+    nothing; raises when it couldn't tell."""
     out = C.upkeep("verdict", repo, as_app=False, input=json.dumps({
-        "head": pr["headRefOid"], "base": pr["baseRefName"], "description": C.fingerprint(pr["body"]),
-        "carried": carried, "reviewers": names, "reviews": pr["reviews"]["nodes"]}))
+        "head": pr["headRefOid"], "reviews": pr["reviews"]["nodes"], "comments": pr["comments"]["nodes"]}))
     if out["said"] is None:
         raise RuntimeError(out["why"])
-    return {r: (s["verdict"], s["at"], s["rounds"]) for r, s in out["said"].items()}
+    s = out["said"]
+    return s["verdict"], s["at"], s["rounds"]
 
 
-# ---------------------------------------------------------------- the snapshot
-
-def git(*args, cwd=None, input=None, env=None):
-    p = subprocess.run(["git", *args], cwd=cwd, input=input, env=env, capture_output=True, check=False)
-    if p.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args[:2])}: {p.stderr.decode(errors='replace').strip()[:300]}")
-    return p.stdout
-
-
-def fetch(repo, *refs, pr=None):
-    """The steward's bare clone of the repo, which only it reads, with refs
-    fetched into it from GitHub (burrow-upkeep's `fetch`): what the
-    snapshots are taken from, and what a proof's builds are worked out from
-    (proofs.py). With pr, its head too, as refs/pr/N: from refs/pull/N/head,
-    or by the head's id when GitHub has lost that ref (mirror.rs
-    `fetch_pr`). As long as git takes while GitHub keeps answering; one
-    that goes quiet for mirror.rs's STALL fails, as any fetch that fails."""
-    ask = {"refs": list(refs), "pr": pr and {"number": pr["number"], "head": pr["headRefOid"]}}
-    out = C.upkeep("fetch", repo, input=json.dumps(ask), bounded=False)
-    if out["mirror"] is None:
-        raise RuntimeError(out["why"])
-    return out["mirror"]
-
-
-def carry(repo, pr, st, names):
-    """Which of the PR's earlier heads' looks by the reviewers `names` cover
-    its head, and what the head changes that they aren't shown, by
-    burrow-upkeep (crates/burrow-upkeep/src/carry.rs), from the steward's
-    mirror. None when no clean look could carry, or it couldn't tell
-    (logged): then the reviewers look at this head. Its answer is kept in
-    the PR's state `st` and handed back to it, which reuses it as it sees
-    fit."""
-    out = C.upkeep("carry", repo, bounded=False, input=json.dumps({
-        "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"], "reviewers": names,
-        "reviews": pr["reviews"]["nodes"], "kept": st.get("carry")}))
-    if out["why"] is not None:
-        log(f"{repo}#{pr['number']}: couldn't tell whether earlier reviews cover {pr['headRefOid'][:7]}: {out['why'][:200]}")
-    if out["carry"] is not None:
-        st["carry"] = out["carry"]
-    return out["carry"]
-
-
-def snap_name(key, head, base):
-    """One snapshot a head on a base: retargeted, a PR is another change."""
-    return f"{key[:-5]}-{head[:12]}-{hashlib.sha1(base.encode()).hexdigest()[:8]}"
-
-
-def remove(p):
-    """p gone, whether this takes it or something else (the reviewers'
-    service, done with a queued review) got there first."""
-    try:
-        if os.path.isdir(p) and not os.path.islink(p):
-            shutil.rmtree(p)
-        else:
-            os.remove(p)
-    except FileNotFoundError:
-        pass
-
-
-def item_name(key, r, head, base):
-    return f"{r}--{snap_name(key, head, base)}"
-
-
-def queue(repo, pr, key, r):
-    """Queue the reviewer on the head's snapshot, briefed with the PR's
-    description as it is now: one edited to answer a finding is what the
-    next look at the same head reads, and its fingerprint goes back with the
-    answer (`described`). burrow-upkeep's `queue` takes the snapshot
-    (snapshot.rs), writes the brief (brief.rs) with the reviewer's earlier
-    findings, and leaves the entry the reviewers' service takes. In line by
-    when the PR was opened, so one pushed again keeps its place. As long as
-    git takes; raises if it can't be queued (the head moved on, GitHub's
-    unreachable)."""
-    head, base = pr["headRefOid"], pr["baseRefName"]
-    out = C.upkeep("queue", repo, bounded=False, input=json.dumps({
-        "number": pr["number"], "head": head, "base": base, "title": pr["title"], "quoted": C.quote(pr["body"]),
-        "description": C.fingerprint(pr["body"]), "opened": ts(pr["createdAt"]), "reviewer": r,
-        "name": snap_name(key, head, base)}))
-    if out["queued"] is None:
-        raise RuntimeError(out["why"])
-
-
-def ask(repo, pr, key, r, rs, after):
-    """Queue the reviewer on the PR's head, unless it's already on its way.
-    Its looks at one head are bounded by `rounds`: each one with findings
-    counts as a round. rs is the reviewer's state on the PR, which keeps
-    its tries; after books the PR's next pass (step.py's)."""
+def ask(repo, pr, st, why):
+    """Ask the connector to look at the PR's head again, once a head and at
+    most once an hour: after its findings were answered without a push, or
+    when a push brought no review. `why` goes in the comment. st is the PR's
+    state."""
     head = pr["headRefOid"]
-    tag = f"{repo}#{pr['number']}"
-    if rs.get("queued"):
+    asked = st.setdefault("asked", {})
+    if asked.get("head") == head and C.NOW - asked.get("at", 0) < 60 * MIN:
         return
     if DRY:
-        log(f"  would: ask {NAMES[r]} to review {tag} at {head[:7]}")
+        log(f"  would: ask Codex to review {repo}#{pr['number']} at {head[:7]}")
         return
-    if rs.get("fails", 0) >= 3 and C.NOW - rs.get("failedAt", 0) > 3600:
-        rs["fails"] = 0  # an outage passes: three more tries an hour on
-    if rs.get("fails", 0) >= 3:
-        after(rs.get("failedAt", 0), 60)  # ends: listed (stuck, step.py), three more tries an hour on
-        return
-    if rs.get("fails") and C.NOW - rs["failedAt"] < 5 * MIN:
-        # Tries five minutes apart, however many events come meanwhile:
-        # a hiccup gets time to pass before all three are spent.
-        after(rs["failedAt"], 5)  # ends: three tries, then hourly, and listed
-        return
-    # Reviews are paused with the repo, a PR handed to the steward's too: it
-    # lands only on a review it already has (admission.py).
-    if C.paused(repo):
-        raise C.JobPaused(f"{repo}: reviews paused")
-    try:
-        queue(repo, pr, key, r)
-    except Exception as e:  # the snapshot: GitHub, git, the disk
-        rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-        log(f"{tag}: couldn't queue {NAMES[r]} on {head[:7]} ({rs['fails']}): {str(e)[:200]}")
-        after(C.NOW, 5)  # ends: three tries, then hourly, and listed
-        return
-    log(f"{tag}: queued a {NAMES[r]} review of {head[:7]}")
-    rs["queued"] = C.NOW
-
-
-def unseen(key, head, base):
-    """What the head changes that its snapshot hid from the reviewers
-    (secrets paths, and plain ones a secret was moved to). [] until the
-    snapshot's taken."""
-    return (load(f"{SNAP}/{snap_name(key, head, base)}.json", None) or {}).get("secret", [])
-
-
-def drop(name):
-    """A review's queue entry and answer."""
-    for p in (f"{QUEUE}/{name}.json", f"{DONE}/{name}.json"):
-        try:
-            os.remove(os.path.join(STATE, p))
-        except OSError:
-            pass
-
-
-def mine(d, key, r):
-    """The names of the reviewer's entries in `d` (the queue, the answers),
-    for any head, for the PR whose state file is `key`: parsed, not matched
-    by prefix, since sam/r-5's names start with sam/r PR 5's. [] if there's
-    no such directory (a status run that couldn't make it)."""
-    try:
-        names = [x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, d))]
-    except OSError:
-        return []
-    return sorted(n for n in names if n.partition("--")[0] == r and n.partition("--")[2].rsplit("-", 2)[0] == key[:-5])
-
-
-def answered(key, r):
-    """The names of the reviewer's answers, for any head, to the PR."""
-    return mine(DONE, key, r)
-
-
-def in_queue(key, r, base):
-    """The names of the reviewer's looks at the PR on `base`, for any head,
-    still in the queue, begun or not."""
-    on = snap_name(key, "", base).rsplit("-", 1)[1]
-    return [name for name in mine(QUEUE, key, r) if name.rsplit("-", 1)[1] == on]
-
-
-def under_way(key, r, base):
-    """The names of the reviewer's looks at the PR on `base`, for any head,
-    that the reviewers' service is on now (on another base, the PR was
-    another change). Those it hasn't begun are taken off the queue
-    (`taken`), so none begins after this."""
-    on = snap_name(key, "", base).rsplit("-", 1)[1]
-    return [name for name in mine(QUEUE, key, r)
-            if name.rsplit("-", 1)[1] == on and not taken(os.path.join(STATE, QUEUE, name + ".json"))]
-
-
-def taken(path):
-    """Takes the queued review at path off the queue unless the reviewers'
-    service is on it (it holds the entry's lock while it is: burrow-review's
-    `review`). False if it is, or if it can't be opened to tell."""
-    try:
-        f = open(path)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    with f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        remove(path)  # under the lock: the service, waiting on it, sees it gone
-        return True
-
-
-def sweep(repo, live):
-    """What the reviewers leave of the repo's PRs, swept once nothing needs
-    it (burrow-upkeep's `sweep`, crates/burrow-upkeep/src/sweep.rs): the
-    snapshots, queue entries and answers of heads none of its open PRs has
-    any more (`live`: the snapshot names of the heads they have), and the
-    sessions of its PRs that closed or were retargeted, marked gone for the
-    reviewers' service to delete. A look the service is on stays, with what
-    it reads, until it ends. Returns what it left of the heads it swept:
-    their looks under way, and the sessions it couldn't mark gone. Raises
-    when it couldn't sweep. As long as deleting takes, as it always has,
-    and as nobody: it asks GitHub nothing."""
-    out = C.upkeep("sweep", repo, input=json.dumps(sorted(live)), as_app=False, bounded=False)
-    if out["left"] is None:
-        raise RuntimeError(out["why"])
-    return out["left"]
-
-
-# ---------------------------------------------------------------- posting
-
-def post(repo, pr, r, answer, description):
-    """The reviewer's answer as one review on the head, marked with the
-    description it was shown (its fingerprint, or None if that's unknown),
-    by burrow-upkeep (crates/burrow-upkeep/src/post.rs). Returns "clean" or
-    "findings", and whether the review covers the PR's description as it is
-    now (verdict.rs `covers`). Raises ValueError if the answer isn't a
-    review, RuntimeError if GitHub didn't take it (the same answer can go
-    next pass), and C.Unavailable if GitHub didn't answer."""
-    out = C.upkeep("post", repo, input=json.dumps({
-        "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"], "reviewer": r, "name": NAMES[r],
-        "answer": answer, "description": description, "now": C.fingerprint(pr["body"])}))
-    if out["outcome"] in ("clean", "findings"):
-        return out["outcome"], out["covers"]
-    raise {"notAReview": ValueError, "refused": RuntimeError, "unanswered": C.Unavailable}[out["outcome"]](out["why"])
+    C.comment(repo, pr["number"], f"{ASK}\n\n{why}")
+    st["asked"] = {"head": head, "at": C.NOW}
+    log(f"{repo}#{pr['number']}: asked Codex to review {head[:7]}: {why}")

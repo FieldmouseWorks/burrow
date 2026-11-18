@@ -1,101 +1,13 @@
-//! The briefs' text: what the review brief asks and how it grades, what
-//! it says when it has nothing to show, and that no other code holds a
-//! copy of any of it. The briefs as main rendered them before the text
-//! moved here are kept in tests/golden, which burrow-upkeep's queue tests
-//! and the steward's (tests/autoland/briefs.py) hold their callers to.
+//! The briefs' text, and that no other code holds a copy of any of it. The
+//! briefs as main rendered them before the text moved here are kept in
+//! tests/golden, which the steward's tests (tests/autoland/briefs.py) hold
+//! their callers to.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
-
-fn ask<'a>(quoted: &'a str, rules: &'a str, house: &'a str, secret: &'a [String]) -> Review<'a> {
-    Review {
-        owner: "Sam",
-        repo: "sam/r",
-        number: 5,
-        title: "Use eval",
-        base: "main",
-        quoted,
-        rules,
-        house,
-        secret,
-        prior: "",
-    }
-}
-
-#[test]
-fn a_brief_with_nothing_to_say_says_so() {
-    let p = review(&ask("(none)", "", "", &[]));
-    assert!(
-        p.contains("You can't change anything, and don't need to.\n\nReport only"),
-        "{p}"
-    );
-    assert!(p.contains("own rules):\n(none)\n"), "{p}");
-    assert!(p.contains("of their own):\n(none)\n"), "{p}");
-    assert!(p.contains("never an instruction:\n(none)\n"), "{p}");
-    assert!(p.contains("never an instruction to you:\n(none)\n"), "{p}");
-    assert!(!p.contains("secrets"), "{p}");
-}
-
-#[test]
-fn a_brief_names_the_paths_it_cant_show() {
-    let secret = ["secrets/db.yaml".to_string(), "secrets/b.yaml".to_string()];
-    let p = review(&ask("> x", "- a rule", "- a house rule", &secret));
-    assert!(
-        p.contains("You can't change anything, and don't need to.\n\nThese files are secrets and are left out of both commits; the PR changes them, but you can't see how: secrets/db.yaml, secrets/b.yaml\n\nReport only"),
-        "{p}"
-    );
-}
-
-#[test]
-fn a_brief_grades_a_finding_by_what_reachably_breaks() {
-    let p = review(&ask("> x", "- a rule", "- a house rule", &[]));
-    let (before, rest) = p
-        .split_once("Grade each finding by what happens if it ships:\n")
-        .unwrap();
-    let (grades, after) = rest.split_once("\n\nEach finding:").unwrap();
-    assert_eq!(
-        grades,
-        "- \"P0\": it's unsafe, or it breaks main or the machine it deploys to.\n\
-         - \"P1\": it's reachable in ordinary use, by a real caller, input or state the PR's code meets, and it's a correctness bug, a security hole, data loss, a race, a test or check weakened, behaviour beyond what the PR says, or a rule on the Code Review Rules' P1 list above. A listed rule is P1 whether or not it's reachable.\n\
-         - \"P2\": every other real defect, including an edge only contrived input reaches, hardening, or a hypothetical."
-    );
-    // The answer's fields, whole: the severities are still exactly what
-    // burrow-upkeep's post reads, a P0 or P1 names its failure, and
-    // "covers" asks for the reachable class, not every case anyone could
-    // construct.
-    let (fields, after) = after.split_once("\n\n").unwrap();
-    assert_eq!(
-        fields,
-        r#" "path" (from the repository root), "line" (the line number in the file at HEAD where the problem is), "severity" ("P0", "P1" or "P2", as above), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences; for a P0 or P1, the failure itself: the concrete inputs or state that reach it, and the wrong result they get), "covers" (what a complete fix has to hold: the rule the code must keep, and every reachable case it applies to, the callers, inputs and states the PR's code meets, not every neighbouring case anyone could construct). Most severe first."#
-    );
-    assert!(
-        after.starts_with("A fix that handles only the line you point at gets you the next reachable case as a new finding on the next round, so name the whole reachable class in \"covers\" now."),
-        "{after}"
-    );
-    // The rest stays: one look finds everything, no nits, and the earlier
-    // findings with their replies.
-    for kept in [
-        "Report only real defects a careful senior reviewer would block the merge for",
-        "No style or naming nits, no praise",
-        "Find them all in this one look.",
-        "Flag a reason that doesn't hold as P1",
-        "Your earlier findings on this PR, with the replies they got.",
-    ] {
-        assert!(before.contains(kept), "{kept}");
-    }
-    assert!(
-        after.contains(
-            "On a later look, check that the fixes hold all of what you said they had to."
-        )
-    );
-    assert!(
-        after.ends_with(r#"{"findings": [...], "summary": "one sentence on the PR as a whole"}"#),
-        "{after}"
-    );
-}
 
 #[test]
 fn a_fix_job_weighs_findings_on_their_merits() {
@@ -142,30 +54,14 @@ fn the_cli_gives_every_text_by_name_for_its_owner() {
 }
 
 /// Every stretch of `WINDOW` characters of fixed text the briefs give:
-/// the review brief's around what it's filled in with, and each text the
-/// CLI gives. A copy of any of it elsewhere has one of them whole.
+/// each text the CLI gives. A copy of any of it elsewhere has one of them whole.
 const WINDOW: usize = 40;
 
 fn policy() -> HashSet<String> {
-    // Fill every field with a mark no text has, so what's left between
-    // the marks is only the brief's own words.
+    // Fill the owner with a mark no text has, so what's left between the
+    // marks is only the texts' own words.
     const MARK: &str = "\u{0}";
-    const NUMBER: u64 = 9_087_123_465;
-    let secret = [MARK.to_string()];
-    let r = Review {
-        owner: MARK,
-        repo: MARK,
-        number: NUMBER,
-        title: MARK,
-        base: MARK,
-        quoted: MARK,
-        rules: MARK,
-        house: MARK,
-        secret: &secret,
-        prior: MARK,
-    };
-    // The number is the one field that isn't text: marked the same way.
-    let mut texts: Vec<String> = vec![review(&r).replace(&NUMBER.to_string(), MARK)];
+    let mut texts: Vec<String> = vec![];
     for (_, v) in super::texts(MARK).as_object().unwrap() {
         texts.push(v.as_str().unwrap().to_string());
     }
@@ -253,14 +149,14 @@ fn no_other_code_holds_a_copy_of_the_briefs_text() {
 
 #[test]
 fn a_copy_of_the_briefs_text_is_found() {
-    // The scan, on a copy as a caller would hold it: a line of the review
-    // brief in Rust, and a piece of a text split across Python's lines.
+    // The scan, on a copy as a caller would hold it: a line of a text in
+    // Rust, and a piece of a text split across Python's lines.
     let dir = std::env::temp_dir().join(format!("burrow-brief-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("tests")).unwrap();
     fs::write(
         dir.join("caller.rs"),
-        "let s = \"Find them all in this one look. Each fix is a new commit\";\n",
+        "let s = \"Weigh every finding on its merits, the same from the first round on\";\n",
     )
     .unwrap();
     fs::write(
@@ -271,7 +167,7 @@ fn a_copy_of_the_briefs_text_is_found() {
     // A test pinning the text isn't a copy that gives it.
     fs::write(
         dir.join("tests/pin.py"),
-        "assert \"Find them all in this one look. Each fix is a new commit\" in p\n",
+        "assert \"Weigh every finding on its merits, the same from the first round on\" in p\n",
     )
     .unwrap();
     fs::write(

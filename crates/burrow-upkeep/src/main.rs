@@ -1,16 +1,13 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
-//! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
-//! posts a reviewer's answer on a repo's PR; `verdict`, which reads what
-//! its reviewers said of one back; `queue`, which queues a
-//! reviewer on one; `claims`, which sees to the steward's Claude jobs that
+//! for the repo's owner in GH_TOKEN, under the pass's lock; `verdict`,
+//! which reads what Codex's GitHub connector said of one of its PRs;
+//! `claims`, which sees to the steward's Claude jobs that
 //! settle a PR, posting each one's answers once its push is the PR's head;
 //! `fetch`, which fetches refs into the steward's mirror of a
-//! repo; `carry`, which works out from it which of a PR's earlier heads'
-//! looks cover its head; `commits`, which reads a PR's commits whole for
+//! repo; `commits`, which reads a PR's commits whole for
 //! who made them; `ci`, which owns the CI verdict and cancelled workflow
-//! recovery; and `sweep`, which deletes what the reviewers leave of its closed
-//! PRs and old heads; `token`, which mints the pass
+//! recovery; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -23,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
-use burrow_upkeep::carry;
 use burrow_upkeep::ci;
 use burrow_upkeep::claims;
 use burrow_upkeep::commits::{self, Read as Commits};
@@ -31,10 +27,7 @@ use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::mirror;
 use burrow_upkeep::pass::{Out, Pass, Proj};
-use burrow_upkeep::post::{self, Look, Posted, Unposted};
-use burrow_upkeep::queue::{self, Ask};
 use burrow_upkeep::settle::Repo;
-use burrow_upkeep::sweep;
 use burrow_upkeep::token::{self, Installations, Token};
 use burrow_upkeep::verdict::{self, Asked};
 use gh_token::app::Minted;
@@ -62,26 +55,12 @@ const USAGE: &str = "usage:
       open PRs have (head and base), a JSON list on stdin: what's stuck and
       the pass to book, as JSON on stdout; --default, its default branch;
       --full, a full pass's look, which tries again what GitHub said no to
-  burrow-upkeep CONFIG post OWNER/REPO --now SECONDS
-      a reviewer's answer, posted as its review of the head it read; a JSON
-      object on stdin gives the PR's number, the head, its base, the
-      reviewer (and its name), its answer, the description it was shown and
-      the PR's now: what came of it (clean, findings, notAReview, refused
-      or unanswered), whether its review covers the PR's description, and a
-      rate limit's reset, as JSON on stdout
   burrow-upkeep CONFIG verdict OWNER/REPO --now SECONDS [--dry]
-      what each of a PR's reviewers last said of its head, read back from
-      the reviews the steward posted; a JSON object on stdin gives the
-      head, its base, the fingerprint of its description, the reviewers and
-      the PR's reviews: each one's verdict, when, and its rounds with
-      findings, or why it couldn't tell, as JSON on stdout
-  burrow-upkeep CONFIG queue OWNER/REPO --now SECONDS
-      a reviewer queued on a PR's head, with its snapshot and its brief; a
-      JSON object on stdin gives the PR's number, the head, its base, its
-      title, its description (quoted, and its fingerprint), when it was
-      opened, the reviewer, the snapshot's name and the reasons' weighing:
-      the queue entry's name or why it couldn't be queued, and a rate
-      limit's reset, as JSON on stdout
+      what Codex's GitHub connector last said of a PR's head, read from its
+      summary comment and reviews; a JSON object on stdin gives the head and
+      the PR's reviews and comments: the verdict (none, running, clean or
+      findings), when, and its rounds with findings, or why it couldn't
+      tell, as JSON on stdout
   burrow-upkeep CONFIG claims OWNER/REPO --now SECONDS
       a PR's steward Claude jobs that settle it, seen to; a JSON object on
       stdin gives the PR's number, its head and branch, the login its jobs
@@ -97,15 +76,6 @@ const USAGE: &str = "usage:
       the head, the jobs to stop, what came of each one's answers (posted,
       wrong, unpushed, moved, refused or unanswered), when to look again and
       a rate limit's reset, as JSON on stdout
-  burrow-upkeep CONFIG carry OWNER/REPO --now SECONDS [--dry]
-      which of a PR's earlier heads' reviews cover its head (the head is
-      that head's change merged onto its base, and nothing else), from the
-      steward's mirror, with the head and base fetched into it; a JSON
-      object on stdin gives the PR's number, the head, its base, the
-      reviewers, the PR's reviews and what it said last: the heads checked,
-      those carried and what the head hides from the reviewers (or null
-      when no clean review could carry), or why it couldn't tell, as JSON
-      on stdout; --dry reads only what it said last
   burrow-upkeep CONFIG commits OWNER/REPO --now SECONDS [--dry]
       a PR's commits, every one on its head since it left its base, read
       whole from GitHub's compare a page at a time; a JSON object on stdin
@@ -118,11 +88,6 @@ const USAGE: &str = "usage:
       on stdin supplies the PR's GraphQL nodes, proof names, moved paths,
       and whether to read remotely and recover: the verdict (state, names,
       docs lane) and rate limit as JSON; exit 75 on unanswered GitHub calls
-  burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
-      what the reviewers leave of the repo's PRs, deleted once nothing needs
-      it, a JSON list on stdin giving the snapshots of its open PRs' heads:
-      what it left (the looks under way, the sessions it couldn't mark gone)
-      or why it couldn't sweep, as JSON on stdout
   burrow-upkeep CONFIG watch OWNER/REPO --now SECONDS [--searched N] [--dry]
       the repo's dashboard and quarantine, as of the pass's time: what's
       stuck, the pass to book and the jobs to start, as JSON on stdout;
@@ -239,8 +204,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "carry",
-        "sweep", "commits", "ci",
+        "settle", "branches", "watch", "verdict", "claims", "fetch", "commits", "ci",
     ]
     .contains(&word)
     {
@@ -250,63 +214,20 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if let Some((flag, its)) = f.own.iter().find(|(_, its)| *its != word) {
         return Err(Stop::Usage(format!("{flag} is {its}'s")));
     }
-    if f.dry && ["post", "claims"].contains(&word) {
+    if f.dry && word == "claims" {
         return Err(Stop::Usage(format!(
             "{word} has no status run: it posts what it's given"
         )));
     }
-    if f.dry && word == "queue" {
-        return Err(Stop::Usage(
-            "queue has no status run: it writes the steward's mirror and the queue".into(),
-        ));
-    }
     if word == "fetch" {
         return fetched(config, repo, f.dry);
     }
-    if word == "sweep" {
-        return swept(config, repo, f.dry);
-    }
-    let look = match word {
-        "post" => Some(stdin::<Look>(
-            "the look to post, as a JSON object on stdin",
-        )?),
-        _ => None,
-    };
-    if let Some(l) = &look
-        && !verdict::named(&l.reviewer)
-    {
-        return Err(Stop::Usage(format!(
-            "{:?} isn't a reviewer's name",
-            l.reviewer
-        )));
-    }
     let asked = match word {
         "verdict" => Some(stdin::<Asked>(
-            "the PR and its reviews, as a JSON object on stdin",
+            "the PR's head, reviews and comments, as a JSON object on stdin",
         )?),
         _ => None,
     };
-    if let Some(why) = asked.as_ref().and_then(Asked::wrong) {
-        return Err(Stop::Usage(why));
-    }
-    let carrying = match word {
-        "carry" => Some(stdin::<carry::Ask>(
-            "the PR and its reviews, as a JSON object on stdin",
-        )?),
-        _ => None,
-    };
-    if let Some(why) = carrying.as_ref().and_then(carry::Ask::wrong) {
-        return Err(Stop::Usage(why));
-    }
-    let ask = match word {
-        "queue" => Some(stdin::<Ask>(
-            "the reviewer to queue, as a JSON object on stdin",
-        )?),
-        _ => None,
-    };
-    if let Some(why) = ask.as_ref().and_then(Ask::wrong) {
-        return Err(Stop::Usage(why));
-    }
     let claimed = match word {
         "claims" => Some(stdin::<claims::Look>(
             "the PR and its Claude jobs, as a JSON object on stdin",
@@ -370,47 +291,14 @@ fn run(args: &[String]) -> Result<(), Stop> {
             burrow_upkeep::settle(&mut p, &repo, || secret(&creds()?));
             json!({"failed": p.out.failed, "limited": p.out.limited})
         }
-        ("post", _) => {
-            let Some(look) = &look else {
-                return Err(Stop::Usage("no look to post".into()));
-            };
-            let (outcome, why) = match post::post(&mut p, look) {
-                Ok(Posted::Clean) => ("clean", None),
-                Ok(Posted::Findings) => ("findings", None),
-                Err(Unposted::NotAReview(why)) => ("notAReview", Some(why)),
-                Err(Unposted::Refused(why)) => ("refused", Some(why)),
-                Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
-            };
-            let covers = verdict::covers(look.description.as_deref(), &look.now);
-            json!({"outcome": outcome, "covers": covers, "why": why, "limited": p.out.limited})
-        }
         ("verdict", _) => {
             let Some(asked) = &asked else {
                 return Err(Stop::Usage("no PR to read".into()));
             };
-            match verdict::said(&p.me(), asked) {
+            match verdict::said(asked) {
                 Ok(said) => json!({"said": said, "why": null, "limited": null}),
                 Err(why) => json!({"said": null, "why": why, "limited": null}),
             }
-        }
-        ("carry", _) => {
-            let Some(ask) = &carrying else {
-                return Err(Stop::Usage("no PR to carry to".into()));
-            };
-            match carry::carry(p.cfg, repo, &p.me(), ask, p.dry) {
-                Ok(c) => json!({"carry": c, "why": null, "limited": null}),
-                Err(why) => json!({"carry": null, "why": why, "limited": null}),
-            }
-        }
-        ("queue", _) => {
-            let Some(ask) = &ask else {
-                return Err(Stop::Usage("no reviewer to queue".into()));
-            };
-            let (queued, why) = match queue::queue(&mut p, ask) {
-                Ok(entry) => (Some(entry), None),
-                Err(why) => (None, Some(why)),
-            };
-            json!({"queued": queued, "why": why, "limited": p.out.limited})
         }
         ("claims", _) => {
             let Some(l) = &claimed else {
@@ -460,8 +348,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
 }
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
-/// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the PR whose commits are read, the open PRs' snapshots, or the
+/// branches, none of which is deleted, the PR whose verdict is read, a
+/// PR's Claude jobs, the refs to fetch, the PR whose commits are read, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
@@ -508,29 +396,6 @@ fn fetched(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
     let out = match got {
         Ok(m) => json!({"mirror": m, "why": null, "limited": null}),
         Err(why) => json!({"mirror": null, "why": why, "limited": null}),
-    };
-    println!("{out}");
-    Ok(())
-}
-
-/// `sweep`, which a status run never asks for: it deletes the steward's
-/// state. It asks GitHub nothing, so it's handed no token.
-fn swept(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
-    if dry {
-        return Err(Stop::Usage(
-            "sweep has no status run: it deletes what the reviewers leave".into(),
-        ));
-    }
-    let live: BTreeSet<String> =
-        stdin("the snapshots of the open PRs' heads, as a JSON list on stdin")?;
-    let key = repo.replace('/', "_");
-    if let Some(why) = sweep::wrong(&key, &live) {
-        return Err(Stop::Usage(why));
-    }
-    let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
-    let out = match sweep::sweep(&cfg.state_dir, &cfg.snapshot.dir, &key, &live) {
-        Ok(left) => json!({"left": left, "why": null, "limited": null}),
-        Err(why) => json!({"left": null, "why": why, "limited": null}),
     };
     println!("{out}");
     Ok(())
