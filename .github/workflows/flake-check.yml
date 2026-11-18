@@ -150,6 +150,13 @@ on:
           so a PR that changes it changes only where its negative runs.
         type: string
         default: ''
+      negative:
+        description: >-
+          Run a PR's negative run in this call. A caller that calls this
+          workflow twice on one PR's head turns it off in the call whose
+          negative doesn't count, so each head runs one.
+        type: boolean
+        default: true
       gate-reuse:
         description: >-
           On a push to the default branch, before anything is built, ask
@@ -948,7 +955,7 @@ jobs:
   # red when they pass there; it attests what it found, as the gate does
   # its result, with a subject of its own.
   negative:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && inputs.negative
     runs-on: ${{ inputs.negative-runner || inputs.runner }}
     concurrency:
       group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
