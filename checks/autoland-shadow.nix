@@ -48,7 +48,7 @@ let
   taken = (self.nixosConfigurations.example.extendModules {
     modules = [{
       burrow.autoland.shadow = [ "sam/plain" ];
-      burrow.ledger.controllerUser = "autoland-review";
+      burrow.ledger.controllerUser = "burrow-events";
     }];
   }).config;
   failed = map (a: a.message) (lib.filter (a: !a.assertion) taken.assertions);
@@ -74,7 +74,7 @@ let
     timeout = shadow.serviceConfig.TimeoutStartSec == "10min";
     user = shadow.serviceConfig.User == machine.burrow.user && !(shadow.environment ? CONARY_DATA);
     controlledHolds = lib.all (a: a.assertion) controlled.assertions;
-    taken = lib.any (lib.hasInfix "autoland-review is already someone else's") failed;
+    taken = lib.any (lib.hasInfix "burrow-events is already someone else's") failed;
     producerNeedsController = !uncontrolled.success && controlled.burrow.ledger.flow.controller == "conary-flow"
       && machine.burrow.ledger.flow.controller == null;
     controller = controlledShadow.serviceConfig.User == "conary-flow"

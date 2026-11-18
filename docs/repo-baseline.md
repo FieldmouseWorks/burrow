@@ -147,17 +147,16 @@ root only.
    It leaves a PR stacked on another open PR's branch alone too, until it's
    retargeted (GitHub does that when the PR below merges): merged first, it
    would fold into the PR below.
-2. The machine's reviewer (`burrow.autoland.reviewers`) reviews the head:
-   Codex, through the codex CLI on the owner's ChatGPT plan. The steward
-   takes a snapshot of the change with secrets paths left out; the agent
-   reads it read-only, with no GitHub login, and the steward posts its
-   findings, as its App, as review threads marked as Codex's. A look at a head the PR has since moved past still
-   finishes, and its findings are posted on the commit it read, so they go
-   into the next push. Codex keeps one session per PR: every look
-   resumes the one before, told which head it last read, and still judges
-   the whole change at the new head. A PR's sessions are deleted for good
-   once it merges or closes. While its usage is spent, or it's logged out,
-   PRs wait for it, and it comes back on its own. A change to documentation
+2. Codex reviews the head, through its GitHub connector (the ChatGPT Codex
+   Connector App, on the owner's ChatGPT account, set to review every push in
+   each repo). It posts its findings as review threads and a summary comment
+   naming the commit it reviewed; the steward reads its verdict from those
+   (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
+   half an hour after its push is asked for once (`@codex review`), and after
+   two hours the stuck issue says so. A PR retargeted onto another base is
+   another change: Codex's word on the head before the move doesn't count. A
+   repo can turn the wait off (`codex = false` in its `burrow.autoland.repos`
+   entry), and then nothing settles it but the owner. A change to documentation
    alone (Conary's class policy, `burrow.ledger.policy`'s `docs`) gets no
    review round, unless it's R2: it lands once CI is green and nothing is
    open on it.
@@ -168,9 +167,8 @@ root only.
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
    as on a hold, until proj resumes the job to bring the fix in.
-4. The reviewers look again, until none of them finds anything on the head, or
-   on an earlier one whose own change was the same: a merge of the base that
-   leaves the PR's lines alone isn't looked at again, while CI still runs on it.
+4. Codex looks again at each push, and the steward asks it to when every
+   finding was answered without one, until it finds nothing on the head.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. A check run cancelled with nothing run through since

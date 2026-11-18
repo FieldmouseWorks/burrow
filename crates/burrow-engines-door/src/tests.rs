@@ -65,11 +65,12 @@ fn set(cfg: &Config, line: &str) {
         .unwrap_or_else(|e| panic!("{line}: {e}"));
 }
 
-/// The engine `work` runs on now.
-/// The routes in force, which tell one saved setup from another.
+/// The named routes in force, which tell one saved setup from another
+/// (the default, `*`, is in every one once a setup has been applied).
 fn work(cfg: &Config) -> String {
     let force = cfg.settings.roles().unwrap();
-    force.roles.keys().cloned().collect::<Vec<_>>().join(" ")
+    let named = force.roles.keys().filter(|k| *k != "*");
+    named.cloned().collect::<Vec<_>>().join(" ")
 }
 
 const ONE: &str = "work";

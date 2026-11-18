@@ -277,6 +277,7 @@ class Pass(Context, Jobs, Actions):
             self.line,
             self.age,
             self.after,
+            self.tried,
             lambda: T.review(self.repo, self.pr),
         )
 
@@ -308,7 +309,8 @@ class Pass(Context, Jobs, Actions):
                     if said[r][0] == "findings":
                         self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
                         if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
-                            V.ask(self.repo, self.pr, self.st, "Every finding is answered; this head has no push to review.")
+                            why = "Every finding is answered; this head has no push to review."
+                            self.tried("ask", V.ask(self.repo, self.pr, self.st, why))
                 self.settle(
                     "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
                 )

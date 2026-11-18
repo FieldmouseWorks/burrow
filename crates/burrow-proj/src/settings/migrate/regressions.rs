@@ -144,7 +144,7 @@ fn failed_publication_cannot_acknowledge_and_retry_keeps_the_original_result() {
         fs::remove_file(&receipt).unwrap();
         fs::remove_file(dir.join("roles.operation")).unwrap();
         cfg.command(
-            &["role".into(), "work".into(), "claude".into()],
+            &["role".into(), "work@sam/two".into(), "unset".into()],
             "intervening",
         )
         .unwrap();

@@ -244,7 +244,7 @@ fn why_names_each_wait_and_what_ends_it() {
             "for the owner",
             "It waits on owner, which ends with the owner's reply",
         ),
-        ("held for usage", "It waits on usage Claude "),
+        ("held for usage", "It waits on await usage-limit"),
         (
             "parked",
             "It waits on policy, which ends with the settings letting it run (it waits for its repo to be allowed)",

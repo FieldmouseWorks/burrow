@@ -382,8 +382,8 @@ def run_pass(kick, continuing=False):
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
-                # Swept only once it has every open PR's head: one whose look
-                # failed before then would have the sweep take what's theirs.
+                # A slice left part done goes on in the next batch, and its
+                # train steps only once every open PR was seen to.
                 if partial or batch.expired():
                     complete = False
                     batch.left = True

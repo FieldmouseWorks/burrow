@@ -329,12 +329,10 @@ fn spaced(value: &serde_json::Value) -> String {
 }
 
 /// Every collection default, as JSON whitespace and Markdown escaping may
-/// spell it, is that option's value for every name it goes by; so is
-/// skipPaths' row copied out of the reference, its pipes escaped.
+/// spell it, is that option's value for every name it goes by.
 #[test]
 fn collection_defaults_are_found_however_spelled() {
     let facts = facts();
-    let reference = burrow_settings::reference::markdown();
     let mut collections = 0;
     for setting in SETTINGS {
         let Some(value) = setting
@@ -372,24 +370,8 @@ fn collection_defaults_are_found_however_spelled() {
         }
     }
     // settings.allowed, settings.repositoryOverrides, autoland.repos,
-    // autoland.reviewers.skipPaths, proj.roles, proj.models,
-    // proj.engineSetups at least.
-    assert!(collections >= 7, "{collections}");
-    // The reference's own row, its pipes escaped, copied out of it.
-    let row = reference
-        .lines()
-        .find(|l| l.starts_with("| `autoland.reviewers.skipPaths` |"))
-        .expect("skipPaths has a reference row");
-    assert!(row.contains("\\|"), "{row}");
-    for name in aliases("autoland.reviewers.skipPaths") {
-        let text = row.replacen("autoland.reviewers.skipPaths", &name, 1);
-        assert!(
-            check_text("a.md", &text, &facts)
-                .iter()
-                .any(|f| f.what == "`autoland.reviewers.skipPaths` with a value"),
-            "{text}"
-        );
-    }
+    // proj.roles, proj.models, proj.engineSetups at least.
+    assert!(collections >= 6, "{collections}");
 }
 
 /// `text` with every ASCII punctuation mark backslash-escaped, as Markdown

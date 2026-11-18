@@ -104,8 +104,9 @@ def reset(r, k, known, failed):
     (they'd push its history to the new one, or answer the new one's
     issues), and all the steward kept about it goes: its PRs' state (so a new
     PR doesn't take on an old one's of the same number), its dashboard's
-    and quarantine's, and the steward's clone of it. The name is out of known, and of failed, so the new one's
-    baseline job starts straight away.
+    and quarantine's, and the steward's clone of it. The name is out of
+    known, and of failed, so the new one's baseline job starts straight
+    away.
 
     Its settings (repo-K.json) are what says it was remade, so they go
     last: a pass that fails partway leaves them, and the next one does it
@@ -516,7 +517,7 @@ def stuck_brief():
     who = CFG["notify"]["assignee"] or "the owner"
     stalls = " (and `burrow-watchdog status` for what stalled past its deadline)" if CFG["watch"] else ""
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
-one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
+one, find out why: `journalctl -u autoland` here, and the steward's state in \
 {CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
 this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
 repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \

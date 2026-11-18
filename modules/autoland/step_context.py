@@ -33,7 +33,7 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
-    "post": "GitHub keeps refusing a review it's to post",
+    "ask": "GitHub keeps refusing the comment that asks Codex for a review",
     "answer": "GitHub keeps refusing a Claude job's answers it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
@@ -114,9 +114,9 @@ class Context:
         STRIKE_LIMIT-th failure in a row on this head makes the PR's wait
         overdue whatever its deadline, so the watchdog takes it (a kick, a
         Claude job, the stuck issue); without the watchdog, it's listed on
-        the stuck issue. Either says what GitHub said. Once a pass: two
-        reviews it couldn't post are one pass's failure. When it's tried
-        again."""
+        the stuck issue. Either says what GitHub said. Once a pass: a
+        step failing twice in one pass is that pass's one failure. When it's
+        tried again."""
         if kind in self.struck:
             return self.struck[kind]
         strikes = self.st.setdefault("strikes", {})
@@ -137,9 +137,17 @@ class Context:
 
     def cleared(self, kind):
         """The step went through: its run of failures is over, unless it
-        failed this pass too (one review posted, another not)."""
+        failed this pass too."""
         if kind not in self.struck:
             self.st.setdefault("strikes", {}).pop(kind, None)
+
+    def tried(self, kind, refused):
+        """The step was tried: refused (what GitHub said), a strike, or
+        through, cleared."""
+        if refused:
+            self.strike(kind, refused)
+        else:
+            self.cleared(kind)
 
     def handoff_at(self):
         """When findings or red CI will have sat long enough for a Claude job

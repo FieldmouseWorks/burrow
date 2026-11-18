@@ -39,14 +39,17 @@ def ask(repo, pr, st, why):
     """Ask the connector to look at the PR's head again, once a head and at
     most once an hour: after its findings were answered without a push, or
     when a push brought no review. `why` goes in the comment. st is the PR's
-    state."""
+    state. What GitHub said if it refused the comment, which isn't counted
+    as asked (the caller strikes it), else None."""
     head = pr["headRefOid"]
     asked = st.setdefault("asked", {})
     if asked.get("head") == head and C.NOW - asked.get("at", 0) < 60 * MIN:
-        return
+        return None
     if DRY:
         log(f"  would: ask Codex to review {repo}#{pr['number']} at {head[:7]}")
-        return
-    C.comment(repo, pr["number"], f"{ASK}\n\n{why}")
+        return None
+    if C.comment(repo, pr["number"], f"{ASK}\n\n{why}") is None:
+        return "GitHub refused the comment"
     st["asked"] = {"head": head, "at": C.NOW}
     log(f"{repo}#{pr['number']}: asked Codex to review {head[:7]}: {why}")
+    return None

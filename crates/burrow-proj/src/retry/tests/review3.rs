@@ -5,7 +5,7 @@ fn retained(r: &Rig, id: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
     fs::write(job.path("project"), "/original").unwrap();
-    fs::write(job.path("engine"), "other").unwrap();
+    fs::write(job.path("engine"), "claude").unwrap();
     crate::policy::bind(
         &job,
         crate::policy::Identity::Local,

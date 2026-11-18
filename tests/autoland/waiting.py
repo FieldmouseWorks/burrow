@@ -14,9 +14,9 @@ import os
 
 import proofs as P
 import stages
-from harness import CI_GREEN, FAIL, JOBS, WAITING, WROTE, C, S, T0, V, clean, fresh_pr_state, mkpr, run, rv_review, said
+from harness import CI_GREEN, FAIL, JOBS, WAITING, WROTE, C, S, clean, found, fresh_pr_state, mkpr, run, said, summary
 
-AGE, SLOT, REVIEWER = "waiting: release age", "waiting: proof slot", "waiting: reviewer"
+AGE, SLOT = "waiting: release age", "waiting: proof slot"
 REVIEW, FIX, MACHINE, MERGE = "waiting: review", "waiting: fix", "waiting: machine checks", "waiting: merge"
 
 
@@ -89,35 +89,28 @@ status, _ = run(clean(checks=proof, number=1), 700)
 assert "a Claude job is running remi-proof" in status and edits() == [on(1, MACHINE)], (status, WROTE)
 status, _ = run(clean(checks=proof, number=2), 700)
 assert "waiting its turn to run remi-proof (1 ahead)" in status and edits() == [on(2, SLOT)], (status, WROTE)
-# Moved from one wait to another, the label goes with it in one call: put
-# back for a reviewer out of service with its proof slot's still on.
-C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
+# Moved from one wait to another, the label goes with it in one call: back
+# in review once Codex is off for the repo, with its proof slot's still on.
+S.CFG["repos"]["sam/r"]["codex"] = False
 status, _ = run(mkpr(checks=proof, number=2, labels=[SLOT]), 800)
-assert "No reviewer can review it now" in status, status
-assert edits() == [on(2, REVIEWER, off=[SLOT])], WROTE
-C.save(V.OUT, {})
+assert "No reviewer can review it" in status, status
+assert edits() == [on(2, REVIEW, off=[SLOT])], WROTE
 C.job = kept
 S.CFG["repos"] = repos
 
-# Every reviewer out of service, it waits for one back. GitHub didn't take
-# the label: the status stands all the same, and the next pass asks again.
+# Waiting on Codex, it's in review. GitHub didn't take the label: the status
+# stands all the same, and the next pass asks again.
 fresh_pr_state()
-C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
-FAIL.append("--add-label waiting: reviewer")
-status, _ = run(clean(), 600)
-assert "No reviewer can review it now" in status and edits() == [on(5, REVIEWER)], (status, WROTE)
-FAIL.remove("--add-label waiting: reviewer")
-status, _ = run(clean(), 700)
-assert edits() == [on(5, REVIEWER)], WROTE
-run(clean(labels=[REVIEWER]), 800)
+FAIL.append("--add-label waiting: review")
+status, _ = run(mkpr(), 600)
+assert "Waiting for Codex's review" in status and edits() == [on(5, REVIEW)], (status, WROTE)
+FAIL.remove("--add-label waiting: review")
+status, _ = run(mkpr(), 700)
+assert edits() == [on(5, REVIEW)], WROTE
+run(mkpr(labels=[REVIEW]), 800)
 assert edits() == [], WROTE
-# One back, it's reviewed.
-C.save(V.OUT, {})
-fresh_pr_state()
-status, _ = run(mkpr(labels=[REVIEWER]), 900)
-assert "No reviewer" not in status and edits() == [on(5, REVIEW, off=[REVIEWER])], (status, WROTE)
 # A finding comes back: a Claude job has it.
-status, _ = run(mkpr(reviews=[rv_review("codex", 1)], threads=[False], labels=[REVIEW]), 7200)
+status, _ = run(mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[False], labels=[REVIEW]), 7200)
 assert "1 open review thread" in status and edits() == [on(5, FIX, off=[REVIEW])], (status, WROTE)
 
 # Held by hand, it waits on what its holder knows, and the hold label says
@@ -125,8 +118,8 @@ assert "1 open review thread" in status and edits() == [on(5, FIX, off=[REVIEW])
 fresh_pr_state()
 status, _ = run(clean(labels=["hold", SLOT]), 600)
 assert "On hold" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: proof slot"], (status, WROTE)
-status, _ = run(clean(labels=[AGE, REVIEWER], draft=True), 600)
-assert "Draft" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: reviewer --remove-label waiting: release age"], \
+status, _ = run(clean(labels=[AGE, REVIEW], draft=True), 600)
+assert "Draft" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: review --remove-label waiting: release age"], \
     (status, WROTE)
 # Whatever path posts its status, a held PR's isn't a stage's: one with more
 # than a page to read is the owner's, but on hold it carries no label.
