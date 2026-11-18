@@ -33,7 +33,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus body
+        createdAt updatedAt mergeStateStatus body lastEditedAt
         author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
@@ -44,6 +44,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
+        retargets: timelineItems(last: 1, itemTypes: [BASE_REF_CHANGED_EVENT]) { nodes { ... on BaseRefChangedEvent { createdAt } } }
         timelineItems(last: 50, itemTypes: [UNLABELED_EVENT, RENAMED_TITLE_EVENT]) { pageInfo { hasPreviousPage } nodes { ... on UnlabeledEvent { createdAt label { name } } ... on RenamedTitleEvent { createdAt previousTitle } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {

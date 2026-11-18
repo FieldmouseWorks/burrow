@@ -35,7 +35,11 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
     needed, whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     names = V.on(repo)
-    said = {r: since_base(pr, st, V.verdict(repo, pr)) for r in names}
+    said = {r: V.verdict(repo, pr, st) for r in names}
+    # A retarget or an edit is a change to review too, which the connector
+    # doesn't look at by itself: it's asked at once (the push's QUIET has
+    # long gone), and the owner's wait runs from the change.
+    waited = min(age, C.NOW - st.get("since", 0))
     rounds = max((said[r][2] for r in names), default=0)
     clean = bool(names) and all(said[r][0] == "clean" for r in names)
     # Past the limit the steward stops waiting on the reviewers: a Claude
@@ -58,28 +62,14 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
         elif v == "none":
             waiting.append(f"Waiting for {V.NAMES[r]}'s review of this commit")
             if age >= QUIET * MIN:
-                tried("ask", V.ask(repo, pr, st, f"No review of {pr['headRefOid'][:7]} came after its push."))
+                tried("ask", V.ask(repo, pr, st, f"No review of {pr['headRefOid'][:7]} came after its push, retarget or edit."))
             else:
                 after(C.NOW - age, QUIET)  # ends: asked once, then listed
-            if age >= LOST * MIN:
-                x = f"no review of {pr['headRefOid'][:7]} after {int(age // MIN)} minutes"
+            if waited >= LOST * MIN:
+                x = f"no review of {pr['headRefOid'][:7]} after {int(waited // MIN)} minutes"
                 stuck.append(f"{V.NAMES[r]}: {x}")
                 digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, x + " (its usage, or the connector's setup)"))
             else:
-                after(C.NOW - age, LOST)  # ends: listed for the owner
+                after(C.NOW - waited, LOST)  # ends: listed for the owner
     return Looked(names, said, rounds, clean, capped, waiting, stuck, unreviewed)
 
-
-def since_base(pr, st, said):
-    """The connector's verdict on this head, counted only from when it was
-    on this base: one retargeted is another change, so what it said of the
-    head before then is no word on it (rounds still count). st keeps the
-    base each head was first seen on, and when it moved."""
-    head, base = pr["headRefOid"], pr["baseRefName"]
-    on = st.get("onBase")
-    if not on or on["head"] != head:
-        on = st["onBase"] = {"head": head, "base": base, "at": 0}
-    elif on["base"] != base:
-        on = st["onBase"] = {"head": head, "base": base, "at": C.NOW}
-    verdict, at, rounds = said
-    return (verdict, at, rounds) if at >= on["at"] else ("none", 0, rounds)

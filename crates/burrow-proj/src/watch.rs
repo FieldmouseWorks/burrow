@@ -13,11 +13,12 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::github::{changes, fingerprint, over, target};
 use crate::job::{Job, USAGE_LIMIT, awaits};
-use crate::record::JobFile;
+use crate::record::{JobFile, TurnFile};
 use crate::turn::{start, start_closed};
-use crate::{Fail, io_fail, now, swap, usage};
+use crate::{Fail, io_fail, now, read, swap, usage};
 
-// Usage awaits from old turns become Claude's global hold.
+// Usage awaits from old Claude turns become its global hold. One a Codex
+// turn left (Codex is retired) holds nothing: Claude's limit isn't Codex's.
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
 /// couldn't start, is looked at again.
@@ -197,6 +198,11 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue;
             }
             if a.target == USAGE_LIMIT {
+                if read(&job.turn_file(&turn, TurnFile::Engine)).as_deref() == Some("codex") {
+                    news.push_str(crate::engine::RETIRED);
+                    news.push('\n');
+                    continue;
+                }
                 let reset = a.was.parse::<i64>().unwrap_or(0);
                 let written = a.since.parse::<i64>().ok();
                 // Not taken: the job's waits stay as they are, for the next
@@ -445,5 +451,40 @@ mod tests {
         ] {
             assert_eq!(kick_for(t), kick, "{t}");
         }
+    }
+}
+
+#[cfg(test)]
+mod retired_tests {
+    use super::*;
+
+    #[test]
+    fn a_codex_turns_usage_wait_never_holds_claude() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = d.path().join("jobs");
+        cfg.wake = d.path().join("wake.json");
+        cfg.waits = None;
+        cfg.kick.clear();
+        cfg.tools.systemctl = "false".into();
+        cfg.tools.systemd_run = "true".into();
+        let job = Job::new(&cfg, "code");
+        fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "engine"), "codex").unwrap();
+        let due = now() + 10000;
+        fs::write(
+            job.path("await"),
+            format!("usage-limit\t{}\t{due}\n", now()),
+        )
+        .unwrap();
+        look(&cfg, "").unwrap();
+        assert!(usage::out(&cfg).is_none(), "Codex's reset held Claude");
     }
 }

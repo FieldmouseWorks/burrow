@@ -52,6 +52,8 @@ fn of(reviews: Vec<Review>, comments: Vec<Comment>) -> (Verdict, f64, u64) {
         head: HEAD.into(),
         reviews,
         comments,
+        edited: None,
+        retargeted: None,
     })
     .unwrap();
     (s.verdict, s.at, s.rounds)
@@ -154,4 +156,42 @@ fn the_newest_word_on_the_head_wins() {
         .0,
         Verdict::Clean
     );
+}
+
+/// What it says once the PR was edited or retargeted at `changed`.
+fn after(
+    changed: (Option<&str>, Option<&str>),
+    reviews: Vec<Review>,
+    comments: Vec<Comment>,
+) -> Said {
+    said(&Asked {
+        head: HEAD.into(),
+        reviews,
+        comments,
+        edited: changed.0.map(Into::into),
+        retargeted: changed.1.map(Into::into),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_review_from_before_a_retarget_or_an_edit_is_no_word_on_the_pr() {
+    const T2: &str = "2026-10-24T02:00:00Z";
+    let clean = || vec![summary(connector(), HEAD, "completed", Some(false), T1)];
+    let found = || vec![receipt(connector(), HEAD, &HEAD[..10], T1)];
+    for changed in [(Some(T2), None), (None, Some(T2)), (Some(T0), Some(T2))] {
+        // Clean or findings, from before: nothing, though its round counts.
+        let s = after(changed, vec![], clean());
+        assert_eq!((s.verdict, s.at), (Verdict::None, 0.0), "{changed:?}");
+        assert_eq!(s.since, crate::ts(T2).unwrap());
+        let s = after(changed, found(), vec![]);
+        assert_eq!((s.verdict, s.rounds), (Verdict::None, 1), "{changed:?}");
+    }
+    // One from after the change counts, as GitHub dates both: however late
+    // a pass first sees the retarget.
+    let s = after((None, Some(T0)), vec![], clean());
+    assert_eq!(s.verdict, Verdict::Clean);
+    // A summary edited the same second as the change isn't after it.
+    let s = after((Some(T1), None), vec![], clean());
+    assert_eq!(s.verdict, Verdict::None);
 }

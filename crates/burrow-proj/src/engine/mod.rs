@@ -24,22 +24,24 @@ pub use stream::{
 };
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Deserialize,
-    Serialize,
-    schemars::JsonSchema,
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]
     Claude,
+}
+
+/// What a job's record says when it names Codex, which proj no longer runs:
+/// the work is retired, never carried on another engine's model.
+pub const RETIRED: &str = "- this job ran on Codex, which is retired: label its issue `claude` to start it again on Claude";
+
+/// Read as [`Engine::parse`] does, so a record from a Codex turn (a request,
+/// an execution identity) fails its job with why, rather than run on Claude.
+impl<'de> Deserialize<'de> for Engine {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
 }
 impl Engine {
     pub fn name(self) -> &'static str {
@@ -50,6 +52,7 @@ impl Engine {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "claude" => Ok(Self::Claude),
+            "codex" => Err(RETIRED.trim_start_matches("- ").to_owned()),
             _ => Err(format!("unknown engine {s}")),
         }
     }
@@ -341,6 +344,38 @@ for session in ('writer-session', 'reviewer-session'):
         let recorded = serde_json::to_value(&c).unwrap();
         assert_eq!(recorded["engine"], "claude");
         assert_eq!(recorded["model"], "chosen");
+    }
+
+    #[test]
+    fn a_job_whose_record_names_codex_is_retired_not_run_on_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        let job = Job::new(&cfg, "old");
+        fs::create_dir_all(&job.dir).unwrap();
+        crate::ask::ensure(&job).unwrap();
+        // Its protected request, as a proj that ran Codex recorded it.
+        fs::write(
+            crate::ask::host_path(&job, "request"),
+            r#"{"project":"p","engine":"codex","role":null,"app":null,"agent":null,"owned":false}"#,
+        )
+        .unwrap();
+        let err = choice(&cfg, &job).unwrap_err();
+        assert!(err.contains("Codex, which is retired"), "{err}");
+        // So is a turn's execution identity, which a retained retry restores.
+        fs::write(
+            crate::ask::host_path(&job, "request"),
+            r#"{"project":"p","engine":null,"role":null,"app":null,"agent":null,"owned":false}"#,
+        )
+        .unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(
+            job.turn_file("1", crate::record::TurnFile::Execution),
+            r#"{"choice":{"engine":"codex","model":"m","effort":null}}"#,
+        )
+        .unwrap();
+        let err = choice(&cfg, &job).unwrap_err();
+        assert!(err.contains("Codex, which is retired"), "{err}");
     }
 }
 

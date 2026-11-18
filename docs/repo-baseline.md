@@ -153,8 +153,9 @@ root only.
    naming the commit it reviewed; the steward reads its verdict from those
    (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
    half an hour after its push is asked for once (`@codex review`), and after
-   two hours the stuck issue says so. A PR retargeted onto another base is
-   another change: Codex's word on the head before the move doesn't count. A
+   two hours the stuck issue says so. A PR retargeted onto another base, or
+   whose description is edited, is another change: Codex's word from before
+   (as GitHub dates the change) doesn't count, and it's asked again. A
    repo can turn the wait off (its `codex` override, in the
    [settings reference](settings-reference.md)), and then nothing settles it
    but the owner. A change to documentation

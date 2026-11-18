@@ -10,7 +10,11 @@
 //!
 //! The connector reviews each push itself, so there's no look to carry from
 //! an earlier head: a head is clean only once a review of that exact commit
-//! finished with nothing found.
+//! finished with nothing found. Nor from before the PR last changed without
+//! a push: a retarget onto another base is another change, and an edited
+//! description is text the review didn't read. What the connector said
+//! before the later of the two is no word on the PR as it is (its rounds
+//! still count), as GitHub dates them, not as a pass first saw them.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -31,6 +35,12 @@ pub struct Asked {
     pub reviews: Vec<Review>,
     /// Its comments, as GraphQL gives them (prs.py).
     pub comments: Vec<Comment>,
+    /// When its description was last edited (GraphQL's `lastEditedAt`).
+    #[serde(default)]
+    pub edited: Option<String>,
+    /// When it was last retargeted (its last `BaseRefChangedEvent`).
+    #[serde(default)]
+    pub retargeted: Option<String>,
 }
 
 /// One of a PR's reviews, as GraphQL gives it.
@@ -83,6 +93,9 @@ pub struct Said {
     /// Its reviews of the PR that had findings, at any head: each one is a
     /// round.
     pub rounds: u64,
+    /// When the PR last changed without a push (0 if never): nothing it
+    /// said before then counts.
+    pub since: f64,
 }
 
 /// The summary comment's state for one kind of review.
@@ -102,13 +115,15 @@ pub fn said(asked: &Asked) -> Result<Said, String> {
         None | Some("") => Ok(0.0),
         Some(t) => crate::ts(t),
     };
+    let since = when(&asked.edited)?.max(when(&asked.retargeted)?);
     let mut s = Said {
         verdict: Verdict::None,
         at: 0.0,
         rounds: 0,
+        since,
     };
     let mut saw = |verdict, at: f64| {
-        if at >= s.at {
+        if at > since && at >= s.at {
             s.verdict = verdict;
             s.at = at;
         }
@@ -151,7 +166,7 @@ pub fn said(asked: &Asked) -> Result<Said, String> {
         let on = r.commit.as_ref().map(|c| c.oid.as_str());
         if on == Some(asked.head.as_str()) && asked.head.starts_with(&read[1]) {
             let at = when(&r.submitted_at)?;
-            if at >= s.at {
+            if at > since && at >= s.at {
                 s.verdict = Verdict::Findings;
                 s.at = at;
             }

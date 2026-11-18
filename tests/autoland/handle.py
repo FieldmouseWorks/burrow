@@ -56,7 +56,7 @@ assert "Codex found nothing in this commit's change" in status and merged() and 
 fresh_pr_state()
 run(mkpr(), 0)
 status, digest = run(mkpr(), 30 * 60)
-assert len(asks()) == 1 and "No review of aaaaaaa came after its push." in asks()[0] and digest == [], (WROTE, digest)
+assert len(asks()) == 1 and "No review of aaaaaaa came after its push, retarget or edit." in asks()[0] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 31 * 60)
 assert asks() == [] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 120 * 60)
@@ -94,14 +94,28 @@ status, _ = run(answered, 960)
 assert asks() == [], WROTE
 
 # Retargeted, the same head is another change: what the connector said of it
-# on the old base doesn't count, and it's asked again at once, since the head
-# has long sat still.
+# before the move (as GitHub dates the move) doesn't count, even on a pass
+# that never saw it on its old base; it's asked for once the head has sat
+# still long enough, as after a push.
 fresh_pr_state()
-run(clean(), 0)
-status, _ = run(clean(base="release"), 3600)
-assert not merged() and "Waiting for Codex's review of this commit" in status and len(asks()) == 1, (status, WROTE)
+moved = "2026-10-24T00:50:00Z"
+status, _ = run(clean(base="release", retargeted=moved), 3600)
+assert not merged() and "Waiting for Codex's review of this commit" in status, (status, WROTE)
+status, _ = run(clean(base="release", retargeted=moved), 5400)
+assert not merged() and len(asks()) == 1, (status, WROTE)
 # Its word after the move does.
-status, _ = run(clean(base="release", comments=[summary(at="2026-10-24T01:05:00Z")]), 3960)
+status, _ = run(clean(base="release", retargeted=moved, comments=[summary(at="2026-10-24T01:35:00Z")]), 5700)
+assert merged(), (status, WROTE)
+# So does an edited description: the review didn't read the new text. It's
+# asked again though it was asked within the hour, and its wait runs from
+# the edit, so the owner doesn't hear of it at once.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 1900)
+assert len(asks()) == 1, WROTE
+status, digest = run(clean(edited="2026-10-24T00:40:00Z"), 2700)
+assert not merged() and len(asks()) == 1 and digest == [], (status, WROTE, digest)
+status, _ = run(clean(edited="2026-10-24T00:40:00Z", comments=[summary(at="2026-10-24T00:50:00Z")]), 3000)
 assert merged(), (status, WROTE)
 
 # A repo with Codex off has no reviewer: it waits, and the owner hears.
@@ -234,11 +248,12 @@ fresh_pr_state()
 run(clean(comments=[said(judgment("land"))], **gated), 700)
 assert merged()
 moved = summary(at="2026-10-24T00:14:00Z")
+retargeted = {**gated, "retargeted": "2026-10-24T00:13:00Z"}
 for verdicts, start in (([said(judgment("land"))], True), ([said(judgment("land")), said(judgment("owner"))], False)):
-    status, _ = run(clean(comments=[*verdicts, moved], base="release", **gated), 800)
+    status, _ = run(clean(comments=[*verdicts, moved], base="release", **retargeted), 800)
     assert not merged() and "judging it" in status, status
     assert (len(JOBS) == 1 and "origin/release:AGENTS.md" in JOBS[0]) if start else JOBS == [], JOBS
-status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release")), moved], base="release", **gated), 900)
+status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release")), moved], base="release", **retargeted), 900)
 assert merged() and "state=success" in status, status
 
 # Whether it's R2 is Conary's: what `cn class` says of the PR at its head,
