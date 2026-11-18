@@ -55,10 +55,15 @@ pub fn markdown() -> String {
             kept,
             s.help.to_owned(),
         ];
-        let row: Vec<_> = row.iter().map(|cell| cell.replace('|', "\\|")).collect();
-        out.push_str(&format!("| {} |\n", row.join(" | ")));
+        out.push_str(&line(&row));
     }
     out
+}
+
+/// One table row, a pipe in a cell escaped: it would end the cell.
+fn line(cells: &[String]) -> String {
+    let cells: Vec<_> = cells.iter().map(|cell| cell.replace('|', "\\|")).collect();
+    format!("| {} |\n", cells.join(" | "))
 }
 
 fn code(text: &str) -> String {
@@ -140,6 +145,9 @@ mod tests {
             "| `settings.pipelineUntil` | integer or null | 0 or more, or `null` | `null` | yes | proj | `settings/overlay.json` |"
         ));
         // A pipe in a cell would end it.
-        assert!(text.contains(r#"`["(^\|/)secrets?/","#), "pipes escaped");
+        assert_eq!(
+            line(&["`(^|/)x`".into(), "y".into()]),
+            "| `(^\\|/)x` | y |\n"
+        );
     }
 }

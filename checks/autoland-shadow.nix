@@ -102,8 +102,8 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e '.evidence == null and (.settings.train | not)' ${withApp.plain} >/dev/null || fail "plain has evidence with no train negative"
   jq -e '.settings.settle_delay == 120 and .settings.reviewers == [] and .settings.proof_slots == 1
     and .settings.proofs == {gate: {Run: [.settings.proofs.gate.Run[0], "-c", "make check"]}, vm: {Build: "checks.x86_64-linux.vm"}}
-    and .settings.review_authors == ["sams-steward[bot]"] and .settings.people == ["sam"]
-    and .settings.judge_engines == ["codex"]
+    and .settings.review_authors == ["chatgpt-codex-connector[bot]"] and .settings.people == ["sam"]
+    and .settings.judge_engines == []
     and .settings.bot_emails == ["49699333+dependabot[bot]@users.noreply.github.com"]' \
     ${withApp.plain} >/dev/null || fail "plain's settings aren't the steward's: $(jq -c .settings ${withApp.plain})"
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]", "sam-workers[bot]"]' ${withApp.plain} >/dev/null \

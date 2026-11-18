@@ -43,7 +43,6 @@ in pkgs.testers.runNixOSTest {
       owners = [ "sam" ];
       authors = [ "sam" ];
       app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
-      reviewers.codex.enable = true;
       pipelineRepos = [ "sam/box" ];
     };
     burrow.ledger = {

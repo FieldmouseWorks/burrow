@@ -5,7 +5,7 @@ fn retained(r: &Rig, id: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
     fs::write(job.path("project"), "/original").unwrap();
-    fs::write(job.path("engine"), "codex").unwrap();
+    fs::write(job.path("engine"), "other").unwrap();
     crate::policy::bind(
         &job,
         crate::policy::Identity::Local,
@@ -72,7 +72,7 @@ fn recovery_never_follows_prompt_or_stream_links_for_reading_writing_or_touching
 
 #[test]
 fn a_saved_identity_and_deleted_slot_cannot_authorize_stopping_active_work() {
-    for pool in ["claude", "codex", "unstick"] {
+    for pool in ["claude", "unstick"] {
         let mut r = rig();
         start(
             &mut r,
@@ -105,7 +105,11 @@ fn a_saved_identity_and_deleted_slot_cannot_authorize_stopping_active_work() {
 fn startup_saves_the_resolved_choice_despite_later_settings_changes() {
     let mut r = rig();
     let dir = r.tmp.path().join("settings");
-    crate::config::tests::routes(&mut r.cfg, &dir, "worker claude");
+    crate::config::tests::set(
+        &mut r.cfg,
+        &dir,
+        &["offer claude models one two", "model worker claude one"],
+    );
     let job = Job::new(&r.cfg, "choice");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
@@ -115,7 +119,10 @@ fn startup_saves_the_resolved_choice_despite_later_settings_changes() {
         .settings
         .as_ref()
         .unwrap()
-        .command(&["role", "worker", "codex"].map(String::from), "test")
+        .command(
+            &["model", "worker", "claude", "two"].map(String::from),
+            "test",
+        )
         .unwrap();
     Identity::capture_choice(&job, "1", &choice).unwrap();
     assert_eq!(Identity::load(&job, "1").unwrap().unwrap().choice, choice);

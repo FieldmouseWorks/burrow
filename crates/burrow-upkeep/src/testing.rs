@@ -344,5 +344,3 @@ pub fn start(cfg: &Config, at: f64, part: &str, jid: &str) {
     });
     r.unwrap();
 }
-
-

@@ -13,12 +13,11 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::github::{changes, fingerprint, over, target};
 use crate::job::{Job, USAGE_LIMIT, awaits};
-use crate::record::{JobFile, TurnFile};
+use crate::record::JobFile;
 use crate::turn::{start, start_closed};
-use crate::{Fail, io_fail, now, read, swap, usage};
+use crate::{Fail, io_fail, now, swap, usage};
 
-// Usage awaits from old Claude turns become its global hold. Codex turns
-// keep the same wire format but wait independently until the reset.
+// Usage awaits from old turns become Claude's global hold.
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
 /// couldn't start, is looked at again.
@@ -198,18 +197,6 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue;
             }
             if a.target == USAGE_LIMIT {
-                if read(&job.turn_file(&turn, TurnFile::Engine)).as_deref() == Some("codex") {
-                    let reset = a.was.parse::<i64>().unwrap_or(0);
-                    if reset > now() {
-                        lines.push_str(&a.line());
-                        retry.push((String::new(), reset));
-                    } else {
-                        news.push_str(
-                            "- Codex's usage limit has reset; carry on from the last turn\n",
-                        );
-                    }
-                    continue;
-                }
                 let reset = a.was.parse::<i64>().unwrap_or(0);
                 let written = a.since.parse::<i64>().ok();
                 // Not taken: the job's waits stay as they are, for the next
@@ -458,94 +445,5 @@ mod tests {
         ] {
             assert_eq!(kick_for(t), kick, "{t}");
         }
-    }
-}
-
-#[cfg(test)]
-mod codex_tests {
-    use super::*;
-    #[test]
-    fn a_codex_limit_is_booked_then_resumed_without_holding_claude() {
-        let d = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.jobs = d.path().join("jobs");
-        cfg.wake = d.path().join("wake.json");
-        cfg.waits = None;
-        cfg.kick.clear();
-        cfg.tools.systemctl = "false".into();
-        cfg.tools.systemd_run = "true".into();
-        let job = Job::new(&cfg, "code");
-        fs::create_dir_all(&job.dir).unwrap();
-        crate::policy::bind(
-            &job,
-            crate::policy::Identity::Local,
-            crate::policy::Kind::Manual,
-        )
-        .unwrap();
-        job.set_turns(1).unwrap();
-        fs::write(
-            job.turn("1", "outcome"),
-            "usage limit; waiting for Codex's reset",
-        )
-        .unwrap();
-        fs::write(job.turn("1", "engine"), "codex").unwrap();
-        let due = now() + 10000;
-        let await_text = format!("usage-limit\t{}\t{due}\n", now());
-        fs::write(job.path("await"), &await_text).unwrap();
-        look(&cfg, "").unwrap();
-        assert_eq!(job.turns().as_deref(), Some("1"));
-        assert_eq!(fs::read_to_string(job.path("await")).unwrap(), await_text);
-        let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
-        assert_eq!(wake[""], due);
-        assert!(crate::usage::kept(&cfg).is_none());
-        fs::write(
-            job.path("await"),
-            format!("usage-limit\t1000\t{}\n", now() - 1),
-        )
-        .unwrap();
-        // A due wake from an inbox job remains parked while its repo is
-        // paused, then joins the ordinary turn queue when enabled again.
-        drop(job);
-        let inbox = cfg.inbox.as_mut().unwrap();
-        inbox.state = d.path().join("inbox");
-        let record = inbox.state.join("sam_r-7");
-        fs::create_dir_all(&record).unwrap();
-        fs::write(record.join("job"), "code").unwrap();
-        fs::write(record.join("drained"), "sam/r#7").unwrap();
-        cfg.settings.as_mut().unwrap().overlay = d.path().join("overlay.json");
-        cfg.settings.as_mut().unwrap().allowed.push("sam/r".into());
-        crate::policy::bind(
-            &Job::new(&cfg, "code"),
-            crate::policy::Identity::Repository("sam/r".into()),
-            crate::policy::Kind::Automated,
-        )
-        .unwrap();
-        cfg.settings
-            .as_ref()
-            .unwrap()
-            .command(&["pause".into(), "sam/r".into()], "test")
-            .unwrap();
-        let job = Job::new(&cfg, "code");
-        let parked = fs::read_to_string(job.path("await")).unwrap();
-        look(&cfg, "").unwrap();
-        assert_eq!(job.turns().as_deref(), Some("1"));
-        assert_eq!(fs::read_to_string(job.path("await")).unwrap(), parked);
-        let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
-        assert!(wake[""].as_i64().unwrap() > now());
-        drop(job);
-        cfg.settings
-            .as_ref()
-            .unwrap()
-            .command(&["allow".into(), "sam/r".into()], "test")
-            .unwrap();
-        let job = Job::new(&cfg, "code");
-        look(&cfg, "").unwrap();
-        assert_eq!(job.turns().as_deref(), Some("2"));
-        assert!(
-            fs::read_to_string(job.path("prompt.2"))
-                .unwrap()
-                .contains("Codex's usage limit has reset")
-        );
-        assert!(crate::usage::kept(&cfg).is_none());
     }
 }

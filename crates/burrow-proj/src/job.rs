@@ -92,7 +92,6 @@ impl<'a> Job<'a> {
     /// The engine recorded for this turn, including jobs that changed engines.
     pub fn engine_label(&self, n: &str) -> &'static str {
         match read(&self.turn_file(n, TurnFile::Engine)).as_deref() {
-            Some("codex") => "Codex",
             Some("claude") | None => "Claude",
             _ => "Unknown",
         }
@@ -284,7 +283,9 @@ impl<'a> Job<'a> {
     }
 }
 
-/// A usage refusal's await target. Its fields are SINCE and reset's epoch.
+/// An earlier proj's usage refusal's await target, which proj-watch moves
+/// into the machine's hold (usage.rs). Its fields are SINCE and reset's
+/// epoch.
 pub const USAGE_LIMIT: &str = "usage-limit";
 
 /// One line of a job's await: what it awaits (a PR or issue, OWNER/REPO#N
@@ -373,31 +374,6 @@ mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
-    }
-
-    #[test]
-    fn lifecycle_reports_the_engine_and_usage_reset() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut v = example();
-        v["jobs"] = tmp.path().to_str().unwrap().into();
-        let cfg: Config = serde_json::from_value(v).unwrap();
-        let job = Job::new(&cfg, "held");
-        fs::create_dir(&job.dir).unwrap();
-        job.set_turns(1).unwrap();
-        fs::write(job.turn("1", "outcome"), "failed").unwrap();
-        let reset = now() + 3600;
-        fs::write(job.path("await"), format!("usage-limit\t1000\t{reset}\n")).unwrap();
-        for (engine, label) in [("claude", "Claude"), ("codex", "Codex")] {
-            fs::write(job.turn("1", "engine"), engine).unwrap();
-            assert!(
-                job.lifecycle()
-                    .unwrap()
-                    .1
-                    .contains(&format!("usage {label} {reset}"))
-            );
-        }
-        fs::remove_file(job.path("await")).unwrap();
-        assert!(job.lifecycle().unwrap().1.is_empty());
     }
 
     #[test]

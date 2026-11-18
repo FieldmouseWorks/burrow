@@ -63,10 +63,6 @@ fn every_option_shown_comes_from_the_schema() {
         options["autoland.rounds"],
         json!({"value": 3, "origin": "flake"})
     );
-    assert_eq!(
-        options["autoland.reviewers.codex.effort"],
-        json!({"value": "high", "origin": "default"})
-    );
     // Derived defaults, from the values they're worked out from.
     assert_eq!(
         options["proj.pipelineSlots"],
@@ -81,9 +77,8 @@ fn every_option_shown_comes_from_the_schema() {
         json!({"value": null, "origin": "default"})
     );
     // A role with nothing set shows the declared default, never an
-    // implicit one: every role on Claude but the planner, each on its
-    // engine's own model.
-    let unset = json!({"engine": "claude", "over": null});
+    // implicit one: every role on Claude, on its own model.
+    let unset = json!({"engine": "claude"});
     assert_eq!(options["proj.roles"]["value"]["*"], unset);
     assert_eq!(options["proj.roles"]["origin"], "default");
     assert_eq!(options["proj.roles"]["file"], json!(roles_file));
@@ -102,13 +97,12 @@ fn every_option_shown_comes_from_the_schema() {
         &mut cfg,
         d.path(),
         &[
-            "role triage codex",
-            "engines save cheap",
             "role triage claude",
-            "role fix@Sam/Box codex over 80 claude",
+            "engines save cheap",
+            "role fix@Sam/Box claude",
             "offer claude models small",
             "model triage claude small low",
-            "model fix codex - high",
+            "model fix claude - high",
             "engines save usual",
         ],
     );
@@ -116,10 +110,9 @@ fn every_option_shown_comes_from_the_schema() {
     let doc = show(&cfg);
     let options = &doc["options"];
     let usual_roles = json!({
-        "*": {"engine": "claude", "over": null},
-        "planner": {"engine": "codex", "over": null},
-        "triage": {"engine": "claude", "over": null},
-        "fix@sam/box": {"engine": "codex", "over": {"pct": 80.0, "engine": "claude"}},
+        "*": {"engine": "claude"},
+        "triage": {"engine": "claude"},
+        "fix@sam/box": {"engine": "claude"},
     });
     assert_eq!(
         options["proj.roles"],
@@ -128,9 +121,8 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(
         options["proj.models"]["value"],
         json!({"* claude": {"model": null, "effort": null},
-               "* codex": {"model": null, "effort": null},
                "triage claude": {"model": "small", "effort": "low"},
-               "fix codex": {"model": null, "effort": "high"}})
+               "fix claude": {"model": null, "effort": "high"}})
     );
     assert_eq!(
         options["proj.engineOffers"]["value"]["claude"]["models"],
@@ -139,7 +131,7 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(options["proj.engineSetups"]["value"]["active"], "usual");
     assert_eq!(
         options["proj.engineSetups"]["value"]["saved"]["cheap"],
-        json!({"roles": {"triage": {"engine": "codex", "over": null}}, "models": {}})
+        json!({"roles": {"triage": {"engine": "claude"}}, "models": {}})
     );
     let hold = &options["proj.usageHold"];
     assert_eq!(hold["origin"], "live");

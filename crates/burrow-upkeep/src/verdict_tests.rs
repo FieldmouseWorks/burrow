@@ -66,7 +66,10 @@ fn nothing_said_is_no_verdict() {
 fn a_finished_review_of_the_head_with_nothing_found_is_clean() {
     let at = crate::ts(T1).unwrap();
     assert_eq!(
-        of(vec![], vec![summary(connector(), HEAD, "completed", Some(false), T1)]),
+        of(
+            vec![],
+            vec![summary(connector(), HEAD, "completed", Some(false), T1)]
+        ),
         (Verdict::Clean, at, 0)
     );
 }
@@ -83,7 +86,11 @@ fn a_finished_review_with_findings_is_findings() {
 #[test]
 fn a_review_under_way_is_running() {
     assert_eq!(
-        of(vec![], vec![summary(connector(), HEAD, "running", None, T1)]).0,
+        of(
+            vec![],
+            vec![summary(connector(), HEAD, "running", None, T1)]
+        )
+        .0,
         Verdict::Running
     );
 }
@@ -91,7 +98,11 @@ fn a_review_under_way_is_running() {
 #[test]
 fn a_clean_review_of_another_commit_says_nothing_of_the_head() {
     assert_eq!(
-        of(vec![], vec![summary(connector(), OLD, "completed", Some(false), T1)]).0,
+        of(
+            vec![],
+            vec![summary(connector(), OLD, "completed", Some(false), T1)]
+        )
+        .0,
         Verdict::None
     );
 }

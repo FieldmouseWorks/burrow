@@ -80,8 +80,7 @@ const USAGE: &str = "usage:
       a PR's commits, every one on its head since it left its base, read
       whole from GitHub's compare a page at a time; a JSON object on stdin
       gives the head's sha, the base branch, the bots' addresses and the
-      committers' that aren't an edit: whether a Codex job wrote one and
-      whether anyone but the bots made one, or why GitHub won't list them
+      committers' that aren't an edit: whether anyone but the bots made one, or why GitHub won't list them
       all (short), or why they couldn't be read this time, as JSON on stdout
   burrow-upkeep CONFIG ci OWNER/REPO --now SECONDS [--dry]
       the head's CI verdict and cancelled workflow recovery; a JSON object
@@ -315,9 +314,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 return Err(Stop::Usage("no PR to read".into()));
             };
             let (commits, short, why) = match commits::read(&mut p, ask) {
-                Ok(Commits::Whole { codex, edited }) => {
-                    (Some(json!({"codex": codex, "edited": edited})), None, None)
-                }
+                Ok(Commits::Whole { edited }) => (Some(json!({"edited": edited})), None, None),
                 Ok(Commits::Short(why)) => (None, Some(why), None),
                 Err(why) => (None, None, Some(why)),
             };

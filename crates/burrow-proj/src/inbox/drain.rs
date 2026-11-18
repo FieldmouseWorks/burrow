@@ -293,7 +293,6 @@ impl Pass<'_> {
             role.as_deref().unwrap_or_default(),
             Some(repo),
             pinned.map(Engine::name),
-            self.inbox.vm,
         )
         .map(|choice| choice.engine)
     }
