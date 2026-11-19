@@ -1049,12 +1049,13 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=292aa71ecde12e34c22761ab050abcfddb12bbf4#292aa71ecde12e34c22761ab050abcfddb12bbf4"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef#1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef"
 dependencies = [
  "blake3",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "regex",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -1064,14 +1065,15 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=292aa71ecde12e34c22761ab050abcfddb12bbf4#292aa71ecde12e34c22761ab050abcfddb12bbf4"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef#1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef"
 dependencies = [
  "base64 0.23.1",
- "chrono",
  "conary-core",
  "ed25519-dalek",
+ "jiff 1.0.1",
  "regex",
  "ring",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha1",
@@ -3469,7 +3471,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
