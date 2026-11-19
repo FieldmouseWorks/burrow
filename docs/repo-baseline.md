@@ -232,7 +232,10 @@ root only.
    With the ledger on (burrow.ledger), a revert of one PR's merge is that
    PR's undo instead: the job names the PR in its answers file and opens
    nothing, and once it has ended the steward has the ledger's writer `cn
-   undo` it, as the door does. That undo's PR (`conary/undo/...`, the
+   undo` it, as the door does, with the red tip's reason: the URL of each
+   run a check failed in, the checks that failed and the first error line
+   of the first one's log, which the undo keeps and its PR opens with (no
+   undo without it: GitHub not giving the log is a stop, tried again). That undo's PR (`conary/undo/...`, the
    machinery's) is the red's fix from then on, waiting and closed like the
    rest. An undo anyone else asked for (the door's, say) isn't one: found
    open, it only keeps another job from starting while it's open. If the
