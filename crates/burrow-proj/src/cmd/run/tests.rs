@@ -1,6 +1,6 @@
 use super::{
-    Command, Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer,
-    run, run_with_cgroup, since_time, start, start_job,
+    Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer, run,
+    run_with_cgroup, since_time, start, start_job,
 };
 
 #[test]
@@ -74,7 +74,7 @@ fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
         Some("claude-rc-scan.service"),
         Some("proj-inbox.service"),
     ] {
-        let mut child = Command::new(std::env::current_exe().unwrap());
+        let mut child = burrow_test::command(std::env::current_exe().unwrap());
         child
             .args([
                 "--exact",
@@ -83,8 +83,7 @@ fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
             ])
             .env(CHILD, unit.unwrap_or("shell"))
             .env_remove("INVOCATION_ID")
-            .env_remove("SYSTEMD_EXEC_PID")
-            .env_remove("PROJ_JOB");
+            .env_remove("SYSTEMD_EXEC_PID");
         if let Some(unit) = unit {
             child
                 .env("INVOCATION_ID", "0123456789abcdef0123456789abcdef")

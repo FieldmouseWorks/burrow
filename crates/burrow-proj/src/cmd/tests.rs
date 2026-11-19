@@ -2,8 +2,6 @@ use std::fs;
 
 use std::env;
 
-use std::process::Command;
-
 use super::{baselines, left_be};
 use crate::config::Config;
 use crate::job::Job;
@@ -64,7 +62,7 @@ fn an_await_needs_every_baseline() {
 // slot::tests' stand-in git is.
 #[test]
 fn an_await_on_what_is_over_is_refused() {
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "cmd::tests::awaits_against_a_stand_in_gh",
@@ -172,7 +170,7 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         return;
     }
     for kind in ["0-held", "1-held", "2-held", "2-none", "2-expired"] {
-        let out = Command::new(env::current_exe().unwrap())
+        let out = burrow_test::command(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "cmd::tests::usage_is_one_json_value_with_zero_one_or_multiple_github_readings",

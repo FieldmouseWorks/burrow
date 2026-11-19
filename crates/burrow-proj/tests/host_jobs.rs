@@ -6,12 +6,7 @@
 
 use burrow_proj::{config::Config, job::Job, probe::Bridge};
 use serde_json::json;
-use std::{
-    fs,
-    os::unix::fs::symlink,
-    path::Path,
-    process::{Command, Output},
-};
+use std::{fs, os::unix::fs::symlink, path::Path, process::Output};
 
 fn config(root: &Path) -> Config {
     let p = |name: &str| root.join(name);
@@ -51,14 +46,12 @@ fn config(root: &Path) -> Config {
 }
 
 fn cli(cfg: &Config, socket: Option<&Path>, args: &[&str]) -> Output {
-    let mut command = Command::new(&cfg.me);
+    let mut command = burrow_test::command(&cfg.me);
     command
         .args(args)
         .env("PROJ_JOB", "recovery")
         .env("PROJ_CONFIG", cfg.path.with_file_name("sandbox.json"))
-        .env("PROJ_SELF", &cfg.me)
-        .env_remove("PROJ_PROBE_SOCKET")
-        .env_remove("PROJ_HOST_JOBS_SOCKET");
+        .env("PROJ_SELF", &cfg.me);
     if let Some(socket) = socket {
         command.env("PROJ_HOST_JOBS_SOCKET", socket);
     }
