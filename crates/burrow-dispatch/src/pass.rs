@@ -800,24 +800,54 @@ mod tests {
     }
 
     // An input the flake holds at a commit: status says so, where a watched
-    // one says how far behind live it is, and no wait is kept for it.
+    // one says how far behind live it is, and no wait is kept for it. One
+    // that was watched, and behind, when the flake took hold of it (remi's
+    // Conary, FieldmouseWorks/remi#1404) loses the wait it had.
     #[test]
     fn held_input() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config(dir.path());
-        let w = Fake::default();
-        let said = super::status(&cfg, &w, 1_794_656_000.0);
+        let mut cfg = config(dir.path());
+        let mut w = Fake::default();
+        w.units.insert(
+            "box-update".into(),
+            Unit {
+                state: "inactive".into(),
+                ..Unit::default()
+            },
+        );
+        w.github.insert(
+            "repos/sam/pin".into(),
+            Ok(json!({"default_branch": "main"})),
+        );
+        w.github.insert(
+            "repos/sam/pin/compare/dddddddddddd...main".into(),
+            Ok(json!({"ahead_by": 1, "commits": [
+                {"sha": "c1", "commit": {"committer": {"date": "2026-11-14T08:00:00Z"}}}]})),
+        );
+        let t = 1_794_656_000.0;
+        let waits = |cfg: &crate::config::Config| {
+            run(cfg, &w, t).unwrap();
+            let (_, items) = watch::read(&dir.path().join("watch.json")).unwrap();
+            items.into_keys().any(|k| k.contains("sam/pin"))
+        };
+        let deploy = cfg.deploy.as_mut().unwrap();
+        let held = std::mem::take(&mut deploy.held);
+        deploy.running.extend(held.clone());
+        assert!(waits(&cfg), "watched and behind, it waits to go live");
+        let deploy = cfg.deploy.as_mut().unwrap();
+        deploy.running.remove("sam/pin");
+        deploy.held = held;
+        assert!(!waits(&cfg), "held, nothing waits on it");
+        let said = super::status(&cfg, &w, t);
         assert!(
             said.contains(
                 "sam/pin: held at ddddddd by the flake's own rev, so its default branch isn't going live\n"
             ),
             "{said}"
         );
-        run(&cfg, &w, 1_794_656_000.0).unwrap();
-        let (_, items) = watch::read(&dir.path().join("watch.json")).unwrap();
-        assert!(items.keys().all(|k| !k.contains("sam/pin")), "{items:?}");
     }
 
+    // burrow's main on 2026-11-14 (#1108), replayed: flake's push runs for
     // 9c6ad02 and fceda93 both under way, the first stuck in a gate leg for
     // hours. The pass cancels the first for the second, and nothing else:
     // not the second, not code-scanning's runs (another workflow, the
