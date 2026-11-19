@@ -8,9 +8,18 @@
 # be split across legs, each on a runner of its own, and then attested
 # together by one more job. Called from a repo's own
 # workflow with `uses:`, whose job grants `id-token: write` and
-# `attestations: write`; `actions: read` also enables kept-build waiting. Its
+# `attestations: write`; `actions: read` also enables kept-build waiting, and
+# `actions: write` lets a push keep one kept-build entry a leg. Its
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
+#
+# The machine's build store (docs/gate-design.md, stage 1) is named by the
+# caller's repository or organization Actions variables BURROW_BUILDS_URL (a
+# substituter's URL; its door is URL/upload) and BURROW_BUILDS_PUBLIC_KEY,
+# never by an input: a PR's run takes its caller from the PR. For now it's a
+# shadow: each leg says what the store would have served of what it builds
+# cold, then uploads what it built, and nothing substitutes from it. With
+# the variables unset, none of it runs.
 #
 # Each job runs once a PR at a time: a PR's new run (a push, or a retarget from
 # the caller's flake-retarget.yml, which has flake.yml's name) cancels what its
@@ -149,6 +158,13 @@ on:
           so a PR that changes it changes only where its negative runs.
         type: string
         default: ''
+      negative:
+        description: >-
+          Run a PR's negative run in this call. A caller that calls this
+          workflow twice on one PR's head turns it off in the call whose
+          negative doesn't count, so each head runs one.
+        type: boolean
+        default: true
       gate-reuse:
         description: >-
           On a push to the default branch, before anything is built, ask
@@ -473,6 +489,14 @@ jobs:
       - if: inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true'
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/kept"
+      # The build store's shadow (docs/gate-design.md, stage 1): how long the
+      # restore below takes, for the gate to say beside what fetching the
+      # same from the store would take (crates/burrow-flake-check/src/
+      # builds.rs). Only when the caller's Actions variables name a store.
+      - id: builds-restore-start
+        if: ${{ vars.BURROW_BUILDS_URL != '' && inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true' }}
+        shell: bash
+        run: date +%s%N > "$RUNNER_TEMP/builds-restore-start"
       - id: kept-lookup
         if: ${{ inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -488,6 +512,10 @@ jobs:
           path: ${{ runner.temp }}/kept
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ steps.merge.outputs.tip || github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
+      - id: builds-restore-end
+        if: ${{ steps.builds-restore-start.outcome == 'success' && steps.kept-restore.outcome == 'success' }}
+        shell: bash
+        run: date +%s%N > "$RUNNER_TEMP/builds-restore-end"
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
@@ -517,9 +545,11 @@ jobs:
       # as the gate does, stopped before building, with a nix cache of its
       # own so the substituter's misses it saw aren't remembered by the gate.
       # It waits only while that push's own leg is running on a runner, and
-      # then until it ends, with no cap: one still queued may be queued for
-      # the very runner this leg holds, and one cut off part way would have
-      # cost the wait and saved nothing (#929). The token inherits actions:
+      # then until it ends, with no cap of its own: one still queued may be
+      # queued for the very runner this leg holds, and one cut off part way
+      # would have cost the wait and saved nothing (#929). A leg past its
+      # deadline, hours from its own start, isn't waited for (#1102,
+      # crates/burrow-flake-check/README.md). The token inherits actions:
       # read when the caller grants it. Missing permission, other runtime API
       # errors and a request past its deadline fail this step softly and
       # leave the gate to build cold.
@@ -543,6 +573,15 @@ jobs:
           LEG_JOB: *leg-job
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
         run: bash "$TOOLS/run.sh" wait
+      # The wait's plan ran with Nix installed, so when nothing was restored
+      # the root daemon opened the empty kept cache and made its nar/ and
+      # log/ as root, where the restore below can't extract (the reason the
+      # first restore runs before Nix is installed). Hand the directory back
+      # to the runner's user first: installing Nix needed sudo, so it's here.
+      - id: kept-reclaim
+        if: ${{ steps.kept-wait.outputs.saved == 'true' }}
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
       - id: kept-rewait
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -552,7 +591,11 @@ jobs:
           fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       # With gate-reuse, Nix reads a commit of the tree alone, so the verdict
-      # is the tree's (crates/burrow-flake-check/src/source.rs).
+      # is the tree's (crates/burrow-flake-check/src/source.rs). With a build
+      # store named, on a runner whose store is the job's own, it says before
+      # building what the store would have served of what it builds cold,
+      # takes nothing from it, and keeps a flake's own nixConfig out of every
+      # build, since the store gets what this leg builds (builds.rs).
       - id: gate
         if: needs.reuse.outputs.hit != 'true'
         shell: bash
@@ -563,6 +606,8 @@ jobs:
           LEGS: ${{ inputs.legs }}
           LEG: ${{ matrix.leg }}
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+          BUILDS: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
+          BUILDS_KEY: ${{ inputs.install-nix && vars.BURROW_BUILDS_PUBLIC_KEY || '' }}
         run: bash "$TOOLS/gate.sh"
       # With legs, a leg's log goes to the gate job, which attests the legs
       # together: as an artifact named for the leg, with the log's digest, the
@@ -722,9 +767,30 @@ jobs:
         run: |
           cargo build --release --locked --quiet -p burrow-keep
           "$CARGO_TARGET_DIR/release/burrow-keep" --gate "$GATE" "$RUNNER_TEMP"
+      # One entry a leg (#1011): each push saves its own, and a generation of
+      # them comes close to the repo's whole Actions cache, whose eviction
+      # takes whatever was read longest ago (often one this push just saved
+      # for another leg) once it's over. So the leg chooses: before its
+      # save, a newer commit's entry for it already there (a newer push that
+      # finished first) means this push's would never be restored, and it
+      # isn't saved; after, every entry its commit supersedes goes, its own
+      # too if a newer commit's turned up meanwhile. burrow-keep-prune,
+      # built beside burrow-keep, says which (crates/burrow-keep/src/prune.rs).
+      # Deleting needs actions: write, which only burrow's flake.yml grants.
+      - id: keep-newer
+        name: soft/keep-newer
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env: &prune
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
+          PRUNE: ${{ runner.temp }}/keep-build/release/burrow-keep-prune
+        run: '"$PRUNE" before'
       - id: keep-save
         name: soft/keep-save
-        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' && steps.keep-newer.outputs.superseded != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -753,6 +819,66 @@ jobs:
         if: ${{ always() && steps.saved-lookup.outcome == 'success' && steps.saved-lookup.outputs.cache-hit != 'true' }}
         shell: bash
         run: echo 'degraded/keep-save-missing' >> "$GITHUB_STEP_SUMMARY"
+      - id: keep-prune
+        name: soft/keep-prune
+        if: ${{ !cancelled() && steps.saved-lookup.outputs.cache-hit == 'true' }}
+        continue-on-error: true
+        shell: bash
+        env: *prune
+        run: '"$PRUNE" after'
+      - name: degraded/keep-newer
+        if: ${{ always() && steps.keep-newer.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/keep-newer' >> "$GITHUB_STEP_SUMMARY"
+      - name: degraded/keep-prune
+        if: ${{ always() && steps.keep-prune.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/keep-prune' >> "$GITHUB_STEP_SUMMARY"
+      # The build store (docs/gate-design.md, "One build store, written by
+      # whoever may sign"): a leg whose gate ran, passed or failed, uploads
+      # what it built (what burrow-keep picks: the paths of the job's own
+      # store that no one signed) to the store the caller's Actions
+      # variables name, with its job's token, once the steps above are done
+      # with the kept builds. The store's door decides whether this job may
+      # write, not this step: a job it refuses, or one with no token (a
+      # fork's PR), says so and writes nothing. Only on a runner whose store
+      # started empty (install-nix), where unsigned means this job's.
+      # Nothing here substitutes from the store. burrow-keep-upload is built
+      # beside burrow-keep, from this workflow's own commit, as the keep
+      # step builds it (once, where both run); a store that's down, slow or
+      # failing costs the run this step and its degradation, nothing more.
+      - id: builds-tool
+        name: soft/builds-tool
+        if: ${{ !cancelled() && vars.BURROW_BUILDS_URL != '' && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && steps.keep-tool.outcome != 'success' }}
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .flake-check-keep
+          persist-credentials: false
+          sparse-checkout: crates
+      - id: builds-write
+        name: soft/builds-write
+        if: ${{ !cancelled() && vars.BURROW_BUILDS_URL != '' && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && (steps.keep-tool.outcome == 'success' || steps.builds-tool.outcome == 'success') }}
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        working-directory: .flake-check-keep/crates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          BUILDS: ${{ vars.BURROW_BUILDS_URL }}
+        run: |
+          cargo build --release --locked --quiet -p burrow-keep --bin burrow-keep-upload
+          "$CARGO_TARGET_DIR/release/burrow-keep-upload" "$BUILDS"
+      - name: degraded/builds-tool
+        if: ${{ always() && steps.builds-tool.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/builds-tool' >> "$GITHUB_STEP_SUMMARY"
+      - name: degraded/builds-write
+        if: ${{ always() && steps.builds-write.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/builds-write' >> "$GITHUB_STEP_SUMMARY"
       # gate-reuse's hit: every step above skipped, so nothing was built,
       # attested or kept, and the gate passed as it did in the run named.
       - &reused
@@ -900,7 +1026,7 @@ jobs:
   # red when they pass there; it attests what it found, as the gate does
   # its result, with a subject of its own.
   negative:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && inputs.negative
     runs-on: ${{ inputs.negative-runner || inputs.runner }}
     concurrency:
       group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}

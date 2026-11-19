@@ -10,6 +10,7 @@ use crate::engine::{is_error, last_result};
 use crate::github::{fingerprint_until, over, target};
 use crate::host_jobs::View;
 use crate::job::{Job, awaits, kick};
+use crate::record::{JobFile, Marker, TurnFile, TurnMarker};
 use crate::snapshot::{self, Snapshot};
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
@@ -81,7 +82,6 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
-        Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         Some("_host-view") if view == View::Owner => crate::host_jobs::view(cfg, &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
@@ -123,6 +123,32 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
                 .collect::<String>());
             Ok(())
         }
+        Some("why") => {
+            let usage = "usage: proj why ID|OWNER/REPO#N [--json]";
+            let id = arg(args, 1, usage)?;
+            let json = match args.get(2).map(String::as_str) {
+                None => false,
+                Some("--json") if args.len() == 3 => true,
+                _ => return Err(Fail::new(2, usage)),
+            };
+            // An issue's record, followed into its job. A job's id may hold
+            // a `#` (its project's name), but never OWNER/REPO.
+            if crate::inbox::record::issue_target(id).is_some() {
+                put(&view.plain(&crate::inbox::record::why(cfg, id, json)?));
+                return Ok(());
+            }
+            let job = Job::new(cfg, id);
+            if !job.dir.is_dir() {
+                return Err(Fail::new(1, format!("no job {id}")));
+            }
+            let record = crate::record::derive(&job);
+            put(&if json {
+                format!("{}\n", record.json(id))
+            } else {
+                view.plain(&record.why(id))
+            });
+            Ok(())
+        }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
             if let Some(id) = run::find(cfg, key)? {
@@ -130,9 +156,15 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             }
             Ok(())
         }
-        Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
-        Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
-        Some("unstick") => unstick(cfg, arg(args, 1, "usage: proj unstick ID")?),
+        Some(cmd @ ("stop" | "withdraw" | "unstick")) => {
+            let id = arg(args, 1, &format!("usage: proj {cmd} ID"))?;
+            let done = match cmd {
+                "unstick" => unstick(cfg, id),
+                _ => stop(cfg, id, cmd == "withdraw"),
+            };
+            crate::record::noted(&Job::new(cfg, id), &format!("proj {cmd}"));
+            done
+        }
         Some("list") => {
             let mut names: Vec<String> = fs::read_dir(&cfg.projects)
                 .map_err(|e| io_fail(&cfg.projects, e))?
@@ -234,9 +266,9 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             let text = std::str::from_utf8(&bytes).map_err(|e| Fail::new(2, e.to_string()))?;
             let tasks = crate::planning::parse(text).map_err(|e| Fail::new(2, e))?;
             let job = Job::new(cfg, &id);
-            if !job.path("inbox-issue").exists()
+            if !job.file(JobFile::InboxIssue).exists()
                 || !cfg.inbox.as_ref().is_some_and(|i| i.planning)
-                || read(&job.path("link"))
+                || read(&job.file(JobFile::Link))
                     .as_deref()
                     .and_then(target)
                     .is_none()
@@ -246,9 +278,11 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
                     "split needs an inbox issue with planning enabled",
                 ));
             }
-            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let _held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
             let n = job.turns().ok_or_else(|| Fail::new(2, "no active turn"))?;
-            let path = job.turn(&n, "split");
+            let path = job.turn_file(&n, TurnFile::Split);
             crate::planning::declare_split(&job, &n, &tasks).map_err(|e| io_fail(&path, e))?;
             put(declare_end(&job, "split")?);
             Ok(())
@@ -300,7 +334,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
+            "usage: proj run|reply|status|log|state|why|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
         )),
     }
 }
@@ -352,7 +386,7 @@ fn log(cfg: &Config, args: &[String], view: View) -> Result<(), Fail> {
             .ok_or_else(|| Fail::new(1, format!("proj: {id} has no turns")))?,
     };
     if raw {
-        let stream = job.turn(&n, "jsonl");
+        let stream = job.turn_file(&n, TurnFile::Jsonl);
         crate::state_reads::copy(&stream, &mut io::stdout().lock())
             .map_err(|e| io_fail(&stream, e))?;
         return Ok(());
@@ -380,14 +414,14 @@ fn told_as(cfg: &Config, id: &str, n: &str, view: View) -> Result<String, String
     let job = Job::new(cfg, id);
     // A turn's answer is read from its own stream, so an earlier turn's is
     // still there once later ones have started.
-    let stream = job.turn(n, "jsonl");
+    let stream = job.turn_file(n, TurnFile::Jsonl);
     let last = last_result(&stream, 0);
     let mut said = crate::engine::results(&stream)
         .iter()
         .map(|r| view.plain(r))
         .collect::<Vec<_>>()
         .join("\n\n");
-    if read(&job.turn(n, "end")).as_deref() == Some("ask") {
+    if crate::record::end(&job, n).as_deref() == Some("ask") {
         match crate::ask::load(&job) {
             Ok(Some(q)) => said.push_str(&view.plain(&q.notice())),
             Ok(None) => (),
@@ -416,7 +450,7 @@ fn told_as(cfg: &Config, id: &str, n: &str, view: View) -> Result<String, String
         } else if let Some(outcome) = outcome.filter(|o| !o.is_empty() && o != "done") {
             let outcome = view.plain(&outcome);
             out.push_str(&format!("\n(turn {n} then ended: {outcome})\n"));
-        } else if read(&job.turn(n, "end")).as_deref() == Some("undeclared") {
+        } else if crate::record::end(&job, n).as_deref() == Some("undeclared") {
             out.push_str(&format!(
                 "\n(turn {n} ended without saying what comes next, even when asked again: nothing resumes the job but a reply)\n"
             ));
@@ -460,10 +494,10 @@ fn left_be(job: &Job, n: &str, active: &str) -> Result<Option<&'static str>, Fai
         }
     }
     job.adopt();
-    if job.turn(n, "slot").exists() {
+    if crate::record::has_slot(job, n) {
         return Ok(Some("running"));
     }
-    if !job.turn(n, "withdrawable").exists() {
+    if !job.turn_file(n, TurnFile::Withdrawable).exists() {
         return Err(Fail::new(
             1,
             format!(
@@ -484,7 +518,9 @@ pub fn stop(cfg: &Config, id: &str, withdraw: bool) -> Result<(), Fail> {
     }
     // Under the lock turns start under, so none starts between looking and
     // stopping. A stopped job is over: nothing it waited on resumes it.
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     halt(cfg, &job, withdraw)
 }
 
@@ -507,7 +543,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // Marked first, so the turn's end already finds it stopped rather than
     // failed: nobody waits on it.
     if let Some(n) = &n {
-        let _ = crate::state_reads::write(job.turn(n, "stopped"), "");
+        let _ = crate::record::mark_turn(job, n, TurnMarker::Stopped).write("");
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -516,12 +552,13 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // the turn is known to be over: one that ended on its own between the
     // look and the stop is stopped all the same, and one systemd can't be
     // asked about may still be running.
-    for f in ["await", "await.next", "github-await"] {
-        let _ = fs::remove_file(job.path(f));
+    let _ = crate::record::mark(job, Marker::Await).remove_file();
+    for f in [JobFile::AwaitNext, JobFile::GithubPending] {
+        let _ = fs::remove_file(job.file(f));
     }
     if rc != 0 && !systemd::gone(cfg, &unit) {
         if let Some(n) = &n {
-            let _ = fs::remove_file(job.turn(n, "stopped"));
+            let _ = crate::record::mark_turn(job, n, TurnMarker::Stopped).remove_file();
         }
         rewatch(cfg, &[id]);
         return Err(Fail::new(
@@ -531,11 +568,12 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     }
     crate::policy::cancel(job).map_err(|e| Fail::new(1, e))?;
     if let Some(n) = &n {
-        if job.turn(n, "retry-migration").exists() {
-            crate::swap(&job.turn(n, "retry-cancelled"), "")
+        if crate::record::transferring(job, n) {
+            crate::swap(&job.turn_file(n, TurnFile::RetryCancelled), "")
                 .map_err(|e| Fail::new(1, e.to_string()))?;
         }
-        fs::remove_file(job.turn(n, "retry-migration"))
+        crate::record::mark_turn(job, n, TurnMarker::RetryMigration)
+            .remove_file()
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     Ok(())
@@ -559,7 +597,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // The end hook may have deferred while the checkpoint still existed.
     // Confirmed transfer cancellation owns finalization in either ordering.
     if n.as_ref()
-        .is_some_and(|n| job.turn(n, "retry-cancelled").exists())
+        .is_some_and(|n| job.turn_file(n, TurnFile::RetryCancelled).exists())
     {
         finish(cfg, id)?;
     } else if idle {
@@ -578,8 +616,8 @@ pub fn unstick(cfg: &Config, id: &str) -> Result<(), Fail> {
     if !job.dir.is_dir() {
         return Err(Fail::new(1, format!("no job {id}")));
     }
-    crate::state_reads::write(job.path("unstick"), "")
-        .map_err(|e| io_fail(&job.path("unstick"), e))?;
+    let unstick = crate::record::mark(&job, Marker::Unstick);
+    unstick.write("").map_err(|e| unstick.fail(e))?;
     rewatch(cfg, &[id]);
     Ok(())
 }
@@ -610,9 +648,11 @@ pub(crate) fn record_wait(
     targets: &[String],
     until: Option<Instant>,
 ) -> Result<(), Fail> {
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     crate::github::take_limit();
-    let pending = job.path(crate::github_quota::PENDING);
+    let pending = job.file(JobFile::GithubPending);
     let saved: Option<crate::github_quota::Pending> = crate::github_quota::state(&pending)?
         .map(|text| {
             serde_json::from_str::<crate::github_quota::Pending>(&text)
@@ -697,11 +737,11 @@ pub(crate) fn record_wait(
         job,
         &crate::github_quota::join_records(&saved_baselines, &text),
     )?;
-    let next = job.path("await.next");
+    let next = job.file(JobFile::AwaitNext);
     crate::state_reads::write(&next, crate::github_quota::captured(job)?)
         .map_err(|e| io_fail(&next, e))?;
     crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
-    let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
+    let _ = fs::remove_file(job.file(JobFile::GithubPending));
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
         targets.join(" ")
@@ -760,7 +800,9 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
         ));
     }
     let job = Job::new(cfg, &id);
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     if let Some(recommendation) = recommendation {
         crate::ask::record(&job, &recommendation).map_err(|e| Fail::new(1, e))?;
     }
@@ -770,18 +812,20 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
 
 /// Record the declaration and return the instruction the engine receives.
 fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
-    let _ = fs::remove_file(job.path("await.next"));
+    let _ = fs::remove_file(job.file(JobFile::AwaitNext));
     crate::ask::declare(job, how).map_err(|e| Fail::new(1, e))?;
     if how == "done" {
-        let _ = fs::remove_file(job.path("open-question"));
+        let _ = fs::remove_file(job.file(JobFile::OpenQuestion));
     }
-    Ok(if how == "ask" && job.path("open-question").exists() {
-        "Noted. End your turn now without repeating the question already posted or pinging the owner again. The job is still waiting for their answer.\n"
-    } else if how == "ask" {
-        "Noted. End your turn now with your question: the job is resumed when someone answers it.\n"
-    } else {
-        "Noted. End your turn now with your answer.\n"
-    })
+    Ok(
+        if how == "ask" && job.file(JobFile::OpenQuestion).exists() {
+            "Noted. End your turn now without repeating the question already posted or pinging the owner again. The job is still waiting for their answer.\n"
+        } else if how == "ask" {
+            "Noted. End your turn now with your question: the job is resumed when someone answers it.\n"
+        } else {
+            "Noted. End your turn now with your answer.\n"
+        },
+    )
 }
 
 /// After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
@@ -789,7 +833,8 @@ fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
 /// took its baseline, and proj-inbox for a ready issue its drain holds
-/// for a slot.
+/// for a slot. A sorting job's verdict is kept and its slot freed here, with
+/// no GitHub call (`inbox::settle`).
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
@@ -799,6 +844,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     // an OOM kill included): news for the stream's subscribers.
     let done = finish(cfg, &id);
     crate::snapshot::stream::notify(cfg);
+    crate::record::noted(&Job::new(cfg, &id), "its turn ended");
     done
 }
 
@@ -806,24 +852,24 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     if job
         .turns()
-        .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+        .is_some_and(|n| crate::record::transferring(&job, &n))
     {
         // The unit is gone, but its committed transfer is still pending.
         // Wake the filesystem consumer even when it failed after launch.
         if let Some(n) = job.turns() {
-            crate::state_reads::write(job.turn(&n, "retry-wake"), "")
+            crate::state_reads::write(job.turn_file(&n, TurnFile::RetryWake), "")
                 .map_err(|e| Fail::new(1, e.to_string()))?;
         }
         return Ok(());
     }
     let cancelled = job
         .turns()
-        .filter(|n| job.turn(n, "retry-cancelled").exists());
+        .filter(|n| job.turn_file(n, TurnFile::RetryCancelled).exists());
     let _finalizing = if let Some(n) = &cancelled {
-        let lock = fs::File::create(job.turn(n, "retry-finalizing"))
+        let lock = fs::File::create(job.turn_file(n, TurnFile::RetryFinalizing))
             .map_err(|e| Fail::new(1, e.to_string()))?;
         lock.lock().map_err(|e| Fail::new(1, e.to_string()))?;
-        if job.turn(n, "retry-finalized").exists() {
+        if job.turn_file(n, TurnFile::RetryFinalized).exists() {
             return Ok(());
         }
         Some(lock)
@@ -831,16 +877,19 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         None
     };
     if let Some(n) = job.turns()
-        && !job.turn(&n, "stopped").exists()
-        && !job.path("await").exists()
+        && !crate::record::stopped(&job, &n)
+        && !crate::record::has_await(&job)
     {
         crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
     }
     job.capture().map_err(|e| Fail::new(1, e))?;
     job.mark_ended();
+    // A sorting job's verdict is kept and its slot freed before anything
+    // waits on GitHub, and before the queue is woken to fill the slot.
+    crate::inbox::settle::ended(cfg, id);
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
-    let mut names = lines(&job.path("kick"));
+    let mut names = lines(&job.file(JobFile::Kick));
     if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
     {
         names.extend(["proj-watch".into(), "autoland".into()]);
@@ -848,15 +897,14 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     if crate::question::needs_watch(&job) {
         names.push("proj-watch".into());
     }
-    for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
+    for a in awaits(&crate::record::await_text(&job).unwrap_or_default()) {
         names.push(watch::kick_for(&a.target));
     }
     // A ready issue waiting for a slot (proj-inbox's drain): whatever turn
-    // this was, its slot is room now, and the issue's repo's pass looks.
-    if let Some(inbox) = &cfg.inbox
-        && let Some(repo) = read(&inbox.state.join(crate::inbox::WAITING))
-    {
-        names.push(format!("proj-inbox/{repo}"));
+    // this was, its slot is room now, and the drain's own pass looks, from
+    // the saved ready lists, listing nothing.
+    if crate::inbox::record::drain_waiting(cfg) {
+        names.push(crate::inbox::DRAIN_KICK.to_owned());
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so
@@ -866,12 +914,15 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         scratch::clear(cfg, id);
     }
     if let Some(n) = cancelled {
-        crate::swap(&job.turn(&n, "retry-finalized"), "")
+        crate::swap(&job.turn_file(&n, TurnFile::RetryFinalized), "")
             .map_err(|e| Fail::new(1, e.to_string()))?;
     }
     // A resume may own the lock while waiting for this oneshot to finish.
     // The watcher kick above retains reconciliation when it cannot run here.
-    let Some(_held) = job.try_lock().map_err(|e| io_fail(&job.path("lock"), e))? else {
+    let Some(_held) = job
+        .try_lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?
+    else {
         return Ok(());
     };
     crate::question::notify(cfg, &job).map_err(|e| Fail::new(1, e))?;

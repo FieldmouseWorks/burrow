@@ -265,7 +265,7 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
     assert!(!b.posted().contains("Sorted:"));
     assert!(b.posted().contains("No answer by"));
     // The same predicate used to budget sorting slots excludes this claim.
-    assert!(!b.pass().sorting_slot(&d));
+    assert!(!b.pass().holds_sorting_slot(&d));
     for (login, kind, accepted) in [
         ("stranger", "User", false),
         ("sam", "Bot", false),
@@ -278,7 +278,7 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
         assert_eq!(!pending.exists(), accepted, "{login} {kind}: {}", b.log());
     }
     assert_eq!(job.turns().as_deref(), Some("3"));
-    assert!(b.pass().sorting_slot(&d));
+    assert!(b.pass().holds_sorting_slot(&d));
     fs::remove_file(b.path("active")).unwrap();
     fs::write(job.turn("3", "end"), "done\n").unwrap();
     fs::write(job.turn("3", "outcome"), "done\n").unwrap();

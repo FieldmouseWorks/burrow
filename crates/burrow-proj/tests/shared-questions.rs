@@ -1,5 +1,9 @@
 //! Exercise the operator migration and answer route through the real CLI.
 //! This test also runs on the feature's base, where merge-questions is absent.
+// It builds a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn).
+#![allow(deprecated)]
+
 use burrow_proj::{
     config::Config,
     host_jobs,
@@ -24,9 +28,9 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         "stallAfterMinutes":1, "awaitHours":1, "kick":"", "wake":dir.path().join("wake"),
         "waits":null, "inboxMark":"", "pipelineRepos":[], "leadRepos":[],
         "flake":"/unused", "deployed":"/unused", "apps":{}, "machinery":null,
-        "notify":null, "meters":null, "codexSlots":1,
-        "codexHooks":"/unused", "inbox":null,
-        "tools":{"gh":"unused", "git":"git", "codex":"unused", "bwrap":"unused",
+        "notify":null, "meters":null,
+        "inbox":null,
+        "tools":{"gh":"unused", "git":"git",
             "bash":"unused", "flock":"unused", "systemctl":systemctl,
             "systemdRun":"true", "timeout":"unused"}
     });

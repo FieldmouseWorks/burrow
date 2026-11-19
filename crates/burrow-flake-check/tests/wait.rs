@@ -109,11 +109,21 @@ fn run(branch: &str, tip: &str, status: &str, name: &str, event: &str) -> String
 fn runs(items: &[String]) -> String {
     format!(r#"{{"workflow_runs":[{}]}}"#, items.join(","))
 }
-/// A run's jobs, each a name and a status.
+/// A run's jobs, each a name and a status, started just now.
 fn jobs(items: &[(&str, &str)]) -> String {
+    let now: Vec<_> = items.iter().map(|&(n, s)| (n, s, 0)).collect();
+    jobs_since(&now)
+}
+/// A run's jobs, each a name, a status and how many seconds ago it
+/// started, as GitHub writes the time.
+fn jobs_since(items: &[(&str, &str, i64)]) -> String {
     let jobs: Vec<String> = items
         .iter()
-        .map(|(name, status)| format!(r#"{{"name":"{name}","status":"{status}"}}"#))
+        .map(|(name, status, ago)| {
+            let started = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(*ago);
+            let started = started.strftime("%Y-%m-%dT%H:%M:%SZ");
+            format!(r#"{{"name":"{name}","status":"{status}","started_at":"{started}"}}"#)
+        })
         .collect();
     format!(r#"{{"jobs":[{}]}}"#, jobs.join(","))
 }
@@ -217,10 +227,11 @@ fn a_cache_with_another_key_or_ref_is_not_a_save() {
     }
 }
 
-/// The base push's leg on a runner is waited for to its end, however long
-/// that is: the waiter had a cap (WAIT_MAX, an hour by default) and, past
-/// it, built cold anyway, the hour lost (#929). Its jobs are what it polls;
-/// the cache, only once the leg has stopped.
+/// The base push's leg on a runner is waited for to its end inside its
+/// deadline, however long this leg has waited: the waiter had a cap of its
+/// own (WAIT_MAX, an hour by default) and, past it, built cold anyway, the
+/// hour lost (#929). Its jobs are what it polls; the cache, only once the
+/// leg has stopped.
 #[test]
 fn a_leg_on_a_runner_is_waited_for_to_its_end_and_restored() {
     let mut c = Case::new("a\n");
@@ -334,4 +345,94 @@ fn denied_api_permission_fails_the_soft_step() {
     assert!(!o.status.success());
     assert!(text(&o).contains("403"), "{}", text(&o));
     assert!(Path::new(c.dir.path()).exists());
+}
+
+/// #1102, replayed: main went red at a push whose leg 2 sat compiling for
+/// hours, and the red fix's PR, merged onto it, waited on that leg with no
+/// end in sight. A base push's leg past its deadline (4 hours from its own
+/// start) isn't waited for: the PR's leg builds cold at once, with nothing
+/// to restore, and says why. The push's other legs, failed, change nothing.
+#[test]
+fn a_red_fix_on_a_push_whose_leg_is_past_its_deadline_builds_cold_at_once() {
+    let c = Case::new("codex-0.167.0\nburrow-proj\n");
+    going(&c);
+    let late = 4 * 60 * 60 + 60;
+    c.serve(
+        "jobs",
+        1,
+        &jobs_since(&[
+            ("check / leg 1 of 4", "completed", late),
+            (&format!("check / {LEG}"), "in_progress", late),
+            ("check / leg 3 of 4", "completed", late),
+            ("check / leg 4 of 4", "completed", late),
+        ]),
+    );
+    c.serve("caches", 1, NONE);
+    let started = Instant::now();
+    let o = c.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(text(&o).contains("Late"), "{}", text(&o));
+    assert!(text(&o).contains("building cold"), "{}", text(&o));
+    // Nothing for the restore after it: the gate builds cold.
+    assert_eq!(c.out(), "");
+    assert_eq!(c.asked("/jobs?"), 1, "{}", c.log());
+    assert_eq!(c.asked("/caches?"), 1, "{}", c.log());
+}
+
+/// The deadline is the producer leg's, from its start: a leg waited for
+/// while inside it is given up on once past it, poll by poll, not after
+/// the waiter's own time.
+#[test]
+fn a_leg_that_runs_past_its_deadline_while_waited_for_is_given_up() {
+    let mut c = Case::new("a\n");
+    going(&c);
+    c.serve(
+        "jobs",
+        1,
+        &jobs(&[(&format!("flake / {LEG}"), "in_progress")]),
+    );
+    c.serve("caches", 1, NONE);
+    c.set("WAIT_POLL", "1");
+    c.set("WAIT_DEADLINE", "3");
+    let started = Instant::now();
+    let o = c.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(started.elapsed() >= Duration::from_secs(2), "{}", text(&o));
+    assert!(started.elapsed() < Duration::from_secs(15), "{}", text(&o));
+    assert!(text(&o).contains("Late"), "{}", text(&o));
+    assert!(c.asked("/jobs?") >= 3, "{}", c.log());
+    assert_eq!(c.out(), "");
+}
+
+/// A late leg's run may still have saved the exact key (an earlier
+/// attempt): that save is restored, not built again.
+#[test]
+fn a_late_legs_exact_save_is_still_restored() {
+    let c = Case::new("a\n");
+    going(&c);
+    c.serve("jobs", 1, &jobs_since(&[(LEG, "in_progress", 5 * 60 * 60)]));
+    c.serve("caches", 1, &saved());
+    let o = c.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("Saved"), "{}", text(&o));
+    assert!(c.out().contains("saved=true"), "{}", c.out());
+}
+
+/// A running leg whose start can't be read can't be held to its deadline,
+/// so the soft step fails and says so rather than wait without one.
+#[test]
+fn a_running_leg_with_no_start_fails_the_soft_step() {
+    let c = Case::new("a\n");
+    going(&c);
+    c.serve(
+        "jobs",
+        1,
+        &format!(r#"{{"jobs":[{{"name":"{LEG}","status":"in_progress","started_at":null}}]}}"#),
+    );
+    c.serve("caches", 1, NONE);
+    let o = c.run();
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("start"), "{}", text(&o));
+    assert_eq!(c.out(), "");
 }

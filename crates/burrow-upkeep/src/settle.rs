@@ -301,13 +301,10 @@ fn required(cfg: &Settle, app: u64, train: bool) -> Vec<Value> {
 }
 
 /// Who gets past the baseline. The owner (an admin) can still merge past
-/// it from the PR page, and automation that pushes (directPush) past it
-/// altogether; in a repo with its train on, no one: only the train lands
-/// there.
+/// it from the PR page, with the train on too: that's how the owner lands a
+/// fix by hand when the pipeline itself is what's stuck. Automation that
+/// pushes (directPush) gets past it altogether.
 fn bypass(rules: Rules) -> Value {
-    if rules.train {
-        return json!([]);
-    }
     let mode = if rules.direct_push {
         "always"
     } else {
@@ -364,8 +361,8 @@ fn keep_checks(cfg: &Settle, app: u64, checks: &mut Value, key: &str) -> bool {
 /// A baseline made before this repo's settings were what they are (say
 /// while it pushed directly, with only the first two rules) gets the rules
 /// it lacks: with no required-status rule in it there's nothing for
-/// keep_rules to require the train's status in. Who may bypass it follows
-/// the train going on or off. What changed, in words.
+/// keep_rules to require the train's status in. The owner's bypass comes
+/// back if it's gone; nothing here takes one away. What changed, in words.
 fn complete_baseline(cfg: &Settle, app: u64, rs: &mut Value, rules: Rules) -> Vec<String> {
     if rs["name"] != "baseline" || !(cfg.rulesets && rules.ruleset) || rules.direct_push {
         return vec![];
@@ -389,17 +386,14 @@ fn complete_baseline(cfg: &Settle, app: u64, rs: &mut Value, rules: Rules) -> Ve
         had.extend(missing);
         rs["rules"] = had.into();
     }
-    // Only the train's own turn: a repo's other bypass is its own to keep.
-    let bypassed = rs["bypass_actors"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty());
-    if bypassed == rules.train {
-        rs["bypass_actors"] = bypass(rules);
-        changed.push(if rules.train {
-            "no bypass, only the train lands".into()
-        } else {
-            "the owner's bypass back".into()
-        });
+    // Only the owner's own entry: a repo's other bypass is its own to keep,
+    // and so is the mode the owner's has.
+    let owner = |a: &Value| a["actor_type"] == "RepositoryRole" && a["actor_id"] == 5;
+    let mut actors: Vec<Value> = rs["bypass_actors"].as_array().cloned().unwrap_or_default();
+    if !actors.iter().any(owner) {
+        actors.extend(bypass(rules).as_array().cloned().unwrap_or_default());
+        rs["bypass_actors"] = actors.into();
+        changed.push("the owner's bypass back".into());
     }
     changed
 }

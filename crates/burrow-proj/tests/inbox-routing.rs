@@ -16,9 +16,9 @@ fn config(gh: &Path) -> Config {
         "stallAfterMinutes":1, "awaitHours":1, "kick":"", "wake":"/unused",
         "waits":null, "inboxMark":"", "pipelineRepos":[], "leadRepos":[],
         "flake":"/unused", "deployed":"/unused", "apps":{}, "machinery":null,
-        "notify":null, "meters":null, "codexSlots":1,
-        "codexHooks":"/unused", "inbox":null,
-        "tools":{"gh":gh, "git":"git", "codex":"unused", "bwrap":"unused",
+        "notify":null, "meters":null,
+        "inbox":null,
+        "tools":{"gh":gh, "git":"git",
             "bash":"unused", "flock":"unused", "systemctl":"unused",
             "systemdRun":"unused", "timeout":"unused"}
     }))

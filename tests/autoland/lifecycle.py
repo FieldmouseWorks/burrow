@@ -14,12 +14,22 @@ from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+# burrow-brief (argv[2]), which the steward's tasks read their policy text
+# from as they're imported.
+BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
+                        str(Path(__file__).resolve().parents[2] / 'crates/target/debug/burrow-brief'))
 # Keep deadline coverage on the established test entry point, including
 # when the negative gate runs these tests with the base check definition.
 subprocess.run([sys.executable, str(Path(__file__).with_name("timeouts.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("limits.py")),
+                *sys.argv[1:]], check=True)
+
 subprocess.run([sys.executable, str(Path(__file__).with_name("batches.py")),
+                *sys.argv[1:]], check=True)
+
+subprocess.run([sys.executable, str(Path(__file__).with_name("looks.py")),
                 *sys.argv[1:]], check=True)
 
 subprocess.run([sys.executable, str(Path(__file__).with_name("listing.py")),
@@ -33,7 +43,7 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("rereads.py")),
 
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',
+    cfg.write_text(json.dumps(dict(brief=[BRIEF], context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',
                                   conary='cn', trainContext='train', snapDir=tmp)))
     os.environ['AUTOLAND_CONFIG'] = str(cfg)
     import common as C

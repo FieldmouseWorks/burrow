@@ -1,0 +1,225 @@
+# The proof producer's systemd half (modules/autoland/proof.nix), for real:
+# it starts only with its key, as a user of its own, listening only for the
+# flow's controller. Each run is a unit of its own (autoland-proof-work@ID)
+# as a user systemd makes for it, which sees only its run's folder as the
+# producer lays it out (producer.rs, `lay`), reads its copy of the repo
+# though it's another user's, and whose exit the unit keeps: 0 and 1 are a
+# pass and a fail, anything else (a run killed, a tree that isn't the
+# head's) no verdict, the unit gone. A build proves its derivation with the
+# machine's nix. One run can't reach another's processes or folder, nor the
+# mirrors or the producer's key; only the producer starts and stops runs,
+# and nothing else; and its runs end with it. The crate's tests
+# (crates/burrow-proof) run the same work with fakes for systemd and
+# GitHub; this is systemd's, polkit's and nix's half.
+#
+#   nix build .#checks.x86_64-linux.proof-producer -L
+{ self, pkgs }:
+let
+  git = "${pkgs.git}/bin/git";
+  cn = pkgs.writeShellScriptBin "cn" "exit 0";
+  # A flake whose checks are a derivation that builds and one that doesn't.
+  flake = pkgs.writeText "flake.nix" ''
+    {
+      outputs = _: let
+        mk = name: script: derivation {
+          inherit name;
+          system = "x86_64-linux";
+          builder = "/bin/sh";
+          args = [ "-c" script ];
+        };
+      in {
+        checks.x86_64-linux = {
+          ok = mk "proof-ok" "echo ok >$out";
+          bad = mk "proof-bad" "exit 1";
+        };
+      };
+    }
+  '';
+  lock = pkgs.writeText "flake.lock" (builtins.toJSON { nodes.root = { }; root = "root"; version = 7; });
+  state = "/var/lib/burrow/autoland-proof";
+  mirror = "${state}/git/acme/widget.git";
+in
+pkgs.testers.runNixOSTest {
+  name = "proof-producer";
+
+  nodes.machine = { lib, ... }: {
+    imports = [ self.nixosModules.autoland self.nixosModules.ledger self.nixosModules.github ];
+    burrow.ledger = {
+      enable = true;
+      package = cn;
+      owners = [ "acme" ];
+      anchorRepo = "acme/ledger";
+      reviewers = [ "steward[bot]" ];
+      controllerUser = "conary-flow";
+    };
+    burrow.events.enable = lib.mkForce false;
+    # Its App, which nothing here asks: the crate's tests are GitHub's half.
+    burrow.github = {
+      apps.workers = {
+        id = 7; accountId = 8;
+        slug = "acme-workers";
+        keyFile = "/run/keys/workers.pem";
+        api = "http://127.0.0.1:8080";
+      };
+      machinery = "workers";
+    };
+    burrow.autoland.plugins.proof = {
+      enable = true;
+      producer = "acme/proof";
+      keyFile = "/run/keys/proof";
+    };
+    # Started by the test, once its key is there.
+    systemd.services.autoland-proof.wantedBy = lib.mkForce [ ];
+    users.users.dev.isNormalUser = true;
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+  };
+
+  testScript = ''
+    import json
+    import re
+    import shlex
+
+    def producer(cmd, ok=True):
+        run = f"runuser -u autoland-proof -- bash -c {shlex.quote('umask 0027; ' + cmd)}"
+        return machine.succeed(run) if ok else machine.fail(run)
+
+    def unit(id):
+        return f"autoland-proof-work@{id}.service"
+
+    def folder(id):
+        return f"${state}/runs/{id}"
+
+    def shown(id):
+        out = machine.succeed(f"systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus {unit(id)}")
+        return dict(l.split("=", 1) for l in out.splitlines())
+
+    # The worker's exit, as the producer reads it (producer.rs, `ended`):
+    # only one systemd kept as the unit's success.
+    def verdict(id):
+        s = shown(id)
+        if (s["ActiveState"], s["SubState"], s["Result"], s["ExecMainCode"]) == ("active", "exited", "success", "1"):
+            return int(s["ExecMainStatus"])
+        return None
+
+    # A run's folder as the producer lays it out (producer.rs, `lay`), then
+    # its unit started as the producer starts it.
+    def run(id, recipe, mode="proof", tree=None, block=True):
+        spec = {"mode": mode, "repo": "acme/widget", "head": head, "tree": tree or tree_of_head,
+                "check": "c", "recipe": recipe}
+        producer(" && ".join([
+            f"mkdir -m 0750 {folder(id)}",
+            f"printf %s {shlex.quote(json.dumps(spec))} >{folder(id)}/spec.json",
+            f": >{folder(id)}/log && chmod 0660 {folder(id)}/log",
+            f"${git} clone -q --mirror --local ${mirror} {folder(id)}/repo.git",
+        ]))
+        # A run with no verdict fails its start, which the producer reads
+        # from systemd too.
+        machine.execute(f"runuser -u autoland-proof -- systemctl start {'--no-block ' if not block else '''}{unit(id)}")
+        return verdict(id) if block else None
+
+    def printed(id):
+        return producer(f"cat {folder(id)}/log")
+
+    def stop(id):
+        producer(f"systemctl stop {unit(id)} && rm -rf {folder(id)}")
+
+    machine.wait_for_unit("multi-user.target")
+
+    with subtest("the producer starts with its key, as a user of its own, for the controller alone"):
+        machine.succeed("install -d -m 0700 /run/keys && head -c 32 /dev/urandom >/run/keys/proof && chmod 0400 /run/keys/proof")
+        machine.succeed("systemctl start autoland-proof.service")
+        machine.wait_for_file("/run/conary-producers/proof/producer.sock")
+        assert machine.succeed("stat -c '%U %G %a' ${state} ${state}/git ${state}/runs").split("\n")[:3] == ["autoland-proof autoland-proof 750"] * 3
+        machine.fail("runuser -u dev -- test -e /run/conary-producers/proof/producer.sock")
+        machine.succeed("runuser -u conary-flow -- test -S /run/conary-producers/proof/producer.sock")
+
+    # The producer's mirror, as its fetch leaves it: the head under
+    # refs/proof/.
+    out = producer("""
+      set -e
+      g="${git} -c user.name=t -c user.email=t@t"
+      w=$(mktemp -d)
+      cd $w
+      $g init -q
+      cp ${flake} flake.nix
+      cp ${lock} flake.lock
+      echo f >f
+      $g add . && $g commit -qm one
+      mkdir -p ${state}/git/acme
+      $g init -q --bare ${mirror}
+      h=$($g rev-parse HEAD)
+      $g push -q ${mirror} HEAD:refs/proof/$h
+      $g rev-parse HEAD HEAD^{tree}
+    """).split()
+    head, tree_of_head = out[0], out[1]
+
+    with subtest("a run's command is its own user's, and its exit, kept by its unit, is the verdict"):
+        # What it printed, not the command line the log names it by.
+        def ran_as(id):
+            got = re.search(r"^ran as ([0-9]+)$", printed(id), re.M)
+            assert got, printed(id)
+            return int(got.group(1))
+        assert run("a1", {"Run": ["bash", "-c", "test -f f && echo ran as $(id -u)"]}) == 0, printed("a1")
+        uid = ran_as("a1")
+        assert uid not in (0, int(machine.succeed("id -u autoland-proof"))), uid
+        # Each run's own: another's, at once, is another.
+        assert run("a5", {"Run": ["bash", "-c", "echo ran as $(id -u)"]}) == 0, printed("a5")
+        assert ran_as("a5") != uid
+        stop("a5")
+        machine.fail(f"runuser -u dev -- cat {folder('a1')}/log")
+        stop("a1")
+        assert run("a2", {"Run": ["bash", "-c", "exit 3"]}) == 1, printed("a2")
+        stop("a2")
+
+    with subtest("a run killed, or a tree that isn't the head's, is no verdict, and its unit goes"):
+        assert run("a3", {"Run": ["bash", "-c", "kill -9 $$"]}) is None, shown("a3")
+        assert run("a4", {"Run": ["true"]}, tree="0" * 40) is None, shown("a4")
+        for id in ["a3", "a4"]:
+            machine.wait_until_fails(f"systemctl list-units --all --plain --no-legend {unit(id)} | grep -q .", timeout=30)
+            stop(id)
+
+    with subtest("a build proves its derivation, from its copy of the repo, with the machine's nix"):
+        assert run("b1", {"Build": "checks.x86_64-linux.ok"}) == 0, printed("b1")
+        stop("b1")
+        assert run("b2", {"Build": "checks.x86_64-linux.bad"}) == 1, printed("b2")
+        stop("b2")
+        # Prepared: built already, so it needs no slot.
+        assert run("b3", {"Build": "checks.x86_64-linux.ok"}, mode="prepare") == 0, printed("b3")
+        stop("b3")
+
+    with subtest("a run sees only its own folder: not another run's, nor the mirrors, nor the producer's key"):
+        run("c1", {"Run": ["bash", "-c", "exec sleep 300"]}, block=False)
+        machine.wait_until_succeeds("pgrep -x sleep", timeout=60)
+        pid = machine.succeed("pgrep -x sleep").strip()
+        assert run("c2", {"Run": ["bash", "-c", " && ".join([
+            f"! kill -0 {pid}",
+            f"! test -r /proc/{pid}/environ",
+            f"! test -e {folder('c1')}",
+            "! test -e ${mirror}",
+            "! test -e ${state}/records",
+            f"! touch {folder('c2')}/forged",
+            "! cat /run/credentials/autoland-proof.service/proof-key",
+            f"test -r {folder('c2')}/repo.git/HEAD",
+        ])]}) == 0, printed("c2")
+        stop("c2")
+
+    with subtest("only the producer starts and stops runs, and nothing else"):
+        machine.fail("runuser -u dev -- systemctl start autoland-proof-work@d1.service")
+        machine.fail("runuser -u conary-flow -- systemctl start autoland-proof-work@d1.service")
+        producer("systemctl start autoland-proof-work@not-a-run.service", ok=False)
+        producer("systemctl restart autoland-proof.service", ok=False)
+        producer("systemctl stop nix-daemon.service", ok=False)
+
+    with subtest("its runs end with it"):
+        # A oneshot is activating while its command runs.
+        def running(id):
+            return f"systemctl show -p ActiveState --value {unit(id)} | grep -qx -e activating -e active"
+        machine.succeed(running("c1"))
+        machine.succeed("systemctl restart autoland-proof.service")
+        machine.wait_for_file("/run/conary-producers/proof/producer.sock")
+        machine.wait_until_fails(running("c1"), timeout=60)
+        machine.wait_until_fails("pgrep -x sleep", timeout=30)
+        # Once its startup has cleared what its runs left.
+        machine.wait_until_succeeds(f"test ! -e {folder('c1')}", timeout=30)
+  '';
+}

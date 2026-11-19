@@ -28,7 +28,7 @@ import stopping
 import train as T
 from aside import aside
 from common import CFG, MIN, save, ts
-from touches import bot_edited, codex_written, dep_kind, gate_edit, moved_from
+from touches import bot_edited, dep_kind, gate_edit, moved_from
 from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
 from prs import ci_state, has_ci, our_status
@@ -45,11 +45,18 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 def handle(repo, pr, repo_info, digest, held=None, below=None):
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
-        if C.paused(repo):
+        # A PR handed to the steward (admission.py) gets its own pass in a
+        # paused repo: whatever else it needs (a Claude job, a proof, a
+        # review) is still paused, and keeps it waiting here.
+        if C.paused(repo, pr):
             raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
-    except C.JobPaused:
-        p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
+    except C.JobPaused as e:
+        if C.handed(repo, pr):
+            why = str(e).split(": ", 1)[-1]
+            p.settle("pending", f"Handed to the steward, but waiting: {why} with its repo", stage=S.REVIEW, wait=None)
+        else:
+            p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
         save(p.key, p.st)
 
 
@@ -221,7 +228,7 @@ class Pass(Context, Jobs, Actions):
             self.open_a_day(our_status(self.pr)[1] or "unsettled")
             save(self.key, self.st)
             return
-        live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
 
         # 2. The reviewers are clean on this head and nothing is open: CI, then land.
         if self.ci == "red":
@@ -236,22 +243,16 @@ class Pass(Context, Jobs, Actions):
             self.prove()
         elif self.ci == "pending":
             self.settle("pending", "Settled; waiting for CI: " + ", ".join(self.ci_names)[:90], stage=S.CI)
-        elif (codex := codex_written(self.repo, self.pr, self.st)) is None:
-            self.settle("pending", "Settled; couldn't read its commits; next pass", stage=S.REVIEW)
-        elif codex or self.gate() or unseen or self.ci == "none" or asked or capped:
+        elif self.gate() or self.ci == "none" or asked or capped or changed:
             self.judged(
-                "a Codex job wrote it"
-                if codex is True
-                else codex
-                if codex
-                else f"it touches {self.gate()}"
+                f"it touches {self.gate()}"
                 if self.gate()
-                else f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown"
-                if unseen
                 else "the repo has no CI"
                 if self.ci == "none"
                 else "a Claude job was asked to judge this head"
                 if asked
+                else "it was retargeted or its description edited after its push, which Codex's review can't vouch for"
+                if changed
                 else f"it went past the review-round limit ({rounds} rounds with findings)",
                 PAST_LIMIT if capped else REVIEWED,
             )
@@ -273,33 +274,28 @@ class Pass(Context, Jobs, Actions):
         looked = review_step.look(
             self.repo,
             self.pr,
-            self.key,
             self.st,
-            self.lost_on,
             self.digest,
             self.line,
             self.age,
             self.after,
-            self.strike,
-            self.cleared,
+            self.tried,
             lambda: T.review(self.repo, self.pr),
         )
 
-        live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
 
         what = []
         if open_threads:
             what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
         if changes:
             what.append("changes requested by " + ", ".join(changes))
-        if late:
-            what.append("review findings on " + ", ".join(sorted(set(late))))
         if waiting:
             # One reviewer's threads needn't wait for the other to finish.
             if what:
                 self.hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
             else:
-                self.settle("pending", "; ".join(waiting + stuck), stage=S.REVIEWER if out_of_service else S.REVIEW)
+                self.settle("pending", "; ".join(waiting + stuck), stage=S.REVIEW)
         elif what and capped:
             self.hand_off(
                 f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again, "
@@ -315,7 +311,8 @@ class Pass(Context, Jobs, Actions):
                     if said[r][0] == "findings":
                         self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
                         if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
-                            V.ask(self.repo, self.pr, self.key, r, self.st["rv"].setdefault(r, {}), self.after)
+                            why = "Every finding is answered; this head has no push to review."
+                            self.tried("ask", V.ask(self.repo, self.pr, self.st, why))
                 self.settle(
                     "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
                 )

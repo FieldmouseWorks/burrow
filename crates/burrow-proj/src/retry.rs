@@ -2,7 +2,7 @@
 //!
 //! The deployment's barrier owns the original census lock. Older schedulers
 //! therefore cannot admit a retained retry while this event consumer moves
-//! its existing turn to the current executable. Running turns, Codex and the
+//! its existing turn to the current executable. Running turns and the
 //! emergency pool retain their own locks and continue normally.
 use std::collections::HashSet;
 use std::fs;
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod authority;
 pub(crate) use authority::Identity;
 
+use crate::record::{TurnFile, TurnMarker};
 use crate::{config::Config, engine, job::Job, now_nanos, read, swap, systemd, turn};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,7 +35,7 @@ pub(crate) struct Checkpoint {
 
 impl Checkpoint {
     pub fn load(job: &Job, n: &str) -> io::Result<Option<Self>> {
-        match crate::state_reads::bytes(&job.turn(n, "retry-migration")) {
+        match crate::record::checkpoint(job, n) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 if !Self::valid_place(&state.name, job.id) {
@@ -72,7 +73,7 @@ impl Checkpoint {
             said: Some(said.into()),
             first,
             retained: Some(true),
-            deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
+            deadline: crate::record::deadline(job, n),
             name: crate::slot::entry_at(
                 job,
                 job.id,
@@ -86,19 +87,17 @@ impl Checkpoint {
         };
         loop {
             let held = job.lock()?;
-            if job.turns().as_deref() != Some(n) || job.turn(n, "stopped").exists() {
+            if job.turns().as_deref() != Some(n) || crate::record::stopped(job, n) {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "retry was cancelled or superseded",
                 ));
             }
             Identity::capture(job, n).map_err(io::Error::other)?;
-            match census(job, n) {
+            match census(job) {
                 Ok(_census) => {
-                    return swap(
-                        &job.turn(n, "retry-migration"),
-                        &serde_json::to_string(&state)?,
-                    );
+                    return crate::record::mark_turn(job, n, TurnMarker::RetryMigration)
+                        .swap(&serde_json::to_string(&state)?);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // Cancellation and emergency promotion remain available.
@@ -113,8 +112,8 @@ impl Checkpoint {
     pub fn resume(&self, job: &Job, n: &str, first: &Path) -> io::Result<PathBuf> {
         let _job = job.lock()?;
         if job.turns().as_deref() != Some(n)
-            || job.turn(n, "stopped").exists()
-            || !job.turn(n, "retry-migration").exists()
+            || crate::record::stopped(job, n)
+            || !crate::record::transferring(job, n)
         {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -127,20 +126,14 @@ impl Checkpoint {
         if !self.initial()
             && let Some(dl) = self.deadline
         {
-            crate::state_reads::write(
-                job.turn(n, "deadline"),
-                format!("{}\n", dl + now_nanos() - self.waited),
-            )?;
+            crate::record::mark_turn(job, n, TurnMarker::Deadline)
+                .write(format!("{}\n", dl + now_nanos() - self.waited))?;
         }
         let prompt = if let Some(said) = &self.said {
-            let prompt = job.turn(n, "spent");
+            let prompt = job.turn_file(n, TurnFile::Spent);
             crate::state_reads::write(
                 &prompt,
-                format!(
-                    "{}\n\n{said}. {}\n\n{asked}",
-                    turn::SPENT,
-                    crate::usage::policy(job.cfg)
-                ),
+                format!("{}\n\n{asked}", crate::usage::login::resumed(job.cfg, said)),
             )?;
             prompt
         } else {
@@ -148,13 +141,13 @@ impl Checkpoint {
         };
         // Match an in-process retry: waiting consumed neither its turn
         // budget nor its next run's idle allowance. Keep the stream contents.
-        if job.turn(n, "quiet").exists() {
-            crate::state_reads::remove(job.turn(n, "quiet"))?;
+        if job.turn_file(n, TurnFile::Quiet).exists() {
+            crate::state_reads::remove(job.turn_file(n, TurnFile::Quiet))?;
         }
-        crate::state_reads::append(&job.turn(n, "jsonl"))?
+        crate::state_reads::append(&job.turn_file(n, TurnFile::Jsonl))?
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
-        crate::state_reads::remove(job.turn(n, "retry-migration"))?;
-        let _ = crate::state_reads::remove(job.turn(n, "retry-startup-failed"));
+        crate::record::mark_turn(job, n, TurnMarker::RetryMigration).remove()?;
+        let _ = crate::record::mark_turn(job, n, TurnMarker::RetryStartupFailed).remove();
         Ok(prompt)
     }
 
@@ -163,17 +156,8 @@ impl Checkpoint {
     }
 }
 
-fn is_codex(job: &Job, n: &str) -> io::Result<bool> {
-    Ok(Identity::load(job, n)
-        .map_err(io::Error::other)?
-        .map_or_else(
-            || read(&job.turn(n, "engine")).as_deref() == Some("codex"),
-            |identity| identity.choice.engine == engine::Engine::Codex,
-        ))
-}
-
-fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
-    if job.path("unstick").exists() || is_codex(job, n)? {
+fn census(job: &Job) -> io::Result<Option<fs::File>> {
+    if crate::record::unstuck(job) {
         return Ok(None);
     }
     let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
@@ -198,8 +182,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
         if crate::policy::denied(&job)
             || crate::policy::parked(&job)
             || !job.retry_pending(&n)
-            || job.path("unstick").exists()
-            || is_codex(&job, &n)?
+            || crate::record::unstuck(&job)
         {
             continue;
         }
@@ -258,7 +241,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         Checkpoint::valid_place(&e.file_name().to_string_lossy(), job.id)
             && read(&e.path()).as_deref() == Some(pid.to_string().as_str())
     });
-    let stream = job.turn(n, "jsonl");
+    let stream = job.turn_file(n, TurnFile::Jsonl);
     let said = engine::last_result(&stream, 0)
         .and_then(|last| {
             engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
@@ -268,12 +251,12 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
     // its place. Publication after reset must not turn that retained refusal
     // into fresh work that can bypass the draining cohort.
     let refusal = said.as_ref().and_then(|_| crate::mtime_nanos(&stream));
-    let awaiting = read(&job.path("await"))
+    let awaiting = crate::record::await_text(job)
         .filter(|s| s.starts_with("usage-limit\t"))
-        .and_then(|_| crate::mtime_nanos(&job.path("await")));
+        .and_then(|_| crate::record::await_written(job));
     let waited = [
         place.as_ref().and_then(|e| crate::mtime_nanos(&e.path())),
-        crate::mtime_nanos(&job.turn(n, "withdrawable")),
+        crate::mtime_nanos(&job.turn_file(n, TurnFile::Withdrawable)),
         refusal,
         awaiting,
     ]
@@ -301,7 +284,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         name,
         first,
         retained: Some(fs::metadata(&stream).is_ok_and(|m| m.len() > 0)),
-        deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
+        deadline: crate::record::deadline(job, n),
     })
 }
 
@@ -325,13 +308,13 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         };
         let Some(n) = job.turns() else { continue };
-        // Running turns keep their own locks and executable. Waiting Codex
-        // and emergency turns must transfer too: an old initial handover can
-        // itself be blocked on the fenced census. Their saved engine/flag
-        // sends the replacement straight back to its independent pool.
-        if job.turn(&n, "slot").exists()
-            || job.turn(&n, "outcome").exists()
-            || job.turn(&n, "stopped").exists()
+        // Running turns keep their own locks and executable. Waiting
+        // emergency turns must transfer too: an old initial handover can
+        // itself be blocked on the fenced census. Their saved flag sends the
+        // replacement straight back to its independent pool.
+        if crate::record::has_slot(&job, &n)
+            || crate::record::has_outcome(&job, &n)
+            || crate::record::stopped(&job, &n)
         {
             continue;
         }
@@ -350,7 +333,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if Checkpoint::load(&job, &n)?.is_none() {
             let state = checkpoint(cfg, &job, &n, pid, first)?;
             Identity::capture_legacy(&job, &n).map_err(io::Error::other)?;
-            let _census = match census(&job, &n) {
+            let _census = match census(&job) {
                 Ok(held) => held,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     busy = true;
@@ -358,10 +341,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
                 }
                 Err(e) => return Err(e),
             };
-            swap(
-                &job.turn(&n, "retry-migration"),
-                &serde_json::to_string(&state)?,
-            )?;
+            crate::record::mark_turn(&job, &n, TurnMarker::RetryMigration)
+                .swap(&serde_json::to_string(&state)?)?;
         }
         // Validate the committed checkpoint before authorizing a stop.
         Checkpoint::load(&job, &n)?
@@ -384,14 +365,30 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         }
         let job = Job::new(cfg, &id);
-        let Some(_lock) = job.try_lock()? else {
+        // A folder with no lock is locked only for a checkpoint of its latest
+        // turn (kept in the control root, not the folder), the one thing
+        // below that acts on it: one being removed, whose own deletes wake
+        // this pass, gets no lock file put back into it.
+        let lock = match job.try_lock_existing() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let pending = job
+                    .turns()
+                    .is_some_and(|n| crate::record::transferring(&job, &n));
+                if !pending {
+                    continue;
+                }
+                job.try_lock()?
+            }
+            held => held?,
+        };
+        let Some(_lock) = lock else {
             busy = true;
             continue;
         };
         // One locked snapshot owns cancellation, turn identity and launch.
         let Some(n) = job.turns() else { continue };
-        if job.turn(&n, "stopped").exists() || job.retry_completed(&n) {
-            match crate::state_reads::remove(job.turn(&n, "retry-migration")) {
+        if crate::record::stopped(&job, &n) || job.retry_completed(&n) {
+            match crate::record::mark_turn(&job, &n, TurnMarker::RetryMigration).remove() {
                 Ok(()) => (),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e),
@@ -404,6 +401,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if crate::policy::denied(&job) {
             crate::policy::mark(&job, "queued", state.first, Some(crate::policy::DENIED))
                 .map_err(io::Error::other)?;
+            crate::record::noted(&job, "its transfer parked by the policy");
             continue;
         }
         // The ordered policy reconciler owns restoration of parked work.
@@ -419,6 +417,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
                 crate::inbox::resumption::Resume::Waiting(wait) => {
                     crate::policy::mark(&job, "queued", state.first, Some(wait.says()))
                         .map_err(io::Error::other)?;
+                    crate::record::noted(&job, "its transfer parked for capacity");
                     continue;
                 }
             };
@@ -428,7 +427,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             busy = true;
             continue;
         }
-        let attempt = job.turn(&n, "retry-attempt");
+        let attempt = job.turn_file(&n, TurnFile::RetryAttempt);
         if read(&attempt)
             .and_then(|s| s.parse::<i64>().ok())
             .is_some_and(|at| now_nanos() - at < 2_000_000_000)
@@ -441,8 +440,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         let prepare = || -> io::Result<()> {
             swap(&attempt, &now_nanos().to_string())?;
             Identity::restore(&job, &n).map_err(io::Error::other)?;
-            if job.turn(&n, "outcome").exists() {
-                crate::state_reads::remove(job.turn(&n, "outcome"))?;
+            if crate::record::has_outcome(&job, &n) {
+                crate::record::mark_turn(&job, &n, TurnMarker::Outcome).remove()?;
             }
             Ok(())
         };
