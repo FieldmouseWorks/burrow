@@ -16,7 +16,7 @@ import waits
 stand_in()
 MIN = 60
 published = []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.V.snap_name)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.Batch.turn)
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
 REPOS = ["sam/r", "sam/q"]
@@ -190,7 +190,7 @@ OPEN["sam/r"] = [pr("sam/r", 5), {"number": 9, "headRefName": "x", "baseRefName"
 items = run(1200)
 assert items["sam/r#9"] == {"repo":"sam/r", "what": "sam/r#9", "link": None, "phase": waits.FAILS, "since": T + 1200,
                             "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r", "claude": False, "rev": None}, items
-assert items["sam/r#5"]["since"] == T + 1100, items
+assert items["sam/r#5"]["since"] == T + 800, items
 
 
 def broken(*a, **kw):
@@ -208,12 +208,14 @@ assert failing["sam/r#5"] == items["sam/r#5"] and failing["sam/r#7"] == items["s
 assert failing["sam/r"]["phase"] == waits.FAILS and failing["sam/r"]["since"] == T + 1400, failing
 S.R.watch_default = kept_fns[4]
 # Between them: what it saw to is as it noted, the rest as they were.
-S.V.snap_name = lambda name, *a: broken() if name.endswith("-7.json") else kept_fns[6](name, *a)
+# (The pass breaks on its turn for #7, once #5 has been seen to.)
+seen_to = lambda: any(x.startswith("api repos/sam/r/statuses/") for x in WROTE)  # noqa: E731
+S.Batch.turn = lambda self, repo, prs: broken() if repo == "sam/r" and seen_to() else kept_fns[6](self, repo, prs)
 OPEN["sam/r"][1] = pr("sam/r", 7)  # off hold, had the pass seen to it
 failing = run(1500)
 assert failing["sam/r#5"]["phase"] != items["sam/r#5"]["phase"] and failing["sam/r#5"]["since"] == T + 1500, failing
 assert failing["sam/r#7"] == items["sam/r#7"] and failing["sam/r"]["since"] == T + 1400, failing
-S.V.snap_name = kept_fns[6]
+S.Batch.turn = kept_fns[6]
 # After them: all as noted, and a PR that's closed is gone.
 S.branches = broken
 OPEN["sam/r"] = OPEN["sam/r"][:1]
@@ -277,22 +279,22 @@ print("waits on Renovate: ok")
 
 # Engine releases never select lock-age recovery, and the independent
 # usage allowance runs alongside, rather than after, Renovate's recovery.
-for engine in ('Claude', 'Codex'):
-    for refreshing, lock_date in ((False, None), (True, None), (True, T + 86400), (True, T - 10)):
-        for release in (T - 100, T + 3600, T + 10 * 86400):
-            fresh_pr_state()
-            C.NOW = T + 500
-            subject = pr('sam/r', 5)
-            waits.begin()
-            waits.read('sam/r', [subject])
-            waits.note('sam/r', subject, f'{engine} release', waits.STEWARD,
-                       refreshing=refreshing, ripe=lock_date, usage_release=release)
-            waits.publish({'sam/r'}, {}, True)
-            actual = C.load('watch.json', {})['items']['sam/r#5']
-            allowance = (recovery if lock_date else drain) if refreshing else 0
-            expected = max(max(C.NOW, lock_date or 0) + allowance, release) + 120 * MIN
-            assert actual['due'] == expected, (actual, expected, refreshing, lock_date, release)
+engine = "Claude"
+for refreshing, lock_date in ((False, None), (True, None), (True, T + 86400), (True, T - 10)):
+    for release in (T - 100, T + 3600, T + 10 * 86400):
+        fresh_pr_state()
+        C.NOW = T + 500
+        subject = pr('sam/r', 5)
+        waits.begin()
+        waits.read('sam/r', [subject])
+        waits.note('sam/r', subject, f'{engine} release', waits.STEWARD,
+                   refreshing=refreshing, ripe=lock_date, usage_release=release)
+        waits.publish({'sam/r'}, {}, True)
+        actual = C.load('watch.json', {})['items']['sam/r#5']
+        allowance = (recovery if lock_date else drain) if refreshing else 0
+        expected = max(max(C.NOW, lock_date or 0) + allowance, release) + 120 * MIN
+        assert actual['due'] == expected, (actual, expected, refreshing, lock_date, release)
 
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.V.snap_name = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.Batch.turn = kept_fns
 OPEN.clear()
 fresh_pr_state()

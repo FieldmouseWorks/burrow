@@ -1,6 +1,7 @@
 //! Wait for the exact default-branch push's kept builds. Planning is done by
 //! the dependency-free runner; this binary uses the shared GitHub client.
 use burrow_github::{Api, Gh, encode, pages};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use std::{
     env, fs,
@@ -9,6 +10,14 @@ use std::{
     time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+/// How long a base push's leg is worth waiting for from its start, in
+/// seconds, unless `WAIT_DEADLINE` says otherwise: 4 hours. A leg that
+/// compiles a large package cold (codex) takes 2 to 3 hours on a hosted
+/// runner and then saves it, which is worth the wait, as building it here
+/// takes as long; burrow's slowest that saved, in 150 pushes to 2026-11-14,
+/// took 194 minutes. Past 4 hours a leg has stopped making progress, and
+/// the job cuts it off at 6, keeping nothing.
+const DEADLINE: i64 = 4 * 60 * 60;
 fn var(k: &str) -> String {
     env::var(k).unwrap_or_default()
 }
@@ -18,19 +27,25 @@ fn var(k: &str) -> String {
 enum State {
     /// Its kept builds are saved under the exact key.
     Saved,
-    /// Its leg is running on a runner: it ends, saved or not, without
-    /// anything this leg holds.
+    /// Its leg is running on a runner, inside its deadline: it ends, saved
+    /// or not, without anything this leg holds.
     Building,
+    /// Its leg has run past its deadline, longer than even a cold build of
+    /// a large package takes: it has stopped making progress, and a leg its
+    /// job cuts off keeps nothing, so it's no better a bet than building
+    /// cold now (#1102).
+    Late,
     /// Its leg hasn't got a runner yet, and may be waiting for this one.
     Queued,
     /// No run of it is going, or its leg ended without saving.
     Gone,
 }
 
-/// Poll until the producer's leg stops building. No cap: a leg on a runner
-/// ends by itself (its job's own timeout at the latest), and every minute it
-/// has run brings its save closer, so giving up part way would only add the
-/// wait to a cold build.
+/// Poll until the producer's leg stops building. The waiter has no cap of
+/// its own, which would only add a wait cut off part way to a cold build
+/// (#929): the deadline is the producer leg's, from when it started
+/// (`WAIT_DEADLINE`), so a leg past it is never waited for, however long
+/// this one has waited or not (#1102).
 fn poll(every: Duration, mut state: impl FnMut() -> Result<State>) -> Result<State> {
     loop {
         match state()? {
@@ -49,6 +64,9 @@ struct Producer<'a> {
     /// The leg's job name, as the workflow names it; a caller's reusable
     /// workflow puts its own job's name and " / " before it.
     job: &'a str,
+    /// How long after it started the producer's leg is still worth waiting
+    /// for.
+    deadline: SignedDuration,
 }
 impl Producer<'_> {
     fn runs_path(&self) -> String {
@@ -86,8 +104,8 @@ impl Producer<'_> {
             .filter_map(|r| r["id"].as_u64())
             .collect()
     }
-    /// The statuses of this leg's jobs in one page of a run's jobs.
-    fn legs<'v>(&self, jobs: &'v Value) -> impl Iterator<Item = &'v str> {
+    /// This leg's jobs in one page of a run's jobs.
+    fn legs<'v>(&self, jobs: &'v Value) -> impl Iterator<Item = &'v Value> {
         let nested = format!(" / {}", self.job);
         jobs["jobs"]
             .as_array()
@@ -98,7 +116,6 @@ impl Producer<'_> {
                     .as_str()
                     .is_some_and(|n| n == self.job || n.ends_with(&nested))
             })
-            .map(|j| j["status"].as_str().unwrap_or(""))
     }
     fn cached(&self, caches: &Value) -> bool {
         let reference = format!("refs/heads/{}", self.branch);
@@ -117,16 +134,32 @@ impl Producer<'_> {
             .flat_map(|p| self.running(p))
             .collect())
     }
-    /// One poll: one request a run while its leg builds, and the exact
-    /// cache only once it doesn't, which keeps an hours-long wait well
+    /// One poll at `now`: one request a run while its leg builds, and the
+    /// exact cache only once it doesn't, which keeps an hours-long wait well
     /// inside the token's hourly requests.
-    fn state(&self, api: &mut dyn Api, runs: &[u64]) -> Result<State> {
+    fn state(&self, api: &mut dyn Api, runs: &[u64], now: Timestamp) -> Result<State> {
         let mut statuses = Vec::new();
+        let (mut building, mut late) = (false, false);
         for &id in runs {
             let mut found = false;
             for page in pages(api, &self.jobs_path(id)).map_err(|e| e.to_string())? {
-                for status in self.legs(&page) {
+                for leg in self.legs(&page) {
                     found = true;
+                    let status = leg["status"].as_str().unwrap_or("");
+                    if status == "in_progress" {
+                        let started: Timestamp = leg["started_at"]
+                            .as_str()
+                            .unwrap_or("")
+                            .parse()
+                            .map_err(|e| {
+                            format!("its leg's start, {}: {e}", leg["started_at"])
+                        })?;
+                        if now.duration_since(started) < self.deadline {
+                            building = true;
+                        } else {
+                            late = true;
+                        }
+                    }
                     statuses.push(status.to_owned());
                 }
             }
@@ -136,7 +169,7 @@ impl Producer<'_> {
                 statuses.push("queued".to_owned());
             }
         }
-        if statuses.iter().any(|s| s == "in_progress") {
+        if building {
             return Ok(State::Building);
         }
         // Read the cache AFTER status, including on the first poll. A leg
@@ -148,6 +181,8 @@ impl Producer<'_> {
             .any(|p| self.cached(p));
         Ok(if saved {
             State::Saved
+        } else if late {
+            State::Late
         } else if statuses.iter().any(|s| s != "completed") {
             State::Queued
         } else {
@@ -175,6 +210,7 @@ fn wait() -> Result<()> {
         );
     }
     let key = format!("{}{tip}", var("KEPT_KEY"));
+    let deadline = SignedDuration::from_secs(var("WAIT_DEADLINE").parse().unwrap_or(DEADLINE));
     let producer = Producer {
         repo: &repo,
         workflow: &workflow,
@@ -182,6 +218,7 @@ fn wait() -> Result<()> {
         tip: &tip,
         key: &key,
         job: &job,
+        deadline,
     };
     // Each poll's requests, pages and retry pauses share one deadline: a
     // request still going past it fails the step, which says so.
@@ -197,15 +234,20 @@ fn wait() -> Result<()> {
         Duration::from_secs(var("WAIT_POLL").parse().unwrap_or(60)),
         || {
             api.until = Some(Instant::now() + request);
-            producer.state(&mut api, &runs)
+            producer.state(&mut api, &runs, Timestamp::now())
         },
     )?;
+    let late = format!(
+        "its leg has run past its deadline ({}s from its start) without saving, so it has stopped making progress: building cold",
+        deadline.as_secs()
+    );
     println!(
         "{state:?} after {}s: {}",
         started.elapsed().as_secs(),
         match state {
             State::Saved => "restoring its kept builds",
             State::Queued => "its leg has no runner yet, and may want this one, so building cold",
+            State::Late => &late,
             State::Gone =>
                 "no run of it is going, or its leg ended without saving, so building cold",
             State::Building => unreachable!("poll returns once it stops building"),

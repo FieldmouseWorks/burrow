@@ -2,9 +2,7 @@
 //! crate, which asks again when GitHub doesn't answer (a 502, a reset). A
 //! program with its own `gh api` treats a blip as GitHub's no, and in CI
 //! that paints a PR red for nothing (#477). gh-token is gh itself, as the
-//! machine runs it, so it's the one other place `gh api` is named. The
-//! guard names it too, to recognise the command in the one it judges; it
-//! never runs it.
+//! machine runs it, so it's the one other place `gh api` is named.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -37,9 +35,7 @@ fn strays(crates: &Path) -> BTreeSet<String> {
     for e in fs::read_dir(crates).unwrap() {
         let dir = e.unwrap().path();
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        if !dir.join("src").is_dir()
-            || matches!(name.as_str(), "burrow-github" | "burrow-guard" | "gh-token")
-        {
+        if !dir.join("src").is_dir() || matches!(name.as_str(), "burrow-github" | "gh-token") {
             continue;
         }
         let mut text = String::new();
@@ -83,6 +79,5 @@ fn finds_a_stray() {
     mk("tested/src/tests/a.rs", "\"api\"");
     mk("burrow-github/src/lib.rs", "\"api\"");
     mk("gh-token/src/command.rs", "\"api\"");
-    mk("burrow-guard/src/codex.rs", "\"api\"");
     assert_eq!(strays(root.path()), BTreeSet::from(["stray".to_string()]));
 }

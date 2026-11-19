@@ -38,9 +38,17 @@ impl Outcome {
 /// What a run did, said and kept: when, how it ended, what happened, the
 /// system that runs, and its open PR's number when a commit newer than this
 /// run's waits on that landing (`behind`, which burrow-dispatch gives
-/// longer; never on a failure, which is the run's own to fix). Kept whole
-/// or not at all.
-pub fn note(cfg: &Config, outcome: Outcome, message: &str, behind: Option<u64>) {
+/// longer; never on a failure, which is the run's own to fix). Held because
+/// the box runs changes that aren't on main, `off_main` is when the owner
+/// hears of it (run.rs's HELD_FOR): until then nothing waits on HOST-update,
+/// whose commits burrow-dispatch gives till then. Kept whole or not at all.
+pub fn note(
+    cfg: &Config,
+    outcome: Outcome,
+    message: &str,
+    behind: Option<u64>,
+    off_main: Option<i64>,
+) {
     println!("{message}");
     let mut status = json!({
         "time": now(),
@@ -50,6 +58,9 @@ pub fn note(cfg: &Config, outcome: Outcome, message: &str, behind: Option<u64>) 
     });
     if let Some(pr) = behind.filter(|_| outcome != Outcome::Failed) {
         status["behind"] = pr.into();
+    }
+    if let Some(at) = off_main.filter(|_| outcome == Outcome::Held) {
+        status["offMain"] = at.into();
     }
     let path = cfg.state.join("status.json");
     let new = cfg.state.join("status.json.new");

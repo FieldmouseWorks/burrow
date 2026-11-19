@@ -1,9 +1,8 @@
 # usage-reset: the Claude plan's banked weekly reset gets used, once, when the
 # week's usage is nearly gone, rather than every Claude on the machine
 # stopping at the limit with a reset sitting unused (crates/burrow-usage-reset).
-# Each pass also keeps the engines' meters (Claude's session and week, and,
-# with proj's Codex, Codex's windows and credits) for proj's role overflow,
-# and books the next no more than 15 minutes on so they stay fresh.
+# Each pass also keeps Claude's meter (its session and week) for proj's usage
+# hold, and books the next no more than 15 minutes on so it stays fresh.
 # Each pass reads the weekly meter through Claude Code itself, as burrow.user,
 # whose login is the owner's plan; past the line it types /limit-reset weekly
 # into a Claude Code of its own and confirms it, once a week at most, and
@@ -19,9 +18,6 @@ let
   name = "burrow-usage-reset";
   dir = "${config.burrow.stateDir}/usage-reset";
   meters = "${dir}/meters";
-  # Codex's meter is the job user's plan, whose login is proj's (codex-login).
-  proj = config.burrow.proj.enable or false;
-  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-usage-reset;
 
   configFile = pkgs.writeText "${name}.json" (builtins.toJSON {
@@ -30,7 +26,6 @@ let
     inherit (cfg) below;
     inherit meters;
     stateDir = dir;
-    codex = if proj then "${agents}/bin/codex" else null;
     notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
   });
 in
@@ -104,10 +99,9 @@ in
       /limit-reset (once a week at most) and tells ${config.burrow.owner} with a notice.
       It drives its own Claude Code in `tmux -L ${name}`; leave that one
       alone. Don't run /limit-reset yourself unless ${config.burrow.owner} asks.
-      ${dir}/state.json says what it last saw. Each engine's fresh reading
-      (Claude's session and week; Codex's windows and whether it has credits)
-      goes to ${meters}/ENGINE.json and appends to ${meters}/log; proj uses them for
-      role overflow.
+      ${dir}/state.json says what it last saw. Claude's fresh reading (its
+      session and week) goes to ${meters}/claude.json and appends to
+      ${meters}/log; proj reads it for its usage hold.
     '';
   };
 }

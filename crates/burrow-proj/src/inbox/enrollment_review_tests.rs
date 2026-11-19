@@ -42,7 +42,7 @@ fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
                     assert!(ask::expire(&b.cfg, &old).is_err());
                 }
                 _ => {
-                    crate::policy::mark(&old, "queued", false).unwrap();
+                    crate::policy::mark(&old, "queued", false, None).unwrap();
                     crate::policy::reconcile(&b.cfg).unwrap();
                 }
             }
@@ -62,7 +62,7 @@ fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
             assert!(exclusion.exists());
             assert!(!b.path("launched").exists());
             assert!(pass.wake.contains_key("sam/box"));
-            on_github(&b, &listed(7, &["ready", "codex"]));
+            on_github(&b, &listed(7, &["ready", "claude"]));
             fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();
             pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
                 .unwrap();
@@ -231,7 +231,7 @@ esac
         assert!(old.turn("1", "stopped").exists());
         assert!(!old.path("await").exists());
         assert!(pass.wake.contains_key("sam/box"));
-        let restored = listed(7, &["ready", "codex"]);
+        let restored = listed(7, &["ready", "claude"]);
         // Subsequent stops no longer change the restored live labels.
         fs::write(b.path("parked-issue"), restored.to_string()).unwrap();
         on_github(&b, &restored);
@@ -263,7 +263,7 @@ fn retiring_a_worker_preserves_parking_against_both_automatic_admissions() {
             "sorting must not restart parked work"
         );
         assert!(
-            !b.log().contains("labels[]=codex"),
+            !b.log().contains("labels[]=claude"),
             "drain must not restore the engine label"
         );
         assert!(b.pass().drain_records().is_empty());
@@ -276,7 +276,7 @@ fn retiring_a_worker_preserves_parking_against_both_automatic_admissions() {
         assert!(b.log().contains("POST repos/sam/box/issues/8/labels"));
 
         // Explicit enrollment permits a fresh worker for the parked issue.
-        let restored = listed(7, &["ready", "codex"]);
+        let restored = listed(7, &["ready", "claude"]);
         on_github(&b, &restored);
         b.pass().new_issues("sam/box", &[restored]).unwrap();
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
@@ -312,7 +312,7 @@ fn a_refused_pending_enrollment_releases_drain_capacity_immediately() {
     let dir = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-8");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("drained"), "sam/box#8").unwrap();
-    let parked = listed(8, &["ready", "later", "codex"]);
+    let parked = listed(8, &["ready", "later", "claude"]);
     on_github(&b, &parked);
     b.pass().note_ready("sam/box", &[parked]).unwrap();
     b.pass().drain().unwrap();
@@ -499,7 +499,7 @@ fn repository_release_survives_label_errors_without_other_wakes() {
             let job = Job::new(&b.cfg, "j1");
             fs::remove_file(job.path("await")).unwrap();
             ask::clear(&job);
-            crate::policy::mark(&job, state, false).unwrap();
+            crate::policy::mark(&job, state, false, None).unwrap();
             fs::write(b.path("repos_sam_box_issues_7"), "{}").unwrap();
             if unavailable {
                 fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();

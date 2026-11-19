@@ -4,9 +4,9 @@ GitHub, and a Claude job merges the base in at once, one a head on its base,
 before any review or CI. Ordinary and judged PRs alike; a dependency bot's
 own update is the bot's to rebase, and one renovate-sweep has is its job's."""
 
-from harness import CI_GREEN, COMMITS, JOBS, ROLES, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
+from harness import CI_GREEN, COMMITS, JOBS, ROLES, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, \
     run, said, stand_in, swept
-from touches import DEPENDABOT_EMAIL
+DEPENDABOT_EMAIL = S.CFG["dependabotEmail"]
 
 import waits
 
@@ -130,7 +130,7 @@ STATES.clear()
 # Before any review or CI too: neither can settle it while it conflicts.
 fresh_pr_state()
 status, _ = run(conflicting(mkpr(checks=[])), 700)
-assert len(JOBS) == 1 and queued() == [] and "Conflicts with main" in status, (JOBS, queued(), status)
+assert len(JOBS) == 1 and "Conflicts with main" in status, (JOBS, status)
 # A bot's own update is the bot's to rebase.
 fresh_pr_state()
 status, _ = run(conflicting(clean(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5")), 700)

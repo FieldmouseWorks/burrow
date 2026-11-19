@@ -183,7 +183,7 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
 /// change its lock file: the pass it attests is the tree's, so the inputs
 /// it evaluates are the ones the tree locks (eval-apart's snapshot refuses
 /// a lock that needs changing already).
-fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
+pub(crate) fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut v = args.to_vec();
     if var("TREE_SOURCE") == "true" {
         v.insert(args.len().min(2), "--no-update-lock-file");
@@ -261,6 +261,13 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
                 &locked(&["flake", "check", "-L", "--keep-going"]),
             ))?
         } else {
+            // What the store has of the checks nix flake check is about to
+            // build, as a build by derivation says it (builds.rs).
+            if super::builds::writes()
+                && let Ok(checks) = attributes("")
+            {
+                build::shadow_attributes(&checks);
+            }
             build::slot(&locked(&["flake", "check", "-L", "--keep-going"]))?
         };
         return Ok(ok && !failed);
@@ -274,6 +281,15 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
         }
         return Ok(!failed);
     }
+    let checks = attributes(skip)?;
+    build::shadow_attributes(&checks);
+    let mut args = vec!["build", "-L", "--no-link", "--keep-going"];
+    args.extend(checks.iter().map(String::as_str));
+    Ok(build::slot(&locked(&args))? && !failed)
+}
+/// The flake's checks for this system, as attributes, but those `skip`
+/// names, each said as it's left out.
+fn attributes(skip: &str) -> Result<Vec<String>> {
     let system = string(cmd(
         "nix",
         &[
@@ -294,21 +310,15 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
             "cs: toString (builtins.attrNames cs)",
         ]),
     ))?;
-    let mut args = vec![
-        "build".to_owned(),
-        "-L".into(),
-        "--no-link".into(),
-        "--keep-going".into(),
-    ];
+    let mut checks = Vec::new();
     for c in names.split_whitespace() {
         if skip.split_whitespace().any(|s| s == c) {
             println!("not building {c}");
         } else {
-            args.push(format!(".#checks.{system}.{c}"));
+            checks.push(format!(".#checks.{system}.{c}"));
         }
     }
-    let refs: Vec<_> = args.iter().map(String::as_str).collect();
-    Ok(build::slot(&locked(&refs))? && !failed)
+    Ok(checks)
 }
 pub fn gate() -> Result<bool> {
     check(Mode::Build)

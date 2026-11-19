@@ -2,9 +2,18 @@
 
 use std::fmt;
 
-/// One undo, as `cn undo` takes it.
+/// One undo, as `cn undo` takes it: what it reverts, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request {
+pub struct Request {
+    pub undo: Undo,
+    /// cn's `--reason`: nonblank, as the issue's author wrote it. The undo
+    /// keeps it, and its PR opens with it.
+    pub reason: String,
+}
+
+/// What an undo reverts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undo {
     /// The change a PR is: OWNER/REPO#N.
     Change { repo: String, pr: u64 },
     /// Everything an agent session landed.
@@ -14,16 +23,59 @@ pub enum Request {
 }
 
 /// What a request takes, for a line that isn't one.
-pub const WORDS: &str = "ask for one undo: `undo OWNER/REPO#N`, `undo --actor https://claude.ai/code/session_ID` or `undo --since 2026-11-04T18:00:00Z --repo OWNER/REPO`";
+pub const WORDS: &str = "ask for one undo, and say why after `--reason`: `undo OWNER/REPO#N --reason WHY`, `undo --actor https://claude.ai/code/session_ID --reason WHY` or `undo --since 2026-11-04T18:00:00Z --repo OWNER/REPO --reason WHY`. The reason is kept for good: no secrets, personal data or prompt text";
 
 const SESSION: &str = "https://claude.ai/code/session_";
 
+/// The word a request's reason follows, as cn takes it.
+const REASON: &str = "--reason";
+
 impl Request {
-    /// The request a line makes. Which repos it may reach is the ledger's
-    /// to say: cn refuses a change, or a repo, the ledger keeps nothing of,
-    /// and a session's undo reaches only the repos the ledger has it
-    /// landing in.
+    /// The request a line makes: the undo, then `--reason` and the rest of
+    /// the line, which must say something. Which repos it may reach is the
+    /// ledger's to say: cn refuses a change, or a repo, the ledger keeps
+    /// nothing of, and a session's undo reaches only the repos the ledger
+    /// has it landing in.
     pub fn parse(line: &str) -> Result<Self, String> {
+        let (undo, reason) = reason_of(line).map_or((line, None), |(u, r)| (u, Some(r)));
+        let undo = Undo::parse(undo)?;
+        let reason = reason
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| format!("`{}` doesn't say why: {WORDS}", echo(line)))?;
+        Ok(Self {
+            undo,
+            reason: reason.to_owned(),
+        })
+    }
+
+    /// Its arguments to `cn`. The reason goes as `--reason=WHY`, so it's
+    /// one argument whatever it opens with.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = self.undo.args();
+        args.push(format!("{REASON}={}", self.reason));
+        args
+    }
+}
+
+/// The line's undo, and its reason: the rest of the line after its first
+/// `--reason` word (or `--reason=`), trimmed, as written: no shell reads
+/// it, so quotes are its own. None when there's no such word.
+fn reason_of(line: &str) -> Option<(&str, &str)> {
+    let at = line.match_indices(REASON).map(|(i, _)| i).find(|&i| {
+        let after = line[i + REASON.len()..].chars().next();
+        line[..i]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
+            && after.is_none_or(|c| c == '=' || c.is_whitespace())
+    })?;
+    let rest = &line[at + REASON.len()..];
+    Some((&line[..at], rest.strip_prefix('=').unwrap_or(rest).trim()))
+}
+
+impl Undo {
+    /// The undo the words before `--reason` ask for.
+    fn parse(line: &str) -> Result<Self, String> {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
             ["undo", what] if !what.starts_with('-') => {
@@ -61,7 +113,7 @@ impl Request {
         }
     }
 
-    /// Its arguments to `cn`.
+    /// Its arguments to `cn`, but the reason.
     pub fn args(&self) -> Vec<String> {
         match self {
             Self::Change { repo, pr } => vec!["undo".into(), format!("{repo}#{pr}")],
@@ -77,9 +129,15 @@ impl Request {
     }
 }
 
+/// What a comment shows of a request: its reason clipped, in no backticks.
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.args().join(" "))
+        write!(
+            f,
+            "{} {REASON}={}",
+            self.undo.args().join(" "),
+            echo(&self.reason)
+        )
     }
 }
 

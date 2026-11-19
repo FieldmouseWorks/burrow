@@ -347,23 +347,22 @@ except C.Unavailable:
 RERUN_FAILS.clear()
 one_pass(clean(checks=two), 760)
 assert RERUNS == ["a", "b"], RERUNS
-# A refusal for want of Actions write isn't a rerun: it says so, and is tried
-# again once repaired. Any other (a run GitHub still thinks is going) is tried
-# again too and says nothing of permission.
+# A refused rerun isn't a rerun: the status quotes what GitHub said, never a
+# guess at why, and it's tried again on the next pass, whatever the refusal.
 start()
-RERUN_FAILS["s1"] = RuntimeError("gh run rerun: HTTP 403: Resource not accessible by integration")
+RERUN_FAILS["s1"] = RuntimeError("HTTP 403: Resource not accessible by integration")
 status, _ = one_pass(clean(checks=hung(51)), 700)
-assert RERUNS == [] and "Actions write" in status and not JOBS, (RERUNS, status, JOBS)
-RERUN_FAILS["s1"] = RuntimeError("gh run rerun: HTTP 403: Resource not accessible by integration")
+assert RERUNS == [] and "not run again: HTTP 403" in status and not JOBS, (RERUNS, status, JOBS)
+RERUN_FAILS["s1"] = RuntimeError("HTTP 403: Resource not accessible by integration")
 status, _ = one_pass(clean(checks=hung(51)), 730)
-assert RERUNS == [] and "Actions write" in status, (RERUNS, status)
+assert RERUNS == [] and "not run again: HTTP 403" in status, (RERUNS, status)
 RERUN_FAILS.clear()
 status, _ = one_pass(clean(checks=hung(51)), 760)
-assert RERUNS == ["s1"] and "Actions write" not in status, (RERUNS, status)
+assert RERUNS == ["s1"] and "not run again" not in status, (RERUNS, status)
 start()
-RERUN_FAILS["s1"] = RuntimeError("gh run rerun: HTTP 409: workflow run is still running")
+RERUN_FAILS["s1"] = RuntimeError("HTTP 409: workflow run is still running")
 status, _ = one_pass(clean(checks=hung(51)), 700)
-assert RERUNS == [] and "Actions write" not in status and "waiting for CI" in status, (RERUNS, status)
+assert RERUNS == [] and "not run again: HTTP 409" in status and "waiting for CI" in status, (RERUNS, status)
 RERUN_FAILS.clear()
 one_pass(clean(checks=hung(51)), 760)
 assert RERUNS == ["s1"], RERUNS

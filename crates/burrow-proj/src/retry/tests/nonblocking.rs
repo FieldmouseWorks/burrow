@@ -108,11 +108,10 @@ fn nonblocking_retries_waiting_before_the_deploy_keep_their_places_and_the_reset
 }
 
 #[test]
-fn nonblocking_emergency_and_codex_turns_keep_their_own_pools() {
+fn a_nonblocking_emergency_turn_keeps_its_own_pool() {
     let mut r = rig();
     spent(&r);
     for (id, mode) in [
-        ("c0", "nb-codex"),
         ("emergency", "nb-unstick"),
         ("w0", "nb"),
         ("w1", "nb"),
@@ -120,15 +119,15 @@ fn nonblocking_emergency_and_codex_turns_keep_their_own_pools() {
     ] {
         start(&mut r, id, mode, "/ordinary");
     }
-    until(|| r.cfg.jobs.join("c0/took").exists());
     until(|| queued(&r).len() == 3);
     let _barrier = barrier(&r);
     usage::back(&r.cfg, None);
     transfer(&r);
-    until(|| took(&r.cfg) == 4);
+    until(|| took(&r.cfg) == 3);
     sleep(Duration::from_secs(3));
-    assert_eq!(took(&r.cfg), 4, "two ordinary, one Codex, one emergency");
-    for id in ["c0", "emergency"] {
+    assert_eq!(took(&r.cfg), 3, "two ordinary, one emergency");
+    {
+        let id = "emergency";
         assert!(r.cfg.jobs.join(id).join("took").exists());
         assert!(
             !Job::new(&r.cfg, id).turn("1", "retry-migration").exists(),

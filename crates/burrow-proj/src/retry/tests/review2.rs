@@ -36,8 +36,8 @@ fn sandbox_files_cannot_authorize_recovery_or_change_retained_identity() {
     let job = Job::new(&r.cfg, "pinned");
     // The trusted starter used the configured Claude engine. A guest cannot
     // substitute another execution identity or App during a retained resume.
-    fs::write(job.path("engine"), "codex").unwrap();
-    fs::write(job.turn("1", "engine"), "codex").unwrap();
+    fs::write(job.path("engine"), "other").unwrap();
+    fs::write(job.turn("1", "engine"), "other").unwrap();
     assert_eq!(
         engine::choice(&r.cfg, &job).unwrap().engine,
         engine::Engine::Claude

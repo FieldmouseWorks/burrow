@@ -5,13 +5,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
 use crate::config::{
-    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Snapshot, Stage, Webhook,
+    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Stage, Webhook,
 };
 use crate::pass::{Jobs, Lifecycle, Out, Pass};
 
@@ -86,15 +85,6 @@ pub fn config(dir: &Path) -> Config {
             train: "conary/*".into(),
         }),
         git: dir.join("origin").display().to_string(),
-        snapshot: Snapshot {
-            dir: dir.join("trees"),
-            skip_paths: vec![
-                "(^|/)secrets?/".into(),
-                r"\.(pem|key)$".into(),
-                r"(^|/)\.env$".into(),
-            ],
-            repos: Default::default(),
-        },
     }
 }
 
@@ -123,6 +113,8 @@ pub struct Answer {
     pub why: String,
     /// The next page's path, for the Link header.
     pub next: Option<String>,
+    /// Any other headers it answers with (Retry-After, say).
+    pub headers: Vec<(String, String)>,
 }
 
 pub fn answer(status: u16, body: Value) -> Answer {
@@ -132,6 +124,15 @@ pub fn answer(status: u16, body: Value) -> Answer {
         etag: None,
         why: String::new(),
         next: None,
+        headers: vec![],
+    }
+}
+
+impl Answer {
+    /// The same answer, with this header too.
+    pub fn with(mut self, name: &str, value: &str) -> Answer {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 }
 
@@ -186,7 +187,9 @@ impl Api for Hub {
                     transient: false,
                 });
             }
-            return Ok(response(a.status, &a.body, None));
+            let mut r = response(a.status, &a.body, None);
+            r.headers.extend(a.headers.iter().cloned());
+            return Ok(r);
         }
         let Some((_, _, a)) = self.answers.iter().find(|(m, p, _)| {
             m == method
@@ -206,6 +209,7 @@ impl Api for Hub {
             return Ok(response(304, &Value::Null, a.etag.as_deref()));
         }
         let mut r = response(a.status, &a.body, a.etag.as_deref());
+        r.headers.extend(a.headers.iter().cloned());
         if let Some(next) = &a.next {
             let link = format!("<https://api.github.com/{next}>; rel=\"next\"");
             r.headers.push(("Link".into(), link));
@@ -339,36 +343,4 @@ pub fn start(cfg: &Config, at: f64, part: &str, jid: &str) {
         _ => crate::flaky::found(p),
     });
     r.unwrap();
-}
-
-/// git as the tests run it, in `dir`: what it printed. Fails the test if it
-/// fails.
-pub fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-/// `text` at `path` in `work`, its directories made.
-pub fn put(work: &Path, path: impl AsRef<Path>, text: &str) {
-    let at = work.join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, text).unwrap();
 }
