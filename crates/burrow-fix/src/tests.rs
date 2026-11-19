@@ -2,8 +2,8 @@
 //! the plugin and the kit's socket, as the flow reaches it.
 use super::*;
 use crate::broker::{Broker, GitHub, key};
-use crate::jobs::{Jobs, Record, Turn};
 use burrow_github::{Api, Failed, Response as GhResponse};
+use burrow_producer::jobs::{Jobs, Record, Turn};
 use burrow_producer::serve::{Controller, Server};
 use conary_core::plugin::{Request, fixtures};
 use serde_json::{Value, json};
@@ -541,19 +541,6 @@ fn a_fix_the_fixing_role_wouldnt_run_as_asked_starts_nothing() {
         (fine.clone(), choice("a-model", "low"), "the flow chose"),
         // The role names no model, so what ran couldn't be said.
         (json!({}), fix(HEAD), "names no model"),
-        // In this repo it runs on another engine, or moves to one.
-        (
-            json!({"roles": {"fix@sam/box": {"engine": "codex", "over": null}},
-                "models": {"fix claude": {"model": "a-model"}}}),
-            fix(HEAD),
-            "another engine",
-        ),
-        (
-            json!({"roles": {"fix": {"engine": "claude", "over": {"pct": 90.0, "engine": "codex"}}},
-                "models": {"fix claude": {"model": "a-model"}}}),
-            fix(HEAD),
-            "another engine",
-        ),
     ] {
         let mut r = rig();
         r.cfg.settings = route(r.dir.path(), routing);

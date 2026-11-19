@@ -563,6 +563,7 @@ pub mod tests {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
                 "logs": dir.join("logs"), "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
+                "held": {"sam/pin": "dddddddddddd"},
                 "after": 1800.0, "run": 5400.0, "ride": 18000.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
@@ -854,6 +855,13 @@ pub mod tests {
             (3, 1_793_289_660.0, "c3", "aaa")
         );
         assert_eq!(snap.deploys["sam/kit"].count, 0);
+        // One the flake holds at a commit isn't compared: nothing's read of
+        // it (the fake has nothing of sam/pin's to give), so nothing waits.
+        assert_eq!(
+            snap.deploys.keys().collect::<Vec<_>>(),
+            ["sam/box", "sam/kit"]
+        );
+        assert!(!snap.unread.contains_key("sam/pin"), "{:?}", snap.unread);
         assert_eq!(
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"

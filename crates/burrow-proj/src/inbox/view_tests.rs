@@ -11,7 +11,7 @@ use crate::now;
 use crate::snapshot::{SlotKind, SlotState, Snapshot};
 
 /// Job `id`, about sam/game#N, its one turn ended on `proj await` of
-/// sam/game#AWAITED `ago` seconds back, on Codex's `small` at `high`; and the
+/// sam/game#AWAITED `ago` seconds back, on Claude's `small` at `high`; and the
 /// drain's record of having handed it on.
 fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
     let d = b.cfg.jobs.join(id);
@@ -23,7 +23,7 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
         ("project", "/src/game".to_owned()),
         ("link", format!("https://github.com/sam/game/issues/{n}")),
         ("role", "inbox".to_owned()),
-        ("1.engine", "codex".to_owned()),
+        ("1.engine", "claude".to_owned()),
         ("1.model", "small".to_owned()),
         ("1.effort", "high".to_owned()),
         ("1.outcome", "done".to_owned()),
@@ -63,7 +63,7 @@ fn the_11_11_stall() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Codex);
+    t.drain = Some(Engine::Claude);
     t.drain_jobs = 3;
     for (i, n) in [11u64, 12, 13].into_iter().enumerate() {
         parked(&b, &format!("job-{n}"), n, 100 + n, 600 * (i as i64 + 1));
@@ -103,7 +103,7 @@ fn the_11_11_stall() {
     );
     assert_eq!(
         snap.holds.triage.as_ref().map(|t| (t.drain, t.drain_jobs)),
-        Some((Some(Engine::Codex), 3))
+        Some((Some(Engine::Claude), 3))
     );
 
     // `proj status` is the snapshot's, line for line: each job as the
@@ -167,7 +167,7 @@ fn a_parked_sorting_job_holds_its_slot() {
     assert_eq!(h.awaits, ["sam/game#121"]);
     assert_eq!(
         (h.engine, h.model.as_deref(), h.effort.as_deref()),
-        (Some(Engine::Codex), Some("small"), Some("high"))
+        (Some(Engine::Claude), Some("small"), Some("high"))
     );
     let age = s.age.unwrap();
     assert!((900..905).contains(&age), "{age}s, not 900s");
@@ -180,7 +180,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Codex);
+    t.drain = Some(Engine::Claude);
     t.drain_jobs = 2;
     fs::write(b.path("active"), "").unwrap();
     for count in 0..=3 {

@@ -15,11 +15,17 @@
 //! - [`sign`]: the producer's key, from its systemd credential only, and
 //!   the results it signs, each from its record as it's published. Nothing
 //!   signs a statement a caller hands it.
+//! - [`credential`]: a producer's secrets, from its systemd credentials
+//!   only.
+//! - [`jobs`]: work a producer runs as a proj job, on a role from the role
+//!   map, stopped with its request.
 //! - [`publish`]: a record's check run, completed once: with its signed
 //!   result, or as `cancelled` when its work is abandoned before it's
 //!   committed; and startup reconciliation, which does the same for what a
 //!   crash left.
 
+pub mod credential;
+pub mod jobs;
 pub mod plugin;
 pub mod publish;
 pub mod records;

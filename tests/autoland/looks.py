@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S.T, 'begin', lambda repo: None), (S.T, 'on', lambda *a: False),
                 (S.step, 'handle', handle),
                 (S, 'branches', lambda *a, **k: None),
-                (S, 'upkeep', lambda *a: None), (S.V, 'sweep', lambda *a: None),
+                (S, 'upkeep', lambda *a: None),
                 (C, 'follow_renames', lambda names: None), (C, 'taken', lambda *a: None),
                 (C, 'poke', lambda *a: None),
             ):

@@ -76,10 +76,9 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
         issue["created_at"] = json!("2026-11-01T00:00:00Z");
         issue
     };
-    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    assert_eq!(b.pass().pick_ready(t, &[ready(9)]), None);
+    assert_eq!(b.pass().pick_ready(&[ready(9)]), None);
     assert_eq!(
-        b.pass().pick_ready(t, &[ready(8)]),
+        b.pass().pick_ready(&[ready(8)]),
         Some(("sam/box".into(), "8".into()))
     );
     // Closing an issue alone does not release another implementation.
@@ -92,7 +91,7 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(b.pass().child_admissible("sam/box", "9"));
     assert_eq!(
-        b.pass().pick_ready(t, &[ready(9)]),
+        b.pass().pick_ready(&[ready(9)]),
         Some(("sam/box".into(), "9".into()))
     );
     assert!(b.pass().child_can_close("sam/box", "8", None).closes());
@@ -225,7 +224,7 @@ fn a_worker_split_posts_its_answer_before_retiring_and_can_retry_a_partial_plan(
     assert!(!b.log().contains("-X POST repos/sam/box/issues "));
 }
 #[test]
-fn a_human_claude_issue_is_sized_on_a_fresh_codex_job_before_implementation() {
+fn a_human_claude_issue_is_sized_on_a_fresh_planner_job_before_implementation() {
     let mut b = Box::new();
     b.cfg.inbox.as_mut().unwrap().planning = true;
     b.cfg.projects = b.path("projects");
@@ -258,8 +257,8 @@ fn a_human_claude_issue_is_sized_on_a_fresh_codex_job_before_implementation() {
     let id = read(&record.join("job")).expect("a size-planning job");
     let job = crate::job::Job::new(&b.cfg, &id);
     assert_eq!(
-        crate::engine::choice(&b.cfg, &job).unwrap().engine,
-        crate::engine::Engine::Codex
+        crate::job::Request::load(&job).unwrap().role.as_deref(),
+        Some("planner")
     );
     assert!(
         !b.cfg
@@ -686,7 +685,7 @@ fn unavailable_planning_reads_retry_without_false_stale_notices() {
 
 #[test]
 fn unstick_preflight_bypasses_ordinary_triage_admission() {
-    for engine in ["claude", "codex"] {
+    for engine in ["claude"] {
         let mut b = Box::new();
         let dir = b.path("settings");
         crate::config::tests::set(
@@ -872,7 +871,7 @@ fn the_snapshot_queue_asks_github_nothing() {
     assert_eq!(b.log(), before, "the snapshot asked GitHub");
     // The drain's pass checks the parent on GitHub before it hands one on.
     assert_eq!(
-        b.pass().pick_ready(&t, &[ready(8)]),
+        b.pass().pick_ready(&[ready(8)]),
         Some(("sam/box".into(), "8".into()))
     );
     assert!(

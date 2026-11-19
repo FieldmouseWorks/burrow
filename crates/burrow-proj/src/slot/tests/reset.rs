@@ -250,34 +250,24 @@ fn cohort_uses_precise_birth_times_and_survives_renames() {
 }
 
 #[test]
-fn independent_pools_start_while_claude_census_is_blocked() {
-    for codex in [false, true] {
-        let tmp = TempDir::new().unwrap();
-        let jobs = jobs_dir(&tmp);
-        let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
-        census.lock().unwrap();
-        let cfg = config(&jobs, 1);
-        let _usage = crate::usage::lock(&cfg).unwrap();
-        fs::create_dir_all(jobs.join("escape")).unwrap();
-        if !codex {
-            fs::write(jobs.join("escape/unstick"), "").unwrap();
-        }
-        let _kid = waiter_to(
-            if codex { "codex" } else { "take" },
-            &jobs,
-            &tmp,
-            "escape",
-            1,
-        );
-        until("independent turn starts", || {
-            took(&jobs, "escape").is_some()
-        });
-        assert_eq!(in_queue(&jobs), 0);
-        assert_eq!(
-            fs::read_to_string(jobs.join("escape/1.slot")).unwrap(),
-            if codex { "codex-1\n" } else { "unstick\n" }
-        );
-    }
+fn the_unstick_slot_starts_while_the_census_is_blocked() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
+    census.lock().unwrap();
+    let cfg = config(&jobs, 1);
+    let _usage = crate::usage::lock(&cfg).unwrap();
+    fs::create_dir_all(jobs.join("escape")).unwrap();
+    fs::write(jobs.join("escape/unstick"), "").unwrap();
+    let _kid = waiter_to("take", &jobs, &tmp, "escape", 1);
+    until("independent turn starts", || {
+        took(&jobs, "escape").is_some()
+    });
+    assert_eq!(in_queue(&jobs), 0);
+    assert_eq!(
+        fs::read_to_string(jobs.join("escape/1.slot")).unwrap(),
+        "unstick\n"
+    );
 }
 
 #[test]

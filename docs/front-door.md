@@ -192,9 +192,11 @@ probe's repo and from its authors unless set otherwise (`door.repo`,
 - **Ask:** one line, in `cn undo`'s words: `undo OWNER/REPO#N` (the change
   that PR is), `undo --actor SESSION_URL` (everything an agent session
   landed, one PR per repo) or `undo --since TIME --repo OWNER/REPO`
-  (everything that landed there after an RFC 3339 time). Which repos it
-  reaches is the ledger's to say: cn refuses a change or a repo it keeps
-  nothing of.
+  (everything that landed there after an RFC 3339 time), then `--reason`
+  and why, to the end of the line. Every undo needs its reason: the ledger
+  keeps it for good and the undo's PR opens with it, so it carries no
+  secrets, personal data or prompt text. Which repos it reaches is the
+  ledger's to say: cn refuses a change or a repo it keeps nothing of.
 - **Answer:** `cn undo` runs as the ledger's writers do, as the machine's
   App, and the comment links each undo's PR, with any change left out (its
   revert conflicts with the rest: ask again) or already gone from trunk.
@@ -218,9 +220,6 @@ into project jobs.
   `inbox.authors`. Put the whole brief in the body: the job knows only the
   issue. Within seconds it's a `proj run` job in that project, and the
   issue gets an "On it" comment naming the job.
-- **Engine:** `codex` for code work with a checkable bar: a gate or tests.
-  `claude` for judgment, anything the owner reads, and one-way calls. If an
-  issue has both, Codex takes it. VM jobs stay Claude-only.
 - **Answer:** when the job finishes a turn, its answer is posted to the issue.
 - **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the
   same job as its next turn (`proj reply`), with everything it already did in
@@ -253,17 +252,21 @@ into project jobs.
 
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
-  have the box user's permissions. Codex jobs write
-  only their project, scratch, job dir, git metadata and a /tmp of their own,
-  and see nothing else but the machine's system paths, with network access
-  (the App's token socket included) but no server of the user's own (the
-  runtime dir's D-Bus and systemd manager, tmux, any socket the user serves
-  outside those paths); sudo cannot elevate there.
-- Jobs are headless (`claude -p` or `codex exec --json`).
+  have the box user's permissions.
+- Jobs are headless (`claude -p`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.
 - On the box: `proj-inbox status` maps issues to jobs, `proj log ID` shows an
-  answer.
+  answer, and `proj why OWNER/REPO#N` (the probe's `why OWNER/REPO#N` off the
+  box) prints the issue's record: its stage (unseen and why, sorting, planned,
+  ready, working, answered, closed), what it waits on and what ends that, and
+  then its job's record when it has one. An issue the inbox never took up
+  says why: not opened by an author, no engine label, a label that keeps it
+  back, closed, its repo paused, or GitHub refusing to list its repo. GitHub
+  is asked about an issue once when no job holds it, so one closed reads
+  closed whatever the inbox kept of it; a ready one says what the drain's
+  admission does (its cap, a repair past it, its engine's room, the drain
+  off), and a child what its plan holds it on.
 
 ### Triage and the drain: issues nobody labelled
 
@@ -333,20 +336,8 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Which engine, model and effort runs each role (`ROLE` or
-`ROLE@OWNER/REPO`), and when a turn overflows to the other engine, are
+Which model and effort runs each role (`ROLE` or `ROLE@OWNER/REPO`) are
 live settings: see [settings](settings.md#engines-models-and-efforts-per-role).
-
-Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
-an independent login: `autoland-codex-login job` logs the job user in,
-`autoland-codex-login review` logs the reviewer in. Each is a device-code
-login; don't copy tokens between them. Codex jobs have their own small
-pool (`burrow.proj.codex.slots`), leaving the reviewer first
-claim on the plan. Usage refusals wait for the reset and resume themselves.
-The job user's `.codex/config.toml` picks the default model. Machine
-instructions and one-way command rules are generated alongside Claude's.
-Codex commits carry `Engine: codex` (a push of a commit without it is
-refused); after the usual review, a Claude job judges whether their PR lands, as it does one GitHub won't list every commit of. A steward judge always uses Claude.
 
 ### For the Claude in the chat (coordinator and threads)
 
@@ -401,7 +392,7 @@ pre-approved.
 ## What's running
 
 - Inbox and other proj jobs: `proj status` and `proj-inbox status` on the box;
-  open issues labelled `claude` or `codex` on GitHub.
+  open issues labelled `claude` on GitHub.
 - Remote Control: the chat's thread list; on the box, `tmux -L rc-NAME attach`
   shows a project's server and its sessions.
 
@@ -498,6 +489,6 @@ registration intent; stopped jobs stay stopped.
 
 Known holds are published before optional budget sampling. Observations
 wake the host watcher, which refreshes queued watchdog records for matching
-Claude, Codex and emergency work. Their stall deadline includes the reset
+Claude and emergency work. Their stall deadline includes the reset
 and ordinary queue grace after it, so a long API hold never looks like a
 stalled queue; unrelated installations keep their existing deadlines.

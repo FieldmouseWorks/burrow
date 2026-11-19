@@ -102,7 +102,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     let associated = dirs(&inbox.state, "")
         .iter()
         .any(|d| mine(d) && d.join("drained").exists())
-        || dirs(&inbox.state.join(".triage"), "")
+        || dirs(&super::record::files::sorting_root(&inbox.state), "")
             .iter()
             .any(|d| mine(d));
     if !associated || inbox.triage.is_none() || job.path("unstick").exists() {
@@ -152,12 +152,12 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     {
         return Ok(Resume::Waiting(Wait::Drain));
     }
-    let sorting = dirs(&inbox.state.join(".triage"), "");
+    let sorting = dirs(&super::record::files::sorting_root(&inbox.state), "");
     if sorting.iter().any(|d| mine(d))
         && !job.path("unstick").exists()
         && sorting
             .iter()
-            .filter(|d| !mine(d) && pass.sorting_slot(d))
+            .filter(|d| !mine(d) && pass.holds_sorting_slot(d))
             .count()
             >= t.at_once
     {

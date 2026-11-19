@@ -2,10 +2,9 @@
 //! (modules/autoland/touches.py): every commit on the head since it left its
 //! base, read whole from GitHub's compare of the two, a page at a time.
 //! GitHub's list of a PR's commits, and the compare unpaged, stop at 250;
-//! paged, the compare lists them all. From them: whether a Codex job wrote
-//! any (an `Engine: codex` trailer, which sends the PR to a Claude judge),
-//! and whether anyone but the bots it's given authored, co-authored or
-//! committed one (a dependency update someone edited).
+//! paged, the compare lists them all. From them: whether anyone but the
+//! bots it's given authored, co-authored or committed one (a dependency
+//! update someone edited).
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -18,10 +17,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::pass::Pass;
-
-/// The trailer burrow-proj's commit-msg hook marks a Codex job's commits
-/// with, compared case-blind with each trailer line whole.
-const MARK: &str = "engine: codex";
 
 /// A co-author line, and the address it names.
 static CO_AUTHOR: LazyLock<Regex> =
@@ -56,9 +51,8 @@ impl Ask {
 /// What the read says of the head.
 #[derive(Debug, PartialEq)]
 pub enum Read {
-    /// Every commit read: whether a Codex job wrote one, and whether
-    /// anyone but the bots made one.
-    Whole { codex: bool, edited: bool },
+    /// Every commit read: whether anyone but the bots made one.
+    Whole { edited: bool },
     /// GitHub lists fewer commits than its own count: with the head and
     /// the merge base fixed the range can't change, so that's its cap, and
     /// no later read says more. Why, for the PR's status.
@@ -136,23 +130,21 @@ fn whole<'a>(pages: &'a [Value], head: &str) -> Result<Whole<'a>, String> {
     Ok(Whole::Commits(commits))
 }
 
-/// Whether a Codex job wrote any of them, and whether anyone but the bots
-/// made one. A missing or empty address is no one's in particular, so
+/// Whether anyone but the bots made any of them. A missing or empty address is no one's in particular, so
 /// never a bot's.
 fn judge(commits: &[&Value], ask: &Ask) -> Result<Read, String> {
     let of = |list: &[String], e: Option<&str>| {
         e.is_some_and(|e| !e.is_empty() && list.iter().any(|b| b == e))
     };
-    let (mut codex, mut edited) = (false, false);
+    let mut edited = false;
     for c in commits {
         let c = &c["commit"];
         let lines = trailers(c["message"].as_str().unwrap_or_default())?;
-        codex |= lines.iter().any(|l| l.to_lowercase() == MARK);
         edited |= !of(&ask.bots, c["author"]["email"].as_str())
             || !of(&ask.committers, c["committer"]["email"].as_str())
             || co_authors(&lines).iter().any(|a| !of(&ask.bots, *a));
     }
-    Ok(Read::Whole { codex, edited })
+    Ok(Read::Whole { edited })
 }
 
 /// The addresses a commit's Co-authored-by trailers name, as GitHub reads
@@ -171,8 +163,7 @@ fn co_authors(trailers: &[String]) -> Vec<Option<&str>> {
 }
 
 /// A message's trailers, a line each, as `git interpret-trailers --parse`
-/// reads them with git's defaults alone, outside any repository, as
-/// burrow-proj's commit-msg hook reads the mark it writes.
+/// reads them with git's defaults alone, outside any repository.
 fn trailers(message: &str) -> Result<Vec<String>, String> {
     let mut child = Command::new("git")
         .args(["interpret-trailers", "--parse"])

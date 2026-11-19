@@ -11,8 +11,8 @@ burrow-github = { path = "../burrow-github" }
 burrow-producer = { path = "../burrow-producer" }
 # The plugin contract, the flow's recipes and settings are Conary's, pinned
 # with the kit's by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "53c6b35c3875b0d57993e896507235ff4a39bd07" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "53c6b35c3875b0d57993e896507235ff4a39bd07" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "292aa71ecde12e34c22761ab050abcfddb12bbf4" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "292aa71ecde12e34c22761ab050abcfddb12bbf4" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -176,6 +176,29 @@ pub fn live_at(cfg: &Config, main: &str, running: &str) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", live.display()))
 }
 
+/// Whether a run found `run` live as a main (live.json) that `main` has
+/// since moved past, or is: a PR someone put live by hand, found to be
+/// main's once it landed (same_as_running), stays on main when main moves on,
+/// though its stamp, the PR's own commit, is no ancestor of main once the PR
+/// lands squashed. A record that can't be read, of another system, or of a
+/// main the clone doesn't have behind `main`, is no.
+pub fn was_main(cfg: &Config, run: &Running, main: &str) -> bool {
+    let Ok(text) = fs::read(cfg.state.join("live.json")) else {
+        return false;
+    };
+    let Ok(live) = serde_json::from_slice::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let (Some(was), Some(running)) = (live["main"].as_str(), live["running"].as_str()) else {
+        return false;
+    };
+    running == run.current
+        && crate::is_commit(was)
+        && cfg
+            .git_hushed(&["merge-base", "--is-ancestor", was, main])
+            .is_ok()
+}
+
 /// nix as the user, its stderr to `log`.
 fn nix(cfg: &Config, log: File) -> Command {
     let mut c = cfg.run_as_user("nix");
