@@ -326,8 +326,13 @@ The rules the stages keep:
 
 ### Where it stands
 
-Stage 0 has landed (#937, #979). The wait it left gets a deadline in
-#1104, which is open, and goes at stage 1. Nothing else has landed.
+Stage 0 has landed (#937, #979), and the wait it left has its deadline
+(#1104); the wait goes at stage 1. Of stage 1, the store and its door have
+landed (#986), and so has its shadow (#988): with a repo's Actions
+variables naming the store, every leg on a hosted runner reports what the
+store would have served of what it builds cold, beside its kept builds'
+restore, and then uploads what it built; nothing substitutes from the store
+yet. The switch (#989) is made on what those reports show.
 
 ## What this doesn't do
 

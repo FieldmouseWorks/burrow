@@ -678,11 +678,14 @@ dependencies = [
 name = "burrow-keep"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
+ "burrow-builds",
  "burrow-github",
  "burrow-test",
  "serde_json",
  "sha2",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

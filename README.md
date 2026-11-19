@@ -453,6 +453,9 @@ Each has an entry below, and each can be imported on its own.
   manifest. The door asks Conary's `cn attest job` whether the job may sign,
   takes only a public repo in `repos`, writes each NAR only once its hash is
   the manifest's, and past `maxSize` drops what nginx served longest ago.
+  flake-check.yml writes it, in shadow for now, once a repo's or its
+  organization's Actions variables name it: `BURROW_BUILDS_URL`
+  (`https://HOST/PATH`) and `BURROW_BUILDS_PUBLIC_KEY` (`PATH/public-key`).
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no
