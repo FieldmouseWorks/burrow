@@ -504,10 +504,45 @@ fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
         .as_mut()
         .unwrap()
         .effort = None;
-    for (request, settings, answered) in [
-        (&unchosen, &model, ran("claude", "b-model", "high")),
-        (&unchosen, &effort, ran("claude", "a-model", "low")),
-        (&model_only, &effort, ran("claude", "a-model", "low")),
+    let chosen = judge_request(&w, vec![Trigger::Asked]);
+    // Each row: the request, the settings written while its job judges,
+    // what ran, why it's refused, and whether a job was asked first.
+    for (request, settings, answered, why, asked) in [
+        // A request whose choice names no model is refused before any work:
+        // the offer read when it came may already not be the one the flow
+        // negotiated.
+        (
+            &unchosen,
+            &model,
+            ran("claude", "b-model", "high"),
+            "chose no model",
+            false,
+        ),
+        (
+            &unchosen,
+            &effort,
+            ran("claude", "a-model", "low"),
+            "chose no model",
+            false,
+        ),
+        // So is one that names the model alone while the role runs at an
+        // effort: it would hold what ran to no effort.
+        (
+            &model_only,
+            &effort,
+            ran("claude", "a-model", "low"),
+            "the flow chose",
+            false,
+        ),
+        // One the role runs exactly is asked, and what ran at an effort the
+        // offer read when the request came didn't take is refused after.
+        (
+            &chosen,
+            &effort,
+            ran("claude", "a-model", "low"),
+            "plugin offers",
+            true,
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let w = world();
@@ -517,19 +552,12 @@ fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
         judges.0.lock().unwrap().during =
             Some(Box::new(move || std::fs::write(&roles, settings).unwrap()));
         let refused = ask(dir.path(), &p, request).unwrap_err();
-        // A request whose choice names no model is refused before any work:
-        // the offer read when it came may already not be the one the flow
-        // negotiated. One that names the model alone holds what ran to no
-        // effort.
-        assert!(
-            refused.contains("chose no model")
-                || refused.contains("the flow chose")
-                || refused.contains("plugin offers"),
-            "{answered:?}: {refused}"
+        assert!(refused.contains(why), "{answered:?}: {refused}");
+        assert_eq!(
+            !judges.0.lock().unwrap().asked.is_empty(),
+            asked,
+            "{answered:?}"
         );
-        if request.execution.as_ref().unwrap().choice.is_none() {
-            assert!(judges.0.lock().unwrap().asked.is_empty());
-        }
         assert!(w.posted().is_empty(), "{answered:?}");
         assert!(w.with(|p| p.runs.is_empty()), "{answered:?}");
     }
