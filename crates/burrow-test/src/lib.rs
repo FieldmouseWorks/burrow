@@ -136,6 +136,12 @@ fn tree(root: i32) -> Vec<i32> {
     found
 }
 
+/// A process's state, from the kernel: none once it's gone.
+fn state(pid: i32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
 /// Stop a process and its descendants, until no new one turns up, so none
 /// starts another or leaves the tree as its parent dies; then kill them.
 fn end_tree(root: i32) {
@@ -159,10 +165,20 @@ fn end_tree(root: i32) {
             started.elapsed() < Duration::from_secs(10),
             "{new:?}, started by {root}, won't stop"
         );
-        for pid in new {
+        for &pid in &new {
             signal(pid, Signal::STOP);
-            stopped.push(pid);
         }
+        // Stopped before the tree is read again, so none forks after it.
+        for &pid in &new {
+            while state(pid).is_some_and(|s| s != 'T' && s != 'Z') {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{pid}, started by {root}, won't stop"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        stopped.extend(new);
     }
     for pid in stopped {
         signal(pid, Signal::KILL);

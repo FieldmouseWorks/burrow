@@ -82,11 +82,19 @@ pub fn timed_out(drv: &str, log: &[u8]) -> bool {
         .filter_map(|l| l.strip_prefix("building '"))
         .map(|l| l.split('\'').next().unwrap_or_default())
         .peekable();
-    started.peek().is_some()
-        && started.all(|d| d == drv)
-        && text
-            .lines()
-            .any(|l| l.starts_with("error: ") && l.contains(" timed out after "))
+    started.peek().is_some() && started.all(|d| d == drv) && text.lines().any(nix_timed_out)
+}
+/// Nix's own line for a build it stopped at its `timeout` or
+/// `max-silent-time`, and nothing else that says "timed out" (a download's,
+/// say).
+fn nix_timed_out(line: &str) -> bool {
+    line.strip_prefix("error: timed out after ")
+        .and_then(|l| l.split_once(' '))
+        .is_some_and(|(n, rest)| {
+            !n.is_empty()
+                && n.chars().all(|c| c.is_ascii_digit())
+                && matches!(rest, "seconds" | "seconds of silence")
+        })
 }
 /// The text without its colours.
 fn plain(text: &str) -> String {
@@ -150,5 +158,12 @@ mod tests {
             DRV,
             b"error: timed out after 1800 seconds\n"
         ));
+        let download = format!(
+            "building '{DRV}'...\nerror: unable to download 'https://cache.example/x.narinfo': timed out after 30000 milliseconds\n"
+        );
+        assert!(!super::timed_out(DRV, download.as_bytes()));
+        let silence =
+            format!("building '{DRV}'...\nerror: timed out after 3600 seconds of silence\n");
+        assert!(super::timed_out(DRV, silence.as_bytes()));
     }
 }

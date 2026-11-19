@@ -254,8 +254,15 @@ impl Negative {
     /// same check passes on the head; and the same check on the base
     /// passes. Anything else can't tell.
     fn caught(&self, t: &Target, log: &[u8], work: &Path) -> Result<bool> {
+        if !not_a_fetch(&t.drv) {
+            return Ok(false);
+        }
         let timed_out = classify::timed_out(&t.drv, log);
-        if !timed_out && !self.own_failure(&t.drv, log) {
+        if !timed_out && !classify::builder_failed(&t.drv, log) {
+            println!(
+                "nix doesn't say {}'s own builder failed with a test's exit code, or that it timed out, so it can't tell",
+                t.drv
+            );
             return Ok(false);
         }
         if !t.base.is_empty() && !matches!(self.alone(&t.base, &work.join("roots"))?, Alone::Passed)
@@ -270,27 +277,6 @@ impl Negative {
             return self.passes_on_head(t, work);
         }
         Ok(true)
-    }
-    /// Whether nix says the check's own builder failed with a test's exit
-    /// code, and it isn't a fetch, whose failure can be the network's.
-    fn own_failure(&self, drv: &str, log: &[u8]) -> bool {
-        match classify::fetch(drv) {
-            Ok(false) if classify::builder_failed(drv, log) => true,
-            Ok(false) => {
-                println!(
-                    "nix doesn't say {drv}'s own builder failed with a test's exit code, so it can't tell"
-                );
-                false
-            }
-            Ok(true) => {
-                println!("{drv} is a fetch, whose failure can be the network's, so it can't tell");
-                false
-            }
-            Err(_) => {
-                println!("can't tell whether {drv} is a fetch, so it can't tell");
-                false
-            }
-        }
     }
     /// A check that timed out with the new tests on the old code, built on
     /// the PR's head: passing there, its timing out is the new tests
@@ -331,6 +317,21 @@ impl Negative {
             t.drv
         );
         Ok(true)
+    }
+}
+/// Whether a check is known not to be a fetch, whose failure, or timing
+/// out, can be the network's.
+fn not_a_fetch(drv: &str) -> bool {
+    match classify::fetch(drv) {
+        Ok(false) => true,
+        Ok(true) => {
+            println!("{drv} is a fetch, whose failure can be the network's, so it can't tell");
+            false
+        }
+        Err(_) => {
+            println!("can't tell whether {drv} is a fetch, so it can't tell");
+            false
+        }
     }
 }
 fn negative_commit(tree: &str, fork: &str, head: &str, when: &str, one: bool) -> Result<String> {

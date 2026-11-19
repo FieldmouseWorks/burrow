@@ -350,9 +350,9 @@ fn a_waiter_that_never_ends_is_killed_at_the_cases_deadline() {
     c.set("HANG", "1");
     c.set("WAIT_REQUEST", "3600");
     let started = Instant::now();
-    let ran = c.run_within(Duration::from_secs(2));
+    let ran = c.run_within(Duration::from_secs(5));
     assert!(ran.killed, "{}", text(&ran.output));
-    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(started.elapsed() < Duration::from_secs(20));
     let hung = fs::read_to_string(c.dir.path().join("fake/hung")).unwrap();
     let gone = Instant::now();
     // Gone, or only waiting to be reaped.

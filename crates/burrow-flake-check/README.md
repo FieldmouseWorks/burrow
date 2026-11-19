@@ -143,8 +143,8 @@ built. The longest quiet stretch in a burrow build that went on to pass was
 14 to 16 minutes (codex linking, on a hosted runner).
 
 The negative builds each check it judges on its own, once what the check is
-built from has built under that hour, with Nix's `timeout` of 30 minutes
-(`CHECK_SECONDS` in `src/negative.rs` says why that figure), and keeps its
+built from has built under that hour, with Nix's shorter `timeout`
+(`CHECK_SECONDS` in `src/negative.rs`, which says why that figure), and keeps its
 log to say why it failed: no check is built a second time. A check that
 timed out there, where every build its log started was its own, is the new
 tests catching the base when the same check passes on the base and on the
