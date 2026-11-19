@@ -1,6 +1,6 @@
 //! The API credit meter as the machine stands: burrow-settings' credit
-//! setting and meter, over the cycle's [`ENGINE`] turn costs that proj
-//! recorded in its jobs, decoded by the same accounting the usage answer
+//! setting and meter, over the cycle's [`ENGINE`] run costs that proj
+//! recorded in its jobs, each run of a turn at its own start, decoded by the same accounting the usage answer
 //! uses (answer/usage/accounting.rs). The probe's `usage` answer shows it,
 //! and proj's admission and routing are to read the same [`meter`] once the
 //! engine and its routing land.
@@ -8,7 +8,7 @@
 //! Strict where the usage answer is tolerant: anything about a job with an
 //! [`ENGINE`] turn that can't be read (its folder, a turn's engine, start
 //! or stream, a malformed record) is an error, and an error is no room. An
-//! [`ENGINE`] turn of the cycle whose cost isn't recorded (one still
+//! [`ENGINE`] run of the cycle whose cost isn't recorded (one still
 //! running, or one stopped before its result that no later run of its
 //! session has accounted for) is counted at what it has recorded and makes
 //! the meter pending: its spend can't be known, so there's no room until it
@@ -61,7 +61,8 @@ fn setting(path: &Path) -> Result<Credit, String> {
     credit::parse(&bytes)?.ok_or_else(|| "no API credit is set".into())
 }
 
-/// Every [`ENGINE`] turn's cost that started at `from` or after.
+/// Every [`ENGINE`] run's cost that started at `from` or after: a turn's
+/// runs (its first and each retry) each at the time its marker says.
 pub fn ledger(jobs: &Path, from: i64) -> Result<Ledger, String> {
     let fail = |e: std::io::Error| format!("{}: {e}", jobs.display());
     let root = Dir::open(jobs).map_err(fail)?;
@@ -146,35 +147,53 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
     let recovered: BTreeSet<&String> = decoded.iter().flat_map(|(_, _, r)| &r.recovered).collect();
     let mut gaps = BTreeSet::new();
     for (n, api, report) in &decoded {
-        let charged = *api || report.recovered.iter().any(|id| gaps.contains(id));
-        if !charged {
-            continue;
-        }
-        let at = text(dir, &format!("{n}.started"))?
-            .ok_or_else(|| format!("turn {n} has no recorded start"))?
-            .parse::<i64>()
-            .map_err(|e| format!("{n}.started: {e}"))?;
-        if at < from {
-            continue;
-        }
-        if *api {
-            if let Some(id) = report.missing.iter().find(|id| !recovered.contains(id))
-                && ledger.pending.is_none()
-            {
-                ledger.pending = Some(format!(
-                    "{ENGINE} turn {id} has no recorded cost yet: running, or stopped before its result"
-                ));
+        // Each run of a turn counts at its own start: a retry keeps the
+        // turn's first start in N.started and writes its own in its marker.
+        let mut started = None;
+        for run in &report.invocations {
+            let charged = *api || run.recovered.iter().any(|id| gaps.contains(id));
+            if !charged {
+                continue;
             }
-            gaps.extend(report.missing.iter().cloned());
+            let at = if run.marked {
+                run.at
+                    .ok_or_else(|| format!("turn {n} has a run marker without its time"))?
+            } else {
+                match started {
+                    Some(at) => at,
+                    None => *started.insert(start(dir, *n)?),
+                }
+            };
+            if at < from {
+                continue;
+            }
+            if *api {
+                if let Some(id) = run.missing.iter().find(|id| !recovered.contains(id))
+                    && ledger.pending.is_none()
+                {
+                    ledger.pending = Some(format!(
+                        "{ENGINE} turn {id} has no recorded cost yet: running, or stopped before its result"
+                    ));
+                }
+                gaps.extend(run.missing.iter().cloned());
+            }
+            // A Claude run that accounts for an API run's unrecorded cost is
+            // charged whole: its cost includes that run's.
+            ledger.spends.push(Spend {
+                at,
+                micros: micros(run.cost)?,
+            });
         }
-        // A Claude turn that accounts for an API turn's unrecorded run is
-        // charged whole: its cost includes that run's.
-        ledger.spends.push(Spend {
-            at,
-            micros: micros(report.cost)?,
-        });
     }
     Ok(())
+}
+
+/// When turn N first started, for the runs of a stream from before markers.
+fn start(dir: &Dir, n: u64) -> Result<i64, String> {
+    text(dir, &format!("{n}.started"))?
+        .ok_or_else(|| format!("turn {n} has no recorded start"))?
+        .parse::<i64>()
+        .map_err(|e| format!("{n}.started: {e}"))
 }
 
 fn micros(usd: f64) -> Result<i64, String> {

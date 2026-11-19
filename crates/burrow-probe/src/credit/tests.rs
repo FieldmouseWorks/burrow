@@ -20,6 +20,11 @@ fn assistant(session: &str) -> Value {
     json!({"type":"assistant","session_id":session,"message":{"id":"m","usage":{"input_tokens":1}}})
 }
 
+/// The host's marker for a run of a turn, started at AT.
+fn run(at: i64) -> Value {
+    json!({"type":"burrow.run","at":at})
+}
+
 fn stream(records: &[Value]) -> String {
     records.iter().map(|r| format!("{r}\n")).collect()
 }
@@ -49,6 +54,18 @@ impl Jobs {
             fs::write(dir.join(format!("{n}.started")), at.to_string()).unwrap();
         }
         fs::write(dir.join(format!("{n}.jsonl")), stream).unwrap();
+    }
+
+    /// The ledger's spends in order, each with its time; an error when one
+    /// is pending.
+    fn spends(&self, from: i64) -> Result<Vec<(i64, i64)>, String> {
+        let ledger = ledger(&self.root, from)?;
+        let mut spends = ledger.spends;
+        spends.sort_by_key(|s| s.at);
+        match ledger.pending {
+            Some(pending) => Err(pending),
+            None => Ok(spends.into_iter().map(|s| (s.at, s.micros)).collect()),
+        }
     }
 
     /// The ledger's spends in order; an error when one is pending.
@@ -127,6 +144,109 @@ fn retries_and_rereads_count_each_dollar_once() {
         once,
         "reading again adds nothing"
     );
+}
+
+#[test]
+fn each_run_of_a_retried_turn_is_charged_at_its_own_start() {
+    let jobs = Jobs::new();
+    // A turn started late on the first day, retried after midnight: N.started
+    // keeps the first run's time, each run's marker its own.
+    let (first, retry) = (SINCE + 23 * HOUR, SINCE + 25 * HOUR);
+    let retried = stream(&[
+        run(first),
+        init("s"),
+        result("s", 1.0),
+        run(retry),
+        init("s"),
+        result("s", 3.0),
+    ]);
+    jobs.turn("a", 1, Some(ENGINE), Some(first), &retried);
+    assert_eq!(
+        jobs.spends(SINCE).unwrap(),
+        vec![(first, M), (retry, 2 * M)],
+        "the retry is the next day's spend"
+    );
+    // A renewal or a new balance between them: only the retry is this cycle's.
+    assert_eq!(
+        jobs.spends(SINCE + 24 * HOUR).unwrap(),
+        vec![(retry, 2 * M)]
+    );
+    // So today's spend is the retry's, against today's allowance.
+    let credit = json!({"budgetUsd": 20, "renews": "2026-11-23", "monthlyUsd": 200, "reserveUsd": 5, "since": SINCE});
+    let file = credit_file(jobs.root.parent().unwrap(), credit);
+    let m = meter(&file, Some(&jobs.root), retry + HOUR).unwrap();
+    assert_eq!((m.spent, m.today), (3 * M, 2 * M));
+
+    // A retry still running after the cycle began holds the meter, though
+    // the turn started before it.
+    let running = Jobs::new();
+    let stream = stream(&[
+        run(first),
+        init("s"),
+        result("s", 1.0),
+        run(retry),
+        init("s"),
+        assistant("s"),
+    ]);
+    running.turn("a", 1, Some(ENGINE), Some(first), &stream);
+    let err = running.spends(SINCE + 24 * HOUR).unwrap_err();
+    assert!(err.contains("no recorded cost yet"), "{err}");
+}
+
+#[test]
+fn an_abandoned_run_is_charged_with_the_retry_that_accounts_for_it() {
+    let jobs = Jobs::new();
+    let (first, retry) = (SINCE + HOUR, SINCE + 2 * HOUR);
+    // The first run stopped before its result; the retry resumed its session.
+    let retried = stream(&[
+        run(first),
+        init("s"),
+        assistant("s"),
+        run(retry),
+        init("s"),
+        result("s", 2.0),
+    ]);
+    jobs.turn("a", 1, Some(ENGINE), Some(first), &retried);
+    assert_eq!(
+        jobs.spends(SINCE).unwrap(),
+        vec![(first, 0), (retry, 2 * M)]
+    );
+    // Covered on the subscription instead: only the run that covers it is
+    // charged, at its own start, not the whole turn.
+    jobs.turn(
+        "a",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[run(first), init("s"), assistant("s")]),
+    );
+    jobs.turn(
+        "a",
+        2,
+        Some("claude"),
+        Some(retry),
+        &stream(&[
+            run(retry),
+            init("u"),
+            result("u", 7.0),
+            run(retry + HOUR),
+            init("s"),
+            result("s", 2.0),
+        ]),
+    );
+    assert_eq!(
+        jobs.spends(SINCE).unwrap(),
+        vec![(first, 0), (retry + HOUR, 2 * M)]
+    );
+    // A marker without its time is an error, not a guess.
+    jobs.turn(
+        "b",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[json!({"type":"burrow.run"}), result("t", 1.0)]),
+    );
+    assert!(ledger(&jobs.root, SINCE).is_err());
 }
 
 #[test]

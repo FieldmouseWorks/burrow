@@ -177,9 +177,12 @@ micro-dollars. `burrow_probe::credit::meter` reads it on the machine: the
 setting, and each `claude-api` turn's cost from proj's job records, decoded by
 the usage answer's accounting with every Claude Code turn of a job in order,
 so a session carried over from the subscription is charged only its own part.
+Each run of a turn (its first and every retry) counts at its own start, from
+its `burrow.run` marker, so a retry after midnight or a renewal is that
+day's and that cycle's spend.
 The probe's `usage` answer shows it; launch admission and routing are to
 read the same function once the `claude-api` engine and its routing land. Anything it can't read is no room, and so is a
-`claude-api` turn of the cycle whose cost isn't recorded yet (still running,
+`claude-api` run of the cycle whose cost isn't recorded yet (still running,
 or stopped before its result and not yet accounted for by a later run of its
 session): the meter says so beside the numbers it knows, and those turns
 therefore run one at a time. A turn stopped for good before its result
