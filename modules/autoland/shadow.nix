@@ -73,11 +73,12 @@ let
         settle_delay = minutes rc.settleDelay;
         handoff_after = minutes rc.handoffAfter;
         session_handoff_after = minutes rc.sessionHandoffAfter;
-        # A first PR is overdue in half an hour, the rest at stallAfter: the
-        # deadlines burrow#960 sets out. Until the steward keeps them too, a
-        # first PR waiting between the two is overdue to the flow alone.
+        # A first PR is overdue in half an hour (or stallAfter, if that's
+        # sooner), the rest at stallAfter: the deadlines burrow#960 sets out.
+        # Until the steward keeps them too, a first PR waiting between the
+        # two is overdue to the flow alone.
         stall_after = {
-          high = minutes 30;
+          high = minutes (lib.min 30 rc.stallAfter);
           medium = minutes rc.stallAfter;
           low = minutes rc.stallAfter;
         };
