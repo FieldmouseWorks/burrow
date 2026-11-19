@@ -79,6 +79,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         println!("stalled again, its notice still open: {}", line(&st.item));
         stalls.insert(s, st);
     }
+    // Only more time still to run is matched: a rest whose time ran out
+    // before its stall came back is gone first, or the stall would take back
+    // its old job and steps.
+    resting.retain(|_, st| st.snoozed.is_some_and(|t| t > now));
     let back: Vec<(String, String)> = found
         .iter()
         .filter(|(s, _)| !stalls.contains_key(*s))
@@ -102,7 +106,6 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         );
         stalls.insert(s, st);
     }
-    resting.retain(|_, st| st.snoozed.is_some_and(|t| t > now));
     closing.retain(|s, _| {
         close(cfg, world, s, MOVING);
         held(cfg, world, s)

@@ -840,10 +840,11 @@ fn snooze_outlasts_a_clear() {
     m.state_of("job-1", "done");
     m.write(&m.steward, json!({}), T + 2.0 * MIN);
     m.run(T + 2.0 * MIN);
-    m.run(T + 3.0 * H);
-    assert!(m.state().resting.is_empty());
+    // Back overdue in the first pass after its more time ran out, with no
+    // pass between to prune it: the expired rest is no match.
     stalled(&m, T + 3.0 * H, T + 4.0 * H);
     m.run(T + 4.0 * H);
+    assert!(m.state().resting.is_empty());
     assert_eq!((m.runs().len(), m.escalated().len()), (2, 0));
 
     // Back in another phase in time: a stall of its own too.
