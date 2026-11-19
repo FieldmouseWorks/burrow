@@ -196,3 +196,65 @@ fn usage_totals_recover_appended_runs_without_matching_other_jobs_gaps() {
         );
     }
 }
+
+#[test]
+fn usage_shows_the_api_credit_meter_in_both_forms_and_it_survives_the_scrubber() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    let jobs = tmp.path().join("jobs");
+    // 2026-11-20T00:00:00Z, the balance read then; the credit renews on the
+    // 25th, so 2026-11-21T12:00:00Z has 4 days left, today included.
+    let since = 1_795_132_800;
+    let now = since + 36 * 3600;
+    let job = jobs.join("fallback");
+    fs::create_dir_all(&job).unwrap();
+    let put = |n: u64, engine: &str, at: i64, total: f64| {
+        fs::write(job.join(format!("{n}.engine")), engine).unwrap();
+        fs::write(job.join(format!("{n}.started")), at.to_string()).unwrap();
+        let line = json!({"type":"result","session_id":"s","usage":{"input_tokens":1},"total_cost_usd":total,"result":"SECRET PROMPT"});
+        fs::write(job.join(format!("{n}.jsonl")), format!("{line}\n")).unwrap();
+    };
+    put(1, "claude", since + 3600, 3.0); // the subscription's part of session s
+    put(2, "claude-api", since + 7200, 13.0); // yesterday: $10
+    put(3, "claude-api", now - 3600, 14.5); // today: $1.50
+    let mut cfg = config(&state);
+    cfg.jobs = Some(jobs);
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now,
+        uid: 1,
+        run: &fake,
+    };
+    let unset = m.answer(&Query::parse("usage --totals").unwrap()).unwrap();
+    assert!(
+        unset.contains("claude-api credit: no room (no API credit is set)"),
+        "{unset}"
+    );
+    fs::create_dir_all(state.join("settings")).unwrap();
+    fs::write(
+        state.join(burrow_settings::credit::FILE),
+        json!({"credit": {"budgetUsd": 214.37, "renews": "2026-11-25", "monthlyUsd": 200, "reserveUsd": 5, "since": since}, "receipts": {}}).to_string(),
+    )
+    .unwrap();
+    for query in ["usage", "usage --totals"] {
+        let got = m.answer(&Query::parse(query).unwrap()).unwrap();
+        let got = crate::scrub::Redactor::default().plain(&got);
+        for line in [
+            "API credit at 2026-11-21 12:00:00Z:",
+            "claude-api credit: room",
+            "cycle 2026-11-20 00:00:00Z to 2026-11-25 00:00:00Z (credit expires then), 4 UTC days left with today; the balance as set",
+            "budget $214.37, spent $11.50, reserve $5.00, remaining $202.87",
+            "today spent $1.50 of $51.0925 allowed",
+        ] {
+            assert!(got.lines().any(|l| l == line), "{query}: {line}: {got}");
+        }
+        assert!(!got.contains("SECRET"), "{got}");
+        let at = |s: &str| got.find(s).unwrap_or_else(|| panic!("{s}: {got}"));
+        assert!(at("By engine") < at("API credit at"));
+        if query == "usage" {
+            assert!(at("API credit at") < at("Meter readings:"));
+        }
+    }
+}

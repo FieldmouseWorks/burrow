@@ -62,6 +62,7 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   [ -e $live/config/roles ]
   run settings role fix@sam/homelab claude
   run engines save usual
+  run settings credit 214.37 "$(date -u -d '+10 days' +%F)" 200 5
 
   run settings schema >schema.json
   run settings show --json >show.json
@@ -80,6 +81,8 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.engineSetups"].value.active' '"usual"'
   want '.options["proj.engineOffers"].origin' '"default"'
   want '.options["proj.usageHold"].origin' '"live"'
+  want '.options["proj.apiCredit"].value.budgetUsd' '214.37'
+  want '.options["proj.apiCredit"].file' "\"$live/settings/overlay.credit.json\""
   want '.options | length' "$(jq '.properties.options.required | length' schema.json)"
 
   # What the schema is for: it refuses an option it doesn't declare, a value

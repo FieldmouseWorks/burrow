@@ -24,6 +24,10 @@ pub enum Kind {
     Text,
     /// A number from 0 to 100, fractions included.
     Percent,
+    /// Dollars, 0 or more, to the cent.
+    Usd,
+    /// A calendar day, `YYYY-MM-DD`.
+    Date,
     /// One of these words.
     OneOf(&'static [&'static str]),
     /// A GitHub repository, OWNER/NAME.
@@ -127,6 +131,8 @@ pub fn find(name: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.name == name)
 }
 
+/// The API credit, beside it under the same lock (credit).
+const CREDIT_OVERLAY: &str = crate::credit::FILE;
 /// The one runtime settings overlay, under `burrow.stateDir`.
 const OVERLAY: &str = "settings/overlay.json";
 /// Role routing and tuning, beside it under the same lock (roles::store).
@@ -201,6 +207,29 @@ const HOLD: Kind = Kind::Maybe(&Kind::Record(&[
     Field {
         name: "reason",
         kind: &Kind::Text,
+    },
+]));
+
+const CREDIT: Kind = Kind::Maybe(&Kind::Record(&[
+    Field {
+        name: "budgetUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "renews",
+        kind: &Kind::Date,
+    },
+    Field {
+        name: "monthlyUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "reserveUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "since",
+        kind: &STAMP,
     },
 ]));
 
@@ -489,6 +518,13 @@ pub static SETTINGS: &[Setting] = &[
         "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
+        "proj.apiCredit",
+        &CREDIT,
+        "null",
+        CREDIT_OVERLAY,
+        "The expiring API credit the claude-api engine spends (settings credit BUDGET RENEWS MONTHLY RESERVE, or off): budgetUsd is its balance at since (when it was set), renews the UTC day it expires and renews to monthlyUsd, again each month from that day, and reserveUsd is never spent. The engine has room while spent + reserve < budget and today's spend < (budget - spent before today) / UTC days left, today included. Null, or a value or turn cost that can't be read, is no room.",
+    ),
+    live(
         "proj.usageHold",
         &HOLD,
         "null",
@@ -505,6 +541,8 @@ impl Kind {
             Kind::Count { min } => json!({"type": "integer", "minimum": min}),
             Kind::Text => json!({"type": "string"}),
             Kind::Percent => json!({"type": "number", "minimum": 0, "maximum": 100}),
+            Kind::Usd => json!({"type": "number", "minimum": 0}),
+            Kind::Date => json!({"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}),
             Kind::OneOf(words) => json!({"enum": words}),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
@@ -534,6 +572,12 @@ impl Kind {
             {
                 Ok(())
             }
+            (Kind::Usd, v @ Value::Number(_))
+                if serde_json::from_value::<crate::credit::Cents>(v.clone()).is_ok() =>
+            {
+                Ok(())
+            }
+            (Kind::Date, Value::String(s)) if crate::credit::Day::parse(s).is_some() => Ok(()),
             (Kind::OneOf(words), Value::String(s)) if words.contains(&s.as_str()) => Ok(()),
             (Kind::Repo, Value::String(s)) if repo(s) => Ok(()),
             (Kind::Maybe(_), Value::Null) => Ok(()),
@@ -564,6 +608,8 @@ impl Kind {
             Kind::Count { min } => format!("a whole number from {min}"),
             Kind::Text => "text".into(),
             Kind::Percent => "a number from 0 to 100".into(),
+            Kind::Usd => "dollars, 0 or more, to the cent".into(),
+            Kind::Date => "a YYYY-MM-DD date".into(),
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),
@@ -661,6 +707,21 @@ mod tests {
         assert!(HOLD.check(&json!({"until": -1})).is_err());
         assert!(REPOS.check(&json!(["sam/box"])).is_ok());
         assert!(REPOS.check(&json!(["sam"])).is_err());
+        let credit = json!({"budgetUsd": 214.37, "renews": "2026-12-05", "monthlyUsd": 200, "reserveUsd": 5.5, "since": 1});
+        assert!(CREDIT.check(&credit).is_ok());
+        assert!(CREDIT.check(&Value::Null).is_ok());
+        for (field, bad) in [
+            ("budgetUsd", json!(1.005)),
+            ("budgetUsd", json!(-1)),
+            ("renews", json!("2026-12-5")),
+            ("renews", json!("2026-02-30")),
+            ("reserveUsd", json!("5")),
+        ] {
+            let mut value = credit.clone();
+            value[field] = bad;
+            let err = CREDIT.check(&value).unwrap_err();
+            assert!(err.starts_with(&format!("{field}: ")), "{err}");
+        }
         assert!(DRAIN.check(&json!("claude")).is_ok());
         assert!(DRAIN.check(&json!("gemini")).is_err());
         assert!(SLOTS.check(&json!(0)).is_err());

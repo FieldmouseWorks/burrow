@@ -151,6 +151,38 @@ launch. A missing identity fails closed; deliberately local automated work
 uses `proj run --local-work`. A worker cannot evade policy by changing its
 project or role metadata, or by making its Git remote unreadable.
 
+## The API credit
+
+`proj.apiCredit` is the expiring API credit the `claude-api` engine may
+spend; the [reference](settings-reference.md) gives its fields and the room
+rule. It's kept in a file of its own beside the admission overlay, under the
+same lock and log, so a generation from before it still reads that overlay,
+and only the write door changes it:
+
+```
+settings credit BUDGET_USD RENEWS_YYYY-MM-DD MONTHLY_USD RESERVE_USD
+settings credit off
+```
+
+`BUDGET_USD` is the balance read now: the write records the time as `since`,
+the cycle's start, and counts spend from then. Writing the same balance again
+before it renews (a repeat, or a new reserve or monthly amount) keeps the
+earlier `since`, so what the cycle spent still counts.
+
+`burrow_settings::credit` is the meter: given the setting, the time and the
+turns' costs, it works out the cycle (renewals are stepped from `renews`' own
+day of the month, so several missed ones still leave one month's credit),
+the spend, today's allowance and whether there's room, in whole
+micro-dollars. `burrow_probe::credit::meter` reads it on the machine: the
+setting, and each `claude-api` turn's cost from proj's job records, decoded by
+the usage answer's accounting with every Claude Code turn of a job in order,
+so a session carried over from the subscription is charged only its own part.
+The probe's `usage` answer shows it, and launch admission and routing read
+the same function. Anything it can't read is no room, and so is a
+`claude-api` turn of the cycle whose cost isn't recorded yet (still running,
+or stopped before its result and not yet accounted for by a later run of its
+session): those turns therefore run one at a time.
+
 ## Engines, models and efforts per role
 
 Which engine, model and effort runs each kind of job are live settings in

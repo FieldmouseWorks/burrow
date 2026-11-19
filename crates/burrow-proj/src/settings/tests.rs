@@ -91,6 +91,8 @@ fn every_option_shown_comes_from_the_schema() {
         json!([])
     );
     assert_eq!(options["proj.usageHold"]["value"], Value::Null);
+    assert_eq!(options["proj.apiCredit"]["value"], Value::Null);
+    assert_eq!(options["proj.apiCredit"]["origin"], "default");
 
     // Each live value, set through the door and read as its turns read it.
     crate::config::tests::set(
@@ -107,6 +109,19 @@ fn every_option_shown_comes_from_the_schema() {
         ],
     );
     crate::usage::hold(&cfg, crate::now() + 3600, "save usage").unwrap();
+    let renews = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .checked_add(jiff::ToSpan::days(10))
+        .unwrap()
+        .to_string();
+    let policy = cfg.settings.as_ref().unwrap();
+    policy
+        .command(
+            &["credit", "214.37", &renews, "200", "5"].map(String::from),
+            "test",
+        )
+        .unwrap();
     let doc = show(&cfg);
     let options = &doc["options"];
     let usual_roles = json!({
@@ -133,6 +148,11 @@ fn every_option_shown_comes_from_the_schema() {
         options["proj.engineSetups"]["value"]["saved"]["cheap"],
         json!({"roles": {"triage": {"engine": "claude"}}, "models": {}})
     );
+    let credit = &options["proj.apiCredit"];
+    assert_eq!(credit["origin"], "live");
+    assert_eq!(credit["file"], json!(policy.credit_file()));
+    assert_eq!(credit["value"]["budgetUsd"], json!(214.37));
+    assert_eq!(credit["value"]["renews"], json!(renews));
     let hold = &options["proj.usageHold"];
     assert_eq!(hold["origin"], "live");
     assert_eq!(hold["value"]["owner"], true);

@@ -81,7 +81,10 @@ own, say), in seconds and without starting a Claude.
     from selected turns, recovered cost potentially belonging outside the span,
     unread engine streams and partial token counts. Recovery is matched by run
     identity, so including both a crash and its recovery does not claim the
-    recovered cost is still missing. `--totals` gives only this required section.
+    recovered cost is still missing. Then the API credit as it stands now
+    ([settings.md](settings.md#the-api-credit)): its cycle and expiry, budget,
+    spend, reserve, what's left, and today's spend against its allowance, or
+    why it has no room. `--totals` gives only these required sections.
     Project basenames, including leading dots and underscores, remain distinct;
     names are escaped for display. Meter readings follow, then each turn by
     role, inbox label and opener category, or starter. Optional detail is cut
