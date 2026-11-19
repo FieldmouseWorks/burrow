@@ -33,7 +33,7 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
-    "post": "GitHub keeps refusing a review it's to post",
+    "ask": "GitHub keeps refusing the comment that asks Codex for a review",
     "answer": "GitHub keeps refusing a Claude job's answers it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
@@ -72,17 +72,6 @@ class Context:
         self.judged_at = f"{self.head} {judged_on(self.pr)}"
         self.key = f"pr-{self.repo.replace('/', '_')}-{self.n}.json"
         self.st = load(self.key, {})
-        # Findings a reviewer couldn't post: by reviewer, then base (on another
-        # base the PR is another change), the head they were on, until it posts
-        # a look at the PR's head on that base. Kept across heads, since past
-        # the round limit no new head's look would cover them. State from
-        # before kept the loss in its head's rv: moved here before a new head
-        # clears that.
-        self.lost_on = self.st.setdefault("lostOn", {})
-        for r, rs in self.st.get("rv", {}).items():
-            if rs.get("lost"):
-                was, base = rs.pop("lost")
-                self.lost_on.setdefault(r, {})[base] = was
         if self.st.get("head") != self.head:
             stopping.moved(self.repo, self.pr, self.st)  # its jobs on the last head, to be stopped below
             # Still since it was pushed, as near as GitHub says (prs.pushed),
@@ -90,7 +79,7 @@ class Context:
             # delay before the steward came round is asked about now.
             got = pushed(self.pr)
             seen = C.NOW if got is None else min(got, C.NOW)
-            self.st.update(head=self.head, seen=seen, handed=None, strikes={}, rv={})
+            self.st.update(head=self.head, seen=seen, handed=None, strikes={})
         if DRY:
             # A status run keeps state of its own, but takes what the live
             # passes found on this head from theirs: their failures in a row,
@@ -102,7 +91,6 @@ class Context:
                     self.st[k] = live[k]
                 else:
                     self.st.pop(k, None)
-        self.st.setdefault("rv", {})
         self.labels = {x["name"] for x in self.pr["labels"]["nodes"]}
         self.merging = MERGE_STEPS.get(self.pr.get("mergeStateStatus"), "refused")
         self.age = C.NOW - self.st["seen"]  # how long its head has been still
@@ -126,9 +114,9 @@ class Context:
         STRIKE_LIMIT-th failure in a row on this head makes the PR's wait
         overdue whatever its deadline, so the watchdog takes it (a kick, a
         Claude job, the stuck issue); without the watchdog, it's listed on
-        the stuck issue. Either says what GitHub said. Once a pass: two
-        reviews it couldn't post are one pass's failure. When it's tried
-        again."""
+        the stuck issue. Either says what GitHub said. Once a pass: a
+        step failing twice in one pass is that pass's one failure. When it's
+        tried again."""
         if kind in self.struck:
             return self.struck[kind]
         strikes = self.st.setdefault("strikes", {})
@@ -149,9 +137,17 @@ class Context:
 
     def cleared(self, kind):
         """The step went through: its run of failures is over, unless it
-        failed this pass too (one review posted, another not)."""
+        failed this pass too."""
         if kind not in self.struck:
             self.st.setdefault("strikes", {}).pop(kind, None)
+
+    def tried(self, kind, refused):
+        """The step was tried: refused (what GitHub said), a strike, or
+        through, cleared."""
+        if refused:
+            self.strike(kind, refused)
+        else:
+            self.cleared(kind)
 
     def handoff_at(self):
         """When findings or red CI will have sat long enough for a Claude job

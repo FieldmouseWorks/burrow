@@ -1,0 +1,66 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -34,6 +34,8 @@ use syslog::Facility;
+ 
+ // burrow: never wait on a job queued behind a run already going.
+ mod held;
++// burrow: re-execute a user manager only when it may need it.
++mod user_reexec;
+ 
+ mod systemd_manager {
+     #![allow(non_upper_case_globals)]
+@@ -1548,7 +1550,10 @@ fn do_user_switch(parent_exe: String) -> anyhow::Result<()> {
+ 
+     // The systemd user session seems to not send a Reloaded signal, so we don't have anything to
+     // wait on here.
+-    _ = systemd.reexecute();
++    // burrow: unless the parent showed it already runs what this would give it.
++    if user_reexec::wanted(std::env::var(user_reexec::ENV).ok().as_deref()) {
++        _ = systemd.reexecute();
++    }
+ 
+     // Reset failed and reload so that subsequent starts use the new unit files.
+     _ = systemd.reset_failed();
+@@ -2416,20 +2421,41 @@ won't take effect until you reboot the system.
+                     .canonicalize()
+                     .context("Failed to get full path to /proc/self/exe")?;
+ 
++                // burrow: whether its manager may need a re-execution.
++                let manager = user_reexec::manager(&dbus_conn, uid);
++                let state = manager.as_ref().and_then(user_reexec::state);
++                let reexec = user_reexec::needed(
++                    manager.as_ref().map(|m| m.binary.as_path()),
++                    &new_pid1_path,
++                    state.as_deref(),
++                    user_reexec::read_baseline(uid).as_deref(),
++                );
++                let socket = user_reexec::socket(&runtime_path);
++
+                 log::debug!("Performing user switch for {name}");
+                 let status = std::process::Command::new(&myself)
+                     .uid(uid)
+                     .gid(gid)
+                     .env_clear()
+-                    .env("XDG_RUNTIME_DIR", runtime_path)
++                    .env("XDG_RUNTIME_DIR", &runtime_path)
+                     .env("__NIXOS_SWITCH_TO_CONFIGURATION_PARENT_EXE", &myself)
+                     .env("TOPLEVEL", &toplevel)
+                     .env("OLD_TOPLEVEL", &old_toplevel)
+                     .env("NIXOS_ACTION", Into::<&'static str>::into(action))
++                    .env(user_reexec::ENV, if reexec { "1" } else { "0" })
+                     .spawn()
+                     .with_context(|| format!("Failed to spawn user activation for {name}"))?
+                     .wait()
+                     .with_context(|| format!("Failed to run user activation for {name}"))?;
++                // burrow: what a re-execution seen to happen applied is the
++                // baseline; one that failed or wasn't seen leaves none.
++                if reexec {
++                    let rebound = user_reexec::rebound(&runtime_path, socket);
++                    user_reexec::write_baseline(
++                        uid,
++                        state.as_deref().filter(|_| rebound && status.success()),
++                    );
++                }
+                 if !status.success() {
+                     eprintln!("warning: user activation for {name} failed");
+                     exit_code = 4;

@@ -24,7 +24,7 @@ C.CFG["settings"] = DEFAULT_ADMISSION
 
 # Exercise the PR transaction boundary: paused fix/judge/proof admissions
 # become holds with no strikes or failure digest. Settled PRs stay held too.
-from harness import JOBS, S, R, CI_GREEN, fresh_pr_state, clean, mkpr, run, pr_state, merged, rv_review, stand_in
+from harness import JOBS, S, R, CI_GREEN, fresh_pr_state, clean, mkpr, run, pr_state, merged, found, stand_in
 
 stand_in()
 C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
@@ -32,7 +32,7 @@ with patch.object(C, "job", REAL["job"]):
     saved_repo = dict(C.CFG["repos"].get("sam/r", {}))
     C.CFG["repos"]["sam/r"] = {"proofJobs": {"paused-proof": "run proof"}}
     cases = [
-        mkpr(reviews=[rv_review("codex", 1)] * 5, threads=[False]),
+        mkpr(reviews=[found()] * 5, threads=[False]),
         clean(checks=[]),
         clean(checks=CI_GREEN + [{"__typename": "StatusContext", "context": "paused-proof", "state": "PENDING", "description": ""}]),
         clean(),

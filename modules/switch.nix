@@ -239,14 +239,27 @@ in
       # rest of the system counts on it. The revert's activation is a system
       # built with it too. The patch stops applying, and the build says so,
       # if nixpkgs' main.rs moves under it.
+      #
+      # It also re-executes a user manager only when it may need it: when it
+      # runs another systemd binary than the new system's, or any source of
+      # its config changed since the re-execution it last saw. A re-execution
+      # closes the manager's private socket, so every `systemctl --user` and
+      # `systemd-run --user` in that window was refused, at every switch, under
+      # a pipeline that runs as user units (user_reexec.rs says how it tells).
       nixpkgs.overlays = [
         (_: prev: {
           switch-to-configuration-ng = prev.switch-to-configuration-ng.overrideAttrs (old: {
-            patches = (old.patches or [ ]) ++ [ ../patches/switch-to-configuration-ng/main.patch ];
+            patches = (old.patches or [ ]) ++ [
+              ../patches/switch-to-configuration-ng/main.patch
+              ../patches/switch-to-configuration-ng/user-reexec.patch
+            ];
             postPatch = (old.postPatch or "") + ''
               cp ${../patches/switch-to-configuration-ng/held.rs} src/held.rs
               mkdir -p src/held
               cp ${../patches/switch-to-configuration-ng/held/tests.rs} src/held/tests.rs
+              cp ${../patches/switch-to-configuration-ng/user_reexec.rs} src/user_reexec.rs
+              mkdir -p src/user_reexec
+              cp ${../patches/switch-to-configuration-ng/user_reexec/tests.rs} src/user_reexec/tests.rs
             '';
           });
         })

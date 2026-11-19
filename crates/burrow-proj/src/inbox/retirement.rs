@@ -1,11 +1,12 @@
 //! Retirement is independent of notification delivery and of a reopened issue.
 use std::{fs, path::Path};
 
+use super::record::files;
 use super::{Pass, dirs, say};
 use crate::{Fail, cmd::halt, github::api, io_fail, read};
 
 pub(super) fn records(state: &Path) -> Vec<std::path::PathBuf> {
-    dirs(&state.join(".retired"), "")
+    dirs(&files::retired_root(state), "")
         .into_iter()
         .flat_map(|repo| dirs(&repo, ""))
         .flat_map(|issue| dirs(&issue, ""))

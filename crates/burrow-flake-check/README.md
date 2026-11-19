@@ -105,6 +105,28 @@ existing callers without it still run the gate and report a soft wait
 failure when GitHub denies an API read. A saved cache is restored with its
 exact key before the gate runs.
 
+## The build store's shadow
+
+With a build store named (the gate step's `BUILDS` and `BUILDS_KEY`, from
+the caller's Actions variables `BURROW_BUILDS_URL` and
+`BURROW_BUILDS_PUBLIC_KEY`, on a runner that installs its own Nix), a leg
+says before it builds what the store would have served of the derivations
+it builds cold (`src/builds.rs`): how many and which, their bytes, how long
+fetching them would take (estimated from one NAR's first 64 MiB, timed), and
+how long the kept builds' restore took. The last line is
+`builds-shadow {JSON}`, for a reader of the job's log. It reads narinfos
+only, through `nix path-info` and `nix store verify --no-contents` with a
+cache of its own, counts only what the store's key signs, and never fails
+or holds up the leg: each question has a deadline. Nothing substitutes
+from the store.
+
+Such a run's builds go to the store, so every nix the worker starts also
+gets `accept-flake-config = false` and `sandbox = true`, after the caller's
+config: a flake's own `nixConfig` can't add a substituter or a key, or turn
+the sandbox off, whatever the runner's config says. After the gate,
+flake-check.yml's builds-write step uploads what the leg built
+(crates/burrow-keep, `burrow-keep-upload`).
+
 ## A build that stops making progress
 
 The gate and negative runs give every build Nix's `max-silent-time` of an

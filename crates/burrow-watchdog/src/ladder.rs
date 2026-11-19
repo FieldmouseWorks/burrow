@@ -24,6 +24,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut stalls,
         mut missing,
         mut closing,
+        mut resting,
         withdraw,
         limit,
     } = load(dir, "state.json");
@@ -55,6 +56,15 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         let st = stalls.remove(&s).expect("a stall it has");
         println!("moving again: {}", line(&st.item));
         withdraw.extend(st.job.clone());
+        // A failed unit a switch resets clears for a while with nothing
+        // fixed, and fails again from a new `since`; a deploy wait is a run's
+        // while the run looks, and back from its old `since` once it has,
+        // its phase saying that run's word: its more time still holds if
+        // it's back before that's up, in the same phase or as the very same
+        // stall (its sid: the wait never started over).
+        if st.snoozed.is_some_and(|t| t > now) {
+            resting.insert(s.clone(), st.clone());
+        }
         if st.told.is_some() && !cfg.notify.is_empty() {
             closing.insert(s, st);
         }
@@ -67,6 +77,33 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     for s in back {
         let st = closing.remove(&s).expect("a stall it has");
         println!("stalled again, its notice still open: {}", line(&st.item));
+        stalls.insert(s, st);
+    }
+    // Only more time still to run is matched: a rest whose time ran out
+    // before its stall came back is gone first, or the stall would take back
+    // its old job and steps.
+    resting.retain(|_, st| st.snoozed.is_some_and(|t| t > now));
+    let back: Vec<(String, String)> = found
+        .iter()
+        .filter(|(s, _)| !stalls.contains_key(*s))
+        .filter_map(|(s, cur)| {
+            resting
+                .iter()
+                .find(|(was, st)| {
+                    *was == s
+                        || (st.source == cur.source
+                            && st.key == cur.key
+                            && st.item.phase == cur.item.phase)
+                })
+                .map(|(was, _)| (was.clone(), s.clone()))
+        })
+        .collect();
+    for (was, s) in back {
+        let st = resting.remove(&was).expect("a stall it has");
+        println!(
+            "stalled again, its more time still to run: {}",
+            line(&st.item)
+        );
         stalls.insert(s, st);
     }
     closing.retain(|s, _| {
@@ -276,6 +313,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             stalls,
             missing,
             closing,
+            resting,
             withdraw: Some(withdraw),
             limit,
         },
@@ -494,6 +532,12 @@ pub fn status(cfg: &Config, now: f64) -> String {
     for st in saved.closing.values() {
         out.push(format!(
             "moving again, its notice still to close: {}",
+            line(&st.item)
+        ));
+    }
+    for st in saved.resting.values() {
+        out.push(format!(
+            "moving again, its more time still to run: {}",
             line(&st.item)
         ));
     }

@@ -1,13 +1,9 @@
 //! What the autoland steward keeps up in each repo besides its PRs: its
 //! labels and settings (settle.rs) and its webhook (hook.rs), the branches
 //! nothing needs any more (branches.rs), Renovate's dashboard (dashboard.rs)
-//! and the flaky tests' quarantine (flaky.rs); and for the reviewers, each
-//! one's look at a PR queued (queue.rs) with its brief (burrow-brief) on the
-//! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
-//! mirror.rs), their answers, posted on its PRs (post.rs) and read back
-//! as their verdicts (verdict.rs), carried to a head that only merged its
-//! base in (carry.rs), and what they leave, swept once nothing
-//! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
+//! and the flaky tests' quarantine (flaky.rs); what Codex's GitHub
+//! connector said of a PR's head (verdict.rs); the steward's mirror of each
+//! repo (mirror.rs); and for its Claude jobs that settle a PR (claims.rs),
 //! their answers, posted only once the PR's head is their push (answer.rs);
 //! and a PR's commits, read whole for who made them (commits.rs); and its
 //! CI verdict and cancelled workflow recovery (ci.rs, ci_runs.rs). A
@@ -23,7 +19,6 @@
 
 pub mod answer;
 pub mod branches;
-pub mod carry;
 pub mod ci;
 mod ci_runs;
 mod ci_unstarted;
@@ -35,11 +30,7 @@ pub mod flaky;
 pub mod hook;
 pub mod mirror;
 pub mod pass;
-pub mod post;
-pub mod queue;
 pub mod settle;
-pub mod snapshot;
-pub mod sweep;
 #[cfg(test)]
 mod testing;
 pub mod token;

@@ -39,6 +39,10 @@ pub struct Snapshot {
     /// HOST-update's own open PR, when its last run said it's waiting on
     /// that to land before it brings in anything newer.
     pub behind: Option<u64>,
+    /// When the owner hears that the box runs changes that aren't on main,
+    /// while its last run held for that (burrow-update's status.rs): nothing
+    /// waits on HOST-update till then.
+    pub off_main: Option<f64>,
     /// The repos GitHub couldn't be read for, and why: what's known of them
     /// is what the last pass saw.
     pub unread: BTreeMap<String, String>,
@@ -151,6 +155,10 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .as_ref()
             .and_then(|v| v.get("behind"))
             .and_then(Value::as_u64);
+        snap.off_main = status
+            .as_ref()
+            .and_then(|v| v.get("offMain"))
+            .and_then(Value::as_f64);
         let said = status
             .map(|v| {
                 let s = |k| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -563,6 +571,7 @@ pub mod tests {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
                 "logs": dir.join("logs"), "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
+                "held": {"sam/pin": "dddddddddddd"},
                 "after": 1800.0, "run": 5400.0, "ride": 18000.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
@@ -854,11 +863,19 @@ pub mod tests {
             (3, 1_793_289_660.0, "c3", "aaa")
         );
         assert_eq!(snap.deploys["sam/kit"].count, 0);
+        // One the flake holds at a commit isn't compared: nothing's read of
+        // it (the fake has nothing of sam/pin's to give), so nothing waits.
+        assert_eq!(
+            snap.deploys.keys().collect::<Vec<_>>(),
+            ["sam/box", "sam/kit"]
+        );
+        assert!(!snap.unread.contains_key("sam/pin"), "{:?}", snap.unread);
         assert_eq!(
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"
         );
         assert_eq!(snap.behind, Some(405));
+        assert_eq!(snap.off_main, None);
         assert!(snap.unknown.is_empty());
         // No logs yet: no sign of a run at work. Then the newest write to
         // any of them.
@@ -917,5 +934,12 @@ pub mod tests {
             take(&cfg, &w).unread["sam/box"],
             "/run/current-system: No such file or directory"
         );
+        // Held while the box runs what isn't on main: when the owner hears.
+        std::fs::write(
+            dir.path().join("status.json"),
+            r#"{"time": "2026-10-29T15:52:00+00:00", "result": "held", "message": "holding", "running": "/nix/store/y", "offMain": 1793300000}"#,
+        )
+        .unwrap();
+        assert_eq!(take(&cfg, &w).off_main, Some(1_793_300_000.0));
     }
 }

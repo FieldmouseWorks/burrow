@@ -68,7 +68,7 @@ fn a_burst_lists_and_drains_once() {
     // once the drain's label is on, #7 says so.
     fs::write(b.path("every"), Value::from(open).to_string()).unwrap();
     fs::write(b.path("labelled"), "[]").unwrap();
-    fs::write(b.path("seven"), found(7, &["ready", "codex"]).to_string()).unwrap();
+    fs::write(b.path("seven"), found(7, &["ready", "claude"]).to_string()).unwrap();
     burrow_test::executable(
         b.path("hook"),
         r#"#!/bin/sh
@@ -88,7 +88,7 @@ esac
     assert_eq!(listings(&b), 1, "{log}");
     assert_eq!(log.matches(PICKED).count(), 1, "one drain round: {log}");
     assert_eq!(
-        log.matches("issues/7/labels -f labels[]=codex").count(),
+        log.matches("issues/7/labels -f labels[]=claude").count(),
         1,
         "{log}"
     );
@@ -135,7 +135,7 @@ fn the_drain_puts_a_stale_list_right() {
     p.drain().unwrap();
     let log = b.log();
     assert!(log.contains(PICKED), "{log}");
-    assert!(log.contains("issues/8/labels -f labels[]=codex"), "{log}");
+    assert!(log.contains("issues/8/labels -f labels[]=claude"), "{log}");
     // Only the label's own booking: nothing to list the repo again now.
     assert!(p.wake["sam/box"] >= now() + 59, "{:?}", p.wake);
     let left =
@@ -152,9 +152,9 @@ fn no_room_asks_nothing() {
         .note_ready("sam/box", &[found(7, &["ready"]), found(8, &["ready"])])
         .unwrap();
     let cfg = &b.cfg;
-    let _held: Vec<fs::File> = (1..=cfg.codex_slots)
+    let _held: Vec<fs::File> = (1..=cfg.max_jobs)
         .map(|i| {
-            let dir = cfg.jobs.join(".codex-slots");
+            let dir = cfg.jobs.join(".slots");
             fs::create_dir_all(&dir).unwrap();
             let f = fs::File::create(dir.join(i.to_string())).unwrap();
             f.lock().unwrap();
@@ -163,7 +163,7 @@ fn no_room_asks_nothing() {
         .collect();
     b.pass().drain().unwrap();
     let state = &b.cfg.inbox.as_ref().unwrap().state;
-    assert!(state.join(super::WAITING).exists());
+    assert!(super::record::files::drain_waiting(state).exists());
     assert!(
         !b.log().contains("api repos/sam/box/issues/"),
         "{}",

@@ -12,32 +12,12 @@ pub struct Config {
     pub git: PathBuf,
     /// zfs, which takes the undo snapshots.
     pub zfs: PathBuf,
-    /// systemd-run, through which the user's service manager takes them for
-    /// a guard outside the machine's own user namespace (undo.rs's
-    /// [`Namespace`](crate::Namespace)).
-    pub systemd_run: PathBuf,
     /// What gets an undo snapshot before a command that deletes or rewrites
     /// files (burrow.undo.datasets); none, and nothing is snapshotted.
     pub snapshot_datasets: Vec<String>,
     /// How long the guard takes before it asks instead: past the hook's
     /// timeout, Claude Code runs the command unchecked.
     pub ask_after_seconds: u64,
-}
-
-/// The user the guard runs as, by the name /etc/passwd gives its uid; None
-/// when that can't be read.
-#[must_use]
-pub fn current_user() -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let uid = std::fs::metadata("/proc/self").ok()?.uid().to_string();
-    std::fs::read_to_string("/etc/passwd")
-        .ok()?
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split(':');
-            let name = fields.next()?;
-            (fields.nth(1)? == uid).then(|| name.to_owned())
-        })
 }
 
 impl Config {

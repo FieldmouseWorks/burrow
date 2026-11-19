@@ -13,7 +13,6 @@ use conary_github::flow::{self, Recipe};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::OsString;
-use std::path::Path;
 
 /// The check a producer's review, judgment or proof is published as.
 const JUDGMENT: &str = "conary/judgment";
@@ -67,6 +66,7 @@ impl sealed::Signs for Judgment {
             self.generation,
             self.verdict,
             self.provenance.as_ref(),
+            self.basis.as_ref(),
         );
         let log = flow::receipt_digest(&receipt);
         signer.sign(&self.target(), &self.tree, None, true, log)
@@ -111,16 +111,25 @@ pub struct Review {
 }
 
 /// A judgment the judge producer issued: signed as `conary/judgment` over
-/// `judgment_receipt_by(revision, generation, verdict, provenance)`.
+/// `judgment_receipt_by(revision, generation, verdict, provenance, basis)`.
+/// It holds all its sealed comment says, so a crash between the two is
+/// finished from it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judgment {
     pub repo: String,
+    /// The PR its sealed comment is on, and seals.
+    pub pr: u64,
     pub revision: flow::Revision,
     /// The head's tree.
     pub tree: String,
     pub generation: u64,
     pub verdict: Option<Verdict>,
     pub provenance: Option<Provenance>,
+    /// Why the flow asked, and the findings and answers it was judged on.
+    pub basis: Option<flow::Basis>,
+    /// The judge's own reasons, which its sealed comment says above the
+    /// seal.
+    pub reasons: String,
 }
 
 /// A proof's run, as the proof producer recorded its program's exit:
@@ -179,6 +188,62 @@ impl std::fmt::Debug for Signer {
     }
 }
 
+/// Whether anyone but root and `me` may read a file with `mode`, owned by
+/// `owner`, with the access ACL `acl` (its xattr, if it has one). systemd
+/// hands a service its credential as root's file, mode 0400, with an ACL
+/// entry granting the service's user read: the mode's group bits are then
+/// the ACL's mask, and the ACL says who may read.
+pub(crate) fn others_may_read(
+    mode: u32,
+    owner: u32,
+    acl: Option<&[u8]>,
+    me: u32,
+) -> Result<bool, String> {
+    const READ: u16 = 4;
+    let ours = |uid: u32| uid == 0 || uid == me;
+    if mode & 0o400 != 0 && !ours(owner) || mode & 0o004 != 0 {
+        return Ok(true);
+    }
+    let Some(acl) = acl else {
+        return Ok(mode & 0o040 != 0);
+    };
+    let bad = || "its ACL doesn't read as one".to_string();
+    let (version, entries) = acl.split_first_chunk::<4>().ok_or_else(bad)?;
+    if u32::from_le_bytes(*version) != 2 || entries.len() % 8 != 0 {
+        return Err(bad());
+    }
+    let entries: Vec<(u16, u16, u32)> = entries
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|e| {
+            (
+                u16::from_le_bytes([e[0], e[1]]),
+                u16::from_le_bytes([e[2], e[3]]),
+                u32::from_le_bytes([e[4], e[5], e[6], e[7]]),
+            )
+        })
+        .collect();
+    let mask = entries
+        .iter()
+        .find(|e| e.0 == 0x10)
+        .map_or(u16::MAX, |e| e.1);
+    Ok(entries.iter().any(|&(tag, perm, id)| {
+        let reads = perm & READ != 0;
+        match tag {
+            // The owner, whom the mode already said.
+            0x01 => false,
+            // A named user, through the mask.
+            0x02 => reads && mask & READ != 0 && !ours(id),
+            // The owning group, or a named one, through the mask.
+            0x04 | 0x08 => reads && mask & READ != 0,
+            0x10 => false,
+            0x20 => reads,
+            _ => true,
+        }
+    }))
+}
+
 impl Signer {
     /// `producer`'s key, as the machine's producers file names it, from
     /// the systemd credential named `credential`: a file in
@@ -195,37 +260,10 @@ impl Signer {
         producer: &str,
         credential: &str,
     ) -> Result<Self, String> {
-        use std::os::unix::fs::PermissionsExt;
         if producer.trim().is_empty() || producer.trim() != producer {
             return Err(format!("{producer:?} isn't a producer's name"));
         }
-        let plain = !credential.is_empty()
-            && credential != "."
-            && credential != ".."
-            && !credential.contains('/');
-        if !plain {
-            return Err(format!(
-                "{credential:?} isn't a credential's name: a key comes only as a systemd credential"
-            ));
-        }
-        let dir = env("CREDENTIALS_DIRECTORY").ok_or(
-            "no $CREDENTIALS_DIRECTORY: a producer's key comes only as a systemd credential",
-        )?;
-        let dir = Path::new(&dir);
-        if !dir.is_absolute() {
-            return Err("$CREDENTIALS_DIRECTORY isn't an absolute path".into());
-        }
-        let path = dir.join(credential);
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{credential}: {e}"))?;
-        if !meta.is_file() {
-            return Err(format!("{credential} isn't a file"));
-        }
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err(format!(
-                "{credential} can be read by others than its owner, so it isn't this producer's alone"
-            ));
-        }
-        let bytes = std::fs::read(&path).map_err(|e| format!("{credential}: {e}"))?;
+        let bytes = crate::credential::read_from(env, credential)?;
         let secret: [u8; 32] = bytes
             .try_into()
             .map_err(|_| format!("{credential} isn't a 32-byte Ed25519 secret"))?;
@@ -277,8 +315,11 @@ impl Signer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
+    /// A signer with a key the test hands it: only in this crate's tests,
+    /// and in a crate's that names the `test-key` feature among its
+    /// dev-dependencies, never in a build that runs.
+    #[cfg(any(test, feature = "test-key"))]
+    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {
         Self {
             producer: producer.into(),
             key: SigningKey::from_bytes(&secret),

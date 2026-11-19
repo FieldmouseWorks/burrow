@@ -1,6 +1,6 @@
 //! The job contract, resolved after the login shell and GitHub App environment.
 //! Engine adapters render this data; they do not invent additional grants.
-use super::sandbox::{self, Env, Machine};
+use super::machine::{self, Env, Machine};
 use crate::{
     config::{Config, McpServer},
     job::Job,
@@ -59,11 +59,6 @@ pub struct Capabilities {
     repository: bool,
 }
 impl Capabilities {
-    pub fn network(&self) -> bool {
-        self.items
-            .iter()
-            .any(|g| g.capability == Capability::Network)
-    }
     pub fn inherits_environment(&self) -> bool {
         self.items.iter().any(|g| g.inherit_environment)
     }
@@ -79,42 +74,6 @@ impl Capabilities {
     }
     pub fn servers(&self) -> BTreeMap<String, McpServer> {
         self.items.iter().flat_map(|g| g.servers.clone()).collect()
-    }
-    pub fn codex_flags(&self) -> Vec<String> {
-        let mut flags = Vec::new();
-        if !self.repository {
-            flags.push("--skip-git-repo-check".into());
-        }
-        flags.extend(["-c".into(), "strict_mcp_config=true".into()]);
-        for (name, value) in self.environment() {
-            flags.extend([
-                "-c".into(),
-                format!("shell_environment_policy.set.{}={}", name, quote(&value)),
-            ]);
-        }
-        let servers = self
-            .servers()
-            .into_iter()
-            .map(|(name, server)| {
-                // Granting a machine server includes calling it headlessly;
-                // approve only these declared servers, never a wildcard.
-                let env = server
-                    .env
-                    .iter()
-                    .map(|(key, value)| format!("{}={}", quote(key), quote(value)))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "{}={{command={},args={},env={{{env}}},default_tools_approval_mode=\"approve\"}}",
-                    quote(&name),
-                    quote(&server.command),
-                    serde_json::to_string(&server.args).expect("args")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        flags.extend(["-c".into(), format!("mcp_servers={{{servers}}}")]);
-        flags
     }
     pub fn claude_flags(&self) -> Vec<String> {
         let mut flags = vec![
@@ -138,9 +97,6 @@ impl Capabilities {
         ]);
         flags
     }
-}
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).expect("string")
 }
 fn var(env: Env, name: &str) -> Option<PathBuf> {
     env(name).filter(|v| !v.is_empty()).map(PathBuf::from)
@@ -178,7 +134,7 @@ pub fn resolve(
     for root in [&project, scratch, &job.dir, &cargo, &cache] {
         std::fs::create_dir_all(root)?;
     }
-    let mut system = sandbox::readable(env, machine)?;
+    let mut system = machine::readable(env, machine)?;
     system.extend(
         cfg.meters
             .iter()
@@ -306,7 +262,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.units_clear_socket = Some(dir.path().join("units/clear.sock"));
+        let clear_socket = dir.path().join("units/clear.sock");
+        cfg.units_clear_socket = Some(clear_socket.clone());
         cfg.tools.git = "git".into();
         let project = dir.path().join("project");
         let socket = dir.path().join("server-socket");
@@ -336,7 +293,7 @@ mod tests {
             }
             _ => None,
         };
-        let machine = sandbox::tests::machine_in(dir.path());
+        let machine = machine::tests::machine_in(dir.path());
         let grants = resolve(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
         let claude = grants.claude_flags();
         let config: serde_json::Value = serde_json::from_str(claude.last().unwrap()).unwrap();
@@ -358,22 +315,6 @@ mod tests {
         );
         assert!(claude.contains(&"--strict-mcp-config".to_owned()));
         assert!(claude.contains(&output.to_string_lossy().into_owned()));
-        let profile = sandbox::flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
-            .unwrap()
-            .flags
-            .join("\n");
-        assert!(profile.contains(r#"mcp_servers={"machine.ledger"={command="/bin/server""#));
-        assert!(
-            profile
-                .contains(r#"env={"EXTRA"="inherited","NIX_REMOTE"="daemon","SETTING"="value"}"#)
-        );
-        assert!(profile.contains("strict_mcp_config=true"));
-        assert!(profile.contains("default_tools_approval_mode=\"approve\""));
-        assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
-        assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
-        assert!(profile.contains(r#""/dev/kvm"="write""#));
-        let clear_socket = cfg.units_clear_socket.as_ref().unwrap();
-        assert!(profile.contains(&format!("\"{}\"=\"read\"", clear_socket.display())));
         let clear = grants
             .items
             .iter()
@@ -381,7 +322,6 @@ mod tests {
             .unwrap();
         assert_eq!(clear.paths, vec![(clear_socket.clone(), false)]);
         assert_eq!(grants.environment()["NIX_REMOTE"], "daemon");
-        // Both adapters take their environment from the same resolved contract.
         let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
         assert_eq!(settings["env"]["NIX_REMOTE"], "daemon");
         assert_eq!(
@@ -391,7 +331,6 @@ mod tests {
                 .to_string_lossy()
                 .as_ref()
         );
-        assert!(profile.contains("shell_environment_policy.set.PROJ_PROBE_SOCKET="));
         assert_eq!(
             settings["env"]["PROJ_HOST_JOBS_SOCKET"],
             dir.path()
@@ -399,7 +338,5 @@ mod tests {
                 .to_string_lossy()
                 .as_ref()
         );
-        assert!(profile.contains("shell_environment_policy.set.PROJ_HOST_JOBS_SOCKET="));
-        assert!(profile.contains("shell_environment_policy.set.PROJ_CAPABILITIES="));
     }
 }

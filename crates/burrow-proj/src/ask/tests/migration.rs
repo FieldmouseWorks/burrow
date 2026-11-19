@@ -332,26 +332,25 @@ fn a_released_question_keeps_its_original_deadline_and_policy_when_it_alone_move
 }
 
 #[test]
-fn upgrading_legacy_registry_members_captures_the_publication_not_a_preallocated_id() {
+fn identityless_questions_bind_the_publication_not_a_preallocated_id() {
     let (_dir, cfg) = fixture();
-    for id in ["a", "z"] {
+    let due = crate::now() + 321;
+    // Questions published before identities were embedded carry none.
+    for (id, since, one_way) in [("a", "200", true), ("z", "100", false)] {
         asks(&cfg, id, None, false);
         let job = Job::new(&cfg, id);
         let mut raw: serde_json::Value =
             serde_json::from_str(&read(&host_path(&job, "question")).unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("id");
-        raw["recommendation"]["about"] = serde_json::json!("legacy");
+        raw["due"] = serde_json::json!(due);
+        raw["recommendation"]["one_way"] = serde_json::json!(one_way);
         fs::write(host_path(&job, "question"), raw.to_string()).unwrap();
-        fs::write(host_path(&job, "question-about"), "legacy").unwrap();
+        fs::write(host_path(&job, "question-since"), since).unwrap();
     }
-    let root = control_root(&cfg).join(".about");
-    fs::create_dir_all(&root).unwrap();
-    let due = crate::now() + 321;
-    fs::write(
-        root.join("6c6567616379"),
-        serde_json::json!({"due":due,"one_way":true,"members":["a","z"]}).to_string(),
-    )
-    .unwrap();
+    assert_eq!(
+        merge(&cfg, "legacy", &["a".into(), "z".into()]).unwrap(),
+        "a"
+    );
     let leader = Job::new(&cfg, "a");
     let original = cohort(&leader).unwrap()[0].1.clone();
     fs::write(
@@ -362,7 +361,7 @@ fn upgrading_legacy_registry_members_captures_the_publication_not_a_preallocated
     assert_eq!(cohort(&leader).unwrap()[0].1, original);
     merge(&cfg, "next", &["z".into()]).unwrap();
     policy(&cfg, "z", due);
-    // Upgrade a legacy publication in place, preserving order and deadline.
+    // Upgrade an identityless publication in place, keeping its deadline.
     redeclare(&cfg, "a", None);
     policy(&cfg, "a", due);
     assert!(follows(&leader).unwrap().is_none());
