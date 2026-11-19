@@ -45,5 +45,6 @@ lib.genAttrs [
   "autoland.askAsOwner.perDay"
   "autoland.repos"
   "github.machinery"
+  "landing.conaryd"
   "updates.renovate.app"
 ] read

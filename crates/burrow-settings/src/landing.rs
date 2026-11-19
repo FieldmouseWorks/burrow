@@ -113,7 +113,11 @@ mod tests {
         let h = record.holding("Sam/Box");
         assert!(h.lands(Owner::Steward));
         assert!(!h.lands(Owner::Conaryd));
-        std::fs::write(&path, b"{\"repos\": {\"sam/box\": {\"owner\": \"nobody\"}}}").unwrap();
+        std::fs::write(
+            &path,
+            b"{\"repos\": {\"sam/box\": {\"owner\": \"nobody\"}}}",
+        )
+        .unwrap();
         assert!(Record::read(&path).is_err());
     }
 
@@ -149,5 +153,114 @@ mod tests {
         let back = Record::read(&path).unwrap();
         assert_eq!(back, record);
         assert!(back.holding("SAM/Box").lands(Owner::Conaryd));
+    }
+
+    fn config(dir: &Path) -> crate::Config {
+        crate::Config {
+            overlay: dir.join("overlay.json"),
+            allowed: vec!["sam/box".into(), "sam/web".into()],
+            landing_record: Some(dir.join("owners.json")),
+            conaryd: vec!["Sam/Box".into()],
+            ..Default::default()
+        }
+    }
+
+    fn say(cfg: &crate::Config, words: &[&str]) -> Result<String, String> {
+        let args: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        cfg.command(&args, "test")
+    }
+
+    #[test]
+    fn only_a_repo_conaryd_has_a_configuration_for_goes_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        assert!(say(&cfg, &["landing", "sam/web", "conaryd"]).is_err());
+        assert!(cfg.landing_owners().unwrap().is_empty());
+        say(&cfg, &["landing", "SAM/box", "conaryd"]).unwrap();
+        assert_eq!(
+            cfg.landing_owners().unwrap().get("sam/box"),
+            Some(&Owner::Conaryd)
+        );
+        // Setting it doesn't move it: the record does, once burrow-landing
+        // has seen the steward let go.
+        assert!(
+            cfg.decision("sam/box")
+                .unwrap()
+                .landing
+                .lands(Owner::Steward)
+        );
+        // Taken off conaryd's list at a deploy, it's the steward's again.
+        let narrower = crate::Config {
+            conaryd: vec![],
+            ..cfg.clone()
+        };
+        assert!(narrower.landing_owners().unwrap().is_empty());
+        say(&cfg, &["landing", "sam/box", "steward"]).unwrap();
+        assert!(cfg.landing_owners().unwrap().is_empty());
+        assert!(crate::valid_command(&[
+            "landing".into(),
+            "sam/box".into(),
+            "conaryd".into()
+        ]));
+        assert!(!crate::valid_command(&[
+            "landing".into(),
+            "sam/box".into(),
+            "nobody".into()
+        ]));
+    }
+
+    #[test]
+    fn the_decision_carries_the_record_and_an_unreadable_one_stops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut record = Record::default();
+        let held = Holding {
+            owner: Owner::Conaryd,
+            to: None,
+            generation: 4,
+            since: 1,
+        };
+        record.repos.insert("sam/box".into(), held);
+        record.write(&dir.path().join("owners.json")).unwrap();
+        assert_eq!(cfg.decision("Sam/Box").unwrap().landing, held);
+        assert!(
+            cfg.decision("sam/web")
+                .unwrap()
+                .landing
+                .lands(Owner::Steward)
+        );
+        assert!(cfg.show().unwrap().contains("sam/box by conaryd"));
+        std::fs::write(dir.path().join("owners.json"), b"not json").unwrap();
+        assert!(cfg.decision("sam/web").is_err());
+    }
+
+    #[test]
+    fn no_handoff_to_the_steward_where_it_doesnt_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let head = "a".repeat(40);
+        for holding in [
+            Holding {
+                owner: Owner::Conaryd,
+                to: None,
+                generation: 1,
+                since: 0,
+            },
+            Holding {
+                owner: Owner::Steward,
+                to: Some(Owner::Conaryd),
+                generation: 1,
+                since: 0,
+            },
+        ] {
+            let mut record = Record::default();
+            record.repos.insert("sam/box".into(), holding);
+            record.write(&dir.path().join("owners.json")).unwrap();
+            assert!(say(&cfg, &["land", "sam/box#3", &head]).is_err());
+        }
+        Record::default()
+            .write(&dir.path().join("owners.json"))
+            .unwrap();
+        say(&cfg, &["land", "sam/box#3", &head]).unwrap();
     }
 }

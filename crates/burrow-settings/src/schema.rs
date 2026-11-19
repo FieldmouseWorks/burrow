@@ -138,6 +138,7 @@ const OVERLAY: &str = "settings/overlay.json";
 /// Role routing and tuning, beside it under the same lock (roles::store).
 const ROLES_OVERLAY: &str = "settings/overlay.roles.json";
 const REPOS: Kind = Kind::List(&Kind::Repo);
+const LANDING_OWNER: Kind = Kind::OneOf(&["steward", "conaryd"]);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
 const ENGINE: Kind = Kind::OneOf(&["claude"]);
@@ -356,6 +357,21 @@ pub static SETTINGS: &[Setting] = &[
         "null",
         OVERLAY,
         "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
+    ),
+    // Who lands each repo's PRs: the steward or conaryd (Conary#313).
+    flake(
+        "landing.conaryd",
+        &REPOS,
+        Is("[]"),
+        "landing",
+        "Repos conaryd has a flow configuration for, and so may be given with settings landing OWNER/REPO conaryd; none is given to it by being listed.",
+    ),
+    live(
+        "settings.landing",
+        &Kind::Map(&LANDING_OWNER),
+        "{}",
+        OVERLAY,
+        "Each repo's configured landing owner where it isn't the steward (settings landing OWNER/REPO steward|conaryd). burrow-landing moves a repo once the one holding it has let go of its work there.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.
     flake(

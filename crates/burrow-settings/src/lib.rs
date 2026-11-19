@@ -25,6 +25,15 @@ pub struct Config {
     pub allowed: Vec<String>,
     #[serde(default)]
     pub pipeline_repos: Vec<String>,
+    /// Who holds each repo's landing now (landing::Record), written by
+    /// burrow-landing; null on a machine with no conaryd to hand one to,
+    /// where every repo is the steward's.
+    #[serde(default)]
+    pub landing_record: Option<PathBuf>,
+    /// The repos `landing OWNER/REPO conaryd` may give to conaryd: those it
+    /// has a flow configuration for (burrow.landing.conaryd).
+    #[serde(default)]
+    pub conaryd: Vec<String>,
 }
 
 /// A scheduling decision and its next change without another external event.
@@ -37,6 +46,9 @@ pub struct Decision {
     /// The repo's PRs handed to the steward while it's paused: each lets
     /// that one PR, at that one head, settle and land, and nothing else.
     pub handed: Vec<Handed>,
+    /// Who holds the repo's landing now: the steward lands nothing unless
+    /// it's `owner` with no handover under way.
+    pub landing: landing::Holding,
 }
 
 /// One PR a trusted request handed to the steward despite its repo's pause
@@ -64,6 +76,11 @@ struct Overlay {
     /// a generation that predates handoffs still reads the overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     handoffs: BTreeMap<String, Handed>,
+    /// Each repo's configured landing owner where it isn't the steward,
+    /// keyed lowercase (`landing OWNER/REPO conaryd`). Left out when empty,
+    /// as handoffs are.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    landing: BTreeMap<String, landing::Owner>,
 }
 
 /// `OWNER/REPO#N` as its handoff key, lowercase, and its parts.
@@ -87,6 +104,7 @@ fn commit(head: &str) -> bool {
 pub struct Snapshot {
     config: Config,
     state: Overlay,
+    record: landing::Record,
     at: i64,
 }
 
@@ -107,6 +125,7 @@ impl Snapshot {
                 .pipeline_until
                 .filter(|t| !allowed && *t > self.at),
             handed: handed(&self.state, repo),
+            landing: self.record.holding(repo),
         }
     }
 }
@@ -163,6 +182,9 @@ pub fn valid_command(args: &[String]) -> bool {
         ["show" | "back"] => true,
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["land", target, head] => handoff(target).is_some() && commit(head),
+        ["landing", repo, owner] => {
+            burrow_github::repo_name(repo) && landing::Owner::parse(owner).is_some()
+        }
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         ["credit", rest @ ..] => credit::valid(rest),
         _ => false,
@@ -179,8 +201,34 @@ impl Config {
         ))
     }
 
+    /// The configured landing owners as the overlay keeps them, for
+    /// `proj settings show`.
+    pub fn landing_set(&self) -> Result<BTreeMap<String, landing::Owner>, String> {
+        Ok(self.read()?.landing)
+    }
+
     fn read(&self) -> Result<Overlay, String> {
         live::read(&self.overlay)
+    }
+
+    /// Who holds landing now: every repo the steward's with no record kept.
+    pub fn record(&self) -> Result<landing::Record, String> {
+        self.landing_record
+            .as_deref()
+            .map_or(Ok(landing::Record::default()), landing::Record::read)
+    }
+
+    /// Each repo's configured landing owner other than the steward. One
+    /// given to conaryd that's no longer among the repos it may have
+    /// (`conaryd`) is the steward's again.
+    pub fn landing_owners(&self) -> Result<BTreeMap<String, landing::Owner>, String> {
+        let mut owners = self.read()?.landing;
+        owners.retain(|repo, owner| *owner != landing::Owner::Conaryd || self.may_have(repo));
+        Ok(owners)
+    }
+
+    fn may_have(&self, repo: &str) -> bool {
+        self.conaryd.iter().any(|r| r.eq_ignore_ascii_case(repo))
     }
 
     /// Read again on every admission, including a long-lived reader's next job.
@@ -198,6 +246,7 @@ impl Config {
         Ok(Snapshot {
             config: self.clone(),
             state: self.read()?,
+            record: self.record()?,
             at: now(),
         })
     }
@@ -261,8 +310,29 @@ impl Config {
             .iter()
             .map(|(pr, h)| format!("{pr} at {}", &h.head[..7]))
             .collect();
+        let record = self.record()?;
+        let mut landing: BTreeMap<String, String> = record
+            .repos
+            .iter()
+            .filter(|(_, h)| h.owner != landing::Owner::Steward || h.to.is_some())
+            .map(|(repo, h)| {
+                let to = h.to.map_or(String::new(), |to| {
+                    format!(", handing over to {}", to.name())
+                });
+                (repo.clone(), format!("{repo} by {}{to}", h.owner.name()))
+            })
+            .collect();
+        for (repo, owner) in self.landing_owners()? {
+            let h = record.holding(&repo);
+            if h.owner != owner && h.to != Some(owner) {
+                landing.insert(
+                    repo.clone(),
+                    format!("{repo} by {}, set to {}", h.owner.name(), owner.name()),
+                );
+            }
+        }
         Ok(format!(
-            "Automated work: {}; allowed: {}; paused: {}; all unlisted repos paused (including new repos){}\n",
+            "Automated work: {}; allowed: {}; paused: {}; all unlisted repos paused (including new repos){}{}\n",
             scoped.map_or("allow list".into(), |t| format!("pipeline-only until {t}")),
             allowed.join(", "),
             paused.join(", "),
@@ -270,6 +340,14 @@ impl Config {
                 String::new()
             } else {
                 format!("; handed to the steward: {}", handed.join(", "))
+            },
+            if landing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; landed by conaryd or handing over: {}; every other repo by the steward",
+                    landing.into_values().collect::<Vec<_>>().join(", ")
+                )
             }
         ))
     }
@@ -333,7 +411,15 @@ impl Config {
                         state.repos.insert(repo, *verb == "allow");
                     }
                     ["land", target, head] if commit(head) => {
-                        let (key, _, n) = handoff(target).ok_or("land needs OWNER/REPO#N")?;
+                        let (key, repo, n) = handoff(target).ok_or("land needs OWNER/REPO#N")?;
+                        // A handoff is the steward landing a PR: never in a
+                        // repo it doesn't hold, or two would land there.
+                        if !self.record()?.holding(&repo).lands(landing::Owner::Steward) {
+                            return Err(format!(
+                                "{repo}'s landing isn't the steward's (settings show says whose): \
+                                 a handoff would have the steward land beside it"
+                            ));
+                        }
                         let head = head.to_ascii_lowercase();
                         state.handoffs.insert(
                             key.clone(),
@@ -364,6 +450,30 @@ impl Config {
                         }
                         state.handoffs.remove(&key);
                     }
+                    ["landing", repo, owner] if burrow_github::repo_name(repo) => {
+                        let owner = landing::Owner::parse(owner)
+                            .ok_or("landing needs OWNER/REPO steward|conaryd")?;
+                        let repo = repo.to_ascii_lowercase();
+                        if owner == landing::Owner::Conaryd && !self.may_have(&repo) {
+                            return Err(format!(
+                                "conaryd has no flow configuration for {repo}: add it to burrow.landing.conaryd first"
+                            ));
+                        }
+                        if owner == landing::Owner::Steward {
+                            state.landing.remove(&repo);
+                        } else {
+                            state.landing.insert(repo.clone(), owner);
+                        }
+                        return Ok(Some(format!(
+                            "{repo}'s landing goes to the {}: the one holding it lets go of its work there first, \
+                             and neither lands meanwhile. settings show says where it stands.",
+                            if owner == landing::Owner::Conaryd {
+                                "conaryd flow"
+                            } else {
+                                "steward"
+                            }
+                        )));
+                    }
                     ["pipeline", until] => {
                         let t: i64 = until
                             .parse()
@@ -376,7 +486,9 @@ impl Config {
                     ["back"] => state.pipeline_until = None,
                     _ => {
                         return Err(format!(
-                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | pipeline UNTIL | back\n{}\n{}",
+                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | landing OWNER/REPO steward|conaryd | pipeline UNTIL | back
+{}
+{}",
                             roles::USAGE,
                             credit::USAGE
                         ));

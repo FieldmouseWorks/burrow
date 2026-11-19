@@ -307,6 +307,7 @@ in
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     (import ./autoland/review-ask.nix inputs)
+    (import ./autoland/landing.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     # The heavy slots its proof builds take, where the machine has them.
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
@@ -671,6 +672,22 @@ in
         settings: the flow's only one, where its plugins read its settings
         (a proof's recipe). One set by hand (CONARY_FLOW_CONFIG) is refused
         (burrow.ledger).
+      '';
+    };
+
+    flow = mkOption {
+      type = types.attrsOf types.anything;
+      readOnly = true;
+      internal = true;
+      default = {
+        inherit credentials;
+        token = "${steward}/bin/autoland-steward token";
+        config = shadow.file;
+      };
+      description = ''
+        What runs Conary's flow as the steward's App (autoland/landing.nix):
+        the credentials its token reads, the token's command, and each
+        shadowed repo's flow configuration by name.
       '';
     };
 

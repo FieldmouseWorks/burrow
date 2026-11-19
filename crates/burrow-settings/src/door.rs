@@ -56,7 +56,7 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
             _ => Vec::new(),
         };
         let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, pipeline TIMESTAMP, back, credit BUDGET RENEWS MONTHLY RESERVE or credit off.".into()
+            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, landing OWNER/REPO steward|conaryd, pipeline TIMESTAMP, back, credit BUDGET RENEWS MONTHLY RESERVE or credit off.".into()
         } else {
             cfg.settings.request(
                 &receipt,

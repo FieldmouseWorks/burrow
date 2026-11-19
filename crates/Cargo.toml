@@ -23,6 +23,7 @@ members = [
     "burrow-health",
     "burrow-heartbeat",
     "burrow-heavy",
+    "burrow-landing",
     "burrow-house",
     "burrow-judge",
     "burrow-keep",

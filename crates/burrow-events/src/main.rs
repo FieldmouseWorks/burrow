@@ -37,7 +37,9 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let text = fs::read(&path).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
     let cfg: Config =
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
+    let cfg = cfg.wire();
     check_yields(&cfg.handlers).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
+    let landing = cfg.landing;
     let handlers: Handlers = Arc::new(cfg.handlers);
     let lines: Lines = Arc::new(
         handlers
@@ -59,8 +61,11 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
             .trim()
             .to_owned();
         let (h, l) = (handlers.clone(), lines.clone());
-        let (port, t) = http::listen(port, Arc::new(move |req| delivery(&h, &l, &secret, req)))
-            .map_err(|e| format!("deliveries: {e}"))?;
+        let (port, t) = http::listen(
+            port,
+            Arc::new(move |req| delivery(&h, &l, landing.as_ref(), &secret, req)),
+        )
+        .map_err(|e| format!("deliveries: {e}"))?;
         eprintln!("deliveries on 127.0.0.1:{port}");
         threads.push(("deliveries".to_owned(), t));
     }
