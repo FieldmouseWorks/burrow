@@ -154,6 +154,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("and over the vhost's HTTPS path"):
         on.wait_for_unit("nginx.service")
+        on.wait_for_open_port(443)
         assert status(on, "${nodes.on.burrow.ledger.gateReuse.url}") in ("400", "401")
         assert "${nodes.on.burrow.ledger.gateReuse.url}" == "https://example.org/conary/gate-reuse"
 
