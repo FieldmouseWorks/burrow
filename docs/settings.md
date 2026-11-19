@@ -177,8 +177,8 @@ micro-dollars. `burrow_probe::credit::meter` reads it on the machine: the
 setting, and each `claude-api` turn's cost from proj's job records, decoded by
 the usage answer's accounting with every Claude Code turn of a job in order,
 so a session carried over from the subscription is charged only its own part.
-The probe's `usage` answer shows it, and launch admission and routing read
-the same function. Anything it can't read is no room, and so is a
+The probe's `usage` answer shows it; launch admission and routing are to
+read the same function once the `claude-api` engine and its routing land. Anything it can't read is no room, and so is a
 `claude-api` turn of the cycle whose cost isn't recorded yet (still running,
 or stopped before its result and not yet accounted for by a later run of its
 session): the meter says so beside the numbers it knows, and those turns

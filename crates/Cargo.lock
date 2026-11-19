@@ -844,7 +844,7 @@ dependencies = [
  "burrow-door",
  "burrow-github",
  "burrow-test",
- "jiff",
+ "jiff 1.0.1",
  "serde",
  "serde_json",
  "sha2",

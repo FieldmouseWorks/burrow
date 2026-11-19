@@ -202,12 +202,12 @@ pub struct Cycle {
 
 fn utc_day(at: i64) -> Result<Date, String> {
     Timestamp::from_second(at)
-        .map(|t| t.to_zoned(TimeZone::UTC).date())
+        .map(|t| t.to_zoned_datetime(TimeZone::UTC).date())
         .map_err(|e| format!("{at}: {e}"))
 }
 
 fn midnight(day: Date) -> Result<i64, String> {
-    day.to_zoned(TimeZone::UTC)
+    day.to_zoned_datetime(TimeZone::UTC)
         .map(|z| z.timestamp().as_second())
         .map_err(|e| format!("{day}: {e}"))
 }

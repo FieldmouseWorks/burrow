@@ -2,7 +2,8 @@
 //! setting and meter, over the cycle's [`ENGINE`] turn costs that proj
 //! recorded in its jobs, decoded by the same accounting the usage answer
 //! uses (answer/usage/accounting.rs). The probe's `usage` answer shows it,
-//! and proj's admission and routing read the same [`meter`].
+//! and proj's admission and routing are to read the same [`meter`] once the
+//! engine and its routing land.
 //!
 //! Strict where the usage answer is tolerant: anything about a job with an
 //! [`ENGINE`] turn that can't be read (its folder, a turn's engine, start

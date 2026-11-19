@@ -110,7 +110,7 @@ fn every_option_shown_comes_from_the_schema() {
     );
     crate::usage::hold(&cfg, crate::now() + 3600, "save usage").unwrap();
     let renews = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
         .checked_add(jiff::ToSpan::days(10))
         .unwrap()
