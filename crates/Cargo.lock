@@ -802,6 +802,7 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-process",
  "burrow-test",
  "jiff 1.0.1",
  "md-5",

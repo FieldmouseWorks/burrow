@@ -13,8 +13,22 @@ fn a_major_without_a_verdict_goes_to_a_job_that_is_told_what_to_trust() {
     // its own slot where the repo is one of the pipeline's own (proj
     // decides).
     assert_eq!(
-        p.jobs[0][..5],
-        ["run", "--pipeline", "--role", "renovate-sweep", "r"]
+        p.jobs[0][..4],
+        ["run", "--pipeline", "--role", "renovate-sweep"]
+    );
+    // Named by a key of its own, kept beside the PR's, and each of its
+    // turns' ends brings the repo's pass again.
+    let handover = m.key(1, ".job");
+    assert!(handover.starts_with("renovate-sweep/sam/r/"), "{handover}");
+    assert_eq!(
+        p.jobs[0][4..9],
+        [
+            "--key",
+            handover.trim_end(),
+            "--kick",
+            "renovate-sweep/sam/r",
+            "r"
+        ]
     );
     let task = p.task();
     assert!(task.starts_with("Renovate's PRs in sam/r can't merge themselves:\n- #1 \"Update foo1 to v2\" (branch renovate/foo1-2.x): a major version bump\nMake them"), "{task}");
@@ -56,7 +70,7 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
     m.prs(&[pr(1)]);
     let p = m.pass();
     assert_eq!(
-        p.jobs[0][..7],
+        p.jobs[0][..6],
         [
             "run",
             "--pipeline",
@@ -64,9 +78,9 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
             "renovate-sweep",
             "--app",
             "workers",
-            "r"
         ]
     );
+    assert_eq!(p.jobs[0][10], "r");
     assert!(
         !p.log.iter().any(|l| l.starts_with("gh api user")),
         "{:#?}",
@@ -614,4 +628,69 @@ fn the_job_is_told_how_the_stewards_proofs_run_wherever_it_has_them() {
         p.task()
             .contains("and push to the same branch. Leave its review threads")
     );
+}
+
+#[test]
+fn a_pr_whose_job_is_still_at_work_goes_to_no_other() {
+    // burrow#1194: CI finishing again on a major's head, or the job's own
+    // push, while its job was at work brought a second job onto the branch.
+    let m = Machine::new();
+    m.prs(&[at(pr(14), "2099-01-01T01:00:00Z")]);
+    assert_eq!(m.pass().jobs.len(), 1);
+    let kept = m.key(14, "");
+    let mut pushed = at(red(14), "2099-01-01T03:00:00Z");
+    pushed["headRefOid"] = "f".repeat(40).into();
+    // Queued, running, parked, or ended holding something open: an await
+    // (on this PR or any), a question.
+    for life in [
+        "queued\n",
+        "running\n",
+        "parked\n",
+        "done\nawait https://github.com/sam/r/pull/14\n",
+        "done\nask\n",
+    ] {
+        m.set("life-id-1", life);
+        for now in [at(pr(14), "2099-01-01T02:00:00Z"), pushed.clone()] {
+            m.prs(&[now]);
+            let p = m.pass();
+            assert!(p.jobs.is_empty(), "{life}: {:#?}", p.jobs);
+            assert!(
+                p.out.contains("sam/r#14: its job id-1 is still at work"),
+                "{}",
+                p.out
+            );
+            assert!(
+                p.log.contains(&"proj lifecycle id-1".to_string()),
+                "{:#?}",
+                p.log
+            );
+        }
+        // What it was handed over for stays as it was, so the pass after
+        // the job ends reads the PR afresh.
+        assert_eq!(m.key(14, ""), kept);
+    }
+    // Ended, it holds nothing: what's still to do goes to the next job.
+    m.set("life-id-1", "done\n");
+    let p = m.pass();
+    assert!(p.task().contains("#14 ") && p.task().contains("its CI fails"));
+    // A job that never started is none: its key finds nothing.
+    let m = Machine::new();
+    m.prs(&[red(15)]);
+    m.set("proj-fails", "");
+    assert_eq!(m.sweep(&[]).code, Some(1));
+    assert_eq!(m.key(15, ".job"), "");
+    m.keep(15, ".job", "renovate-sweep/sam/r/0-0\n");
+    m.unset("proj-fails");
+    assert!(m.pass().task().contains("#15 "));
+    // Nothing can say how it stands: the pass fails, and hands it to no one.
+    m.prs(&[{
+        let mut p = red(15);
+        p["headRefOid"] = "e".repeat(40).into();
+        p
+    }]);
+    m.set("life-fails", "");
+    let p = m.sweep(&[]);
+    assert_eq!(p.code, Some(1));
+    assert!(p.jobs.is_empty(), "{:#?}", p.jobs);
+    assert!(p.err.contains("proj lifecycle id-1 can't say"), "{}", p.err);
 }

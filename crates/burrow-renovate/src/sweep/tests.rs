@@ -51,3 +51,22 @@ fn a_request_taken_back_is_its_head_tries_and_when() {
         dir.path().join("k.released")
     );
 }
+
+#[test]
+fn a_handovers_key_is_one_proj_takes_and_no_other_has() {
+    // proj run --key's rule (burrow-proj's key_name): letters, digits and
+    // ._/:-, starting with a letter or digit, at most 200.
+    let k = job::key("Sam-1/a_b.c-d");
+    assert!(k.starts_with("renovate-sweep/Sam-1/a.b.c-d/"), "{k}");
+    assert!(k.len() <= 200);
+    assert!(
+        k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/:-".contains(&b)),
+        "{k}"
+    );
+    assert_ne!(k, job::key("Sam-1/a_b.c-d"));
+    assert_eq!(
+        job::path(Path::new("/s/sam_r-1")),
+        Path::new("/s/sam_r-1.job")
+    );
+}
