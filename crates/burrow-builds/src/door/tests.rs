@@ -12,10 +12,10 @@ const A: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a";
 const CN: &str = r#"#!/bin/sh
 printf '%s\n' "$@" >"$(dirname "$0")/args"
 case "$(cat)" in
-  public) echo '{"repository":"o/r","visibility":"public"}' ;;
-  private) echo '{"repository":"o/p","visibility":"private"}' ;;
-  refused) echo "cn: the job's token doesn't hold: its token expired" >&2; exit 65 ;;
-  busy) exit 75 ;;
+  *public) echo '{"repository":"o/r","visibility":"public"}' ;;
+  *private) echo '{"repository":"o/p","visibility":"private"}' ;;
+  *refused) printf "cn: the job's token doesn't hold:\nits token expired" >&2; exit 65 ;;
+  *busy) exit 75 ;;
 esac
 "#;
 
@@ -71,6 +71,25 @@ fn ask(d: &Door, req: &[u8]) -> (u16, String) {
     let out = String::from_utf8(out).unwrap();
     let status = out[9..12].parse().unwrap();
     (status, out)
+}
+
+/// nginx's check of a head carrying `token`, which says how long a body
+/// follows and sends none: the status and the whole answer.
+fn check(d: &Door, token: Option<&str>) -> (u16, String) {
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let req =
+        format!("GET /upload HTTP/1.0\r\nHost: builds\r\n{auth}Content-Length: 1073741824\r\n\r\n");
+    let mut out = Vec::new();
+    serve_admit(&d.cfg, &mut Cursor::new(req.into_bytes()), &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    (out[9..12].parse().unwrap(), out)
+}
+
+/// A job's token as GitHub shapes one, its payload claiming `aud`, its
+/// signature what the stand-in cn reads.
+fn jwt(aud: &str, sig: &str) -> String {
+    let payload = json!({ "aud": aud, "repository": "o/r" }).to_string();
+    format!("e30.{}.{sig}", URL_SAFE_NO_PAD.encode(payload))
 }
 
 fn cn_args(d: &Door) -> Vec<String> {
@@ -149,4 +168,98 @@ fn a_nar_that_isnt_its_manifests_or_a_bad_request_is_refused() {
     ]
     .concat();
     assert_eq!(ask(&d, &req).0, 400);
+}
+
+#[test]
+fn the_check_asks_cn_with_the_audience_the_token_claims_and_reads_no_body() {
+    let d = door();
+    let aud = audience(b"{\"paths\":[]}");
+    let (status, out) = check(&d, Some(&jwt(&aud, "public")));
+    assert_eq!(status, 200, "{out}");
+    assert!(!out.contains("Burrow-Refused"), "{out}");
+    assert_eq!(
+        cn_args(&d),
+        [
+            "attest",
+            "job",
+            "--audience",
+            &aud,
+            "--repo",
+            "o/r",
+            "--repo",
+            "o/p"
+        ]
+    );
+}
+
+#[test]
+fn the_check_refuses_what_cn_refuses_with_its_reason_in_one_header() {
+    let d = door();
+    let aud = audience(b"{\"paths\":[]}");
+    for (sig, status, says) in [
+        ("refused", 403, "its token expired"),
+        ("private", 403, "o/p is private"),
+        ("busy", 503, "try again"),
+    ] {
+        let (got, out) = check(&d, Some(&jwt(&aud, sig)));
+        assert_eq!(got, status, "{sig}: {out}");
+        let header = out
+            .lines()
+            .find_map(|l| l.strip_prefix("Burrow-Refused: "))
+            .unwrap_or_else(|| panic!("{sig}: no Burrow-Refused: {out}"));
+        let v: Value = serde_json::from_str(header.trim_end()).unwrap();
+        assert!(
+            v["refused"].as_str().unwrap().contains(says),
+            "{sig}: {header}"
+        );
+    }
+}
+
+#[test]
+fn the_check_refuses_no_token_or_one_that_claims_no_uploads_audience_without_cn() {
+    let d = door();
+    let (status, out) = check(&d, None);
+    assert_eq!(status, 401, "{out}");
+    assert!(
+        out.contains("Burrow-Refused: {\"refused\":\"an upload carries"),
+        "{out}"
+    );
+    let aud = audience(b"{}");
+    for token in [
+        "public".to_owned(),
+        "a.b.public".to_owned(),
+        jwt("burrow-builds:v1:sha256:00", "public"),
+        jwt(&aud.to_uppercase(), "public"),
+        jwt(&format!("{aud} --repo x/y"), "public"),
+        format!(
+            "e30.{}.public",
+            URL_SAFE_NO_PAD.encode(json!({"aud": [aud]}).to_string())
+        ),
+    ] {
+        let (status, out) = check(&d, Some(&token));
+        assert_eq!(status, 403, "{token}: {out}");
+    }
+    assert!(!d._dir.path().join("args").exists(), "cn was asked");
+}
+
+#[test]
+fn a_long_reason_is_cut_to_fit_nginxs_head() {
+    let d = door();
+    let cn = d._dir.path().join("cn");
+    burrow_test::executable(
+        &cn,
+        "#!/bin/sh\nyes 'é too long' | head -c 100000 >&2; exit 65\n",
+    );
+    let (status, out) = check(&d, Some(&jwt(&audience(b"{}"), "x")));
+    assert_eq!(status, 403);
+    let header = out
+        .lines()
+        .find(|l| l.starts_with("Burrow-Refused: "))
+        .unwrap();
+    assert!(
+        header.len() <= MOST_REASON + "Burrow-Refused: ".len(),
+        "{}",
+        header.len()
+    );
+    assert!(header.contains("too long"), "{header}");
 }

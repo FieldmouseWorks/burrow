@@ -4,7 +4,10 @@
 #
 # Reading is public and static. Writing goes through the door
 # (crates/burrow-builds): a run POSTs its manifest, NARs and its job's own
-# GitHub OIDC token to PATH/upload, nginx hands the request to one
+# GitHub OIDC token to PATH/upload. Before nginx takes the body it asks a
+# door of its own (`auth_request`, from the head alone) whether the token
+# is a listed public repo's job's, so a client without one is refused
+# before nginx buffers a byte. Then nginx hands the request to one
 # socket-activated door, and the door asks Conary (`cn attest job`, as the
 # ledger's writers run cn) whether the job may sign, then takes only a public repo
 # this machine lists, and writes each NAR only once its hash is the
@@ -21,6 +24,13 @@ let
   app = config.burrow.github.machineApp;
   keyDir = "${config.burrow.stateDir}/builds-key";
   socket = "/run/burrow-builds/door.sock";
+  # Its own, so uploads parked on the store's lock never hold every check
+  # off: each upload takes one of each in turn, never both at once.
+  admitSocket = "/run/burrow-builds/admit.sock";
+  # A refused upload's body, which nginx reads and drops, buffering none:
+  # a run that sends all of it before it reads (burrow-keep) hears why,
+  # rather than nginx closing on it after the default 30s.
+  refusedBody = "lingering_time 5m;";
   path = lib.removeSuffix "/" cfg.path;
 
   # The directories above `dir` this config declares owned by a user other
@@ -133,7 +143,11 @@ in
     maxUpload = mkOption {
       type = types.str;
       default = "20g";
-      description = "The largest upload nginx takes (its client_max_body_size).";
+      description = ''
+        The largest upload nginx takes (its client_max_body_size) from a
+        job whose token the door has already checked from the request's
+        head: a client without one is refused before nginx reads its body.
+      '';
     };
 
     repos = mkOption {
@@ -217,6 +231,34 @@ in
       };
     };
 
+    # nginx's check of an upload's head, before it takes the body: quick,
+    # and with nothing of the store's to write.
+    systemd.sockets."${account}-admit" = {
+      description = "The build store's check of an upload's token";
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ admitSocket ];
+      socketConfig = {
+        Accept = true;
+        SocketUser = account;
+        SocketGroup = config.services.nginx.group;
+        SocketMode = "0660";
+        MaxConnections = 8;
+      };
+    };
+
+    systemd.services."${account}-admit@" = {
+      description = "A check of an upload's token";
+      serviceConfig = hardening // {
+        ExecStart = "${lib.getExe package} admit ${configFile}";
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        # cn asks GitHub, and the App's token socket.
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        RuntimeMaxSec = "2min";
+      };
+    };
+
     systemd.services."${account}@" = {
       description = "An upload to the build store";
       requires = [ "${account}-init.service" ];
@@ -254,6 +296,13 @@ in
         "= ${path}/upload" = {
           proxyPass = "http://unix:${socket}:";
           extraConfig = ''
+            # The token, from the head, before nginx reads the body; the door
+            # holds it to the manifest once it has that.
+            auth_request ${path}/upload-admit;
+            auth_request_set $burrow_builds_admit $upstream_status;
+            auth_request_set $burrow_builds_refused $upstream_http_burrow_refused;
+            error_page 401 403 500 = @burrow_builds_refused;
+            ${refusedBody}
             client_max_body_size ${cfg.maxUpload};
             proxy_request_buffering on;
             proxy_http_version 1.0;
@@ -263,6 +312,35 @@ in
             proxy_read_timeout 2h;
           '';
         };
+        "= ${path}/upload-admit" = {
+          proxyPass = "http://unix:${admitSocket}:";
+          extraConfig = ''
+            internal;
+            # It sees the upload's Content-Length but never its body.
+            client_max_body_size 0;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_http_version 1.0;
+            proxy_send_timeout 2m;
+            proxy_read_timeout 2m;
+          '';
+        };
+        # auth_request passes on only a 401 or 403, with no body, and makes
+        # anything else a 500: this gives the client the door's own answer.
+        # A door that couldn't be asked is one to try again, as cn's GitHub
+        # away is; a 500 the door didn't give is nginx's own.
+        "@burrow_builds_refused".extraConfig = ''
+          default_type application/json;
+          ${refusedBody}
+          if ($burrow_builds_admit = 401) { return 401 "$burrow_builds_refused\n"; }
+          if ($burrow_builds_admit = 403) { return 403 "$burrow_builds_refused\n"; }
+          if ($burrow_builds_admit = 500) { return 500 "$burrow_builds_refused\n"; }
+          if ($burrow_builds_admit = 503) { return 503 "$burrow_builds_refused\n"; }
+          if ($burrow_builds_admit ~ "^50[24]") {
+            return 503 "{\"refused\":\"the door that checks a token is busy or down; try again\"}\n";
+          }
+          return 500 "{\"refused\":\"nginx failed the upload: its log says why\"}\n";
+        '';
       };
     };
     # nginx's own unit writes only where it's let. Optional (`-`): with
