@@ -1,11 +1,10 @@
-//! A turn on an engine whose conversation hasn't seen all of the job. Each
-//! engine resumes its own conversation, so when a role edit, an overflow
-//! or the meter moves a job from one to the other, in either direction,
-//! the one taking the turn is first given what it missed: every turn since
-//! its conversation's last (all of them, when it has none), each with what
-//! it was asked (the brief, a reply, a watcher's news), always whole, and
-//! what it answered. Its work in the repo is where those turns left it, and
-//! each turn's transcript is named, for whatever its answer leaves out.
+//! A turn whose conversation hasn't seen all of the job. Each engine resumes
+//! its own conversation, so a turn that starts without one (lost, or the job
+//! ran elsewhere) is first given what it missed: every turn since its
+//! conversation's last (all of them, when it has none), each with what it
+//! was asked (the brief, a reply, a watcher's news), always whole, and what
+//! it answered. Its work in the repo is where those turns left it, and each
+//! turn's transcript is named, for whatever its answer leaves out.
 
 #[cfg(test)]
 use std::fs;
@@ -21,8 +20,9 @@ use crate::{job::Job, read};
 /// What a turn was asked is never cut: it's the task.
 const KEEP: usize = 16_000;
 
-/// The engine turn `m` ran on. One from before engines were chosen ran on
-/// Claude.
+/// The engine turn `m` ran on. One from before engines were chosen, or on
+/// one since retired, counts as Claude's: its stream names no session Claude
+/// can resume, so it's handed on all the same.
 fn engine_of(job: &Job, m: u64) -> Engine {
     read(&job.turn_file(&m.to_string(), TurnFile::Engine))
         .and_then(|e| Engine::parse(&e).ok())
@@ -74,9 +74,9 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
         return Ok(prompt);
     }
     let mut text = if resume(job, engine).is_some() {
-        "This job went on without this conversation since you last saw it: the turns below ran on another engine. Here is what each was asked and answered, oldest first; its work (files, commits, branches, PRs) is where they left it.".to_owned()
+        "This job went on without this conversation since you last saw it. Here is what each turn since was asked and answered, oldest first; its work (files, commits, branches, PRs) is where they left it.".to_owned()
     } else {
-        "This job began before this conversation, on another engine. Here is what each turn so far was asked and answered, oldest first, starting with its brief; its work (files, commits, branches, PRs) is where they left it.".to_owned()
+        "This job began before this conversation. Here is what each turn so far was asked and answered, oldest first, starting with its brief; its work (files, commits, branches, PRs) is where they left it.".to_owned()
     };
     for m in missed {
         let m = m.to_string();
@@ -135,29 +135,15 @@ mod tests {
             if let Some(e) = engine {
                 fs::write(job.turn(&n, "engine"), e.name()).unwrap();
             }
-            let stream = match engine.unwrap_or(Engine::Claude) {
-                Engine::Claude => format!(
-                    "{}\n{}\n",
-                    serde_json::json!({"type": "system", "session_id": "claude-session"}),
-                    serde_json::json!({"type": "result", "is_error": false, "result": said}),
-                ),
-                Engine::Codex => format!(
-                    "{}\n{}\n{}\n{}\n",
-                    serde_json::json!({"type": "thread.started", "thread_id": "codex-thread"}),
-                    serde_json::json!({"type": "turn.started"}),
-                    serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": said}}),
-                    serde_json::json!({"type": "turn.completed"}),
-                ),
-            };
+            let stream = format!(
+                "{}\n{}\n",
+                serde_json::json!({"type": "system", "session_id": "claude-session"}),
+                serde_json::json!({"type": "result", "is_error": false, "result": said}),
+            );
             fs::write(job.turn(&n, "jsonl"), stream).unwrap();
-            let id = if engine_name == "claude" {
-                "claude-session"
-            } else {
-                "codex-thread"
-            };
             fs::write(
                 job.path(&format!("session.{engine_name}")),
-                format!("{id}\n"),
+                "claude-session\n",
             )
             .unwrap();
             fs::write(job.path("session.engine"), engine_name).unwrap();
@@ -176,89 +162,49 @@ mod tests {
     #[test]
     fn the_same_engine_carries_on_in_its_own_conversation() {
         let t = Turns::new();
-        assert_eq!(t.starts(1, Engine::Codex, "the brief"), "the brief\n");
-        t.ran(1, Some(Engine::Codex), "the brief", "first answer");
-        assert_eq!(t.starts(2, Engine::Codex, "a reply"), "a reply\n");
+        assert_eq!(t.starts(1, Engine::Claude, "the brief"), "the brief\n");
+        t.ran(1, Some(Engine::Claude), "the brief", "first answer");
+        assert_eq!(t.starts(2, Engine::Claude, "a reply"), "a reply\n");
     }
 
     #[test]
-    fn an_engine_new_to_the_job_gets_the_brief_and_everything_since() {
-        for (before, now) in [
-            (Engine::Claude, Engine::Codex),
-            (Engine::Codex, Engine::Claude),
-        ] {
-            let t = Turns::new();
-            t.ran(1, Some(before), "the brief", "started on it");
-            t.ran(
-                2,
-                Some(before),
-                "the owner says: use the other crate",
-                "switched crates",
-            );
-            let given = t.starts(3, now, "PR #9 changed: checks finished. Carry on.");
-            assert!(
-                given.starts_with("This job began before this conversation"),
-                "{given}"
-            );
-            for part in [
-                "## Turn 1 (",
-                "the brief",
-                "started on it",
-                "use the other crate",
-                "switched crates",
-                "## This turn, asked\n\nPR #9 changed",
-            ] {
-                assert!(given.contains(part), "{part} missing from {given}");
-            }
-            assert!(given.find("the brief") < given.find("use the other crate"));
-        }
-    }
-
-    #[test]
-    fn a_returning_engine_gets_only_what_it_missed() {
-        let t = Turns::new();
-        t.ran(1, Some(Engine::Claude), "the brief", "claude began");
-        t.ran(
-            2,
-            Some(Engine::Codex),
-            "a reply while over the meter",
-            "codex went on",
-        );
-        t.ran(
+    fn a_lost_conversation_gets_the_brief_and_everything_since() {
+        let t = t_lost(&[
+            ("the brief", "started on it"),
+            ("the owner says: use the other crate", "switched crates"),
+        ]);
+        let given = t.starts(
             3,
-            Some(Engine::Codex),
-            "the owner's answer",
-            "codex finished it",
-        );
-        let given = t.starts(4, Engine::Claude, "the meter's down again");
-        assert!(
-            given.starts_with("This job went on without this conversation"),
-            "{given}"
+            Engine::Claude,
+            "PR #9 changed: checks finished. Carry on.",
         );
         assert!(
-            !given.contains("the brief") && !given.contains("claude began"),
+            given.starts_with("This job began before this conversation"),
             "{given}"
         );
         for part in [
-            "a reply while over the meter",
-            "codex went on",
-            "the owner's answer",
-            "codex finished it",
+            "## Turn 1 (",
+            "the brief",
+            "started on it",
+            "use the other crate",
+            "switched crates",
+            "## This turn, asked\n\nPR #9 changed",
         ] {
             assert!(given.contains(part), "{part} missing from {given}");
         }
-        // And back again: Codex missed only turn 4.
-        t.ran(
-            4,
-            Some(Engine::Claude),
-            "the meter's down again",
-            "claude checked it",
-        );
-        let given = t.starts(5, Engine::Codex, "over again");
-        assert!(
-            given.contains("claude checked it") && !given.contains("codex finished it"),
-            "{given}"
-        );
+        assert!(given.find("the brief") < given.find("use the other crate"));
+    }
+
+    /// Turns that ran, each asked and answered, whose conversation is gone.
+    fn t_lost(turns: &[(&str, &str)]) -> Turns {
+        let t = Turns::new();
+        for (n, (asked, said)) in turns.iter().enumerate() {
+            t.ran(n as u64 + 1, Some(Engine::Claude), asked, said);
+        }
+        let job = t.job();
+        fs::remove_file(job.path("session.claude")).unwrap();
+        fs::remove_file(job.path("session.engine")).unwrap();
+        t
     }
 
     #[test]
@@ -266,8 +212,6 @@ mod tests {
         let t = Turns::new();
         t.ran(1, None, "the brief", "an old answer");
         assert_eq!(t.starts(2, Engine::Claude, "a reply"), "a reply\n");
-        let given = t.starts(2, Engine::Codex, "a reply");
-        assert!(given.contains("an old answer"), "{given}");
     }
 
     #[test]
@@ -293,15 +237,10 @@ mod tests {
                 "more ".repeat(KEEP / 4),
             )
         };
-        for (before, now) in [
-            (Engine::Claude, Engine::Codex),
-            (Engine::Codex, Engine::Claude),
-        ] {
-            let t = Turns::new();
+        {
             let said = format!("began{}done", "y".repeat(KEEP * 2));
-            t.ran(1, Some(before), &long("the brief"), &said);
-            t.ran(2, Some(before), &long("the reply"), "replied");
-            let given = t.starts(3, now, "carry on");
+            let t = t_lost(&[(&long("the brief"), &said), (&long("the reply"), "replied")]);
+            let given = t.starts(3, Engine::Claude, "carry on");
             for what in ["the brief", "the reply"] {
                 assert!(given.contains(&long(what)), "{what} cut from the handoff");
             }

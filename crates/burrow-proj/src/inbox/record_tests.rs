@@ -320,7 +320,7 @@ fn proj_why_names_why_an_issue_never_enrolled() {
         b.path("repos_sam_box_issues_9"),
         json!({"number": 9, "state": "open", "title": "a child", "body": "",
                "user": burrow_github::fake::actor("workers[bot]"),
-               "labels": [{"name": "codex"}, {"name": "ready"}]})
+               "labels": [{"name": "claude"}, {"name": "ready"}]})
         .to_string(),
     )
     .unwrap();
@@ -499,7 +499,7 @@ fn an_engine_labelled_child_waits_on_what_its_plan_admission_does() {
         let admitted = p.child_admissible("sam/box", &n.to_string());
         let r = p
             .look()
-            .record("sam/box", &n.to_string(), Some(&listed(n, &["codex"])));
+            .record("sam/box", &n.to_string(), Some(&listed(n, &["claude"])));
         (r.stage, r.wait, admitted)
     };
     assert_eq!(
@@ -527,7 +527,7 @@ fn an_engine_labelled_child_waits_on_what_its_plan_admission_does() {
     let r = b
         .pass()
         .look()
-        .record("sam/box", "25", Some(&listed(25, &["codex"])));
+        .record("sam/box", "25", Some(&listed(25, &["claude"])));
     assert!(r.next.contains("replanned without it"), "{}", r.next);
 
     // Its parent's own job is still at it.
@@ -563,7 +563,7 @@ fn proj_why_says_the_drains_own_admission() {
     fs::write(drained.join("drained"), "sam/box#7\n").unwrap();
     fs::write(
         b.path("repos_sam_box_issues_7"),
-        listed(7, &["codex"]).to_string(),
+        listed(7, &["claude"]).to_string(),
     )
     .unwrap();
     let said = b.pass().why("sam/box", "7", false);
@@ -596,12 +596,12 @@ fn proj_why_says_the_drains_own_admission() {
     issue12(&["ready"]);
     let said = b.pass().why("sam/box", "12", false);
     assert!(
-        said.contains("Next: the drain's next pass hands it on to codex"),
+        said.contains("Next: the drain's next pass hands it on to claude"),
         "{said}"
     );
-    let slots = b.cfg.jobs.join(".codex-slots");
+    let slots = b.cfg.jobs.join(".slots");
     fs::create_dir_all(&slots).unwrap();
-    let held: Vec<fs::File> = (1..=b.cfg.codex_slots)
+    let held: Vec<fs::File> = (1..=b.cfg.max_jobs)
         .map(|i| {
             let f = fs::File::create(slots.join(i.to_string())).unwrap();
             f.lock().unwrap();
@@ -609,7 +609,7 @@ fn proj_why_says_the_drains_own_admission() {
         })
         .collect();
     let said = b.pass().why("sam/box", "12", false);
-    assert!(said.contains("It waits on a free codex slot"), "{said}");
+    assert!(said.contains("It waits on a free claude slot"), "{said}");
     drop(held);
 
     b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap().drain = None;

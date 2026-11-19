@@ -82,7 +82,6 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
-        Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         Some("_host-view") if view == View::Owner => crate::host_jobs::view(cfg, &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {

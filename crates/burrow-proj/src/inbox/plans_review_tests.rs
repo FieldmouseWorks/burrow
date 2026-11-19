@@ -673,7 +673,7 @@ fn edited_task_fields_never_inherit_completed_or_ambiguous_receipts() {
 fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
     for interrupted in [false, true] {
         let (b, mut parent, list) = parent_fixture();
-        parent["labels"] = json!([{"name":"ready"},{"name":"tracker"},{"name":"codex"}]);
+        parent["labels"] = json!([{"name":"ready"},{"name":"tracker"},{"name":"claude"}]);
         parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
         fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
         for n in [8, 9] {
@@ -711,7 +711,7 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
             .unwrap();
         b.pass().drain().unwrap();
         assert!(
-            b.log().contains("issues/8/labels -f labels[]=codex"),
+            b.log().contains("issues/8/labels -f labels[]=claude"),
             "{}",
             b.log()
         );
@@ -734,7 +734,8 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
 fn unstick_children_keep_admission_execution_and_sequence() {
     use crate::engine::Engine;
     for kind in ["generated", "reused", "nested", "offered"] {
-        for engine in [Engine::Claude, Engine::Codex] {
+        {
+            let engine = Engine::Claude;
             let (mut b, mut parent, mut list) = parent_fixture();
             let dir = b.path("settings");
             crate::config::tests::routes(&mut b.cfg, &dir, &format!("stuck {}", engine.name()));
@@ -800,11 +801,7 @@ fn unstick_children_keep_admission_execution_and_sequence() {
             fs::create_dir_all(&busy).unwrap();
             fs::write(busy.join("drained"), "sam/box#99").unwrap();
             fs::write(busy.join("job"), "busy").unwrap();
-            let (slots, count) = if engine == Engine::Codex {
-                (".codex-slots", b.cfg.codex_slots)
-            } else {
-                (".slots", b.cfg.max_jobs)
-            };
+            let (slots, count) = (".slots", b.cfg.max_jobs);
             fs::create_dir_all(b.cfg.jobs.join(slots)).unwrap();
             let _held: Vec<_> = (1..=count)
                 .map(|n| {

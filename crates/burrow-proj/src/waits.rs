@@ -24,7 +24,7 @@ use burrow_watchdog::watch::Item;
 use serde_json::{Map, Value, json};
 
 use crate::config::Config;
-use crate::job::{Job, USAGE_LIMIT};
+use crate::job::Job;
 use crate::slot::successor;
 use crate::{GRACE, RESUME_GRACE, mtime, now, read, swap, usage};
 
@@ -60,8 +60,6 @@ pub struct Facts {
     pub awaits: Vec<(String, String)>,
     /// The machine out of Claude usage, if it is (usage.rs).
     pub spent: Option<usage::Spent>,
-    /// A Codex refusal waits for this reset, independently of Claude's hold.
-    pub usage_reset: Option<(i64, i64)>,
     /// A GitHub API refusal waits independently of either engine.
     pub quota_reset: Option<(i64, i64)>,
 }
@@ -82,17 +80,6 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         {
             kick = Some(crate::watch::kick_for(crate::github_quota::LIMIT));
             (since, reset + GRACE, "waiting for GitHub quota reset; proj-watch registers saved waits and resumes work then".to_owned())
-        }
-        _ if !matches!(f.state.as_str(), "queued" | "running")
-            && !f.stopped
-            && let Some((since, reset)) = f.usage_reset =>
-        {
-            kick = Some(crate::watch::kick_for(USAGE_LIMIT));
-            (
-                since,
-                reset + GRACE,
-                "waiting for Codex's usage reset; proj-watch resumes it then".to_owned(),
-            )
         }
         "queued" if let Some((since, reset)) = f.quota_reset => (
             since,

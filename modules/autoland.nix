@@ -1,8 +1,8 @@
 # autoland: every PR in every repo you own goes from ready to merged on its
 # own, once a reviewer has nothing left to say (autoland/steward.py).
 #
-#   ready -> Codex reviews it (an agent reading a snapshot of the head, as
-#            a user of its own with no GitHub access)
+#   ready -> Codex reviews it, through its GitHub connector (the ChatGPT
+#            Codex Connector, on the owner's ChatGPT account, every push)
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing in the head's own change, CI green on the head
 #         -> (R2 by Conary's class policy, no CI: a Claude job judges it)
@@ -24,10 +24,8 @@ let
   inherit (config.burrow.github) machineApp;
   account = config.users.users.${user};
   inherit (lib) mkOption types;
-  rv = cfg.reviewers;
-  # The reviewers' user, the queue and snapshots it reads, and the kick,
-  # as the reviewers' service (autoland/review.nix) has them.
-  inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
+  # Where a repo's pass is kicked: by the steward when it books one.
+  stewardKick = "${config.burrow.events.kick}/autoland";
   # burrow-upkeep, what keeps up each repo besides its PRs.
   burrowUpkeep = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-upkeep;
   # burrow-brief, the briefs' policy text, which the steward's tasks read.
@@ -64,9 +62,8 @@ let
     (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
       (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
   # Every setting a repo in `repos` may have: the steward's defaults, and the
-  # settings read only where they're set (branch cleanup, proof limits and
-  # the reviewers' snapshot).
-  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "proofTimeoutMinutes" "proofToolsRef" "skipPaths" ];
+  # settings read only where they're set (branch cleanup and proof limits).
+  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "proofTimeoutMinutes" "proofToolsRef" ];
   # "REPO".SETTING, for each setting a repo has that isn't one of those.
   unknown = lib.concatLists (lib.mapAttrsToList (repo: rc: map (k: "\"${repo}\".${k}")
     (lib.filter (k: !lib.elem k known) (lib.attrNames rc))) cfg.repos);
@@ -94,7 +91,6 @@ let
     # tells a fix job's own push from anyone else's (claims.py).
     machineryLogin = if machineApp == null then null else "${machineApp.slug}[bot]";
     stateDir = "${stateDir}/autoland";
-    inherit snapDir;
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
@@ -194,9 +190,6 @@ let
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;
     continuationKick = "${config.burrow.events.kick}/autoland-continue";
-    reviewers = {
-      codex = { inherit (rv.codex) enable; };
-    };
     # What a proof would build, and whether it's built (proofs.py).
     nix = "${config.nix.package}/bin";
     baselineTask = ''
@@ -227,14 +220,6 @@ let
     };
     # Where the steward's mirrors fetch each repo from (mirror.rs).
     git = "https://github.com";
-    # The reviewers' snapshots (snapshot.rs): where they're checked out, and
-    # the paths none of them reads, the machine's and each repo's own on
-    # top.
-    snapshot = {
-      dir = snapDir;
-      inherit (rv) skipPaths;
-      repos = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) cfg.repos);
-    };
     # Renovate's dashboards, and where a job that ticks a box on one kicks
     # Renovate to read it.
     dashboard = if cfg.dashboard.enable then {
@@ -313,11 +298,9 @@ in
 {
   imports = [
     (import ./common.nix inputs)
-    (import ./autoland/review.nix inputs)
     (import ./autoland/fix.nix inputs)
     (import ./autoland/judge.nix inputs)
     (import ./autoland/proof.nix inputs)
-    (import ./autoland/review-producer.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
@@ -686,19 +669,6 @@ in
       '';
     };
 
-    upkeepConfig = mkOption {
-      type = types.path;
-      readOnly = true;
-      internal = true;
-      default = upkeepConfig;
-      defaultText = lib.literalMD "burrow-upkeep's configuration";
-      description = ''
-        The steward's burrow-upkeep configuration: the review producer
-        takes its snapshots by it (autoland/review-producer.nix), so they
-        hide what the steward's hide.
-      '';
-    };
-
     repos = mkOption {
       type = types.attrsOf types.attrs;
       default = { };
@@ -777,9 +747,7 @@ in
         themselves build, a VM test's run say; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
-        Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
-        this repo, on top of `reviewers.skipPaths`, never instead of them: what
-        the repo keeps private that isn't a secret anywhere else), train
+        the steward doesn't wait for Codex's review in this repo), train
         (true: a PR it settles goes into the repo's merge train, Conary's
         `cn train`, instead of being merged: the train merges the PRs in it
         onto the default branch together, has CI run on that on a
@@ -822,9 +790,6 @@ in
         (builtins.isInt rc.proofTimeoutMinutes && rc.proofTimeoutMinutes > 0)) (lib.attrValues cfg.repos);
       message = "burrow.autoland.repos: proofTimeoutMinutes must be a positive integer.";
     } {
-      assertion = rv.codex.enable;
-      message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
-    } {
       # It keeps every repo's hook, which GitHub's deliveries come in on.
       assertion = config.burrow.events.host != null;
       message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
@@ -863,9 +828,9 @@ in
 
     # Every PR's pass comes from what happens to it (burrow.events): a push, a
     # review, a comment or CI finishing on it starts its repo's pass
-    # (autoland@OWNER-REPO), and so do a Claude job's turn ending and a
-    # reviewer's answer coming back. A pass that waits on time (a new head's
-    # settle delay, a reviewer back in service) books its repo's next one in
+    # (autoland@OWNER-REPO), and so does a Claude job's turn ending. A pass
+    # that waits on time (a new head's settle delay, a review that hasn't
+    # come) books its repo's next one in
     # wake.json.
     # The full pass (settings, new repos) is burrow-events' catch-up, when it
     # starts and hourly.
@@ -920,27 +885,18 @@ in
       # Conary's flow beside a shadowed repo's pass, once it's done.
       unitConfig.OnSuccess = lib.optionals (lib.hasSuffix "@" name) shadow.onSuccess;
     }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; };
-    # The steward's state, and the reviews: it queues them and takes the
-    # snapshots (their checkouts in snapDir, what each keeps of its base in
-    # snap/); the reviewers' user reads those, answers in done/, takes
-    # what it answered off the queue and keeps each open PR's sessions in
-    # sessions/, which the
-    # steward marks gone when the PR closes. The clones the snapshots come
-    # from are the steward's alone.
+    # The steward's state, and its clones of the repos, which are its alone.
+    # What the retired review service kept (its queue, answers, sessions and
+    # snapshots) is removed.
     systemd.tmpfiles.settings.burrow = let
       dir = mode: group: { d = { inherit mode user group; }; };
     in {
       "${stateDir}/autoland" = dir "0755" account.group;
       # The worktrees proof runs check out (crates/burrow-proof).
       ${settings.runsDir} = dir "0755" account.group;
-      ${reviewDir} = dir "2750" reviewer;
-      "${reviewDir}/queue" = dir "2770" reviewer;
-      "${reviewDir}/done" = dir "2770" reviewer;
-      "${reviewDir}/sessions" = dir "2770" reviewer;
-      "${reviewDir}/snap" = dir "2750" reviewer;
-      "${reviewDir}/git" = dir "0700" account.group;
-      "/var/cache/autoland" = dir "0755" account.group;
-      ${snapDir} = dir "2750" reviewer;
+      "${stateDir}/autoland/git" = dir "0700" account.group;
+      "${stateDir}/autoland/review".R = { };
+      "/var/cache/autoland".R = { };
     };
 
     burrow.watchdog.sources.autoland = {
@@ -959,12 +915,12 @@ in
       steward (`autoland`, on every change to a PR). Open PRs ready for review, never as drafts (a
       draft is left alone until it's ready), then leave them be:
 
-      - Codex reviews every head; the steward posts its reviews as its GitHub App,
-        ${cfg.app.slug}[bot], each thread marked as Codex's. Fix or answer
-        every finding (reply on the thread, push the fix) and resolve the thread; Codex
-        looks again once they're all resolved.
-      - Once it finds nothing on the head (or on an earlier one whose own change was
-        the same: a merge of the base alone isn't looked at again), every thread is
+      - Codex reviews every push through its GitHub connector
+        (chatgpt-codex-connector[bot]): findings come as review threads, and a
+        summary comment says which commit it reviewed. Fix or answer every finding
+        (reply on the thread, push the fix) and resolve the thread; a push gets a new
+        review, and with no push the steward asks for one (`@codex review`).
+      - Once it finds nothing on the head, every thread is
         resolved and CI is green on the head, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.${lib.optionalString (trains != [ ]) ''
           In ${lib.concatStringsSep ", " trains} it goes into the repo's merge train

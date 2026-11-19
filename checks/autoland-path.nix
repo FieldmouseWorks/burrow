@@ -1,7 +1,7 @@
 # The steward's tools reach a pass however it's started: by hand or
 # a Claude job (`autoland-steward kick OWNER/REPO`), with no gh or
-# proj of its own, gets them from the wrapper, ahead of its own PATH. The reviewers' service gets none of them: only what its unit
-# gives it. Its gh is the machine's: in an App's env (a job's),
+# proj of its own, gets them from the wrapper, ahead of its own PATH.
+# Its gh is the machine's: in an App's env (a job's),
 # `status` and a project's clone go through the socket, and a pass's
 # own calls with the steward's token as given.
 { self, pkgs, ... }:
@@ -35,11 +35,6 @@ in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 ];
       env -i PATH="$p" ${pkgs.bash}/bin/bash -c "command -v $t" >/dev/null || { echo "$sub: no $t on the steward's PATH"; exit 1; }
     done
   done
-  r=${builtins.head (pkgs.lib.splitString " " example.systemd.services.autoland-review.serviceConfig.ExecStart)}
-  grep -q '^exec .*/bin/burrow-review "$@"' "$r" || { echo "the reviewers' service isn't burrow-review"; exit 1; }
-  sed 's|^exec .*|printf "%s\\n" "$PATH"; exit|' "$r" >review-path-of
-  p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash review-path-of work)
-  [ "$p" = /caller ] || { echo "review gets more than its units give it: $p"; exit 1; }
   p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of status)
   gh=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v gh')
   git=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v git')

@@ -29,7 +29,15 @@ fn fixture() -> Fixture {
     cfg.apps = [("workers".to_owned(), root.join("workers.env"))].into();
     let project = cfg.projects.join("project");
     fs::create_dir_all(&project).unwrap();
-    crate::config::tests::set(&mut cfg, &root, &["role work codex", "role wide claude"]);
+    crate::config::tests::set(
+        &mut cfg,
+        &root,
+        &[
+            "offer claude models work-model wide-model scoped chosen",
+            "model work claude work-model",
+            "model wide claude wide-model",
+        ],
+    );
     Fixture {
         project,
         home: root.join("home"),
@@ -39,7 +47,7 @@ fn fixture() -> Fixture {
     }
 }
 
-/// What a Codex job's sandbox can do to its own job directory.
+/// What a job can do to its own job directory.
 fn tamper(job: &Job, root: &Path) {
     fs::write(job.path("engine"), "claude").unwrap();
     fs::write(job.path("role"), "wide\n").unwrap();
@@ -48,10 +56,15 @@ fn tamper(job: &Job, root: &Path) {
     let _ = fs::remove_file(job.path("owned"));
 }
 
+/// The model the job's next turn runs on, as its role gives it.
+fn model(cfg: &Config, job: &Job) -> Option<String> {
+    choice(cfg, job).unwrap().model
+}
+
 fn workspace(f: &Fixture, job: &Job, run: &str) -> Vec<std::path::PathBuf> {
     let home = f.home.clone();
     let env = move |name: &str| (name == "HOME").then(|| home.clone().into_os_string());
-    let machine = sandbox::tests::machine_in(&f.root.join(run));
+    let machine = machine::tests::machine_in(&f.root.join(run));
     capabilities::resolve(&f.cfg, job, &f.root.join("scratch/job"), &env, &machine)
         .unwrap()
         .items
@@ -97,23 +110,24 @@ fn a_jobs_own_writes_never_change_what_it_runs_as() {
     // An ordinary resume: the next turn, from a person or the watcher.
     crate::cmd::reply(&f.cfg, &id, "carry on", false, None).unwrap();
     assert_eq!(job.turns().as_deref(), Some("2"));
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("work-model"));
     assert!(crate::turn::exec(&f.cfg, &id, "normal").is_err());
     // It stopped at the App it was started as, not the one it wrote, on
-    // the engine its role gives it, with its published copy put back.
+    // the model its role gives it, with its published copy put back.
     let outcome = crate::read(&job.turn("2", "outcome")).unwrap();
     assert!(outcome.contains("GitHub App workers"), "{outcome}");
     assert_eq!(
         crate::read(&job.turn("2", "engine")).as_deref(),
-        Some("codex")
+        Some("claude")
     );
     assert_eq!(
         crate::retry::Identity::load(&job, "2")
             .unwrap()
             .unwrap()
             .choice
-            .engine,
-        Engine::Codex
+            .model
+            .as_deref(),
+        Some("work-model")
     );
     assert_eq!(crate::read(&job.path("role")).as_deref(), Some("work"));
     assert_eq!(crate::read(&job.path("app")).as_deref(), Some("workers"));
@@ -128,7 +142,7 @@ fn a_jobs_own_writes_never_change_what_it_runs_as() {
     tamper(&job, &f.root);
     let paths = workspace(&f, &job, "run2");
     assert!(paths.contains(&f.project) && !paths.contains(&f.root));
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("work-model"));
     assert!(Request::load(&job).unwrap().owned);
 }
 
@@ -136,40 +150,32 @@ fn a_jobs_own_writes_never_change_what_it_runs_as() {
 fn host_authorized_changes_and_machine_settings_still_apply() {
     let mut f = fixture();
     let new = crate::cmd::New {
-        engine: Some(Engine::Codex),
+        engine: Some(Engine::Claude),
         local_work: true,
         ..Default::default()
     };
     let id = crate::cmd::start_job(&f.cfg, &new, "project", "the task").unwrap();
     let job = Job::new(&f.cfg, &id);
     fs::write(job.path("session"), "s\n").unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(choice(&f.cfg, &job).unwrap(), Choice::default());
     // The job drops its label's pin itself: nothing changes.
     fs::remove_file(job.path("engine")).unwrap();
     crate::cmd::reply(&f.cfg, &id, "next", false, None).unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
-    // The inbox maps its label to a role: that role's engine from now on,
+    assert_eq!(Request::load(&job).unwrap().engine, Some(Engine::Claude));
+    // The inbox maps its label to a role: that role's model from now on,
     // as the machine's roles file has it on each turn.
     Request::enroll(&job, "wide".into()).unwrap();
     crate::cmd::reply(&f.cfg, &id, "again", false, None).unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Claude);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("wide-model"));
     assert_eq!(crate::read(&job.path("role")).as_deref(), Some("wide"));
     let root = f.root.clone();
-    crate::config::tests::set(
-        &mut f.cfg,
-        &root,
-        &[
-            "role wide codex",
-            "offer codex models chosen",
-            "model wide codex chosen high",
-        ],
-    );
+    crate::config::tests::set(&mut f.cfg, &root, &["model wide claude chosen high"]);
     let job = Job::new(&f.cfg, &id);
     crate::cmd::reply(&f.cfg, &id, "once more", false, None).unwrap();
     let c = choice(&f.cfg, &job).unwrap();
     assert_eq!(
         (c.engine, c.model.as_deref(), c.effort.as_deref()),
-        (Engine::Codex, Some("chosen"), Some("high"))
+        (Engine::Claude, Some("chosen"), Some("high"))
     );
 }
 
@@ -182,9 +188,9 @@ fn a_job_from_before_the_record_adopts_its_request_once() {
     fs::write(job.path("role"), "work\n").unwrap();
     fs::write(job.path("app"), "workers\n").unwrap();
     job.set_turns(1).unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("work-model"));
     tamper(&job, &f.root);
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("work-model"));
     let request = Request::load(&job).unwrap();
     assert_eq!(request.app.as_deref(), Some("workers"));
     assert_eq!(request.project, f.project.to_string_lossy());
@@ -198,7 +204,7 @@ fn a_job_from_before_the_record_adopts_its_request_once() {
     fs::write(
         job.turn("1", "execution"),
         serde_json::json!({
-            "choice": {"engine": "codex", "model": null, "effort": null},
+            "choice": {"engine": "claude", "model": null, "effort": null},
             "files": {"project": f.project.to_str(), "role": "work", "app": "workers",
                       "engine": null, "agent": null, "owned": ""},
         })
@@ -231,11 +237,7 @@ fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
     git(&["init", "-q"]);
     git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
     let root = f.root.clone();
-    crate::config::tests::set(
-        &mut f.cfg,
-        &root,
-        &["role work claude", "role work@sam/code codex"],
-    );
+    crate::config::tests::set(&mut f.cfg, &root, &["model work@sam/code claude scoped"]);
     let new = crate::cmd::New {
         role: Some("work".into()),
         ..Default::default()
@@ -243,7 +245,7 @@ fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
     let id = crate::cmd::start_job(&f.cfg, &new, "project", "the task").unwrap();
     let job = Job::new(&f.cfg, &id);
     fs::write(job.path("session"), "s\n").unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("scoped"));
     // The job's git metadata grant reaches its origin.
     git(&[
         "remote",
@@ -252,7 +254,7 @@ fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
         "https://github.com/else/where.git",
     ]);
     crate::cmd::reply(&f.cfg, &id, "next", false, None).unwrap();
-    assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Codex);
+    assert_eq!(model(&f.cfg, &job).as_deref(), Some("scoped"));
 }
 
 #[test]

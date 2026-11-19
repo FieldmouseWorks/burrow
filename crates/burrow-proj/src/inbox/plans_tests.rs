@@ -224,7 +224,7 @@ fn a_worker_split_posts_its_answer_before_retiring_and_can_retry_a_partial_plan(
     assert!(!b.log().contains("-X POST repos/sam/box/issues "));
 }
 #[test]
-fn a_human_claude_issue_is_sized_on_a_fresh_codex_job_before_implementation() {
+fn a_human_claude_issue_is_sized_on_a_fresh_planner_job_before_implementation() {
     let mut b = Box::new();
     b.cfg.inbox.as_mut().unwrap().planning = true;
     b.cfg.projects = b.path("projects");
@@ -257,8 +257,8 @@ fn a_human_claude_issue_is_sized_on_a_fresh_codex_job_before_implementation() {
     let id = read(&record.join("job")).expect("a size-planning job");
     let job = crate::job::Job::new(&b.cfg, &id);
     assert_eq!(
-        crate::engine::choice(&b.cfg, &job).unwrap().engine,
-        crate::engine::Engine::Codex
+        crate::job::Request::load(&job).unwrap().role.as_deref(),
+        Some("planner")
     );
     assert!(
         !b.cfg
@@ -685,7 +685,7 @@ fn unavailable_planning_reads_retry_without_false_stale_notices() {
 
 #[test]
 fn unstick_preflight_bypasses_ordinary_triage_admission() {
-    for engine in ["claude", "codex"] {
+    for engine in ["claude"] {
         let mut b = Box::new();
         let dir = b.path("settings");
         crate::config::tests::set(

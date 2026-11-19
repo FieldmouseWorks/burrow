@@ -4,9 +4,8 @@
 triage is disabled. In that case only enrolled, ready and tracker issues
 enter the planning queue; unrelated unlabelled issues remain untouched.
 Planning uses a new job on the `planner` role, independently of the
-implementation engine label. This role defaults to Codex. Its model and
-effort come from the role configuration; a Claude selection requires an
-explicit small model, so it cannot fall through to the Claude default.
+implementation engine label. Its model and effort come from the role
+configuration like any other role's, Claude's own where none is set.
 Host planning jobs are required;
 enabling planning with `inbox.vm` is rejected at configuration time.
 

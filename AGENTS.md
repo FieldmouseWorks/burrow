@@ -155,9 +155,8 @@ For every reviewer, the steward's included. Flag as P1:
 - the steward merging what it shouldn't: a head whose own change its
   reviewers didn't check, or a head CI didn't check, a one-way path, or a
   PR with open threads
-- a review agent that reaches more than its snapshot: a GitHub token, a
-  secrets path (`reviewers.skipPaths`), the PR's own copy of its review
-  rules, or its own key in what gets posted
+- a secret a reviewer could read: anything committed outside sops's
+  encryption (Codex's GitHub connector reads every path GitHub holds)
 - `HOST-update` going live or confirming without the VM tests and health
   checks passing first, or pushing to main anything but what went live or
   that rebased onto a moved main and built (the push's own run tests the

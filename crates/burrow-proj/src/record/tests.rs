@@ -173,10 +173,6 @@ fn each_state_reads_as_main_printed_it() {
         if name == "held for usage" {
             assert_eq!(state, "failed");
             assert!(held.contains(&"await usage-limit".to_owned()), "{held:?}");
-            assert!(
-                held.iter().any(|l| l.starts_with("usage Claude ")),
-                "{held:?}"
-            );
             continue;
         }
         let (_, s, h) = want.iter().find(|w| w.0 == name).unwrap();
@@ -248,7 +244,7 @@ fn why_names_each_wait_and_what_ends_it() {
             "for the owner",
             "It waits on owner, which ends with the owner's reply",
         ),
-        ("held for usage", "It waits on usage Claude "),
+        ("held for usage", "It waits on await usage-limit"),
         (
             "parked",
             "It waits on policy, which ends with the settings letting it run (it waits for its repo to be allowed)",
@@ -388,7 +384,7 @@ fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
     j.record_choice(
         "1",
         &crate::engine::Choice {
-            engine: crate::engine::Engine::Codex,
+            engine: crate::engine::Engine::Claude,
             model: None,
             effort: None,
         },
@@ -398,7 +394,7 @@ fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
     let json = derive(&j).json("j");
     assert_eq!(
         json["turn"],
-        serde_json::json!({"n": "1", "engine": "codex", "model": null,
+        serde_json::json!({"n": "1", "engine": "claude", "model": null,
             "effort": null, "session": null})
     );
     assert!(json["ends"].is_array());

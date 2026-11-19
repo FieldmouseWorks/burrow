@@ -26,8 +26,7 @@
 //! isn't left waiting. A person's issue is work they asked for, so its job
 //! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
-//! one. A Codex turn, whoever's issue it is, acts as an App all the same
-//! (`turn::github_app`).
+//! one (`turn::github_app`).
 //!
 //! Discovery uses REST; text is read with its edit history through GraphQL.
 
@@ -476,7 +475,7 @@ impl Pass<'_> {
             .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
-    /// A Codex label takes precedence when an issue has both labels.
+    /// The engine its label selects; the first, by name, when it has more.
     fn engine(&self, issue: &Value) -> Option<crate::engine::Engine> {
         let labels = issue["labels"].as_array()?;
         self.inbox
@@ -488,7 +487,7 @@ impl Pass<'_> {
                     .any(|l| l["name"].as_str() == Some(name.as_str()))
             })
             .map(|(_, engine)| *engine)
-            .max_by_key(|e| *e == crate::engine::Engine::Codex)
+            .next()
     }
 
     /// Whether an issue's job waits in no line (proj run --unstick): it has

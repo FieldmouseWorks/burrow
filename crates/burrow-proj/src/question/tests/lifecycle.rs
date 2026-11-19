@@ -301,7 +301,7 @@ fn paused_inbox_kinds_preserve_all_automatic_waits() {
                 question(&f, false, crate::now() - 10);
             } else {
                 f.ending(1, "await");
-                fs::write(f.job().turn("1", "engine"), "codex").unwrap();
+                fs::write(f.job().turn("1", "engine"), "claude").unwrap();
                 let text = if wait == "usage" {
                     format!("usage-limit\t1000\t{}\n", crate::now() - 1)
                 } else {

@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_GH, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_GH, REAL_TOKEN, T0, WROTE, C, P, R, S, T, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp, upkeep_config)
 from harness import head as HEAD
 
@@ -384,7 +384,7 @@ assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 # merge whatever head the base's rules let through. A merge queued before,
 # by anyone, is taken off first, and a PR settled and queued by a steward
 # before this one is merged now rather than left queued.
-stood = (C.gh, C.write, C.job, C.lifecycle, V.queue, V.post)
+stood = (C.gh, C.write, C.job, C.lifecycle)
 stand_in()
 fresh_pr_state()
 run(clean(), 600)
@@ -453,6 +453,6 @@ for pr in (clean(), clean(base="release"), clean(files=(".github/CODEOWNERS",), 
     status, _ = run(behind, 900)
     FAIL.remove("/update-branch")
     assert merges() == [] and "didn't take the update" in status and C.WAKE["sam/r"] == C.NOW + 60 + 1, (status, C.WAKE)
-(C.gh, C.write, C.job, C.lifecycle, V.queue, V.post) = stood
+(C.gh, C.write, C.job, C.lifecycle) = stood
 fresh_pr_state()
 print("app: ok")

@@ -25,8 +25,8 @@ fn config(root: &Path) -> Config {
         "pipelineRepos":[], "leadRepos":[], "flake":p("projects/machine"),
         "deployed":env!("CARGO_BIN_EXE_burrow-proj"), "apps":{}, "notify":null,
         "meters":null,
-        "codexSlots":2, "codexHooks":p("hooks"), "inbox":null,
-        "tools":{"codex":"false", "bwrap":"false", "bash":"sh", "flock":"flock",
+        "inbox":null,
+        "tools":{"bash":"sh", "flock":"flock",
                  "gh":"false", "git":"git", "systemctl":p("systemctl"),
                  "systemdRun":p("systemd-run"), "timeout":"timeout"}
     });

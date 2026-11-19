@@ -11,21 +11,16 @@ use crate::usage;
 /// Whether a turn on this engine started now would get a slot, as far as a
 /// look from outside the line can tell: for Claude, no hold on its turn (in
 /// a sandbox, `sandboxed`, or here), nobody in line a hold lets by and a slot
-/// free past the pipeline's; for Codex, one of its pool free. Advisory: one on
-/// its way may take it first, and the new one then waits in line like any
-/// other. For what work nobody waits on (proj-inbox's drain) starts on idle
-/// slots. A fresh Claude meter releases a hold it proves over first
-/// ([`usage::metered`]); [`seen_room`] is the same look with nothing
-/// released or made.
+/// free past the pipeline's. Advisory: one on its way may take it first, and
+/// the new one then waits in line like any other. For what work nobody waits
+/// on (proj-inbox's drain) starts on idle slots. A fresh Claude meter releases
+/// a hold it proves over first ([`usage::metered`]); [`seen_room`] is the same
+/// look with nothing released or made.
 pub fn room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
-    let dir = match engine {
-        Engine::Claude => {
-            usage::metered(cfg);
-            ".slots"
-        }
-        Engine::Codex => ".codex-slots",
-    };
-    fs::create_dir_all(cfg.jobs.join(dir)).is_ok() && seen_room(cfg, engine, sandboxed)
+    match engine {
+        Engine::Claude => usage::metered(cfg),
+    }
+    fs::create_dir_all(cfg.jobs.join(".slots")).is_ok() && seen_room(cfg, engine, sandboxed)
 }
 
 /// [`room`], only reading: what an observer (`proj why`) says of the
@@ -49,6 +44,5 @@ pub fn seen_room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
                     .all(|w| held(usage::login::sandboxed(cfg, &w.job)))
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
-        Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
     }
 }

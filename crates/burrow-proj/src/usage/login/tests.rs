@@ -138,42 +138,16 @@ fn only_this_machines_login_holds_the_machine() {
 }
 
 /// This machine's login is a credential a sandbox doesn't use: its hold
-/// holds no sandbox's turn, nor moves its role to another engine, while a
-/// limit, which every token's plan shares, holds and moves them all.
+/// holds no sandbox's turn, while a limit, which every token's plan shares,
+/// holds them all.
 #[test]
 fn this_machines_login_hold_lets_a_sandboxs_turn_by() {
-    use crate::engine::Engine;
     use crate::usage::login::out_for;
-    use burrow_usage_reset::meter::{Snapshot, Window};
-    let (d, mut cfg) = rig();
-    let meters = d.path().join("meters");
-    cfg.meters = Some(meters.clone());
-    Snapshot {
-        windows: [(
-            "seven_day".into(),
-            Window {
-                used: 1.0,
-                resets_at: 0.0,
-            },
-        )]
-        .into(),
-        credits: false,
-        read_at: now() as f64,
-        requested_at: None,
-    }
-    .record(&meters, "codex")
-    .unwrap();
-    crate::config::tests::set(&mut cfg, d.path(), &["role work claude over 80 codex"]);
-    let settings = cfg.role_settings().unwrap();
-    let engine = |sandboxed| cfg.engine_in(&settings, "work", None, sandboxed).unwrap();
+    let (_d, cfg) = rig();
     let t = now();
     let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
     assert_eq!(out_for(&cfg, false), Some(s.clone()));
     assert_eq!(out_for(&cfg, true), None);
-    assert_eq!(
-        (engine(false), engine(true)),
-        (Engine::Codex, Engine::Claude)
-    );
     // The owner's pause holds every turn, whatever it says.
     assert!(
         Spent {
@@ -185,10 +159,6 @@ fn this_machines_login_hold_lets_a_sandboxs_turn_by() {
     // A limit met meanwhile is what holds now: the sandbox's turn too.
     record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
     assert!(out_for(&cfg, true).is_some());
-    assert_eq!(
-        (engine(false), engine(true)),
-        (Engine::Codex, Engine::Codex)
-    );
 }
 
 /// A sandbox's answer proves its own token, not this machine's login: it

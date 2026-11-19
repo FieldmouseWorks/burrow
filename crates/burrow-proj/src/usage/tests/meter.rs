@@ -67,7 +67,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     }
     meter.read_at = t as f64;
     meter.requested_at = Some(meter.read_at);
-    // Every window must have room, and another engine cannot release it.
+    // Every window must have room.
     meter.windows.get_mut("five_hour").unwrap().used = 100.0;
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
@@ -78,12 +78,6 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
         false
     ));
     meter.windows.get_mut("five_hour").unwrap().used = 6.0;
-    meter.record(cfg.meters.as_ref().unwrap(), "codex").unwrap();
-    assert!(!crate::slot::room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();

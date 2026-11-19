@@ -313,18 +313,15 @@ fn revivals() {
 }
 
 #[test]
-fn issue_labels_choose_an_engine_and_codex_wins_when_both_are_present() {
+fn issue_labels_choose_an_engine() {
     use crate::engine::Engine;
     let cfg: Config = serde_json::from_value(example()).unwrap();
     let pass = pass(&cfg);
     for (labels, engine) in [
         (json!([]), None),
         (json!([{"name":"claude"}]), Some(Engine::Claude)),
-        (json!([{"name":"codex"}]), Some(Engine::Codex)),
-        (
-            json!([{"name":"claude"},{"name":"codex"}]),
-            Some(Engine::Codex),
-        ),
+        // A label for an engine the machine doesn't run selects none.
+        (json!([{"name":"codex"}]), None),
     ] {
         assert_eq!(pass.engine(&json!({"labels": labels})), engine);
     }
@@ -345,7 +342,7 @@ fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
         .as_mut()
         .unwrap()
         .labels
-        .insert("code".into(), crate::engine::Engine::Codex);
+        .insert("code".into(), crate::engine::Engine::Claude);
     pass(&cfg).label("sam/box");
     assert_eq!(
         fs::read_to_string(&marker).unwrap(),
@@ -378,8 +375,6 @@ fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
     cfg.inbox.as_mut().unwrap().owner_role = Some("inbox".into());
     let p = pass(&cfg);
     assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Claude)));
-    i["labels"] = json!([{"name":"codex"}]);
-    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Codex)));
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i), (Some("stuck".into()), None));
     i["labels"] = json!([{"name":"claude"}]);
