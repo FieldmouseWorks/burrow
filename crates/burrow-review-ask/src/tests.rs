@@ -18,8 +18,8 @@ fn connector() -> Value {
     json!({"login": "chatgpt-codex-connector", "__typename": "Bot"})
 }
 
-fn eyes(who: Value) -> Value {
-    json!([{"content": "EYES", "reactors": {"nodes": [who]}}])
+fn eyes(who: Value, at: &str) -> Value {
+    json!([{"content": "EYES", "reactors": {"edges": [{"reactedAt": at, "node": who}]}}])
 }
 
 /// The PR as GitHub gives it: open, ready, at HEAD, nothing said of it.
@@ -193,9 +193,9 @@ fn only_when_unreviewed_or_answered() {
         json!([{"isResolved": false}]),
     );
     let mut ask_in_hand = pr();
-    ask_in_hand["comments"]["nodes"] = json!([{"author": {"login": "sam", "__typename": "User"}, "body": "@codex review", "updatedAt": "2026-01-01T00:00:00Z", "reactionGroups": eyes(connector())}]);
+    ask_in_hand["comments"]["nodes"] = json!([{"author": {"login": "sam", "__typename": "User"}, "body": "@codex review", "updatedAt": "2026-01-01T00:00:00Z", "reactionGroups": eyes(connector(), "2026-01-01T00:00:00Z")}]);
     let mut on_pr = pr();
-    on_pr["reactionGroups"] = eyes(connector());
+    on_pr["reactionGroups"] = eyes(connector(), "2026-01-01T00:00:00Z");
     for (why, p) in [
         ("is reviewing", running),
         ("found nothing", clean),
@@ -211,9 +211,31 @@ fn only_when_unreviewed_or_answered() {
         );
         assert!(posted(&gh).is_empty(), "{why}");
     }
+    // Nor is the connector's 👀 from before its last post on the PR (here
+    // its findings, all answered since): that ask was answered.
+    let mut answered_since = with(
+        json!([summary("completed", true, "2026-01-01T01:00:00Z")]),
+        json!([{"isResolved": true}]),
+    );
+    answered_since["reactionGroups"] = eyes(connector(), "2026-01-01T00:00:00Z");
+    let dir2 = tempfile::tempdir().unwrap();
+    assert_eq!(
+        ask(
+            &mut github(answered_since, 201),
+            &cfg(dir2.path()),
+            T,
+            "sam/r",
+            5,
+            HEAD
+        ),
+        Outcome::Posted { at: T }
+    );
     // Someone else's 👀 is no ask in hand.
     let mut theirs = pr();
-    theirs["reactionGroups"] = eyes(json!({"login": "sam", "__typename": "User"}));
+    theirs["reactionGroups"] = eyes(
+        json!({"login": "sam", "__typename": "User"}),
+        "2026-01-01T00:00:00Z",
+    );
     assert_eq!(
         ask(
             &mut github(theirs, 201),
@@ -344,4 +366,25 @@ fn a_refusal_unrecords_a_lost_answer_doesnt() {
     );
     assert_eq!(posted(&gh).len(), 1, "a POST isn't asked twice");
     assert_eq!(record(dir.path()).len(), 1);
+
+    // A rate limit is GitHub's no, however it's said: nothing went up, so
+    // the record goes and a later pass asks.
+    let dir = tempfile::tempdir().unwrap();
+    let mut gh = github(pr(), 201);
+    gh.answers.retain(|a| a.0 != "POST" || a.1 == "graphql");
+    gh.on(
+        "POST",
+        "repos/sam/r/issues/5/comments",
+        vec![ok(
+            429,
+            json!({"message": "slow down"}),
+            &[("retry-after", "60")],
+        )],
+    );
+    let out = ask(&mut gh, &cfg(dir.path()), T, "sam/r", 5, HEAD);
+    assert!(
+        matches!(out, Outcome::Failed { ref why } if !why.contains("kept as asked")),
+        "{out:?}"
+    );
+    assert!(record(dir.path()).is_empty());
 }

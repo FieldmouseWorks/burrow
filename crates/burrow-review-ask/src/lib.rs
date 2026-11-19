@@ -98,12 +98,12 @@ const PR: &str = "query($owner: String!, $name: String!, $n: Int!) {
     pullRequest(number: $n) {
       state isDraft headRefOid
       labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
-      reactionGroups { content reactors(first: 10) { nodes { __typename ... on Bot { login } ... on User { login } } } }
+      reactionGroups { content reactors(first: 10) { edges { reactedAt node { __typename ... on Bot { login } ... on User { login } } } } }
       reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
       reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login __typename } body commit { oid } submittedAt } }
       comments(last: 100) { pageInfo { hasPreviousPage } nodes {
         author { login __typename } body updatedAt
-        reactionGroups { content reactors(first: 10) { nodes { __typename ... on Bot { login } ... on User { login } } } }
+        reactionGroups { content reactors(first: 10) { edges { reactedAt node { __typename ... on Bot { login } ... on User { login } } } } }
       } }
     }
   }
@@ -179,11 +179,13 @@ pub fn ask(api: &mut dyn Api, cfg: &Config, now: u64, repo: &str, pr: u64, head:
         None,
     ) {
         Ok(_) => Outcome::Posted { at: now },
-        Err(Error {
-            why,
-            unanswered: true,
-            ..
-        }) => failed(format!("{why} (kept as asked: GitHub may have taken it)")),
+        // No answer, or a 5xx: the comment may be up, so it stays asked.
+        Err(e) if e.unanswered && e.retry_at.is_none() => failed(format!(
+            "{} (kept as asked: GitHub may have taken it)",
+            e.why
+        )),
+        // GitHub's no, a rate limit's included: nothing went up, so the
+        // record goes and a later pass can ask.
         Err(e) => {
             record.asked.retain(|a| a != &asked);
             match save(&path, &record) {
@@ -230,17 +232,34 @@ fn look(cfg: &Config, p: &Value, head: &str) -> Result<u64, String> {
         return Err(format!("it's labelled {l}"));
     }
     let comments = nodes(&p["comments"]);
-    let eyes = |v: &Value| {
-        v["reactionGroups"]
+    // An ask in hand is the connector's 👀 on the PR or a comment since it
+    // last posted anything on the PR: once it's done, it posts, and swaps
+    // its 👀 for a 👍.
+    let time = |v: &Value| v.as_str().map_or(Ok(0.0), burrow_upkeep::ts);
+    let mut last = 0.0f64;
+    for (v, at) in comments
+        .iter()
+        .map(|c| (c, "updatedAt"))
+        .chain(nodes(&p["reviews"]).iter().map(|r| (r, "submittedAt")))
+    {
+        if login(&v["author"]) == CONNECTOR {
+            last = last.max(time(&v[at])?);
+        }
+    }
+    let mut in_hand = false;
+    for v in std::iter::once(p).chain(comments.iter()) {
+        for g in v["reactionGroups"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|g| {
-                g["content"] == "EYES"
-                    && nodes(&g["reactors"]).iter().any(|r| login(r) == CONNECTOR)
-            })
-    };
-    if eyes(p) || comments.iter().any(eyes) {
+            .filter(|g| g["content"] == "EYES")
+        {
+            for e in g["reactors"]["edges"].as_array().into_iter().flatten() {
+                in_hand |= login(&e["node"]) == CONNECTOR && time(&e["reactedAt"])? > last;
+            }
+        }
+    }
+    if in_hand {
         return Err("Codex has an ask in hand (its 👀)".into());
     }
     let parse = |v: Value| serde_json::from_value(v).map_err(|e| format!("GitHub's answer: {e}"));

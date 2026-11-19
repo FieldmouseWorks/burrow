@@ -661,7 +661,7 @@ def fresh_pr_state():
 
 
 REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
-        "onto": H.onto, "ask_as_owner": C.ask_as_owner}  # the steward's own, for the checks of what it runs
+        "onto": H.onto, "ask_as_owner": V.ask_as_owner}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
@@ -684,4 +684,4 @@ def stand_in():
     C.lifecycle = lambda jid: (STATES.get(jid, "running"), HELD.get(jid, []))
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
-    C.ask_as_owner = owner_door
+    V.ask_as_owner = owner_door

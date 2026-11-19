@@ -2,11 +2,11 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, kick, token) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place.
 
-The steward talks to GitHub only as its GitHub App (config.app): the API
-through gh and git both, each owner's repos with a token of the App's
-installation on that owner. Whose repos a call is about is set around it
-(`acting_for`); a call outside one fails rather than going as the machine
-user's own gh login, which every Claude session on the machine shares.
+The steward talks to GitHub only as its GitHub App (config.app), through gh
+and git, each owner's repos with its installation's token on that owner, but
+for its one door that acts as the owner (reviewers.ask_as_owner), in a unit
+of its own. Whose repos a call is about is set around it (`acting_for`); a
+call outside one fails rather than going as the machine user's own gh login.
 `autoland-steward status` changes nothing, and reads as whoever runs it."""
 
 import contextlib
@@ -306,28 +306,6 @@ def graphql(query, **variables):
 
 def comment(repo, n, body):
     return write("api", f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}", check=False)
-
-
-def ask_as_owner(repo, n, head):
-    """The owner's door (burrow-review-ask, config.askAsOwner) on the PR's
-    head: what came of it, as it says (its Outcome). It runs as a unit of
-    the machine user's own, as a proof build does, so it acts as that
-    user's gh login while this unit never holds it, and nothing of this
-    unit's environment (its App token) goes with it. Waited for: it
-    reads the PR and posts at most one comment."""
-    unit = "autoland-ask-" + hashlib.sha256(f"{repo}#{n}@{head}".encode()).hexdigest()[:16]
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    try:
-        p = subprocess.run(["systemd-run", "--user", "--wait", "--pipe", "--quiet", "--collect", f"--unit={unit}",
-                            "--", *CFG["askAsOwner"]["command"], repo, str(n), head],
-                           stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=300)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"outcome": "failed", "why": f"systemd-run: {e}"}
-    try:
-        return json.loads(p.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        return {"outcome": "failed", "why": f"systemd-run: {p.stderr.strip()[-300:] or p.returncode}"}
 
 
 def me():

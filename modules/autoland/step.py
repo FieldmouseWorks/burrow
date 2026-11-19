@@ -306,8 +306,8 @@ class Pass(Context, Jobs, Actions):
             if not what:
                 # Every finding answered without a new commit: the reviewers that
                 # had findings are asked to look again, through the owner's
-                # door, once for what they last said; the owner hears of it
-                # when no one could ask, or the ask went unanswered.
+                # door, once for what they last said; the owner hears of a
+                # look that doesn't come.
                 for r in live:
                     if said[r][0] == "findings":
                         self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
@@ -318,8 +318,12 @@ class Pass(Context, Jobs, Actions):
                             at, unasked, failed = V.ask(self.repo, self.pr)
                             self.tried("ask", failed)
                             unasked = unasked or failed
-                        if at is not None and C.NOW < at + review_step.ANSWERED * MIN:
-                            self.after(at, review_step.ANSWERED)  # ends: its look, or listed for the owner
+                        # Listed for the owner as a head with no review is: LOST
+                        # minutes after Codex's word, and once asked, only when
+                        # the ask too went unanswered.
+                        due = max(said[r][1] + review_step.LOST * MIN, (at or 0) + review_step.ANSWERED * MIN)
+                        if C.NOW < due:
+                            self.after(due, 0)  # ends: its look, or listed for the owner
                             continue
                         how = f"asked as the owner at {clock(at)}, unanswered" if at else f"not asked as the owner: {unasked or 'not asked'}"
                         stuck.append(f"{V.NAMES[r]}: findings answered without a push; {how}")

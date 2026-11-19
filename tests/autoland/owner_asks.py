@@ -115,9 +115,11 @@ step(mkpr(), 31 * 60)
 assert "ask" not in pr_state().get("strikes", {}) and len(heard["owner"]) == 1, (pr_state(), heard)
 
 # Findings answered without a push: once the settle delay is up, asked for
-# once, as the owner, for what Codex last said; a look that doesn't come
-# within ANSWERED minutes goes to the owner. A new word from Codex is
-# another thing to ask about.
+# once, as the owner, for what Codex last said. A look that doesn't come
+# goes to the owner as a head with no review does: LOST minutes after
+# Codex's word, and once asked, only after the ask's ANSWERED minutes too.
+# A new word from Codex is another thing to ask about.
+said_at = 11 * 60  # the summary's time, after T0
 fresh()
 answered = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[True])
 step(answered, 700)
@@ -125,14 +127,29 @@ assert heard["owner"] == [], heard
 step(answered, 900)
 step(answered, 960)
 assert heard["owner"] == [("sam/r", 5, head)] and heard["app"] == [], heard
-_, digest = step(answered, 900 + 29 * 60)
-assert digest == [], digest
-status, digest = step(answered, 900 + 30 * 60)
+_, digest = step(answered, said_at + 120 * 60 - 1)
+assert digest == [] and C.WAKE == {"sam/r": T + said_at + 120 * 60 + 1}, (digest, C.WAKE)
+status, digest = step(answered, said_at + 120 * 60)
 assert [d[0] for d in digest] == ["Codex hasn't looked again"] and "asked as the owner" in digest[0][2], digest
 again = mkpr(reviews=[found(), found(at="2026-10-24T00:50:00Z")],
              comments=[summary(findings=True, at="2026-10-24T00:50:00Z")], threads=[True, True])
 step(again, 3600)
 assert len(heard["owner"]) == 2, heard
+# Not asked, in a repo that isn't the door's or on the door's no: the
+# owner hears of it no sooner, nor at all before then.
+for unasked in ("unlisted", "declined"):
+    fresh()
+    if unasked == "unlisted":
+        S.CFG["askAsOwner"]["repos"] = []
+    else:
+        DOOR.update(outcome="declined", why="the day's cap")
+    for at in (900, 3600, said_at + 120 * 60 - 1):
+        _, digest = step(answered, at)
+        assert digest == [] and heard["owner"] == [], (unasked, at, digest)
+    _, digest = step(answered, said_at + 120 * 60)
+    assert [d[0] for d in digest] == ["Codex hasn't looked again"] and "not asked as the owner" in digest[0][2], (unasked, digest)
+    S.CFG["askAsOwner"]["repos"] = repos
+    DOOR.clear()
 print("once a head, the digest after: ok")
 
 # The door runs as a unit of the machine user's own, waited for, with only

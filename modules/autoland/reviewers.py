@@ -13,7 +13,10 @@ machine user's own gh login, in a unit of that user's own, in the repos the
 machine lists (askAsOwner), once a head; the steward only reads its record
 (`asked`)."""
 
+import hashlib
 import json
+import os
+import subprocess
 
 import common as C
 import prs as P
@@ -77,7 +80,7 @@ def ask(repo, pr):
     if DRY:
         log(f"  would: ask Codex as the owner to review {repo}#{n} at {head[:7]}")
         return None, None, None
-    out = C.ask_as_owner(repo, n, head)
+    out = ask_as_owner(repo, n, head)
     what = out.get("outcome")
     if what in ("posted", "asked"):
         if what == "posted":
@@ -86,3 +89,25 @@ def ask(repo, pr):
     if what == "declined":
         return None, out["why"], None
     return None, None, out.get("why") or "the owner's door said nothing"
+
+
+def ask_as_owner(repo, n, head):
+    """The owner's door (burrow-review-ask, config.askAsOwner) on the PR's
+    head: what came of it, as it says (its Outcome). It runs as a unit of
+    the machine user's own, as a proof build does, so it acts as that
+    user's gh login while this unit never holds it, and nothing of this
+    unit's environment (its App token) goes with it. Waited for: it
+    reads the PR and posts at most one comment."""
+    unit = "autoland-ask-" + hashlib.sha256(f"{repo}#{n}@{head}".encode()).hexdigest()[:16]
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    try:
+        p = subprocess.run(["systemd-run", "--user", "--wait", "--pipe", "--quiet", "--collect", f"--unit={unit}",
+                            "--", *CFG["askAsOwner"]["command"], repo, str(n), head],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"outcome": "failed", "why": f"systemd-run: {e}"}
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return {"outcome": "failed", "why": f"systemd-run: {p.stderr.strip()[-300:] or p.returncode}"}
