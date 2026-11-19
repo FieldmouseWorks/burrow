@@ -479,6 +479,24 @@ fn unhealthy_after_the_switch_goes_straight_back() {
 }
 
 #[test]
+fn what_a_failing_check_explains_is_noted_not_reverted() {
+    // Claude Code logged out before the switch: HOST-health doesn't count
+    // the servers that can't start again against it, and says so.
+    let m = machine();
+    m.upstream("nixpkgs", &sha('c'));
+    let excused = "claude-rc@web.service failed, but not counted: check:claude-login is failing, and it can't pass without that";
+    fs::write(m.path("excused"), format!("{excused}\n")).unwrap();
+    assert_eq!(go(&m), 0);
+    assert_eq!(said(&m).0, "ok");
+    assert!(m.did("calls").ends_with("confirm\n"));
+    assert_eq!(
+        m.did("journal"),
+        format!("-t box-update -p warning: not the switch's doing: {excused}\n")
+    );
+    assert!(!m.cfg.state.join("jobs/health").exists());
+}
+
+#[test]
 fn bad_proj_config_reverts_without_confirm_and_names_the_line_in_the_notice() {
     let m = machine();
     let was = m.running();
