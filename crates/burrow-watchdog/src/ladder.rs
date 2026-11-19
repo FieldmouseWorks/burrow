@@ -163,6 +163,12 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         });
         st.source = cur.source;
         st.key = cur.key;
+        // A new kick hasn't been tried yet, whatever the old one did: a
+        // deploy wait kicked through dispatch while a run was in its way is
+        // HOST-update's again, the same stall, once that run has ended.
+        if st.item.kick != cur.item.kick {
+            st.kicked = None;
+        }
         st.item = cur.item;
         st.seen = cur.at;
         let kick = st.item.kick.clone().filter(|k| !k.is_empty());
