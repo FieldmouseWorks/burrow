@@ -54,9 +54,9 @@ pub fn complete<T: Signable>(
 
 /// Publish committed `record`'s result on its check run, signed, with no
 /// request's work behind it: a result its producer publishes on its own,
-/// after the request that made it has ended (the review producer signs a
-/// review once the flow has published it). Only a committed record: one
-/// that isn't could still be withdrawn.
+/// after the request that made it has ended (the judge publishes a
+/// judgment once its sealed comment is posted). Only a committed record:
+/// one that isn't could still be withdrawn.
 pub fn publish<T: Signable>(
     api: &mut dyn Api,
     records: &Records,

@@ -373,22 +373,22 @@ fn a_result_published_on_its_own_must_be_committed_first() {
     let records = Records::open(&dir.path().join("records")).unwrap();
     let signer = Signer::for_tests("kit", SECRET);
     let mut api = github();
-    let mut record: Record<sign::Review> = records.begin(review().target()).unwrap();
-    records.keep(&mut record, review()).unwrap();
+    let mut record: Record<sign::Judgment> = records.begin(judgment().target()).unwrap();
+    records.keep(&mut record, judgment()).unwrap();
     // Uncommitted, it could still be withdrawn: nothing goes out.
     assert!(publish::publish(&mut api, &records, &signer, &mut record).is_err());
     assert!(api.asked("POST").is_empty());
     assert_eq!(record.end(), None);
     records.commit(&mut record).unwrap();
     let signed = publish::publish(&mut api, &records, &signer, &mut record).unwrap();
-    assert_eq!(signed.check(), "conary/review/codex");
+    assert_eq!(signed.check(), "conary/judgment");
     assert_eq!(record.end(), Some(End::Published));
     assert_eq!(conclusions(&api), ["success"]);
     let text = api.asked("PATCH")[0].2.as_ref().unwrap()["output"]["text"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(verify(&text, "success", "conary/review/codex", TREE, None).is_ok());
+    assert!(verify(&text, "success", "conary/judgment", TREE, None).is_ok());
 }
 
 #[test]
@@ -501,16 +501,6 @@ fn proof(passed: bool) -> sign::Proof {
     }
 }
 
-fn review() -> sign::Review {
-    sign::Review {
-        repo: REPO.into(),
-        role: "codex".into(),
-        head: HEAD.into(),
-        tree: TREE.into(),
-        body: "No findings.".into(),
-    }
-}
-
 fn judgment() -> sign::Judgment {
     sign::Judgment {
         repo: REPO.into(),
@@ -543,7 +533,7 @@ fn verify(
     let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.as_bytes());
     let producers = Producers::parse(
         json!([{"name": "kit", "key": key,
-            "checks": ["conary/review/*", "conary/judgment", "proof"]}])
+            "checks": ["conary/judgment", "proof"]}])
         .to_string()
         .as_bytes(),
     )
@@ -592,12 +582,6 @@ fn signed_results_verify_through_conarys_verifier_and_nothing_else_does() {
     let dir = tempfile::tempdir().unwrap();
     let signer = Signer::for_tests("kit", SECRET);
     let sign = |record| signer.signed(&kept(dir.path(), record)).unwrap();
-    let r = signer.signed(&kept(dir.path(), review())).unwrap();
-    let receipt = flow::receipt_digest(&flow::review_receipt(HEAD, "No findings."));
-    assert_eq!(
-        verify(r.text(), r.conclusion(), "conary/review/codex", TREE, None),
-        Ok((Outcome::Pass, Some(receipt)))
-    );
     let j = signer.signed(&kept(dir.path(), judgment())).unwrap();
     let judged = judgment();
     let receipt = flow::receipt_digest(&flow::judgment_receipt_by(
