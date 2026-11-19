@@ -181,7 +181,12 @@ The probe's `usage` answer shows it, and launch admission and routing read
 the same function. Anything it can't read is no room, and so is a
 `claude-api` turn of the cycle whose cost isn't recorded yet (still running,
 or stopped before its result and not yet accounted for by a later run of its
-session): those turns therefore run one at a time.
+session): the meter says so beside the numbers it knows, and those turns
+therefore run one at a time. A turn stopped for good before its result
+keeps it so for the rest of the cycle; a new balance read from the Console
+(`settings credit` with a different `BUDGET_USD`) starts counting afresh.
+`renews` is a day, so the renewed credit counts from 00:00 UTC on it: set
+it to the first day the new credit is surely there.
 
 ## Engines, models and efforts per role
 

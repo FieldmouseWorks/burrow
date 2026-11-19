@@ -6,11 +6,13 @@
 //!
 //! Strict where the usage answer is tolerant: anything about a job with an
 //! [`ENGINE`] turn that can't be read (its folder, a turn's engine, start
-//! or stream, a malformed record) is an error, and so is an [`ENGINE`] turn
-//! of the cycle whose cost isn't recorded: one still running, or one stopped
-//! before its result that no later run of its session has accounted for.
-//! Its spend can't be known, so the meter has no room until it is: [`ENGINE`]
-//! turns therefore run one at a time. An error is no room.
+//! or stream, a malformed record) is an error, and an error is no room. An
+//! [`ENGINE`] turn of the cycle whose cost isn't recorded (one still
+//! running, or one stopped before its result that no later run of its
+//! session has accounted for) is counted at what it has recorded and makes
+//! the meter pending: its spend can't be known, so there's no room until it
+//! is, and [`ENGINE`] turns therefore run one at a time. The meter still
+//! says what it knows meanwhile.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Read};
@@ -35,7 +37,18 @@ pub fn meter(credit_file: &Path, jobs: Option<&Path>, now: i64) -> Result<Meter,
     let credit = setting(credit_file)?;
     let cycle = credit.cycle(now)?;
     let jobs = jobs.ok_or("proj's jobs aren't configured here")?;
-    Meter::at(&credit, now, &ledger(jobs, cycle.start)?)
+    let ledger = ledger(jobs, cycle.start)?;
+    let mut meter = Meter::at(&credit, now, &ledger.spends)?;
+    meter.pending = ledger.pending;
+    Ok(meter)
+}
+
+/// The cycle's [`ENGINE`] spend as recorded, and the first turn whose cost
+/// isn't, if any.
+#[derive(Debug, Default)]
+pub struct Ledger {
+    pub spends: Vec<Spend>,
+    pub pending: Option<String>,
 }
 
 fn setting(path: &Path) -> Result<Credit, String> {
@@ -48,10 +61,10 @@ fn setting(path: &Path) -> Result<Credit, String> {
 }
 
 /// Every [`ENGINE`] turn's cost that started at `from` or after.
-pub fn ledger(jobs: &Path, from: i64) -> Result<Vec<Spend>, String> {
+pub fn ledger(jobs: &Path, from: i64) -> Result<Ledger, String> {
     let fail = |e: std::io::Error| format!("{}: {e}", jobs.display());
     let root = Dir::open(jobs).map_err(fail)?;
-    let mut spends = Vec::new();
+    let mut ledger = Ledger::default();
     for name in root.names().map_err(fail)? {
         let label = name.to_string_lossy().into_owned();
         // Hidden entries are proj's control state, not jobs.
@@ -66,9 +79,9 @@ pub fn ledger(jobs: &Path, from: i64) -> Result<Vec<Spend>, String> {
             }
             Err(e) => return Err(format!("job {label}: {e}")),
         };
-        job(&dir, &label, from, &mut spends).map_err(|e| format!("job {label}: {e}"))?;
+        job(&dir, &label, from, &mut ledger).map_err(|e| format!("job {label}: {e}"))?;
     }
-    Ok(spends)
+    Ok(ledger)
 }
 
 /// A turn file's text: None when there's none.
@@ -97,7 +110,7 @@ fn records(dir: &Dir, n: u64) -> Result<Vec<Value>, String> {
         .collect()
 }
 
-fn job(dir: &Dir, label: &str, from: i64, spends: &mut Vec<Spend>) -> Result<(), String> {
+fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), String> {
     let mut turns: Vec<u64> = dir
         .names()
         .map_err(|e| e.to_string())?
@@ -144,16 +157,18 @@ fn job(dir: &Dir, label: &str, from: i64, spends: &mut Vec<Spend>) -> Result<(),
             continue;
         }
         if *api {
-            if let Some(id) = report.missing.iter().find(|id| !recovered.contains(id)) {
-                return Err(format!(
-                    "{ENGINE} turn {n} has no recorded cost yet ({id}: running, or stopped before its result)"
+            if let Some(id) = report.missing.iter().find(|id| !recovered.contains(id))
+                && ledger.pending.is_none()
+            {
+                ledger.pending = Some(format!(
+                    "{ENGINE} turn {id} has no recorded cost yet: running, or stopped before its result"
                 ));
             }
             gaps.extend(report.missing.iter().cloned());
         }
         // A Claude turn that accounts for an API turn's unrecorded run is
         // charged whole: its cost includes that run's.
-        spends.push(Spend {
+        ledger.spends.push(Spend {
             at,
             micros: micros(report.cost)?,
         });

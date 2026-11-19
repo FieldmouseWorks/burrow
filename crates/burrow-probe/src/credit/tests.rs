@@ -51,10 +51,15 @@ impl Jobs {
         fs::write(dir.join(format!("{n}.jsonl")), stream).unwrap();
     }
 
+    /// The ledger's spends in order; an error when one is pending.
     fn ledger(&self, from: i64) -> Result<Vec<i64>, String> {
-        let mut spends = ledger(&self.root, from)?;
+        let ledger = ledger(&self.root, from)?;
+        let mut spends = ledger.spends;
         spends.sort_by_key(|s| s.at);
-        Ok(spends.into_iter().map(|s| s.micros).collect())
+        match ledger.pending {
+            Some(pending) => Err(pending),
+            None => Ok(spends.into_iter().map(|s| s.micros).collect()),
+        }
     }
 }
 
@@ -198,14 +203,14 @@ fn unreadable_accounting_is_an_error() {
     for (what, make) in cases {
         let jobs = Jobs::new();
         make(&jobs);
-        assert!(jobs.ledger(SINCE).is_err(), "{what}");
+        assert!(ledger(&jobs.root, SINCE).is_err(), "{what}");
     }
     // A job folder that's a link isn't followed.
     let jobs = Jobs::new();
     let outside = jobs.root.parent().unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, jobs.root.join("linked")).unwrap();
-    assert!(jobs.ledger(SINCE).is_err());
+    assert!(ledger(&jobs.root, SINCE).is_err());
 }
 
 fn credit_file(dir: &Path, credit: Value) -> PathBuf {
@@ -244,6 +249,16 @@ fn the_meter_refuses_a_turn_once_the_reserve_is_reached() {
     let m = meter(&file, Some(&jobs.root), now).unwrap();
     assert_eq!(m.spent, 15 * M);
     assert!(!m.room(), "$15 spent + $5 reserve of $20 is no room");
+    // A turn still running: no room, and the meter still shows its numbers.
+    let pending = Jobs::new();
+    let started = stream(&[result("p", 2.0), init("p"), assistant("p")]);
+    pending.turn("a", 1, Some(ENGINE), Some(SINCE + HOUR), &started);
+    let m = meter(&file, Some(&pending.root), now).unwrap();
+    assert_eq!(m.spent, 2 * M);
+    assert!(!m.room());
+    let text = m.text();
+    assert!(text.contains("no recorded cost yet"), "{text}");
+    assert!(text.contains("spent $2.00"), "{text}");
 }
 
 #[test]

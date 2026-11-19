@@ -267,6 +267,9 @@ pub struct Meter {
     pub reserve: i64,
     /// Today's allowance: (budget - spent before today) / days left.
     pub allowance: i64,
+    /// A turn whose cost isn't recorded yet, when there is one: its spend
+    /// can't be known, so there's no room until it is.
+    pub pending: Option<String>,
 }
 
 impl Meter {
@@ -296,6 +299,7 @@ impl Meter {
             today: spent - before,
             reserve: credit.reserve_usd.micros(),
             allowance: (cycle.budget - before).div_euclid(days_left.max(1)),
+            pending: None,
         })
     }
 
@@ -306,17 +310,19 @@ impl Meter {
 
     /// Whether the engine may start a turn now.
     pub fn room(&self) -> bool {
-        self.spent + self.reserve < self.cycle.budget && self.today < self.allowance
+        self.pending.is_none()
+            && self.spent + self.reserve < self.cycle.budget
+            && self.today < self.allowance
     }
 
     /// Why it has none, when it hasn't.
-    pub fn short(&self) -> Option<&'static str> {
+    pub fn short(&self) -> Option<String> {
         if self.spent + self.reserve >= self.cycle.budget {
-            Some("spent down to the reserve")
+            Some("spent down to the reserve".into())
         } else if self.today >= self.allowance {
-            Some("today's allowance spent")
+            Some("today's allowance spent".into())
         } else {
-            None
+            self.pending.clone()
         }
     }
 

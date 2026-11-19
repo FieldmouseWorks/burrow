@@ -39,9 +39,17 @@ fn room_needs_spent_plus_reserve_strictly_under_the_budget() {
         (95 * M, 5 * M, 100 * M)
     );
     assert!(!m.room(), "spent + reserve == budget is no room");
-    assert_eq!(m.short(), Some("spent down to the reserve"));
+    assert_eq!(m.short().as_deref(), Some("spent down to the reserve"));
     let under = [spend("2026-11-21T00:00:00Z", 95 * M - 1)];
-    assert!(Meter::at(&credit(), now, &under).unwrap().room());
+    let mut m = Meter::at(&credit(), now, &under).unwrap();
+    assert!(m.room());
+    // A turn whose cost isn't known yet takes the room, and says so.
+    m.pending = Some("turn 3 is pending".into());
+    assert!(!m.room());
+    assert!(
+        m.text()
+            .starts_with("claude-api credit: no room (turn 3 is pending)\n")
+    );
 }
 
 #[test]
@@ -66,7 +74,7 @@ fn today_spends_below_an_even_share_of_what_is_left() {
     let m = Meter::at(&credit(), now, &at_allowance).unwrap();
     assert_eq!(m.today, 10 * M);
     assert!(!m.room(), "today's spend equal to the allowance is no room");
-    assert_eq!(m.short(), Some("today's allowance spent"));
+    assert_eq!(m.short().as_deref(), Some("today's allowance spent"));
     let under = [spend("2026-11-20T01:00:00Z", 10 * M - 1)];
     assert!(Meter::at(&credit(), now, &under).unwrap().room());
     // The next day's allowance counts what's left, not what yesterday took:
