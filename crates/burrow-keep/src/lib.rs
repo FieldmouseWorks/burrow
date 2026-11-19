@@ -283,6 +283,12 @@ fn clear(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// A narinfo's field: the value of its `KEY: value` line.
+pub fn narinfo_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix(": ")))
+}
+
 /// A binary cache's paths, in a store whose paths are under `dir`. A
 /// narinfo that doesn't parse, or whose NAR isn't a file of its own under
 /// `nar/`, isn't one of them.
@@ -295,11 +301,7 @@ fn entries(cache: &Path, dir: &str) -> Result<BTreeMap<String, Entry>, String> {
             continue;
         }
         let text = fs::read_to_string(f.path()).map_err(|e| io(&f.path(), e))?;
-        let field = |key: &str| {
-            text.lines()
-                .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix(": ")))
-                .map(str::to_owned)
-        };
+        let field = |key: &str| narinfo_field(&text, key).map(str::to_owned);
         let (Some(path), Some(url)) = (field("StorePath"), field("URL")) else {
             continue;
         };

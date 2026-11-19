@@ -4,10 +4,10 @@
 //! both from the caller's Actions variables, never an input) which of the
 //! derivations it's about to build cold it has, and says so beside them:
 //! how many, which, their bytes, how long fetching them would take, and how
-//! long the kept builds' restore took. Nothing substitutes from it: nix
-//! reads only narinfos (`nix path-info`, `nix store verify --no-contents`),
-//! with a cache of its own, and one NAR's first bytes are timed for the
-//! fetch. Informational, as the cold build's own line is: it never fails a
+//! long the kept builds' restore took. Nothing substitutes from it: curl
+//! reads the outputs' narinfos by hash, nix checks their signatures
+//! (`nix store verify --no-contents`, with a cache of its own), and one
+//! NAR's first bytes are timed for the fetch. Informational, as the cold build's own line is: it never fails a
 //! leg, and every question has a deadline.
 //!
 //! A run that may write the store also gets [`NIX_CONFIG`]: what a flake's
@@ -215,6 +215,84 @@ impl Store {
         r
     }
 
+    /// The store's narinfos for `paths`, by their hashes: each path it
+    /// has, with its download's bytes and its NAR's URL. Read with curl,
+    /// never nix: given a path its store hasn't, nix tries to build it, and
+    /// an HTTP store (nix 2.35) then fails the whole question. A 404 is a
+    /// path it hasn't; any other answer is an error.
+    fn narinfos(
+        &self,
+        url: &str,
+        paths: &[&str],
+        work: &Path,
+    ) -> Result<BTreeMap<String, (u64, String)>> {
+        let mut has = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(has);
+        }
+        let dir = work.join("narinfo");
+        fs::create_dir_all(&dir)?;
+        let mut c = self.nix(
+            "curl",
+            &[
+                "-sS",
+                "--proto",
+                "=https,http",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                DEADLINE,
+                "-w",
+                "%{urlnum} %{response_code}\\n",
+            ],
+        );
+        for (i, p) in paths.iter().enumerate() {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            let hash = base.split_once('-').map_or(base, |(h, _)| h);
+            c.arg("-o")
+                .arg(dir.join(i.to_string()))
+                .arg(format!("{url}/{hash}.narinfo"));
+        }
+        let o = output(c)?;
+        let mut answered = vec![None; paths.len()];
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Some((Ok(i), Ok(code))) = l
+                .split_once(' ')
+                .map(|(i, c)| (i.parse::<usize>(), c.parse::<u16>()))
+                && let Some(a) = answered.get_mut(i)
+            {
+                *a = Some(code);
+            }
+        }
+        for (i, (p, code)) in paths.iter().zip(answered).enumerate() {
+            match code {
+                Some(404) => {}
+                Some(200) => {
+                    let text = fs::read_to_string(dir.join(i.to_string()))?;
+                    let field = |k| burrow_keep::narinfo_field(&text, k);
+                    let size = field("FileSize")
+                        .or_else(|| field("NarSize"))
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    match (field("StorePath"), field("URL")) {
+                        (Some(sp), Some(nar)) if sp == *p => {
+                            has.insert((*p).to_owned(), (size, nar.to_owned()));
+                        }
+                        _ => return Err(err(format!("its narinfo for {p} doesn't name it"))),
+                    }
+                }
+                code => {
+                    return Err(err(format!(
+                        "the store answered {} for {p}'s narinfo: {}",
+                        code.map_or("nothing".into(), |c| format!("HTTP {c}")),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    )));
+                }
+            }
+        }
+        Ok(has)
+    }
+
     fn asked(&self, cold: &[String], work: &Path) -> Result<Report> {
         let url = self.url.trim_end_matches('/');
         let key = &self.key;
@@ -240,32 +318,7 @@ impl Store {
             .map(String::as_str)
             .filter(|p| !p.is_empty())
             .collect();
-        let mut has: BTreeMap<String, (u64, String)> = BTreeMap::new();
-        if !paths.is_empty() {
-            let mut args = vec!["path-info", "--store", url, "--json", "--json-format", "2"];
-            args.extend(&paths);
-            let o = output(self.asking(work, &args))?;
-            if !o.status.success() {
-                return Err(err(format!(
-                    "nix path-info: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )));
-            }
-            let found = jq(
-                &o.stdout,
-                r#".info | to_entries[] | select(.value != null) | [.key, (.value.downloadSize // .value.narSize | tostring), .value.url] | join(" ")"#,
-            )?;
-            for l in found.lines() {
-                let mut w = l.splitn(3, ' ');
-                let (Some(p), Some(n), Some(u)) = (w.next(), w.next(), w.next()) else {
-                    continue;
-                };
-                has.insert(
-                    format!("{STORE}/{p}"),
-                    (n.parse().unwrap_or(0), u.to_owned()),
-                );
-            }
-        }
+        let mut has = self.narinfos(url, &paths, work)?;
         // What its key doesn't sign, a store that trusts only that key wouldn't
         // take: it doesn't count. With no key named, a store trusts none, so
         // only what needs no signature (a content-addressed path) counts.
@@ -320,7 +373,7 @@ impl Store {
                     "-sS",
                     "--fail",
                     "--proto",
-                    "=https,http,file",
+                    "=https,http",
                     "--connect-timeout",
                     "10",
                     "--max-time",
@@ -348,9 +401,6 @@ impl Store {
         Ok(report)
     }
 }
-
-/// The store paths are under, as every runner's nix has it.
-const STORE: &str = "/nix/store";
 
 /// The kept builds' restore, as the workflow's clock steps had it: its
 /// seconds, from before the lookup to after the restore, and the bytes it
