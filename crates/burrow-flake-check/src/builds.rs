@@ -269,7 +269,11 @@ impl Store {
                 Some(404) => {}
                 Some(200) => {
                     let text = fs::read_to_string(dir.join(i.to_string()))?;
-                    let field = |k| burrow_keep::narinfo_field(&text, k);
+                    // The runner is compiled with rustc alone: no crate's reader.
+                    let field = |k: &str| {
+                        text.lines()
+                            .find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix(": ")))
+                    };
                     let size = field("FileSize")
                         .or_else(|| field("NarSize"))
                         .and_then(|n| n.parse().ok())
