@@ -18,6 +18,7 @@ rendered = {
     "fix": H.fix_task("sam/r", pr, "2 open review threads"),
     "judge-reviewed": H.judge_task("sam/r", pr, "it touches .github/", False),
     "judge-past-limit-no-ci": H.judge_task("sam/r", pr, "it went past its round limit", True, seen=T.PAST_LIMIT),
+    "judge-answered": H.judge_task("sam/r", pr, "its findings were answered without a push", False, seen=T.ANSWERED),
     "judge-dependency": H.judge_task("sam/r", pr, "it's a dependency update", False, seen=T.DEP_SEEN),
 }
 for name, text in rendered.items():

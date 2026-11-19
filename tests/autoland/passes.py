@@ -13,18 +13,19 @@ from harness import (FAIL, REAL_GH, REAL, STATES, T, UPKEEP_RAN, WROTE, C, P, H,
                      head, info, mkpr, pr_state, run, summary, tmp)
 
 # A pass that waits on time books its repo's next pass for when the wait
-# ends: a head Codex hasn't reviewed is asked about QUIET minutes after its
-# push (its review's own posts kick a pass sooner), and the owner hears at
-# LOST; findings sit a while before a job.
+# ends: a head Codex hasn't reviewed is listed for the owner QUIET minutes
+# after its push (its review's own posts kick a pass sooner), and nothing
+# asks Codex (reviewers.py); findings sit a while before a job.
 asks = lambda: [x for x in WROTE if "@codex review" in x]  # noqa: E731
+listed = lambda d: [x[0] for x in d] == ["Codex hasn't reviewed it"]  # noqa: E731
 fresh_pr_state()
-run(mkpr(), 10)
-assert C.WAKE == {"sam/r": T + 10 + 30 * 60 + 1}, C.WAKE
-run(mkpr(), 10 + 30 * 60)
-assert len(asks()) == 1 and C.WAKE == {"sam/r": T + 10 + 120 * 60 + 1}, (WROTE, C.WAKE)
+_, digest = run(mkpr(), 10)
+assert C.WAKE == {"sam/r": T + 10 + 30 * 60 + 1} and digest == [], (C.WAKE, digest)
+_, digest = run(mkpr(), 10 + 30 * 60)
+assert asks() == [] and listed(digest) and C.WAKE == {"sam/r": T + 86400 + 1}, (WROTE, C.WAKE, digest)
 # The wait runs from the head's push, as near as GitHub says (its earliest
 # check suite), not from the steward's first look: a head still for longer
-# than it by then is asked about on that look; one pushed a minute before
+# than it by then is listed on that look; one pushed a minute before
 # still waits out the rest of it.
 def stamp(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -33,13 +34,13 @@ def stamp(t):
 fresh_pr_state()
 pushed = [{"createdAt": stamp(T - 3600), "conclusion": None, "workflowRun": None},
           {"createdAt": stamp(T - 60), "conclusion": None, "workflowRun": None}]
-run(mkpr(suites=pushed), 0)
-assert len(asks()) == 1 and pr_state()["seen"] == T - 3600, (WROTE, pr_state())
+_, digest = run(mkpr(suites=pushed), 0)
+assert listed(digest) and pr_state()["seen"] == T - 3600, (digest, pr_state())
 fresh_pr_state()
-run(mkpr(suites=pushed[1:]), 0)
-assert asks() == [] and C.WAKE == {"sam/r": T - 60 + 30 * 60 + 1}, (WROTE, C.WAKE)
-run(mkpr(suites=pushed[1:]), 29 * 60)
-assert len(asks()) == 1, WROTE
+_, digest = run(mkpr(suites=pushed[1:]), 0)
+assert digest == [] and C.WAKE == {"sam/r": T - 60 + 30 * 60 + 1}, (digest, C.WAKE)
+_, digest = run(mkpr(suites=pushed[1:]), 29 * 60)
+assert listed(digest) and asks() == [], (digest, WROTE)
 # A suite GitHub dates after the look (its clock ahead of ours) is no later
 # than the look.
 fresh_pr_state()
@@ -89,8 +90,8 @@ assert C.WAKE["sam/r"] == T + 500 + 60 + 1 and C.load(key, {})["landed"] == head
 FAIL.clear()
 run(stale, 600, held="Not needed: main is green again without it")
 assert "pr merge 5 -R sam/r --disable-auto" in WROTE and C.load(key, {})["landed"] is None, (WROTE, C.load(key, {}))
-# Every finding answered: Codex is asked to look again once the settle
-# delay after its review is up.
+# Every finding answered: a judge reads the answers once the settle delay
+# after its review is up.
 fresh_pr_state()
 run(mkpr(reviews=[found()], comments=[summary(findings=True)]), 700)
 assert C.WAKE == {"sam/r": T + 660 + 3 * 60 + 1}, C.WAKE

@@ -37,7 +37,8 @@ assert "Too many comments to read" in status and digest and JOBS == [] and not m
 
 
 # Codex's GitHub connector reviews each push on its own: until it says
-# something of this head, the PR waits on it, and no pass asks it to.
+# something of this head, the PR waits on it, and no pass asks it to (it
+# takes no App's ask: reviewers.py).
 fresh_pr_state()
 asks = lambda: [x for x in WROTE if "/issues/5/comments" in x and "@codex review" in x]  # noqa: E731
 status, _ = run(mkpr(), 0)
@@ -51,16 +52,28 @@ assert "Codex is reviewing this commit" in status and not merged(), status
 status, _ = run(clean(), 960)
 assert "Codex found nothing in this commit's change" in status and merged() and JOBS == [], status
 
-# Quiet QUIET minutes after its push, it's asked once, saying why, and not
-# again within the hour; quiet LOST minutes, the digest says so.
+# Quiet QUIET minutes after its push, it's a push the connector skipped:
+# nothing is posted, and the digest names it then, saying a person's ask
+# brings a review.
 fresh_pr_state()
 run(mkpr(), 0)
+status, digest = run(mkpr(), 29 * 60)
+assert asks() == [] and digest == [] and "Waiting for Codex's review of this commit" in status, (WROTE, digest, status)
 status, digest = run(mkpr(), 30 * 60)
-assert len(asks()) == 1 and "No review of aaaaaaa came after its push." in asks()[0] and digest == [], (WROTE, digest)
-status, digest = run(mkpr(), 31 * 60)
-assert asks() == [] and digest == [], (WROTE, digest)
-status, digest = run(mkpr(), 120 * 60)
-assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa after 120 minutes" in status, (status, digest)
+assert asks() == [] and [d[0] for d in digest] == ["Codex hasn't reviewed it"], (WROTE, digest)
+assert "no review of aaaaaaa after 30 minutes" in status and "a person's `@codex review`" in digest[0][2], (status, digest)
+# The steward's own ask, as it posted them before (burrow#1216), with the
+# connector's answer to an App and the state it kept of asking: no review,
+# so nothing was asked. It's listed at QUIET, not an hour on.
+APP_ASK = [said("@codex review\n\nNo review of aaaaaaa came after its push.", who="steward"),
+           said("To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+                who="chatgpt-codex-connector")]
+fresh_pr_state()
+run(mkpr(comments=APP_ASK), 0)
+C.save("pr-sam_r-5.json", {**C.load("pr-sam_r-5.json", {}), "asked": {"head": head, "at": C.NOW}})
+status, digest = run(mkpr(comments=APP_ASK), 30 * 60)
+assert asks() == [] and [d[0] for d in digest] == ["Codex hasn't reviewed it"] and not merged(), (WROTE, digest)
+assert "Waiting for Codex's review of this commit" in status, status
 
 # Only the connector's own posts count: its markers from anyone else, or
 # from a user who took its name, and its word on another head, aren't its
@@ -82,16 +95,19 @@ status, _ = run(threads, 700)
 assert JOBS == [] and "Round 1: 1 open review thread; a Claude job takes it at 12:41am" in status, (status, JOBS)
 status, _ = run(threads, 45 * 60)
 assert len(JOBS) == 1 and not merged(), (status, JOBS)
-# Every finding answered without a push: once that has sat the settle delay,
-# the connector is asked to look again, once.
+# Every finding answered without a push: the connector won't look again
+# unless a person asks, and the steward can't, so once that has sat the
+# settle delay a Claude job judges the answers, with the brief for that, and
+# its verdict lands it. Nothing asks the connector.
 fresh_pr_state()
 answered = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[True])
 status, _ = run(answered, 700)
-assert "Findings answered; review round 2 next" in status and asks() == [] and JOBS == [], status
+assert "Findings answered; a Claude job judges the answers next" in status and asks() == [] and JOBS == [], status
 status, _ = run(answered, 900)
-assert len(asks()) == 1 and "Every finding is answered" in asks()[0] and not merged(), WROTE
-status, _ = run(answered, 960)
-assert asks() == [], WROTE
+assert len(JOBS) == 1 and "judging it" in status and not merged() and asks() == [], (status, JOBS, WROTE)
+assert "without a push" in JOBS[0] and "read each thread as well as the diff" in JOBS[0], JOBS
+status, _ = run(mkpr(reviews=[found()], comments=[summary(findings=True), said(judgment("land", n=5))], threads=[True]), 960)
+assert merged() and asks() == [], (status, WROTE)
 
 # Codex's word binds only the commit: retargeted, or its description edited,
 # after its push (as GitHub dates both, however late a pass first sees it), a

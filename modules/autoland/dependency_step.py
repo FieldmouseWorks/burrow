@@ -11,7 +11,7 @@ import train as T
 import waits
 from common import CFG
 from seal import MAJOR as MAJOR_VERDICT
-from tasks import DEP_SEEN, PAST_LIMIT
+from tasks import ANSWERED, DEP_SEEN, PAST_LIMIT
 from touches import automerge_spent, automerges, provenance
 
 
@@ -58,6 +58,8 @@ def step(repo, pr, st, *, dep, renovate, head, labels, refresh, open_threads, ch
         settle("pending", "Dependency update, CI pending", stage=S.CI)
     elif looked and looked.capped:
         judged("reviewed dependency update past the review-round limit", PAST_LIMIT)
+    elif looked and looked.answered:
+        judged("reviewed dependency update whose findings were answered without a push", ANSWERED)
     elif gate() or ci == "none" or asked:
         judged(f"a dependency update touching {gate()}" if gate() else "the repo has no CI" if ci == "none"
                else "a Claude job was asked to judge this head",

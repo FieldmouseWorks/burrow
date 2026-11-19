@@ -919,7 +919,7 @@ in
         (chatgpt-codex-connector[bot]): findings come as review threads, and a
         summary comment says which commit it reviewed. Fix or answer every finding
         (reply on the thread, push the fix) and resolve the thread; a push gets a new
-        review, and with no push the steward asks for one (`@codex review`).
+        review, and findings all answered with no push get a Claude job's judgment.
       - Once it finds nothing on the head, every thread is
         resolved and CI is green on the head, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.${lib.optionalString (trains != [ ]) ''

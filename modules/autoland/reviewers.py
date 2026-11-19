@@ -3,18 +3,21 @@ Codex Connector App, set up on the owner's ChatGPT account to review every
 push). It reviews each head on its own and posts on the PR: findings as a
 review with inline threads, and a summary comment naming the commit it last
 reviewed and whether it found anything. The steward reads its verdict from
-those (`verdict`, burrow-upkeep's, crates/burrow-upkeep/src/verdict.rs) and
-asks for a look only when one is owed and no push will bring it (`ask`)."""
+those (`verdict`, burrow-upkeep's, crates/burrow-upkeep/src/verdict.rs).
+
+The steward never asks it for a review: the connector takes `@codex review`
+only from a GitHub user with a Codex account, and to the steward's App it
+answers "create a Codex account and connect to github" (burrow#1216). So a
+push is the only thing that brings a review: a head it skipped is listed
+for the owner (review_step.py), and findings answered without a push are
+judged (step.py)."""
 
 import json
 
 import common as C
 import prs as P
-from common import DRY, MIN, log
 
 NAMES = {"codex": "Codex"}
-# What asks the connector for a review, as its docs give it.
-ASK = "@codex review"
 
 
 def on(repo):
@@ -39,22 +42,3 @@ def verdict(repo, pr):
     s = out["said"]
     return s["verdict"], s["at"], s["rounds"], s["changed"]
 
-
-def ask(repo, pr, st, why):
-    """Ask the connector to look at the PR's head again, once a head and at
-    most once an hour: after its findings were answered without a push, or
-    when a push brought no review. `why` goes in the comment. st is the PR's
-    state. What GitHub said if it refused the comment, which isn't counted
-    as asked (the caller strikes it), else None."""
-    head = pr["headRefOid"]
-    asked = st.setdefault("asked", {})
-    if asked.get("head") == head and C.NOW - asked.get("at", 0) < 60 * MIN:
-        return None
-    if DRY:
-        log(f"  would: ask Codex to review {repo}#{pr['number']} at {head[:7]}")
-        return None
-    if C.comment(repo, pr["number"], f"{ASK}\n\n{why}") is None:
-        return "GitHub refused the comment"
-    st["asked"] = {"head": head, "at": C.NOW}
-    log(f"{repo}#{pr['number']}: asked Codex to review {head[:7]}: {why}")
-    return None

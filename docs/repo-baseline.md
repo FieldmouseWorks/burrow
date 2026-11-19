@@ -151,9 +151,11 @@ root only.
    Connector App, on the owner's ChatGPT account, set to review every push in
    each repo). It posts its findings as review threads and a summary comment
    naming the commit it reviewed; the steward reads its verdict from those
-   (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
-   half an hour after its push is asked for once (`@codex review`), and after
-   two hours the stuck issue says so. Codex's word binds only the commit:
+   (`chatgpt-codex-connector[bot]`'s posts only). The connector takes
+   `@codex review` only from a person with a Codex account, never from the
+   steward's App, so the steward never asks: a head it hasn't reviewed half
+   an hour after its push is one it skipped, and the owner's digest names
+   the PR then (a person's `@codex review`, or a push, brings the review). Codex's word binds only the commit:
    nothing it posts says which base or description it read, or when a review
    began. So a PR retargeted onto another base, or whose description is
    edited, after its head was pushed (as GitHub dates both) isn't Codex's to
@@ -172,8 +174,9 @@ root only.
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
    as on a hold, until proj resumes the job to bring the fix in.
-4. Codex looks again at each push, and the steward asks it to when every
-   finding was answered without one, until it finds nothing on the head.
+4. Codex looks again at each push, until it finds nothing on the head. When
+   every finding was answered without a push, which it doesn't look at
+   again unasked, a Claude job judges the answers (step 6) once CI is green.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. A check run cancelled with nothing run through since
@@ -191,7 +194,8 @@ root only.
    that judges it: an R2 one (Conary's class policy, `burrow.ledger.policy`:
    CODEOWNERS, secrets, by default), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
-   nothing to test), one retargeted or edited after its push (step 2), an R2
+   nothing to test), one retargeted or edited after its push (step 2), one
+   whose findings were all answered without a push (step 4), an R2
    dependency update, and a Dependabot major. The job lands anything a revert or a follow-up can undo,
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a

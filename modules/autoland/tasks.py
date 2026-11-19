@@ -45,7 +45,7 @@ NO_CI_TESTS = "Run the repo's tests before you push: it has no CI to run them."
 # The briefs' policy text, which burrow-brief keeps (crates/burrow-brief): how
 # a fix job weighs review findings, the same from a PR's first round to past
 # its round limit (FINDINGS), what must be fixed (MUST_FIX), what cleared a PR
-# a judge is asked about (REVIEWED, PAST_LIMIT, DEP_SEEN), and what a judge
+# a judge is asked about (REVIEWED, PAST_LIMIT, ANSWERED, DEP_SEEN), and what a judge
 # counts as failing and lands (FAILING, LAND_OR_OWNER), and how a reviewer
 # and a judge weigh a description's reasons (REASONS). Read once a process,
 # for the one owner the steward runs for; a binary that can't say fails the
@@ -56,6 +56,7 @@ MUST_FIX = _BRIEF["must_fix"]
 FINDINGS = _BRIEF["findings"]
 REVIEWED = _BRIEF["reviewed"]
 PAST_LIMIT = _BRIEF["past_limit"]
+ANSWERED = _BRIEF["answered"]
 DEP_SEEN = _BRIEF["dep_seen"]
 FAILING = _BRIEF["failing"]
 LAND_OR_OWNER = _BRIEF["land_or_owner"]

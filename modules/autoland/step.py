@@ -29,7 +29,7 @@ import train as T
 from aside import aside
 from common import CFG, MIN, save, ts
 from touches import bot_edited, dep_kind, gate_edit, moved_from
-from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
+from tasks import ANSWERED, FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
 from prs import ci_state, has_ci, our_status
 from prs import onto, land, MERGE_STEPS as MERGE_STEPS
@@ -228,7 +228,8 @@ class Pass(Context, Jobs, Actions):
             self.open_a_day(our_status(self.pr)[1] or "unsettled")
             save(self.key, self.st)
             return
-        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed, answered = looked
+        seen = PAST_LIMIT if capped else ANSWERED if answered else REVIEWED
 
         # 2. The reviewers are clean on this head and nothing is open: CI, then land.
         if self.ci == "red":
@@ -238,12 +239,12 @@ class Pass(Context, Jobs, Actions):
                 "CI is red (" + ", ".join(self.ci_names) + ")", "CI is red: " + ", ".join(self.ci_names)[:100], "redFixed", ours=not swept
             )
         elif self.held:
-            self.judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
+            self.judged("a Claude job was asked to judge this head", seen)
         elif proof_only or build_early:
             self.prove()
         elif self.ci == "pending":
             self.settle("pending", "Settled; waiting for CI: " + ", ".join(self.ci_names)[:90], stage=S.CI)
-        elif self.gate() or self.ci == "none" or asked or capped or changed:
+        elif self.gate() or self.ci == "none" or asked or capped or changed or answered:
             self.judged(
                 f"it touches {self.gate()}"
                 if self.gate()
@@ -253,8 +254,10 @@ class Pass(Context, Jobs, Actions):
                 if asked
                 else "it was retargeted or its description edited after its push, which Codex's review can't vouch for"
                 if changed
-                else f"it went past the review-round limit ({rounds} rounds with findings)",
-                PAST_LIMIT if capped else REVIEWED,
+                else f"it went past the review-round limit ({rounds} rounds with findings)"
+                if capped
+                else "its findings were answered without a push, and its reviewers don't look again unless a person asks",
+                seen,
             )
         else:
             self.land_now(
@@ -274,16 +277,14 @@ class Pass(Context, Jobs, Actions):
         looked = review_step.look(
             self.repo,
             self.pr,
-            self.st,
             self.digest,
             self.line,
             self.age,
             self.after,
-            self.tried,
             lambda: T.review(self.repo, self.pr),
         )
 
-        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked
+        live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed, _ = looked
 
         what = []
         if open_threads:
@@ -305,17 +306,17 @@ class Pass(Context, Jobs, Actions):
             )
         elif (not clean and not capped) or what:
             if not what:
-                # Every finding answered without a new commit: the reviewers that
-                # had findings look again.
-                for r in live:
-                    if said[r][0] == "findings":
-                        self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
-                        if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
-                            why = "Every finding is answered; this head has no push to review."
-                            self.tried("ask", V.ask(self.repo, self.pr, self.st, why))
-                self.settle(
-                    "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
-                )
+                # Every finding answered without a new commit. Its reviewers
+                # don't look again unless a person asks, and the steward can't
+                # (reviewers.py): once the answers have sat the settle delay,
+                # a judge reads them in their stead, after CI.
+                found = [said[r][1] for r in live if said[r][0] == "findings"]
+                if found and all(C.NOW - at > self.rc["settleDelay"] * MIN for at in found):
+                    self.reviewed_round = True
+                    return looked._replace(answered=True)
+                for at in found:
+                    self.after(at, self.rc["settleDelay"])  # ends: judged
+                self.settle("pending", "Findings answered; a Claude job judges the answers next", stage=S.REVIEW)
             else:
                 self.hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
         else:

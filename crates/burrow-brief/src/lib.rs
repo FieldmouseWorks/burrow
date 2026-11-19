@@ -50,6 +50,18 @@ pub const PAST_LIMIT: &str = concat!(
     "every thread is resolved",
 );
 
+/// What cleared a PR whose findings were answered without a push: its
+/// reviewer won't look again unasked, and the steward can't ask (Codex's
+/// connector takes a request only from a person with a Codex account), so
+/// the answers stand in for its next look, and the judge reads those too.
+pub const ANSWERED: &str = concat!(
+    "its reviewers had findings on that head and every one was answered without a push, which they don't look at ",
+    "again unless a person asks, so read each thread as well as the diff (a finding answered away that is ",
+    must_fix!(),
+    " counts as failing, the same as a failing build or test, so say which), ",
+    "every thread is resolved",
+);
+
 /// How a reviewer and a judge weigh the reasons a PR's description gives
 /// where the house rules ask for one. That the line is there is CI's to
 /// check; whether its reason holds up takes reading the code.
@@ -94,6 +106,7 @@ pub fn texts(owner: &str) -> serde_json::Value {
         "findings": FINDINGS,
         "reviewed": REVIEWED,
         "past_limit": PAST_LIMIT,
+        "answered": ANSWERED,
         "dep_seen": DEP_SEEN,
         "failing": FAILING,
         "land_or_owner": land_or_owner(owner),

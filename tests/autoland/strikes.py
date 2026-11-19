@@ -9,7 +9,7 @@ import os
 import re
 
 from harness import ALREADY, CI_GREEN, FAIL, JOBS, STATES, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, \
-    mkpr, pr_state, run, stand_in, tmp
+    pr_state, run, stand_in, tmp
 
 import harness
 import proofs as P
@@ -70,10 +70,6 @@ CASES = {
     "mergeable": {"pr": {**clean(), "mergeStateStatus": "UNKNOWN"}, "mended": clean()},
     "job": {"pr": clean(files=["secrets/1.yaml"]), "fail": lambda: setattr(C, "job", lambda *a, **k: None),
             "mend": lambda: setattr(C, "job", real_job)},
-    # Asking Codex for a review of a head pushed an hour before, which it
-    # hasn't reviewed.
-    "ask": {"pr": mkpr(suites=[{"createdAt": "2026-10-23T23:00:00Z", "conclusion": None, "workflowRun": None}]),
-            "fail": lambda: FAIL.append("/issues/5/comments"), "mend": FAIL.clear, "said": "GitHub refused the comment"},
     "stop": {"pr": clean(files=["secrets/1.yaml"], sha="b" * 40), "setup": judging,
              "fail": lambda: UNSTOPPABLE.add("judge-on-a"), "mend": UNSTOPPABLE.clear},
     # What its merge would change, which git can't say; and a PR that adds

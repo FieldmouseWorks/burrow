@@ -33,7 +33,6 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
-    "ask": "GitHub keeps refusing the comment that asks Codex for a review",
     "answer": "GitHub keeps refusing a Claude job's answers it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",

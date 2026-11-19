@@ -15,6 +15,7 @@ fn a_fix_job_weighs_findings_on_their_merits() {
     // what a judge past the limit counts as failing.
     assert!(FINDINGS.contains(&format!("Fix in full each one that is {MUST_FIX}: ")));
     assert!(PAST_LIMIT.contains(&format!("that is {MUST_FIX} counts as failing")));
+    assert!(ANSWERED.contains(&format!("that is {MUST_FIX} counts as failing")));
     for said in [
         "Weigh every finding on its merits, the same from the first round on, past the review-round limit too, whatever severity the reviewer gave it. ",
         "with a regression test for each of those cases that fails without the fix, not only the line the thread is on. ",
@@ -36,6 +37,7 @@ fn the_cli_gives_every_text_by_name_for_its_owner() {
         "findings",
         "reviewed",
         "past_limit",
+        "answered",
         "dep_seen",
         "failing",
         "land_or_owner",
@@ -45,6 +47,7 @@ fn the_cli_gives_every_text_by_name_for_its_owner() {
     assert_eq!(got, want);
     assert_eq!(t["findings"], FINDINGS);
     assert_eq!(t["past_limit"], PAST_LIMIT);
+    assert_eq!(t["answered"], ANSWERED);
     let land = t["land_or_owner"].as_str().unwrap();
     assert!(
         land.contains(" Send it to Sam only if it can't be undone "),
