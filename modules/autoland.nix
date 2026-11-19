@@ -663,9 +663,10 @@ in
       defaultText = lib.literalMD "the shadow's configurations";
       description = ''
         Each shadowed repo's flow configuration, at OWNER/NAME.json
-        lowercased (autoland/shadow.nix): where the flow's plugins read its
-        settings (a proof's recipe), until the flow's own configuration is
-        rendered (burrow#724).
+        lowercased (autoland/shadow.nix), rendered from the steward's
+        settings: the flow's only one, where its plugins read its settings
+        (a proof's recipe). One set by hand (CONARY_FLOW_CONFIG) is refused
+        (burrow.ledger).
       '';
     };
 

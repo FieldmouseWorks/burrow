@@ -576,6 +576,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-flow-files"
+version = "0.0.0"
+dependencies = [
+ "conary-core",
+ "conary-github",
+]
+
+[[package]]
 name = "burrow-github"
 version = "0.0.0"
 dependencies = [

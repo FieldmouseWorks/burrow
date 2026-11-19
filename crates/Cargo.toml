@@ -36,6 +36,7 @@ members = [
     "burrow-builds",
     "burrow-producer",
     "burrow-fix",
+    "burrow-flow-files",
     "burrow-proof",
     "burrow-renovate",
     "burrow-robot",
