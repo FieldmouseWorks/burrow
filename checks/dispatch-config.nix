@@ -1,7 +1,9 @@
 # The dispatcher's config as the module writes it, read by the binary
 # (the example's, and one with a deploy to watch): which commit of
 # each watched input the running system has, from the flake's
-# flake.lock (tests/dispatch), with its own repo left to the
+# flake.lock (tests/dispatch), but for one the flake holds at a
+# commit itself (an input with a `rev`), which is named as held and
+# isn't watched; with its own repo left to the
 # configuration revision the switch stamps, so that a build from a
 # dirty tree and the same tree committed are one system; and each
 # runner's labels,
@@ -29,12 +31,13 @@ let
         burrow.updates = {
           enable = true;
           origin = "https://github.com/sam/homelab";
-          watch = [ "sam/homelab" "sam/kit" "Sam/Tools" "sam/elsewhere" ];
+          watch = [ "sam/homelab" "sam/kit" "Sam/Tools" "sam/pin" "sam/elsewhere" ];
         };
         burrow.switch.flakeInputs = {
           self = { outPath = ../tests/dispatch; } // own;
           kit.rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
           tools.rev = "cccccccccccccccccccccccccccccccccccccccc";
+          pin.rev = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
           nixpkgs.rev = "dddddddddddddddddddddddddddddddddddddddd";
         };
       }
@@ -69,6 +72,10 @@ let
       "Sam/Tools" = "cccccccccccccccccccccccccccccccccccccccc";
     };
   };
+  # The input the flake's own `rev` holds: HOST-update's bump leaves it
+  # where it is, so its default branch isn't compared with what runs (a
+  # wait nothing could end), and its pushes aren't dispatch's to hear.
+  wantHeld = { "sam/pin" = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"; };
   labels = m: lib.mapAttrs (_: r: r.labels) (settings m).runners;
   wantLabels = arch: { ci-runner = [ "self-hosted" "Linux" arch "homelab" ]; bare = [ "bare" ]; };
   # The fresh runners: what a pass reads, the repo's queued jobs
@@ -105,6 +112,10 @@ in
     && builtins.elem "-/data" freshUnit.serviceConfig.InaccessiblePaths)
     "dispatch: runners must not see host homes or data";
   assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
+  assert lib.assertMsg ((settings committed).deploy.held == wantHeld)
+    "dispatch: the flake holds ${builtins.toJSON (settings committed).deploy.held}, not ${builtins.toJSON wantHeld}";
+  assert lib.assertMsg (builtins.elem "sam/kit" handled && !builtins.elem "sam/pin" handled)
+    "dispatch: a watched input's pushes are its to hear, a held one's aren't: ${builtins.toJSON handled}";
   assert lib.assertMsg (settings dirty == settings committed)
     "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
   # What HOST-update tells main from local changes by: the switch stamps it.
@@ -141,6 +152,8 @@ in
     "dispatch: runners' waits allow for a ${toString (settings committed).gap}s gap, and ${toString (settings spaced).gap}s with passes 600s apart";
   pkgs.runCommand "dispatch-config-check" { } ''
     ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
-    ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+    ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status > said
+    cat said
+    grep -F "sam/pin: held at eeeeeee by the flake's own rev" said
     touch $out
   ''
