@@ -464,8 +464,33 @@ fn waiters(jobs: &Path, tmp: &TempDir, ids: &[&str], max_jobs: usize) -> Vec<Kid
     kids
 }
 
-// Whole, with real processes: the line's head takes the free slot within
-// seconds of it coming free, with the rest of the line skipping their looks.
+/// How soon a free slot goes to the next in line: a look or two each, a pass
+/// apart, however loaded the runner, and well short of LOOK_EVERY, the
+/// fallback a waiter the note skips looks again by. A head that took the slot
+/// only then, not as it came free, would miss this.
+const SOON: Duration = Duration::from_secs(LOOK_EVERY as u64 / 2);
+
+/// Waits for each of `next` to take a slot, within SOON of `freed`, failing the
+/// moment any of `behind` takes one instead.
+fn only_next_take(jobs: &Path, freed: Instant, next: &[&str], behind: &[&str]) {
+    loop {
+        for w in behind {
+            assert_eq!(took(jobs, w), None, "{w} took a slot ahead of {next:?}");
+        }
+        if next.iter().all(|w| took(jobs, w).is_some()) {
+            return;
+        }
+        assert!(
+            freed.elapsed() < SOON,
+            "{next:?} not all in a slot {:?} after it freed",
+            freed.elapsed()
+        );
+        sleep(Duration::from_millis(20));
+    }
+}
+
+// Whole, with real processes: the line's head takes the free slot as it frees,
+// not at a later fallback, with the rest of the line skipping their looks.
 #[test]
 fn the_head_takes_a_slot_as_it_frees() {
     let tmp = TempDir::new().unwrap();
@@ -473,14 +498,11 @@ fn the_head_takes_a_slot_as_it_frees() {
     let held = File::create(jobs.join(".slots/1")).unwrap();
     held.try_lock().unwrap();
     let _kids = waiters(&jobs, &tmp, &["w0", "w1", "w2", "w3", "w4"], 1);
-    let freed = now();
+    let freed = Instant::now();
     held.unlock().unwrap();
-    until("the head of the line takes the slot", || {
-        took(&jobs, "w0").is_some()
-    });
-    let at = took(&jobs, "w0").unwrap();
-    assert!(at - freed <= 6, "took a free slot {}s after", at - freed);
-    for w in ["w1", "w2", "w3", "w4"] {
+    let behind = ["w1", "w2", "w3", "w4"];
+    only_next_take(&jobs, freed, &["w0"], &behind);
+    for w in behind {
         assert_eq!(took(&jobs, w), None, "{w} took a slot w0 holds");
     }
     until("w0's place goes", || in_queue(&jobs) == 4);
@@ -499,15 +521,12 @@ fn two_free_slots_both_go() {
     a.try_lock().unwrap();
     b.try_lock().unwrap();
     let _kids = waiters(&jobs, &tmp, &["w0", "w1", "w2", "w3", "w4"], 2);
-    let freed = now();
+    let freed = Instant::now();
     a.unlock().unwrap();
     b.unlock().unwrap();
-    for w in ["w0", "w1"] {
-        until("the next two take the slots", || took(&jobs, w).is_some());
-        let at = took(&jobs, w).unwrap();
-        assert!(at - freed <= 6, "{w} took a slot {}s after", at - freed);
-    }
-    for w in ["w2", "w3", "w4"] {
+    let behind = ["w2", "w3", "w4"];
+    only_next_take(&jobs, freed, &["w0", "w1"], &behind);
+    for w in behind {
         assert_eq!(took(&jobs, w), None, "{w} went ahead of the line");
     }
     until("their places go", || in_queue(&jobs) == 3);
@@ -601,16 +620,19 @@ fn max_wait_goes_by_when_it_came() {
     let since = now() - 7200;
     fs::create_dir_all(jobs.join("late")).unwrap();
     fs::write(jobs.join("late/since"), format!("{since}\n")).unwrap();
+    // Before it came, so a slow runner only lengthens what's measured: it goes
+    // among the --first ones once a whole-second now() is maxWait (4) past
+    // when it came, so more than 3s after this.
+    let started = Instant::now();
     let _late = waiter_to("soon", &jobs, &tmp, "late", 1);
     let normal = jobs.join(format!(".queue/2-{since}000000000-late"));
     let first = jobs.join(format!(".queue/1-{since}000000000-late"));
     until("late's place among the normal turns", || normal.exists());
-    let joined = Instant::now();
     until("late's place among the --first ones", || first.exists());
     assert!(
-        joined.elapsed() >= Duration::from_secs(2),
+        started.elapsed() >= Duration::from_secs(3),
         "among the --first ones after {:?}, not maxWait",
-        joined.elapsed()
+        started.elapsed()
     );
 }
 
