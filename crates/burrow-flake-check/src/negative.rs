@@ -43,6 +43,9 @@ struct Negative {
     checks: Vec<String>,
     skipped: Vec<String>,
     unrun: Vec<String>,
+    /// The lock files whose inputs are in the store apart already, so a
+    /// host out of reach costs its timeout once a run, not once a check.
+    apart: std::sync::Mutex<Vec<String>>,
 }
 impl Negative {
     fn found(&self, result: &str, tree: Option<&str>) -> Result<bool> {
@@ -98,23 +101,7 @@ impl Negative {
     }
     fn failed_there(&self, first: &Output, trees: &Path, name: Option<&str>) -> Result<()> {
         classify::own(exit_code(first.status), &first.stderr, true)?;
-        let o = output(cmd(
-            "nix",
-            &[
-                "flake",
-                "archive",
-                "--no-update-lock-file",
-                "--to",
-                &format!("local?root={}/apart", s(&self.work.0)),
-                s(&trees.join("negative")),
-            ],
-        ))?;
-        if !o.status.success() {
-            classify::errors(&o.stderr);
-            return Err(err(
-                "its inputs can't be copied into a store apart, so it can't tell",
-            ));
-        }
+        self.inputs_apart(&trees.join("negative"))?;
         let again = output(self.eval(&trees.join("negative"), name, true))?;
         if again.status.success() {
             return Err(err("it evaluated on a second try, so it can't tell"));
@@ -126,6 +113,81 @@ impl Negative {
         {
             return Err(err("the base no longer evaluates either, so it can't tell"));
         }
+        Ok(())
+    }
+    /// The tree's inputs, copied into the store apart: each one fetched
+    /// into this store on its own, so one whose host is out of reach stays
+    /// out without keeping the rest out, then every input's path, from its
+    /// lock, that this store holds. A host the evaluation never reaches for
+    /// can't decide the PR, and a second try that reaches for an input it
+    /// wasn't given fetched on the way, so can't tell.
+    fn inputs_apart(&self, tree: &Path) -> Result<()> {
+        let lock = fs::read_to_string(tree.join("flake.lock")).unwrap_or_default();
+        let mut apart = self.apart.lock().map_err(|_| err("poisoned"))?;
+        if apart.contains(&lock) {
+            return Ok(());
+        }
+        let o = output(cmd(
+            "nix",
+            &["flake", "prefetch-inputs", "--no-update-lock-file", s(tree)],
+        ))?;
+        if !o.status.success() {
+            classify::errors(&o.stderr);
+            println!(
+                "not every input could be fetched: those that couldn't aren't given to the second try"
+            );
+        }
+        let o = output(cmd(
+            "nix",
+            &[
+                "flake",
+                "archive",
+                "--no-update-lock-file",
+                "--dry-run",
+                "--json",
+                s(tree),
+            ],
+        ))?;
+        if !o.status.success() {
+            classify::errors(&o.stderr);
+            return Err(err(
+                "its inputs' paths can't be read from its lock, so it can't tell",
+            ));
+        }
+        // The inputs' paths, not the tree's own: the evaluation copies its
+        // source itself, as the base's does.
+        let paths = lines(&jq(
+            &o.stdout,
+            r#".inputs | .. | objects | select(has("path")) | .path"#,
+        )?);
+        let mut c = cmd("nix-store", &["--check-validity", "--print-invalid"]);
+        c.args(&paths);
+        let absent = lines(&string(c)?);
+        for p in &absent {
+            println!("{p}, an input, isn't in this store, so the second try isn't given it");
+        }
+        let held: Vec<_> = paths.iter().filter(|p| !absent.contains(p)).collect();
+        if held.is_empty() {
+            apart.push(lock);
+            return Ok(());
+        }
+        let mut c = cmd(
+            "nix",
+            &[
+                "copy",
+                "--to",
+                &format!("local?root={}/apart", s(&self.work.0)),
+            ],
+        );
+        c.args(held);
+        let o = output(c)?;
+        if !o.status.success() {
+            classify::errors(&o.stderr);
+            return Err(err(
+                "its inputs can't be copied into a store apart, so it can't tell",
+            ));
+        }
+        apart.push(lock);
         Ok(())
     }
     fn evaluate(&self, tree: &Path, q: &str, root_name: &str) -> Result<Output> {
@@ -199,6 +261,7 @@ pub fn negative() -> Result<bool> {
         checks: vec![],
         skipped: vec![],
         unrun: vec![],
+        apart: Default::default(),
     };
     let work = n.work.0.clone();
     let base = var("BASE");

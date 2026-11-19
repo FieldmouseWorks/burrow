@@ -231,7 +231,13 @@ impl Run<'_> {
     }
 
     pub(crate) fn dispatch(&self, key: &str, prompt: &str) {
-        if let Some(id) = dispatch(self.cfg, key, prompt) {
+        self.dispatch_of(key, &[], prompt);
+    }
+
+    /// [`dispatch`], for a problem about `of` (the inputs that don't build,
+    /// or that a VM test fails with): one job each set while it's at work.
+    pub(crate) fn dispatch_of(&self, key: &str, of: &[String], prompt: &str) {
+        if let Some(id) = dispatch(self.cfg, key, of, prompt) {
             println!("handed to Claude: proj log {id}");
         }
     }
@@ -427,8 +433,9 @@ impl Run<'_> {
         if self.failed.is_empty() {
             settled(cfg, "build-inputs", "Cleared by a later run.");
         } else {
-            self.dispatch(
+            self.dispatch_of(
                 "build-inputs",
+                &self.failed,
                 &format!(
                     "{}: these updates don't build with {}'s flake: {}. The logs are {}/build-<input>.log. Everything else went through without them. Make them build. {}",
                     cfg.update,

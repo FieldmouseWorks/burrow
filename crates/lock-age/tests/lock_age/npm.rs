@@ -14,7 +14,7 @@ fn days(n: i64) -> SignedDuration {
 /// npm's before as npm prints it, in a zone `hours` off UTC.
 fn js_date(at: Timestamp, minutes: i32) -> String {
     let zone = TimeZone::fixed(Offset::from_seconds(minutes * 60).unwrap());
-    at.to_zoned(zone)
+    at.to_zoned_datetime(zone)
         .strftime("%a %b %d %Y %H:%M:%S GMT%z (Somewhere)")
         .to_string()
 }

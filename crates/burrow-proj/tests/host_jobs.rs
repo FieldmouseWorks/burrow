@@ -6,12 +6,7 @@
 
 use burrow_proj::{config::Config, job::Job, probe::Bridge};
 use serde_json::json;
-use std::{
-    fs,
-    os::unix::fs::symlink,
-    path::Path,
-    process::{Command, Output},
-};
+use std::{fs, os::unix::fs::symlink, path::Path, process::Output};
 
 fn config(root: &Path) -> Config {
     let p = |name: &str| root.join(name);
@@ -51,14 +46,12 @@ fn config(root: &Path) -> Config {
 }
 
 fn cli(cfg: &Config, socket: Option<&Path>, args: &[&str]) -> Output {
-    let mut command = Command::new(&cfg.me);
+    let mut command = burrow_test::command(&cfg.me);
     command
         .args(args)
         .env("PROJ_JOB", "recovery")
         .env("PROJ_CONFIG", cfg.path.with_file_name("sandbox.json"))
-        .env("PROJ_SELF", &cfg.me)
-        .env_remove("PROJ_PROBE_SOCKET")
-        .env_remove("PROJ_HOST_JOBS_SOCKET");
+        .env("PROJ_SELF", &cfg.me);
     if let Some(socket) = socket {
         command.env("PROJ_HOST_JOBS_SOCKET", socket);
     }
@@ -636,13 +629,8 @@ fn only_the_bridge_view_redacts_and_the_hosts_own_answers_keep_every_byte() {
     // The host's own commands: no job, the host's configuration.
     let owner = |args: &[&str]| {
         success(
-            Command::new(&cfg.me)
+            burrow_proj::host_jobs::owner(&cfg.me, &cfg.path)
                 .args(args)
-                .env("PROJ_CONFIG", &cfg.path)
-                .env("PROJ_SELF", &cfg.me)
-                .env_remove("PROJ_JOB")
-                .env_remove("PROJ_HOST_JOBS_SOCKET")
-                .env_remove("PROJ_PROBE_SOCKET")
                 .output()
                 .unwrap(),
         )

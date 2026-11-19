@@ -1,5 +1,6 @@
 //! Fixtures shared by the workspace's tests.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -28,6 +29,24 @@ pub fn executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
         path.display(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A command for a program under test that starts from the environment CI
+/// gives it: every `PROJ_*` variable the test inherited is removed.
+///
+/// A proj job runs with its own `PROJ_JOB`, `PROJ_CONFIG`, sockets and the
+/// rest, and proj's programs act on those first: a child that inherits them
+/// talks to the job's host and config instead of the test's fixture. Spawn
+/// proj's programs, and test binaries re-running themselves, through this, and
+/// set the `PROJ_*` variables the test means on the returned command.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"PROJ_") {
+            command.env_remove(key);
+        }
+    }
+    command
 }
 
 /// Change fixture permissions, never making a regular file executable.
@@ -98,5 +117,39 @@ mod tests {
         let source = dir.path().join("executable");
         executable(&source, "#!/bin/sh\nexit 0\n");
         copy_file(source, dir.path().join("copy"));
+    }
+
+    /// The child the parent starts with a job's environment; it checks what a
+    /// command built by [`command`] would see.
+    #[test]
+    fn command_child() {
+        if std::env::var_os("PROJ_JOB").is_none() {
+            return;
+        }
+        let out = command("env")
+            .env("PROJ_CONFIG", "fixture")
+            .output()
+            .unwrap();
+        let env = String::from_utf8(out.stdout).unwrap();
+        let proj: Vec<_> = env.lines().filter(|l| l.starts_with("PROJ_")).collect();
+        assert_eq!(proj, ["PROJ_CONFIG=fixture"]);
+        println!("checked");
+    }
+
+    #[test]
+    fn command_drops_the_inherited_job_environment() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::command_child", "--nocapture"])
+            .env("PROJ_JOB", "job-1")
+            .env("PROJ_CONFIG", "/job/config.json")
+            .env("PROJ_HOST_JOBS_SOCKET", "/job/host.sock")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("checked"));
     }
 }

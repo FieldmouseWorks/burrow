@@ -10,6 +10,9 @@ for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
 builds start. A negative evaluation failure must repeat in a private local
 store without substituters, with the comparison tree evaluating afterwards.
+That store gets each input that can be fetched, one by one, so an unrelated
+host's outage can't decide the PR (#1212); a second try that reaches for an
+input it wasn't given can't tell.
 
 ## Delivery and caller cost
 
@@ -81,14 +84,26 @@ nothing), until its deadline: 4 hours from that leg's own start
 this leg builds cold (#1102). A leg compiling a large package cold takes 2
 to 3 hours on a hosted runner and saves it, which is worth the wait; one
 past 4 hours has stopped making progress, and its job's timeout keeps
-nothing. A failed or superseded push is no reason not to wait: its legs
-keep their builds whether its gate passed or not (#812), under its own
-commit, which is the key this leg restores. The waiter lists the push's runs once, then polls only their jobs
-(`WAIT_POLL`, 60 seconds), and reads the exact cache once the leg isn't
-building, which keeps a long wait inside the token's hourly requests. A
-leg that ended without saving, or no such run, ends the wait. A request
+nothing. A failed push is no reason not to wait: its legs keep their
+builds whether its gate passed or not (#812), under its own commit, which
+is the key this leg restores. A newer push's entry for the leg is: the
+base push's leg skips its save once one is listed, and deletes its own
+if one turns up after (`burrow_keep::prune`), so the waiter asks that
+same question of the leg's entries and, on a yes, stops and restores the
+newer entry, which holds every build of the base's that the newer push
+didn't change (#1164: a base leg compiling cold for three hours skipped
+its save that way, and the PR leg that had waited on it built cold into
+the job's six-hour limit). The waiter lists the push's runs once, then
+polls only their jobs (`WAIT_POLL`, 60 seconds), and reads the leg's
+entries on the first poll, every `WAIT_NEWER` (300 seconds) and once the
+leg isn't building, which keeps a long wait inside the token's hourly
+requests. A leg that ended without saving, with no newer entry, or no
+such run, ends the wait and this leg builds cold. A request
 past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
-which reports `degraded/kept-wait`.
+which reports `degraded/kept-wait`. A saved entry that then fails to
+restore (evicted, or unextractable) leaves the leg building without it and
+reports `degraded/kept-rewait` (#1161); what it left half extracted,
+Nix's `fallback` builds.
 
 The job inherits the caller's token permissions. Shipped callers grant
 `actions: read` for both runs and caches, including in private repositories;

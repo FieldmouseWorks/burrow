@@ -60,7 +60,10 @@ let
         renovate_login = settings.renovate;
         batch_label = cfg.labels.batch;
         hold_label = cfg.labels.hold;
-        first_label = cfg.labels.first;
+        # The steward's one priority: its first label, ahead of the rest.
+        # It knows no other level, so Conary's own `priority: …` labels are
+        # left out, and an unlabelled PR is at Conary's default (medium).
+        priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
         people = lib.filter (a: !bot a) cfg.authors;
         require_ci = rc.requireCi;
@@ -70,16 +73,36 @@ let
         settle_delay = minutes rc.settleDelay;
         handoff_after = minutes rc.handoffAfter;
         session_handoff_after = minutes rc.sessionHandoffAfter;
-        stall_after = minutes rc.stallAfter;
+        # A first PR is overdue in half an hour (or stallAfter, if that's
+        # sooner), the rest at stallAfter: the deadlines burrow#960 sets out.
+        # Until the steward keeps them too, a first PR waiting between the
+        # two is overdue to the flow alone.
+        stall_after = {
+          high = minutes (lib.min 30 rc.stallAfter);
+          medium = minutes rc.stallAfter;
+          low = minutes rc.stallAfter;
+        };
         hold_stall_after = minutes rc.holdStallAfter;
         train_stall_after = minutes rc.trainStallAfter;
         renovate_merge_after = minutes rc.renovateMergeAfter;
         renovate_sweep = settings.majorKey != null;
       };
     };
+  # Loaded by the machine's own cn as it's built (`cn flow settings`), as
+  # the ledger's policy is: Conary refuses a key it doesn't know or a value
+  # of the wrong type, so a burrow and a Conary out of step on the flow's
+  # settings fail the machine's build, rather than every shadow once it's
+  # live.
+  flowFile = repo: pkgs.runCommand "autoland-shadow.json" {
+    config = builtins.toJSON (flowConfig repo);
+    passAsFile = [ "config" ];
+  } ''
+    HOME=$TMPDIR ${ledger.package}/bin/cn flow settings --config "$configPath" >/dev/null
+    cp "$configPath" "$out"
+  '';
   configs = pkgs.linkFarm "autoland-shadow" (map (repo: {
     name = "${lib.toLower repo}.json";
-    path = pkgs.writeText "autoland-shadow.json" (builtins.toJSON (flowConfig repo));
+    path = flowFile repo;
   }) cfg.shadow);
   config = "${configs}/%I.json";
 in

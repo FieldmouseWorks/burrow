@@ -1,7 +1,7 @@
 //! Persist issues awaiting sorting admission or verdict application. Successful issue lists
 //! retire vanished issues; project discovery retires removed repositories.
-use super::record::files;
 use super::{Pass, key, raw};
+use crate::inbox::record::files;
 use crate::{Fail, io_fail, read};
 use serde_json::Value;
 use std::{fs, path::PathBuf};

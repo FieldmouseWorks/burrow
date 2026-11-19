@@ -7,8 +7,7 @@ use std::fs;
 
 mod about;
 pub(crate) use about::{
-    FILE as ABOUT_FILE, cohort, follows, footer, identity, key_of, load, locked, merge, open,
-    restore, still_waiting,
+    cohort, follows, footer, identity, key_of, load, locked, merge, open, restore, still_waiting,
 };
 mod host;
 pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
@@ -261,7 +260,6 @@ pub(crate) fn clear(job: &Job) {
         "question-text",
         "question-since",
         "question-id",
-        ABOUT_FILE,
     ] {
         let _ = fs::remove_file(host_path(job, name));
     }
@@ -337,12 +335,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         let _ = crate::record::mark(job, Marker::Await).remove_file();
         drop(registry);
         if let Some(inbox) = &cfg.inbox {
-            for entry in fs::read_dir(&inbox.state).into_iter().flatten().flatten() {
-                let dir = entry.path();
-                if read(&dir.join("job")).as_deref() == Some(job.id) {
-                    let _ = fs::remove_file(dir.join("drained"));
-                }
-            }
+            crate::inbox::record::undrain(&inbox.state, job.id);
         }
         let kicks = crate::turn::lines(&job.file(JobFile::Kick));
         crate::job::kick(cfg, kicks);

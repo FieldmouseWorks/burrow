@@ -1,5 +1,7 @@
 //! Issue labels govern both enrollment and every later turn.
 use super::{Pass, dirs, key, raw, say, written};
+use crate::inbox::record::files;
+use crate::record::JobFile;
 use crate::{Fail, config::Inbox, github::api, io_fail, job::Job, read};
 use serde_json::Value;
 use std::{
@@ -62,8 +64,7 @@ fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> 
 }
 /// Whether the job's latest turn was stopped: no turn of it starts again.
 pub(super) fn stopped(job: &Job) -> bool {
-    job.turns()
-        .is_some_and(|n| job.turn(&n, "stopped").exists())
+    job.turns().is_some_and(|n| crate::record::stopped(job, &n))
 }
 
 /// A stopped worker its issue's labels parked, which the issue's next
@@ -97,9 +98,9 @@ fn source(job: &Job) -> Result<Option<(String, String)>, String> {
             .map(Some)
             .ok_or_else(|| format!("proj: {}'s inbox issue is invalid", job.id));
     }
-    if job.path("inbox-issue").exists() {
+    if job.file(JobFile::InboxIssue).exists() {
         let source =
-            read(&crate::ask::host_path(job, "source")).or_else(|| read(&job.path("link")));
+            read(&crate::ask::host_path(job, "source")).or_else(|| read(&job.file(JobFile::Link)));
         return source
             .as_deref()
             .and_then(crate::github::target)
@@ -111,8 +112,8 @@ fn source(job: &Job) -> Result<Option<(String, String)>, String> {
     };
     let source = worker_records(&inbox.state)
         .into_iter()
-        .find(|d| read(&d.join("job")).as_deref() == Some(job.id))
-        .and_then(|d| read(&d.join("issue")))
+        .find(|d| files::job(d).as_deref() == Some(job.id))
+        .and_then(|d| files::issue(&d))
         .as_deref()
         .and_then(crate::github::target);
     if let Some((repo, n)) = &source {
@@ -260,7 +261,9 @@ impl Pass<'_> {
     ) -> Result<(), Fail> {
         let job = Job::new(self.cfg, id);
         if job.dir.is_dir() {
-            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let _held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
             remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
         }
         let root = super::record::files::retired(&self.inbox.state, &key(repo), n);
@@ -278,7 +281,7 @@ impl Pass<'_> {
             match parked(self.inbox, issue) {
                 Ok(None) => (),
                 Ok(Some(_)) => {
-                    if d.join("drained").exists() && !d.join("job").exists() {
+                    if files::drained(&d) && !files::has_job(&d) {
                         mark_parked(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
                         fs::remove_dir_all(&d).map_err(|e| io_fail(&d, e))?;
                     }
@@ -291,7 +294,7 @@ impl Pass<'_> {
             }
             let retiring = super::record::files::retired(&self.inbox.state, &key(repo), &n);
             if dirs(&retiring, "").iter().any(|d| {
-                read(&d.join("job")).is_some_and(|id| {
+                files::job(d).is_some_and(|id| {
                     let job = Job::new(self.cfg, &id);
                     job.dir.is_dir() && !stopped(&job)
                 })
@@ -299,7 +302,7 @@ impl Pass<'_> {
                 self.retry(repo);
                 continue;
             }
-            if let Some(id) = read(&d.join("job")) {
+            if let Some(id) = files::job(&d) {
                 if !replaceable(self.inbox, &Job::new(self.cfg, &id), repo, &n) {
                     continue;
                 }
@@ -350,19 +353,16 @@ impl Pass<'_> {
                 }
             };
             let seen = comments.iter().filter_map(|c| c["id"].as_i64()).max();
-            let write = |name: &str, text: String| {
-                fs::write(d.join(name), text).map_err(|e| io_fail(&d.join(name), e))
-            };
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-            write("issue", format!("{repo}#{n}\n"))?;
-            write("job", format!("{id}\n"))?;
-            write("answered", "0\n".into())?;
-            write("seen", format!("{}\n", seen.unwrap_or(0)))?;
+            files::mark(&d, files::File::Issue).put(format!("{repo}#{n}\n"))?;
+            files::mark(&d, files::File::Job).put(format!("{id}\n"))?;
+            files::mark(&d, files::File::Answered).put("0\n")?;
+            files::mark(&d, files::File::Seen).put(format!("{}\n", seen.unwrap_or(0)))?;
             // What it was handed, so it's closed with the issue only as long
             // as the issue is still that (jobs.rs).
             Self::hand(&d, &self.issue_text(repo, issue, &comments))?;
             // Said on the issue, or tried again next pass.
-            write("unannounced", String::new())?;
+            files::mark(&d, files::File::Unannounced).put("")?;
         }
         Ok(())
     }

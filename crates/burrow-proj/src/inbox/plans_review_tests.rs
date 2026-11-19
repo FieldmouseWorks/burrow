@@ -1,6 +1,7 @@
 use super::super::sorting_tests::issue;
 use super::tests::parent_fixture;
 use super::*;
+use crate::inbox::record::files;
 use crate::read;
 
 #[test]
@@ -34,7 +35,7 @@ fn completed_or_unenrolled_splits_retire_without_losing_receipts() {
         b.job_ending("j1", "done", Some("split"), "My split answer");
         let job = crate::job::Job::new(&b.cfg, "j1");
         let record = b.record("j1");
-        fs::write(record.join("drained"), "").unwrap();
+        fs::write(record.join(files::File::Drained), "").unwrap();
         fs::create_dir_all(crate::scratch::dir(&b.cfg, "j1")).unwrap();
         fs::write(crate::ask::host_path(&job, "question"), "{}").unwrap();
         fs::write(
@@ -116,7 +117,7 @@ fn stale_split_proposals_resume_the_updated_verified_task_and_keep_receipts() {
         )
         .unwrap();
         fs::write(
-            record.join("seen"),
+            record.join(files::File::Seen),
             if old_comments.is_empty() { "0" } else { "5" },
         )
         .unwrap();
@@ -155,7 +156,7 @@ fn stale_split_proposals_resume_the_updated_verified_task_and_keep_receipts() {
             receipts
         );
         if !comments.is_empty() {
-            assert_eq!(read(&record.join("seen")).as_deref(), Some("5"));
+            assert_eq!(read(&record.join(files::File::Seen)).as_deref(), Some("5"));
         }
     }
 }
@@ -276,7 +277,7 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
             .unwrap()
             .state
             .join(format!("sam_box-{n}"));
-        let id = read(&record.join("job")).unwrap();
+        let id = read(&record.join(files::File::Job)).unwrap();
         assert!(
             fs::read_to_string(b.cfg.jobs.join(id).join("prompt.1"))
                 .unwrap()
@@ -284,11 +285,15 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
             "{kind}"
         );
         assert_eq!(
-            fs::read_to_string(record.join("input")).unwrap(),
+            fs::read_to_string(record.join(files::File::Input)).unwrap(),
             snapshot,
             "{kind}"
         );
-        assert_eq!(read(&record.join("seen")).as_deref(), Some("42"), "{kind}");
+        assert_eq!(
+            read(&record.join(files::File::Seen)).as_deref(),
+            Some("42"),
+            "{kind}"
+        );
     }
 }
 
@@ -368,7 +373,7 @@ fn triage_uses_the_pass_repository_for_every_state_lookup() {
                     .state
                     .join(".triage/sam_box-7");
                 fs::create_dir_all(&d).unwrap();
-                fs::write(d.join("plan"), "[]").unwrap();
+                fs::write(d.join(files::File::Plan), "[]").unwrap();
             }
             "approval" => {
                 issue["labels"] = json!([{"name":"ready"}]);
@@ -378,12 +383,12 @@ fn triage_uses_the_pass_repository_for_every_state_lookup() {
                 issue["labels"] = json!([{"name":"claude"}]);
                 let d = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
                 fs::create_dir_all(&d).unwrap();
-                fs::write(d.join("job"), "j1").unwrap();
+                fs::write(d.join(files::File::Job), "j1").unwrap();
             }
             "split" => {
                 let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
                 fs::create_dir_all(&record).unwrap();
-                fs::write(record.join("job"), "j1").unwrap();
+                fs::write(record.join(files::File::Job), "j1").unwrap();
                 issue["labels"] = json!([{"name":"claude"}]);
                 fs::write(
                     b.pass().plan_dir("sam/box", n).join("worker-split"),
@@ -440,7 +445,7 @@ fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() 
         )
         .unwrap();
         fs::write(
-            record.join("seen"),
+            record.join(files::File::Seen),
             if old_comments.is_empty() { "0" } else { "5" },
         )
         .unwrap();
@@ -463,7 +468,7 @@ fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() 
         assert!(job.turn("1", "split-invalid").exists(), "{change}");
         assert!(crate::planning::admit(&job).is_ok(), "{change}");
         assert_eq!(job.turns().as_deref(), Some("1"));
-        let old_input = fs::read_to_string(record.join("input")).unwrap();
+        let old_input = fs::read_to_string(record.join(files::File::Input)).unwrap();
         // Restore every original source field after invalidation, before delivery.
         // Use the fixture's original issue rather than assume its rendering.
         let original = issue(7, "sam", &["claude"]);
@@ -500,15 +505,15 @@ fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() 
             receipts
         );
         if !comments.is_empty() {
-            assert_eq!(read(&record.join("seen")).as_deref(), Some("5"));
+            assert_eq!(read(&record.join(files::File::Seen)).as_deref(), Some("5"));
         }
-        let cursor = fs::read(record.join("seen")).unwrap();
+        let cursor = fs::read(record.join(files::File::Seen)).unwrap();
         let prompt = fs::read(job.path("prompt.2")).unwrap();
         b.pass()
             .jobs("sam/box", "box", std::slice::from_ref(&parent))
             .unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));
-        assert_eq!(fs::read(record.join("seen")).unwrap(), cursor);
+        assert_eq!(fs::read(record.join(files::File::Seen)).unwrap(), cursor);
         assert_eq!(fs::read(job.path("prompt.2")).unwrap(), prompt);
     }
 }
@@ -578,13 +583,17 @@ fn planner_and_worker_revisions_complete_without_reauthorizing_obsolete_children
                 .state
                 .join(".triage/sam_box-7");
             fs::create_dir_all(&record).unwrap();
-            fs::write(record.join("job"), "planner").unwrap();
+            fs::write(record.join(files::File::Job), "planner").unwrap();
             Pass::hand(&record, &source).unwrap();
             let steps = vec![
                 super::super::triage::Step::Split(tasks.clone()),
                 super::super::triage::Step::Label("tracker".into()),
             ];
-            fs::write(record.join("plan"), serde_json::to_string(&steps).unwrap()).unwrap();
+            fs::write(
+                record.join(files::File::Plan),
+                serde_json::to_string(&steps).unwrap(),
+            )
+            .unwrap();
             let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
             b.pass().verdicts("sam/box", t, &[parent.clone()]).unwrap();
             assert!(!record.exists(), "{}", b.log());
@@ -693,7 +702,7 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
         assert_eq!(b.pass().pick_ready(&[parent.clone()]), None);
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&record).unwrap();
-        fs::write(record.join("drained"), "sam/box#7").unwrap();
+        fs::write(record.join(files::File::Drained), "sam/box#7").unwrap();
         let view = b.pass().view(t, crate::now());
         assert!(
             view.slots
@@ -799,8 +808,8 @@ fn unstick_children_keep_admission_execution_and_sequence() {
                 .unwrap();
             let busy = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-99");
             fs::create_dir_all(&busy).unwrap();
-            fs::write(busy.join("drained"), "sam/box#99").unwrap();
-            fs::write(busy.join("job"), "busy").unwrap();
+            fs::write(busy.join(files::File::Drained), "sam/box#99").unwrap();
+            fs::write(busy.join(files::File::Job), "busy").unwrap();
             let (slots, count) = (".slots", b.cfg.max_jobs);
             fs::create_dir_all(b.cfg.jobs.join(slots)).unwrap();
             let _held: Vec<_> = (1..=count)
@@ -837,7 +846,7 @@ fn unstick_children_keep_admission_execution_and_sequence() {
                 .unwrap()
                 .state
                 .join(format!("sam_box-{target}"));
-            let id = read(&record.join("job")).unwrap();
+            let id = read(&record.join(files::File::Job)).unwrap();
             let job = crate::job::Job::new(&b.cfg, &id);
             assert!(job.path("unstick").exists());
             assert_eq!(crate::engine::choice(&b.cfg, &job).unwrap().engine, engine);
@@ -886,7 +895,7 @@ fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
                 .state
                 .join(".triage/sam_box-7");
             fs::create_dir_all(&record).unwrap();
-            fs::write(record.join("job"), "planner").unwrap();
+            fs::write(record.join(files::File::Job), "planner").unwrap();
             Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
             b.pass().verdicts("sam/box", t, &[parent]).unwrap();
             assert!(!record.exists());

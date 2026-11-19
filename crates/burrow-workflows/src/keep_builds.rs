@@ -107,22 +107,17 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         install["if"],
         "inputs.install-nix && needs.reuse.outputs.hit != 'true'"
     );
-    for (keep, said) in [
-        (
-            true,
-            "extra-substituters = file:///tmp/runner/kept?trusted=true",
-        ),
-        (false, ""),
-    ] {
-        let c = ctx(&[
-            ("inputs.keep-builds", keep.into()),
-            ("runner.temp", "/tmp/runner".into()),
-        ]);
-        assert_eq!(
-            value(text(&install["with"]["extra_nix_config"]), &c).text(),
-            said
-        );
-    }
+    // What it says, a_failed_restore_builds_without_the_kept_builds says.
+    let c = ctx(&[
+        ("inputs.keep-builds", true.into()),
+        ("runner.temp", "/tmp/runner".into()),
+    ]);
+    assert!(
+        value(text(&install["with"]["extra_nix_config"]), &c)
+            .text()
+            .lines()
+            .any(|l| l.trim() == "extra-substituters = file:///tmp/runner/kept?trusted=true")
+    );
     let tool = crate::harness::step(&job, "keep-tool");
     let keep = crate::harness::step(&job, "keep");
     let save = crate::harness::step(&job, "keep-save");
@@ -330,8 +325,14 @@ fn a_negative_restores_every_legs_kept_builds() {
         install["with"]["extra_nix_config"],
         gate_install["with"]["extra_nix_config"]
     );
-    // Lookup does not extract. Both an exact and a prefix hit require a
-    // successful restore; a genuine miss may build cold on first use.
+    // Lookup does not extract. A restore that fails (an entry evicted
+    // mid-download, an extraction that failed) never fails the job: it
+    // builds without that leg's builds and reports degraded/kept-restore,
+    // as a leg does (#1161), when its lookup found an entry it didn't
+    // restore.
+    let reporter = &all[at(&|s| s["name"] == "degraded/kept-restore")];
+    assert!(at(&|s| s == reporter) < install_at);
+    assert!(text(&reporter["run"]).contains("GITHUB_STEP_SUMMARY"));
     for (k, restore) in restores.iter().enumerate() {
         let id = format!("kept-{}", k + 1);
         let lookup = &all[at(&|s| s["id"] == id)];
@@ -342,13 +343,100 @@ fn a_negative_restores_every_legs_kept_builds() {
         for field in ["path", "key", "restore-keys"] {
             assert_eq!(lookup["with"][field], restore["with"][field]);
         }
-        for (hit, required) in [("true", true), ("false", true), ("", false)] {
-            let c = ctx(&[(&format!("steps.{id}.outputs.cache-hit"), hit.into())]);
-            assert_eq!(
-                value(text(&restore["with"]["fail-on-cache-miss"]), &c).truthy(),
-                required,
-                "{id}: {hit}"
+        assert_eq!(restore["id"], format!("{id}-restore"));
+        assert!(restore["with"]["fail-on-cache-miss"].is_null(), "{id}");
+        assert!(restore["continue-on-error"].is_null(), "{id}");
+        for (found, restored, degraded) in [
+            ("", "", false),
+            ("false", "", true),
+            ("true", "", true),
+            ("false", "false", false),
+            ("true", "true", false),
+        ] {
+            // Every other leg skipped: neither looked up nor restored.
+            let mut c = ctx(&[("always()", true.into())]);
+            for n in 1..=8 {
+                for step in [format!("kept-{n}"), format!("kept-{n}-restore")] {
+                    c.insert(format!("steps.{step}.outputs.cache-hit"), "".into());
+                }
+            }
+            c.insert(format!("steps.{id}.outputs.cache-hit"), found.into());
+            c.insert(
+                format!("steps.{id}-restore.outputs.cache-hit"),
+                restored.into(),
             );
+            assert_eq!(
+                value(text(&reporter["if"]), &c).truthy(),
+                degraded,
+                "{id}: {found} {restored}"
+            );
+        }
+    }
+}
+
+/// A restore that fails after the wait (the entry evicted mid-download, an
+/// extraction cut short) never fails the leg: it builds without the base's
+/// builds and reports degraded/kept-rewait (#1161). What a failed restore
+/// left half extracted is Nix's fallback's: a narinfo naming a truncated NAR
+/// is built rather than failed on, in a leg and in the negative alike.
+#[test]
+fn a_failed_restore_builds_without_the_kept_builds() {
+    let job = job();
+    let all = steps(&job);
+    let rewait = step(&job, "kept-rewait");
+    assert_eq!(rewait["continue-on-error"], true);
+    assert_eq!(rewait["name"], "soft/kept-rewait");
+    assert_eq!(rewait["with"]["fail-on-cache-miss"], true);
+    let reporter = all
+        .iter()
+        .find(|s| s["name"] == "degraded/kept-rewait")
+        .unwrap();
+    for (outcome, degraded) in [("failure", true), ("success", false), ("skipped", false)] {
+        let c = ctx(&[
+            ("always()", true.into()),
+            ("steps.kept-rewait.outcome", outcome.into()),
+        ]);
+        assert_eq!(
+            value(text(&reporter["if"]), &c).truthy(),
+            degraded,
+            "{outcome}"
+        );
+    }
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let negative = &wf["jobs"]["negative"];
+    let installs = steps(&job)
+        .iter()
+        .chain(steps(negative))
+        .filter(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(installs.len(), 2);
+    for install in &installs {
+        for (keep, said) in [
+            (
+                true,
+                vec![
+                    "extra-substituters = file:///tmp/runner/kept?trusted=true",
+                    "fallback = true",
+                ],
+            ),
+            (false, vec![]),
+        ] {
+            let c = ctx(&[
+                ("inputs.keep-builds", keep.into()),
+                ("runner.temp", "/tmp/runner".into()),
+            ]);
+            let config = value(text(&install["with"]["extra_nix_config"]), &c).text();
+            let lines: Vec<&str> = config
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(lines, said, "keep-builds {keep}");
         }
     }
 }
@@ -380,6 +468,15 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+    // The entry the wait named can be pruned by a newer push's save before
+    // it's restored; the restore then takes this leg's newest instead, as
+    // the first restore does, rather than failing the leg.
+    let rewait = &all[at("kept-rewait")];
+    assert_eq!(
+        rewait["with"]["restore-keys"],
+        all[at("kept-lookup")]["with"]["restore-keys"]
+    );
+    assert!(!rewait["with"]["restore-keys"].is_null());
 }
 
 /// The wait plans with Nix installed, so when the leg restored nothing the

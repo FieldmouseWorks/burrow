@@ -19,6 +19,7 @@
 //! unit, a retry's cancellation finishing the turn) means the next pass
 //! settles it instead.
 
+use crate::inbox::record::files;
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::{Pass, dirs};
 use crate::config::Config;
 use crate::job::Job;
-use crate::{filled, read, swap};
+use crate::swap;
 
 /// What a sorting job's last turn said, as its end kept it.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -54,7 +55,7 @@ pub(crate) fn ended(cfg: &Config, id: &str) {
     }
     let sorting = dirs(&super::record::files::sorting_root(&inbox.state), "")
         .iter()
-        .any(|d| read(&d.join("job")).as_deref() == Some(id));
+        .any(|d| files::job(d).as_deref() == Some(id));
     if sorting {
         settle(cfg, &Job::new(cfg, id), true);
     }
@@ -75,7 +76,7 @@ fn settle(cfg: &Config, job: &Job, in_end: bool) {
     if settled(job).is_some() || crate::policy::pending(job) || crate::policy::denied(job) {
         return;
     }
-    if !filled(&job.turn(&n, "outcome")) && !job.turn(&n, "ended").exists() {
+    if !crate::record::outcome_said(job, &n) && !crate::record::ended_marked(job, &n) {
         return;
     }
     if matches!(job.state().as_str(), "queued" | "running")
@@ -121,12 +122,12 @@ impl Pass<'_> {
             return;
         }
         for d in dirs(&self.sorting_dir(), "") {
-            let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
+            let Some(id) = files::job(&d).filter(|j| !j.is_empty()) else {
                 continue;
             };
             let job = Job::new(self.cfg, &id);
             if !job.dir.is_dir() {
-                if !d.join("failed").exists() {
+                if !files::failed(&d) {
                     let _ = fs::remove_dir_all(&d);
                 }
                 continue;

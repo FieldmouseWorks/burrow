@@ -152,7 +152,7 @@ fn a_pass_asks_github_nothing_of_a_parked_job_it_has_no_place_for() {
     // The drain's one place is taken: a handoff still enrolling.
     let taken = state.join("sam_web-1");
     fs::create_dir_all(&taken).unwrap();
-    fs::write(taken.join("drained"), "sam/web#1").unwrap();
+    fs::write(taken.join(crate::inbox::record::File::Drained), "sam/web#1").unwrap();
     // A parked inbox job of issue 2 waits for it.
     job(&cfg, "waiting", "sam/web", "done");
     let waiting = Job::new(&cfg, "waiting");
@@ -160,8 +160,12 @@ fn a_pass_asks_github_nothing_of_a_parked_job_it_has_no_place_for() {
     fs::write(waiting.path("link"), "https://github.com/sam/web/issues/2").unwrap();
     let record = state.join("sam_web-2");
     fs::create_dir_all(&record).unwrap();
-    fs::write(record.join("job"), "waiting").unwrap();
-    fs::write(record.join("drained"), "sam/web#2").unwrap();
+    fs::write(record.join(crate::inbox::record::File::Job), "waiting").unwrap();
+    fs::write(
+        record.join(crate::inbox::record::File::Drained),
+        "sam/web#2",
+    )
+    .unwrap();
     crate::policy::mark(&waiting, "done", false, None).unwrap();
 
     for _ in 0..2 {

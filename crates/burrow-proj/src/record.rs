@@ -30,8 +30,9 @@ pub use files::{JobFile, TurnFile};
 pub(crate) use files::{Marker, TurnMarker};
 pub(crate) use marks::{
     Unread, await_checked, await_text, await_written, awaiting, checkpoint, deadline, end,
-    end_checked, end_said_at, ended_down, has_await, has_outcome, has_slot, left_open, mark,
-    mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped, transferring, unstuck,
+    end_checked, end_said_at, ended_down, ended_marked, has_await, has_outcome, has_slot,
+    left_open, mark, mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped,
+    transferring, unstuck,
 };
 
 /// Where a job stands.
@@ -228,6 +229,22 @@ impl Record {
             self.stage.to_string(),
             self.wait.iter().filter_map(Wait::line).collect(),
         ))
+    }
+
+    /// Whether it's still at work: parked, queued or running, or its turn
+    /// over but holding something open that resumes it ([`Wait::held`]: a
+    /// transfer, a question, an await) or a usage hold still to reset, as
+    /// the steward reads one. A spent limit, or a release, holds nothing.
+    /// An error when what it waits on couldn't be read.
+    pub fn at_work(&self, now: i64) -> Result<bool, String> {
+        if let Some(e) = &self.unread {
+            return Err(e.clone());
+        }
+        Ok(!matches!(self.stage, Stage::Ended(_))
+            || self
+                .wait
+                .iter()
+                .any(|w| w.held() || matches!(w, Wait::Usage { reset, .. } if *reset > now)))
     }
 
     /// Its stage and waits in one line, as the history notes them.

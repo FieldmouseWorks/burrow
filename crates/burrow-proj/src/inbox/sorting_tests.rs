@@ -2,6 +2,7 @@
 //! systemctl that log what they're asked; the drain's are in
 //! [`super::drain_tests`].
 
+use crate::inbox::record::files;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -221,17 +222,17 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.j
         let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&d).unwrap();
         for (f, v) in [
-            ("issue", "sam/box#7"),
-            ("job", id),
-            ("answered", "0"),
-            ("seen", "0"),
+            (files::File::Issue, "sam/box#7"),
+            (files::File::Job, id),
+            (files::File::Answered, "0"),
+            (files::File::Seen, "0"),
         ] {
             fs::write(d.join(f), format!("{v}\n")).unwrap();
         }
         let input = self
             .pass()
             .issue_text("sam/box", &issue(7, "sam", &[]), &[]);
-        fs::write(d.join("input"), input).unwrap();
+        fs::write(d.join(files::File::Input), input).unwrap();
         d
     }
 }
@@ -435,9 +436,9 @@ fn sorted_as(said: &str, still: Value) -> Box {
         .state
         .join(".triage/sam_box-7");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "s1\n").unwrap();
-    fs::write(d.join("updated"), format!("{UPDATED}\n")).unwrap();
-    fs::write(d.join("input"), input(&b, 7)).unwrap();
+    fs::write(d.join(files::File::Job), "s1\n").unwrap();
+    fs::write(d.join(files::File::Updated), format!("{UPDATED}\n")).unwrap();
+    fs::write(d.join(files::File::Input), input(&b, 7)).unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     b.pass().verdicts("sam/box", &t, &[still]).unwrap();
     assert!(!d.exists(), "the record goes once it's carried out");
@@ -529,7 +530,7 @@ fn verdicts_are_carried_out() {
         .state
         .join(".triage/sam_box-7");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "s1\n").unwrap();
+    fs::write(d.join(files::File::Job), "s1\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     b.pass().verdicts("sam/box", &t, &[]).unwrap();
     assert!(!d.exists() && !b.log().contains("labels"), "{}", b.log());
@@ -569,7 +570,7 @@ fn outside_text_starts_no_job() {
     assert_eq!(said.matches("labelled `outside text`").count(), 1, "{said}");
     assert!(!said.contains("It's broken."), "{said}");
     let d = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-    assert!(d.join("refused").exists() && !d.join("job").exists());
+    assert!(d.join(files::File::Refused).exists() && !d.join(files::File::Job).exists());
 }
 
 // A reply that started the job's next turn while the pass was asking GitHub
@@ -640,9 +641,9 @@ pub(super) fn sorting(b: &Box, said: &str) -> PathBuf {
         .state
         .join(".triage/sam_box-7");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "s1\n").unwrap();
-    fs::write(d.join("updated"), format!("{UPDATED}\n")).unwrap();
-    fs::write(d.join("input"), input(b, 7)).unwrap();
+    fs::write(d.join(files::File::Job), "s1\n").unwrap();
+    fs::write(d.join(files::File::Updated), format!("{UPDATED}\n")).unwrap();
+    fs::write(d.join(files::File::Input), input(b, 7)).unwrap();
     d
 }
 
@@ -710,7 +711,7 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
         "{}",
         b.log()
     );
-    assert!(!d.join("job").exists());
+    assert!(!d.join(files::File::Job).exists());
     // Sorted again: a job tried (none can start here, which books a retry).
     assert!(p.wake.contains_key("sam/box"));
 
@@ -723,7 +724,7 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
     b.pass()
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
-    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "2\n");
+    assert_eq!(fs::read_to_string(d.join(files::File::Did)).unwrap(), "2\n");
     fs::remove_file(b.path("fail")).unwrap();
     let said = |who: &str, id: u64, body: &str| json!({"id": id, "user": burrow_github::fake::actor(who), "body": body, "created_at": UPDATED});
     let mark = &b.cfg.inbox_mark;
@@ -773,7 +774,7 @@ fn a_verdict_keeps_its_plan() {
     b.pass()
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
-    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "2\n");
+    assert_eq!(fs::read_to_string(d.join(files::File::Did)).unwrap(), "2\n");
     fs::remove_file(b.path("fail")).unwrap();
     // An owner set since: not assigned now, and nothing said twice.
     let mut t = t;
@@ -835,7 +836,7 @@ fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
     let old = b.record("lane");
     let lane = old.with_file_name("sam_box-100");
     fs::rename(old, &lane).unwrap();
-    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    fs::write(lane.join(files::File::Issue), "sam/box#100\n").unwrap();
     Pass::hand(
         &lane,
         "[deliver](HTTPS://GITHUB.COM/SAM/BOX/ISSUES/7#issue-123)",

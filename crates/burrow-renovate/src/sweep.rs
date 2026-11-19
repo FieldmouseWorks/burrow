@@ -555,7 +555,7 @@ impl Sweep<'_> {
             want = format!("{sha} verdicts sealed for {base}");
         }
         if security {
-            want = format!("{sha} {}", jiff::Zoned::now().strftime("%Y-%m-%d"));
+            want = format!("{sha} {}", jiff::ZonedDateTime::now().strftime("%Y-%m-%d"));
         }
         // Red since it was handed over (a proof run later, say): another
         // job fixes that, verdict or not. Otherwise a major's key names the

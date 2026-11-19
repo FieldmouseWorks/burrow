@@ -48,6 +48,11 @@ pub struct New {
     pub since: Option<String>,
     /// What its starter knows it by before it has its id (`proj find`).
     pub key: Option<String>,
+    /// One job at work a key: a run under a key whose job is still at work
+    /// joins that job (its id, nothing started), and one whose job has
+    /// ended hands the key to the new job. Without it, a key a started job
+    /// has is refused, however that job stands.
+    pub join: bool,
     /// Inbox label choice, kept for every turn.
     pub engine: Option<crate::engine::Engine>,
     /// The kind of work it is, which picks its engine (Config::roles).
@@ -141,21 +146,41 @@ fn find_held(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
     }
 }
 
-/// The key taken for the new job `id`, or the job that has it.
-fn take_key(cfg: &Config, key: &str, id: &str) -> Result<(), Fail> {
+/// The key taken for the new job `id`, or the job that has it: refused,
+/// or, with `join`, joined while it's still at work (`Some`, its id) and
+/// let go once it has ended. All of it under the key's lock, so two
+/// starters joining at once get one job.
+fn take_key(cfg: &Config, key: &str, id: &str, join: bool) -> Result<Option<String>, Fail> {
     let path = key_path(cfg, key);
     let _key = key_lock(cfg, key)?;
     match std::os::unix::fs::symlink(id, &path) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(None),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(io_fail(&path, e)),
     }
     // One that never started lets it go, and, under the key's lock, it's
     // this job's before anything else can judge or take it.
     if let Some(had) = find_held(cfg, key)? {
-        return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
+        if !join {
+            return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
+        }
+        let at_work = Job::new(cfg, &had).at_work().map_err(|e| {
+            Fail::new(
+                1,
+                format!("proj run: can't tell whether {had}, which has the key {key}, is still at work: {e}"),
+            )
+        })?;
+        if at_work {
+            return Ok(Some(had));
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_fail(&path, e)),
+        }
     }
-    std::os::unix::fs::symlink(id, &path).map_err(|e| io_fail(&path, e))
+    std::os::unix::fs::symlink(id, &path).map_err(|e| io_fail(&path, e))?;
+    Ok(None)
 }
 
 /// A --kick: HANDLER or HANDLER/OWNER/REPO.
@@ -272,6 +297,10 @@ fn run_with_cgroup(
                 new.key = Some(k.to_owned());
                 i += 1;
             }
+            Some("--join") => {
+                only_run("--join: the job's own key is kept")?;
+                new.join = true;
+            }
             Some("--app") => {
                 only_run("--app: the job's own is kept")?;
                 let a = value
@@ -339,9 +368,15 @@ fn run_with_cgroup(
         }
         id.to_owned()
     } else {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY [--join]] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
+        if new.join && new.key.is_none() {
+            return Err(Fail::new(
+                2,
+                "proj run --join needs a --key: what it joins by",
+            ));
+        }
         super::starter::check(new.role.as_deref(), cgroup)?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
@@ -409,11 +444,15 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let _held = job
         .lock()
         .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
-    if let Some(k) = &new.key
-        && let Err(e) = take_key(cfg, k, &id)
-    {
-        let _ = fs::remove_dir_all(&job.dir);
-        return Err(e);
+    if let Some(k) = &new.key {
+        let joined = take_key(cfg, k, &id, new.join);
+        if !matches!(joined, Ok(None)) {
+            let _ = fs::remove_dir_all(&job.dir);
+        }
+        if let Some(had) = joined? {
+            eprintln!("proj run: joined {had}, which has the key {k} and is still at work");
+            return Ok(had);
+        }
     }
     let write =
         |f: JobFile, text: &str| fs::write(job.file(f), text).map_err(|e| io_fail(&job.file(f), e));
@@ -661,7 +700,9 @@ fn resume_one(
 fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
     fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
     let name = id_name(project);
-    let when = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
+    let when = jiff::ZonedDateTime::now()
+        .strftime("%Y%m%d-%H%M%S")
+        .to_string();
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let random = RandomState::new();
     for attempt in 0u64.. {

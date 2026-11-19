@@ -1,6 +1,8 @@
-//! Wait for the exact default-branch push's kept builds. Planning is done by
-//! the dependency-free runner; this binary uses the shared GitHub client.
+//! Wait for the exact default-branch push's kept builds, or for a newer
+//! push's that makes that push skip its save. Planning is done by the
+//! dependency-free runner; this binary uses the shared GitHub client.
 use burrow_github::{Api, Gh, encode, pages};
+use burrow_keep::prune::Leg;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use std::{
@@ -18,15 +20,27 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 /// took 194 minutes. Past 4 hours a leg has stopped making progress, and
 /// the job cuts it off at 6, keeping nothing.
 const DEADLINE: i64 = 4 * 60 * 60;
+/// How often, in seconds, the leg's kept entries are read while the base
+/// push's leg builds, unless `WAIT_NEWER` says otherwise: a newer push's
+/// entry turning up means the base push won't save (#1164). Each read is
+/// one listing and one comparison an entry's commit, kept to every five
+/// minutes so an hours-long wait stays well inside the token's requests.
+const NEWER: u64 = 5 * 60;
 fn var(k: &str) -> String {
     env::var(k).unwrap_or_default()
 }
 
 /// Where the base push's leg stands, as one poll found it.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum State {
     /// Its kept builds are saved under the exact key.
     Saved,
+    /// A newer push's leg saved its kept builds first, under this key. The
+    /// base push's leg skips its own save when it finds one
+    /// (burrow_keep::prune), or deletes it once saved, so it's what there
+    /// is to restore: a superset of every build of the base's that the
+    /// newer push didn't change (#1164).
+    Newer(String),
     /// Its leg is running on a runner, inside its deadline: it ends, saved
     /// or not, without anything this leg holds.
     Building,
@@ -60,7 +74,8 @@ struct Producer<'a> {
     workflow: &'a str,
     branch: &'a str,
     tip: &'a str,
-    key: &'a str,
+    /// The leg's kept entries, as the base push's own keep steps read them.
+    leg: Leg<'a>,
     /// The leg's job name, as the workflow names it; a caller's reusable
     /// workflow puts its own job's name and " / " before it.
     job: &'a str,
@@ -79,14 +94,6 @@ impl Producer<'_> {
     }
     fn jobs_path(&self, run: u64) -> String {
         format!("repos/{}/actions/runs/{run}/jobs?per_page=100", self.repo)
-    }
-    fn caches_path(&self) -> String {
-        format!(
-            "repos/{}/actions/caches?key={}&ref={}&per_page=100",
-            self.repo,
-            encode(self.key),
-            encode(&format!("refs/heads/{}", self.branch))
-        )
     }
     /// The ids of the producer's runs still going.
     fn running(&self, runs: &Value) -> Vec<u64> {
@@ -117,13 +124,14 @@ impl Producer<'_> {
                     .is_some_and(|n| n == self.job || n.ends_with(&nested))
             })
     }
-    fn cached(&self, caches: &Value) -> bool {
-        let reference = format!("refs/heads/{}", self.branch);
-        caches["actions_caches"].as_array().is_some_and(|caches| {
-            caches
-                .iter()
-                .any(|c| c["key"] == self.key && c["ref"] == reference)
-        })
+    /// What the leg's kept entries hold for this leg: the base push's own
+    /// save, else a newer push's that supersedes it.
+    fn kept(&self, api: &mut dyn Api) -> Result<Option<State>> {
+        let entries = self.leg.entries(api)?;
+        if entries.contains_key(self.tip) {
+            return Ok(Some(State::Saved));
+        }
+        Ok(self.leg.newer(api, &entries)?.map(State::Newer))
     }
     /// The producer's runs still going, read once: a run's id outlives
     /// its attempts, and its jobs say the rest.
@@ -134,10 +142,11 @@ impl Producer<'_> {
             .flat_map(|p| self.running(p))
             .collect())
     }
-    /// One poll at `now`: one request a run while its leg builds, and the
-    /// exact cache only once it doesn't, which keeps an hours-long wait well
-    /// inside the token's hourly requests.
-    fn state(&self, api: &mut dyn Api, runs: &[u64], now: Timestamp) -> Result<State> {
+    /// One poll at `now`: one request a run while its leg builds, the
+    /// leg's kept entries too when `look` (every `WAIT_NEWER`), and always
+    /// once it doesn't, which keeps an hours-long wait well inside the
+    /// token's hourly requests.
+    fn state(&self, api: &mut dyn Api, runs: &[u64], now: Timestamp, look: bool) -> Result<State> {
         let mut statuses = Vec::new();
         let (mut building, mut late) = (false, false);
         for &id in runs {
@@ -170,17 +179,18 @@ impl Producer<'_> {
             }
         }
         if building {
+            // Its save is skipped once a newer push's is there, so that
+            // is waited for no longer.
+            if look && let Some(State::Newer(key)) = self.kept(api)? {
+                return Ok(State::Newer(key));
+            }
             return Ok(State::Building);
         }
         // Read the cache AFTER status, including on the first poll. A leg
         // that finished during planning or between polls has already saved
         // everything it can save, even if its final conclusion was failure.
-        let saved = pages(api, &self.caches_path())
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|p| self.cached(p));
-        Ok(if saved {
-            State::Saved
+        Ok(if let Some(kept) = self.kept(api)? {
+            kept
         } else if late {
             State::Late
         } else if statuses.iter().any(|s| s != "completed") {
@@ -211,12 +221,18 @@ fn wait() -> Result<()> {
     }
     let key = format!("{}{tip}", var("KEPT_KEY"));
     let deadline = SignedDuration::from_secs(var("WAIT_DEADLINE").parse().unwrap_or(DEADLINE));
+    let prefix = var("KEPT_KEY");
     let producer = Producer {
         repo: &repo,
         workflow: &workflow,
         branch: &branch,
         tip: &tip,
-        key: &key,
+        leg: Leg {
+            repo: &repo,
+            branch: &branch,
+            prefix: &prefix,
+            sha: &tip,
+        },
         job: &job,
         deadline,
     };
@@ -230,11 +246,17 @@ fn wait() -> Result<()> {
     let started = Instant::now();
     api.until = Some(Instant::now() + request);
     let runs = producer.runs(&mut api)?;
+    let newer = Duration::from_secs(var("WAIT_NEWER").parse().unwrap_or(NEWER));
+    let mut looked: Option<Instant> = None;
     let state = poll(
         Duration::from_secs(var("WAIT_POLL").parse().unwrap_or(60)),
         || {
             api.until = Some(Instant::now() + request);
-            producer.state(&mut api, &runs, Timestamp::now())
+            let look = looked.is_none_or(|t| t.elapsed() >= newer);
+            if look {
+                looked = Some(Instant::now());
+            }
+            producer.state(&mut api, &runs, Timestamp::now(), look)
         },
     )?;
     let late = format!(
@@ -244,8 +266,10 @@ fn wait() -> Result<()> {
     println!(
         "{state:?} after {}s: {}",
         started.elapsed().as_secs(),
-        match state {
+        match &state {
             State::Saved => "restoring its kept builds",
+            State::Newer(_) =>
+                "a newer push's kept builds are saved, so its own won't be: restoring those",
             State::Queued => "its leg has no runner yet, and may want this one, so building cold",
             State::Late => &late,
             State::Gone =>
@@ -253,14 +277,19 @@ fn wait() -> Result<()> {
             State::Building => unreachable!("poll returns once it stops building"),
         }
     );
-    if state == State::Saved
+    let restore = match state {
+        State::Saved => Some(key.as_str()),
+        State::Newer(ref newer) => Some(newer.as_str()),
+        _ => None,
+    };
+    if let Some(restore) = restore
         && let Some(path) = env::var_os("GITHUB_OUTPUT")
     {
         let mut out = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(path)?;
-        writeln!(out, "key={key}\nsaved=true")?;
+        writeln!(out, "key={restore}\nsaved=true")?;
     }
     Ok(())
 }
