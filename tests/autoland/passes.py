@@ -1,24 +1,50 @@
 from harness import admission, DEFAULT_ADMISSION
 """What starts the steward's passes, as burrow-events runs them: the
 wake-ups a pass books, a kicked pass over one repo, and the kicks from
-reviews and Claude jobs coming back."""
+Claude jobs coming back."""
 
+import datetime
 import json
 import os
 import sys
 import time
 
-from harness import (FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, UPKEEP_RAN, WROTE, C, P, H, S, V, clean, fresh_pr_state,
-                     head, info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
+from harness import (FAIL, REAL_GH, REAL, STATES, T, UPKEEP_RAN, WROTE, C, P, H, S, clean, found, fresh_pr_state,
+                     head, info, mkpr, pr_state, run, summary, tmp)
 
 # A pass that waits on time books its repo's next pass for when the wait
-# ends: a new head's settle delay, and how long findings sit before a job.
+# ends: a head Codex hasn't reviewed is asked about QUIET minutes after its
+# push (its review's own posts kick a pass sooner), and the owner hears at
+# LOST; findings sit a while before a job.
+asks = lambda: [x for x in WROTE if "@codex review" in x]  # noqa: E731
 fresh_pr_state()
 run(mkpr(), 10)
-assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
-# The reviewers queued: their answers kick it (below), so there's only the day.
-run(mkpr(), 200)
-assert queued() == ["codex", "rival"] and C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
+assert C.WAKE == {"sam/r": T + 10 + 30 * 60 + 1}, C.WAKE
+run(mkpr(), 10 + 30 * 60)
+assert len(asks()) == 1 and C.WAKE == {"sam/r": T + 10 + 120 * 60 + 1}, (WROTE, C.WAKE)
+# The wait runs from the head's push, as near as GitHub says (its earliest
+# check suite), not from the steward's first look: a head still for longer
+# than it by then is asked about on that look; one pushed a minute before
+# still waits out the rest of it.
+def stamp(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+fresh_pr_state()
+pushed = [{"createdAt": stamp(T - 3600), "conclusion": None, "workflowRun": None},
+          {"createdAt": stamp(T - 60), "conclusion": None, "workflowRun": None}]
+run(mkpr(suites=pushed), 0)
+assert len(asks()) == 1 and pr_state()["seen"] == T - 3600, (WROTE, pr_state())
+fresh_pr_state()
+run(mkpr(suites=pushed[1:]), 0)
+assert asks() == [] and C.WAKE == {"sam/r": T - 60 + 30 * 60 + 1}, (WROTE, C.WAKE)
+run(mkpr(suites=pushed[1:]), 29 * 60)
+assert len(asks()) == 1, WROTE
+# A suite GitHub dates after the look (its clock ahead of ours) is no later
+# than the look.
+fresh_pr_state()
+run(mkpr(suites=[{"createdAt": stamp(T + 600), "conclusion": None, "workflowRun": None}]), 0)
+assert asks() == [] and pr_state()["seen"] == T, pr_state()
 fresh_pr_state()
 run(clean(threads=[False]), 300)
 assert C.WAKE == {"sam/r": T + 300 + 30 * 60 + 1}, C.WAKE
@@ -63,22 +89,15 @@ assert C.WAKE["sam/r"] == T + 500 + 60 + 1 and C.load(key, {})["landed"] == head
 FAIL.clear()
 run(stale, 600, held="Not needed: main is green again without it")
 assert "pr merge 5 -R sam/r --disable-auto" in WROTE and C.load(key, {})["landed"] is None, (WROTE, C.load(key, {}))
-# Every finding answered: the reviewer looks again once the settle delay
-# after its review is up.
+# Every finding answered: Codex is asked to look again once the settle
+# delay after its review is up.
 fresh_pr_state()
-run(mkpr(reviews=[rv_review("codex", 1), rv_review("rival", 0)]), 700)
+run(mkpr(reviews=[found()], comments=[summary(findings=True)]), 700)
 assert C.WAKE == {"sam/r": T + 660 + 3 * 60 + 1}, C.WAKE
-# A reviewer out of service: its look is asked for once it's back.
-fresh_pr_state()
-run(mkpr(), 0)
-C.save(V.OUT, {"codex": {"why": "its usage is spent", "until": T + 5000}})
-run(mkpr(), 600)
-assert queued() == ["rival"] and C.WAKE == {"sam/r": T + 5000 + 1}, C.WAKE
-C.save(V.OUT, {})
 
 # Whatever didn't go through is looked at again soon: a merge that failed, a
-# job that couldn't start, a job seen ended with no answer (the second look),
-# a review that couldn't be queued or posted, and one lost from the queue.
+# job that couldn't start, and a job seen ended with no answer (the second
+# look).
 fresh_pr_state()
 H.land, land = (lambda repo, pr, info: "refused"), H.land
 run(clean(), 700)
@@ -95,39 +114,10 @@ STATES["job-1"] = "error"
 run(clean(files=["secrets/1.yaml"]), 800)
 assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
 STATES.clear()
-fresh_pr_state()
-run(mkpr(), 0)
-STUB["queue"] = RuntimeError("git: the head moved on")
-run(mkpr(), 600)
-STUB["queue"] = None
-assert queued() == [] and C.WAKE["sam/r"] == T + 600 + 5 * 60 + 1, C.WAKE
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker()
-STUB["post"] = RuntimeError("gh: 502")
-run(mkpr(), 700)
-STUB["post"] = None
-assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-assert queued() == ["codex", "rival"]
-for x in os.listdir(QDIR):
-    os.remove(f"{QDIR}/{x}")
-run(mkpr(), 700)
-assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
-# Three failed reviews: tried again an hour after the last.
-st = pr_state()
-for r in ("codex", "rival"):
-    st["rv"][r] = {"fails": 3, "failedAt": T + 650}
-C.save("pr-sam_r-5.json", st)
-run(mkpr(), 800)
-assert C.WAKE["sam/r"] == T + 650 + 3600 + 1, C.WAKE
 print("wake-ups: ok")
 
-# A reviewer's answer back kicks the repo's pass (burrow-review's tests),
-# and so does a Claude job, at the end of each turn (proj run --kick).
+# A Claude job kicks the repo's pass at the end of each turn (proj run
+# --kick); Codex's posts kick it as GitHub's events (burrow-events).
 fresh_pr_state()
 proj = os.path.join(tmp, "proj")
 with open(proj, "w") as f:
@@ -219,19 +209,17 @@ watched = [(x[1], x[x.index("--default") + 1], "--full" in x, x[-1]) for x in ra
 assert watched == [("sam/r", "main", False, ["feat", "main"])], ran
 assert not [x for x in ran if x[0] == "hooks"], ran
 assert C.load("repos.json", None) == {"untouched": True}
-assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
+assert C.load("wake.json", None) == {"sam/r": T + 30 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
 
-# Each repo whose PRs a pass read is swept of what its reviewers left, with
-# the snapshots of its open PRs' heads, once its look has them all: sam/q's,
-# which failed before then (its branch watch), isn't, as the sweep would
-# take what its open PRs have. One that can't be swept doesn't stop the
+# Each PR's step is told the open PR its base is the head branch of, if
+# any; a repo whose look failed (sam/q's branch watch) doesn't stop the
 # others, or the pass's end.
 fresh_pr_state()
-swept, published = [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, V.sweep, S.R.watch_default)
+published = []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, S.R.watch_default)
 S.R.discover = lambda: [{"repo": f"sam/{x}", "default": "main"} for x in "rqp"]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
@@ -248,26 +236,13 @@ def watch_default(r, *a):
 
 
 S.R.watch_default = watch_default
-
-
-def sweep(repo, live):
-    swept.append((repo, live))
-    if repo == "sam/r":
-        raise RuntimeError("its answers: not a dir")
-
-
-V.sweep, sys.argv = sweep, ["steward"]
+sys.argv = ["steward"]
 S.main()
 sys.argv = argv
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, V.sweep, S.R.watch_default = kept_fns
-assert swept == [(repo, {V.snap_name(f"pr-{repo.replace('/', '_')}-5.json", head, "main"),
-                         V.snap_name(f"pr-{repo.replace('/', '_')}-6.json", "b" * 40, "release"),
-                         V.snap_name(f"pr-{repo.replace('/', '_')}-7.json", "c" * 40, "feat")})
-                 for repo in ("sam/r", "sam/p")], swept
-# Each PR's step is told the open PR its base is the head branch of, if any.
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, S.R.watch_default = kept_fns
 assert below == {5: None, 6: None, 7: 5}, below
 assert len(published) == 1, published
-print("swept: ok")
+print("stacked bases: ok")
 
 # A repo that can't be started over as new, though it was remade, is left
 # alone that pass, its dashboard and flaky tests too: nothing of the deleted
@@ -371,7 +346,7 @@ S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish = kept_fns
 C.LIMITED.clear()
 fresh_pr_state()
 run(mkpr(), 10)
-assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
+assert C.WAKE == {"sam/r": T + 10 + 30 * 60 + 1}, C.WAKE
 print("rate limit: ok")
 
 # GitHub not answering where no repo's own pass catches it (finding the
@@ -417,9 +392,9 @@ for where in ("discovery", "after"):
         woke = C.load("wake.json", None)
         assert not C.LIMITED and woke["sam/other"] == T + 60 and "sam/q" not in woke, (where, woke)
         if len(argv_now) > 2:
-            # After its PRs, the pass's own wake-up for the repo (its
-            # settle delay) is sooner, and stays.
-            back = T + 5 * 60 if where == "discovery" else T + 3 * 60 + 1
+            # After its PRs too, five minutes is sooner than the pass's own
+            # wake-up for the repo (its PR's wait on Codex), and stays.
+            back = T + 5 * 60
             assert woke["sam/r"] == back and "Sam/R" not in woke and woke[""] == T + 30, (where, woke)
         else:
             assert woke[""] == T + 30, (where, woke)  # sooner than five minutes: it stays

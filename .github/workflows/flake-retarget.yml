@@ -25,11 +25,15 @@ concurrency:
 jobs:
   check:
     if: github.event.changes.base && (github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/'))
+    # One negative run a head: on a PR to main, `train`'s from main's copy,
+    # the one the train counts, so not this call's. The router's exact
+    # comparison decides, not an expression's `==`, which ignores case.
+    needs: train-route
     uses: ./.github/workflows/flake-check.yml
-    # What the shared workflow needs to attest its result.
+    # The same as flake.yml's check (its comment says why actions: write).
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:
@@ -39,6 +43,7 @@ jobs:
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
       docs-checks: guidance
+      negative: ${{ needs.train-route.outputs.train != 'true' }}
   # GitHub expression equality ignores case; git branch names do not.
   # Route using the event's exact refs, without checking out PR code.
   train-route:
@@ -68,7 +73,7 @@ jobs:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:

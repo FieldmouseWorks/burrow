@@ -24,7 +24,7 @@ let
     stallAfter = 60; holdStallAfter = 60; renovateMergeAfter = 60; directPush = false; ruleset = true;
     requireCi = false; proofJobs.hil = "Run the bench."; proofBuilds.vm = "checks.x86_64-linux.vm";
     proofToolsRef = "refs/heads/main"; proofTimeoutMinutes = 720; proofRuns.gate = "make check"; proofSlots = 1; keepBranches = [ "keep/*" ]; codex = true;
-    skipPaths = [ "^secret/" ]; train = false; trainSize = 8; trainRequire = [ ]; trainStallAfter = 60;
+    train = false; trainSize = 8; trainRequire = [ ]; trainStallAfter = 60;
   };
   wrong = lib.filter (k: refused "sam/one" { ${k} = every.${k}; }) (lib.attrNames every)
     ++ map (k: "${k}, which is no setting") (lib.filter (k: !(refused "sam/typo" { ${k} = { }; }))

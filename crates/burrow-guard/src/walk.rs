@@ -1,8 +1,7 @@
 //! Every command a command line runs, as far as the guard reads it: each
 //! command word, with the words after it, through quotes, substitutions,
 //! `sh -c` and `eval` scripts, assignments' values and `${…}` texts
-//! (shell.rs). push.rs finds a line's pushes in it, and codex.rs what would
-//! hide a Codex job's commits from its hooks.
+//! (shell.rs). push.rs finds a line's pushes in it.
 
 use std::cell::Cell;
 

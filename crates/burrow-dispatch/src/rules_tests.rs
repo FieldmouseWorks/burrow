@@ -354,6 +354,28 @@ fn deploy() {
     assert_eq!(it.due, T + 1800.0);
     s.update.as_mut().unwrap().0.state = "inactive".into();
     s.behind = None;
+    // Held while the box runs changes that aren't on main: they're whoever
+    // switched to them's to land, so nothing is due before the owner hears
+    // of it, and it says when; a short wait past then stays short.
+    s.off_main = Some(T + 6.0 * 3600.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 6.0 * 3600.0);
+    assert!(
+        it.phase.ends_with(&format!(
+            "box-update's last run: ok at then: deployed; the owner hears of it at {} if it still does",
+            clock(T + 6.0 * 3600.0)
+        )),
+        "{}",
+        it.phase
+    );
+    s.off_main = Some(T - 3600.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 1800.0);
+    s.off_main = None;
     // A run under way that started before the oldest commit doesn't
     // have it; one that started after does.
     s.update.as_mut().unwrap().0 = Unit {
@@ -499,15 +521,42 @@ fn deploy_unknown() {
     let d = decide(&cfg, &s, &d.state, &d.items, T + 120.0);
     let it = &d.items["deploy/sam/box"];
     assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
-    // Its record unreadable: the wait and its age as they were.
-    let unread = Snapshot {
+    // Its record unreadable: what it waits for, its age and link as they
+    // were, and what HOST-update says now.
+    let mut unread = Snapshot {
         unread: BTreeMap::from([("sam/box".into(), "live.json: bad".into())]),
         update: idle("ok at then: up to date"),
         ..Snapshot::default()
     };
     let e = decide(&cfg, &unread, &d.state, &d.items, T + 180.0);
-    assert_eq!(e.items["deploy/sam/box"], d.items["deploy/sam/box"]);
+    assert_eq!(
+        e.items["deploy/sam/box"],
+        Item {
+            phase: "no record; box-update's last run: ok at then: up to date".into(),
+            ..d.items["deploy/sam/box"].clone()
+        }
+    );
     assert_eq!(e.state.going_live["sam/box"], T - 600.0);
+    // Held since for a switch not on main: not due before the owner hears;
+    // its unit failed, or the hold gone, the short wait again.
+    unread.off_main = Some(T + 6.0 * 3600.0);
+    let h = decide(&cfg, &unread, &e.state, &e.items, T + 200.0);
+    let it = &h.items["deploy/sam/box"];
+    assert_eq!((it.since, it.due), (T - 600.0, T + 6.0 * 3600.0));
+    assert!(
+        it.phase.starts_with(
+            "no record; box-update's last run: ok at then: up to date; the owner hears"
+        ),
+        "{}",
+        it.phase
+    );
+    let mut failed = unread.clone();
+    failed.update.as_mut().unwrap().0.state = "failed".into();
+    let f = decide(&cfg, &failed, &h.state, &h.items, T + 220.0);
+    assert_eq!(f.items["deploy/sam/box"].due, T - 600.0 + 1800.0);
+    unread.off_main = None;
+    let c = decide(&cfg, &unread, &h.state, &h.items, T + 240.0);
+    assert_eq!(c.items["deploy/sam/box"], e.items["deploy/sam/box"]);
     // Found live: nothing waits, and the age goes.
     let live = Snapshot {
         deploys: BTreeMap::from([("sam/box".into(), Behind::default())]),
@@ -518,11 +567,12 @@ fn deploy_unknown() {
     assert!(d.items.is_empty() && d.state.going_live.is_empty(), "{d:?}");
 }
 
-// A queued push run with a later one of its workflow live on the branch
-// is cancelled, whatever the later one's state; one that has started,
-// one someone ran again, or one with nothing later of its own workflow,
-// is left. A run is tried once in RECENT, and the tries of a repo not
-// read this time are kept.
+// A push run with a later one of its workflow live on the branch is
+// cancelled, whether it's queued, next in line or under way, and whatever
+// the later one's state; one someone ran again, one that finished, or one
+// with nothing later of its own workflow still live, is left. A run is
+// tried once in RECENT, and the tries of a repo not read this time are
+// kept.
 #[test]
 fn moot_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -532,30 +582,64 @@ fn moot_runs() {
         pushes: BTreeMap::from([(
             "sam/r".into(),
             vec![
-                run(1, 7, "a1a1a1a1a1", "queued", T - 900.0),
-                run(2, 8, "a1a1a1a1a1", "queued", T - 900.0),
-                run(3, 7, "b2b2b2b2b2", "in_progress", T - 800.0),
-                run(4, 7, "c3c3c3c3c3", "pending", T - 600.0),
-                run(5, 9, "c3c3c3c3c3", "in_progress", T - 600.0),
-                run(6, 9, "d4d4d4d4d4", "queued", T - 300.0),
                 Run {
                     attempt: 2,
                     ..run(10, 8, "a0a0a0a0a0", "queued", T - 1000.0)
                 },
+                run(1, 7, "a1a1a1a1a1", "queued", T - 900.0),
+                run(2, 8, "a1a1a1a1a1", "queued", T - 900.0),
+                run(11, 11, "a1a1a1a1a1", "completed", T - 900.0),
+                run(3, 7, "b2b2b2b2b2", "in_progress", T - 800.0),
+                run(12, 11, "b2b2b2b2b2", "in_progress", T - 800.0),
+                run(4, 7, "c3c3c3c3c3", "pending", T - 600.0),
+                run(5, 9, "c3c3c3c3c3", "in_progress", T - 600.0),
+                run(13, 12, "c3c3c3c3c3", "pending", T - 600.0),
+                run(6, 9, "d4d4d4d4d4", "queued", T - 300.0),
+                run(14, 11, "d4d4d4d4d4", "completed", T - 300.0),
+                run(15, 12, "d4d4d4d4d4", "in_progress", T - 300.0),
             ],
         )]),
         ..Snapshot::default()
     };
     let d = decide(&cfg, &s, &State::default(), &none, T);
-    assert_eq!(cancels(&d), [1]);
+    assert_eq!(cancels(&d), [1, 3, 5, 13]);
     assert!(d.items.is_empty() && d.wake.is_none(), "{d:?}");
-    let Move::Cancel { repo, url, why, .. } = &d.moves[0] else {
-        unreachable!()
+    let why = |run: u64| {
+        d.moves
+            .iter()
+            .find_map(|m| match m {
+                Move::Cancel {
+                    repo,
+                    run: r,
+                    later,
+                    url,
+                    why,
+                } if *r == run => Some((repo.as_str(), *later, url.as_str(), why.as_str())),
+                _ => None,
+            })
+            .unwrap()
     };
-    assert_eq!((repo.as_str(), url.as_str()), ("sam/r", "https://x/runs/1"));
     assert_eq!(
-        why,
-        "it checks a1a1a1a on main and hasn't started, and https://x/runs/3 checks b2b2b2b, which came after it"
+        why(1),
+        (
+            "sam/r",
+            3,
+            "https://x/runs/1",
+            "it checks a1a1a1a on main and hasn't started, and https://x/runs/3 checks b2b2b2b, which came after it"
+        )
+    );
+    assert_eq!(
+        why(3),
+        (
+            "sam/r",
+            4,
+            "https://x/runs/3",
+            "it checks b2b2b2b on main and is under way, and https://x/runs/4 checks c3c3c3c, which came after it"
+        )
+    );
+    assert_eq!(
+        why(13).3,
+        "it checks c3c3c3c on main and is next in line, and https://x/runs/15 checks d4d4d4d, which came after it"
     );
 
     // Tried: not again in RECENT, and the try is kept; a repo not read
@@ -563,6 +647,9 @@ fn moot_runs() {
     let st = State {
         cancels: BTreeMap::from([
             ("sam/r#1".into(), T - 60.0),
+            ("sam/r#3".into(), T - 60.0),
+            ("sam/r#5".into(), T - 60.0),
+            ("sam/r#13".into(), T - 60.0),
             ("sam/o#9".into(), T - 60.0),
             ("sam/o#8".into(), T - RECENT - 1.0),
         ]),
@@ -572,10 +659,42 @@ fn moot_runs() {
     assert!(d.moves.is_empty(), "{d:?}");
     assert_eq!(
         d.state.cancels.keys().collect::<Vec<_>>(),
-        ["sam/o#9", "sam/r#1"]
+        ["sam/o#9", "sam/r#1", "sam/r#13", "sam/r#3", "sam/r#5"]
     );
     let d = decide(&cfg, &s, &st, &none, T + RECENT);
-    assert_eq!(cancels(&d), [1]);
+    assert_eq!(cancels(&d), [1, 3, 5, 13]);
+}
+
+// burrow's main on 2026-11-14 (#1108): flake's push runs for 9c6ad02 and
+// fceda93 both under way, the first stuck in a gate leg for hours. The
+// first is cancelled for the second, which is left to give main its result.
+#[test]
+fn moot_running_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let flake = 394_634_593;
+    let s = Snapshot {
+        pushes: BTreeMap::from([(
+            "sam/r".into(),
+            vec![
+                run(
+                    43_577_282_863,
+                    flake,
+                    "9c6ad0248c58f0fe",
+                    "in_progress",
+                    T - 5328.0,
+                ),
+                run(43_584_281_458, flake, "fceda93f1e45e737", "in_progress", T),
+            ],
+        )]),
+        ..Snapshot::default()
+    };
+    let d = decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0);
+    assert_eq!(cancels(&d), [43_577_282_863]);
+    assert_eq!(
+        d.moves[0].why(),
+        "it checks 9c6ad02 on main and is under way, and https://x/runs/43584281458 checks fceda93, which came after it"
+    );
 }
 
 // A wait the pass couldn't read (GitHub, or the live record) still takes a
@@ -648,5 +767,14 @@ fn deploy_unread_progress() {
         // Not at work, not on a run: as it was.
         let e4 = decide(&cfg, &ended, &d.state, &d.items, T + 1200.0);
         assert_eq!(e4.items[&key], d.items[&key]);
+        // Held since for a switch not on main: not due before the owner hears.
+        let mut held = ended.clone();
+        held.off_main = Some(T + 6.0 * 3600.0);
+        let e5 = decide(&cfg, &held, &d.state, &d.items, T + 1200.0);
+        assert_eq!(
+            (e5.items[&key].since, e5.items[&key].due),
+            (T - 600.0, T + 6.0 * 3600.0),
+            "{repo}"
+        );
     }
 }

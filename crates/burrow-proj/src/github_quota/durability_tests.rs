@@ -83,7 +83,7 @@ fn all_safe_cleanup_intermediate_states_remain_retired_during_recovery() {
                     fs::remove_file(job.path("end.next")).unwrap();
                 }
                 fs::write(
-                    job.path(PENDING),
+                    job.file(crate::record::JobFile::GithubPending),
                     serde_json::to_vec(&Pending {
                         targets: vec!["sam/r#7".into()],
                         retry_at: 1,

@@ -60,6 +60,9 @@ fn the_gate_runs_where_it_should() {
             ("github.event_name", event.into()),
             ("needs.lane.result", lane_result.into()),
             ("needs.lane.outputs.gate", lane_gate.clone()),
+            // gate-reuse off, or no hit: reuse.rs has the rest.
+            ("needs.reuse.outputs.hit", V::Null),
+            ("inputs.legs", V::from(1)),
         ]);
         let case = format!("{event} {lane_result} {lane_gate:?} cancelled {cancelled}");
         assert_eq!(
@@ -88,6 +91,7 @@ fn the_gate_runs_where_it_should() {
             ("cancelled()", cancelled.into()),
             ("inputs.legs", V::from(legs)),
             ("needs.check.result", check.into()),
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         assert_eq!(
             value(text(&jobs["gate"]["if"]), &c).truthy(),
@@ -136,6 +140,8 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.docs-checks", "".into()),
         ("inputs.legs", 1.into()),
         ("inputs.keep-builds", false.into()),
+        ("inputs.gate-reuse", false.into()),
+        ("inputs.gate-reuse-lookup", "".into()),
         ("inputs.negative-runner", "".into()),
     ]
 }
@@ -282,6 +288,20 @@ fn only_a_prs_newer_run_cancels() {
                 name,
                 Run {
                     inputs: &[("keep-builds", "true")],
+                    ..PUSHED
+                },
+            ),
+            g(
+                name,
+                Run {
+                    inputs: &[("gate-reuse", "true")],
+                    ..PUSHED
+                },
+            ),
+            g(
+                name,
+                Run {
+                    inputs: &[("gate-reuse-lookup", "https://lookup.example/")],
                     ..PUSHED
                 },
             ),
@@ -594,7 +614,9 @@ fn a_pr_is_checked_merged_with_its_base_as_it_is_now() {
         "{}",
         ran.said()
     );
-    assert_eq!(r.parents(&ws), [now, head.clone()]);
+    assert_eq!(r.parents(&ws), [now.clone(), head.clone()]);
+    // The base it merged onto, for the kept builds' exact key.
+    assert_eq!(ran.outputs, format!("tip={now}\n"));
     assert_eq!(std::fs::read_to_string(ws.join("c")).unwrap(), "later\n");
     assert_eq!(std::fs::read_to_string(ws.join("b")).unwrap(), "feature\n");
     assert_eq!(r.s.git(&ws, &["status", "--porcelain"]), "");
@@ -634,7 +656,8 @@ fn with_legs_the_base_is_where_the_lane_job_found_it() {
         "{}",
         ran.said()
     );
-    assert_eq!(r.parents(&ws), [event_base, head.clone()]);
+    assert_eq!(r.parents(&ws), [event_base.clone(), head.clone()]);
+    assert_eq!(ran.outputs, format!("tip={event_base}\n"));
     assert!(!ws.join("c").exists());
     for (tip, why) in [
         ("", "the lane job didn't say where main was"),

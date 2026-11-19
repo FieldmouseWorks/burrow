@@ -1,12 +1,16 @@
-//! The shared gate and negative runner. No Rust dependencies: callers compile
-//! these pinned sources directly with rustc, without a registry or cargo build.
+//! The shared gate and negative runner, and gate-reuse's lookup. No Rust
+//! dependencies: callers compile these pinned sources directly with rustc,
+//! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
+mod builds;
 mod gate;
 mod memory;
 mod negative;
 mod plan;
+mod reuse;
 mod snapshot;
+mod source;
 
 use std::{
     env, fs,
@@ -24,9 +28,29 @@ fn var(k: &str) -> String {
 fn temp() -> PathBuf {
     PathBuf::from(var("RUNNER_TEMP"))
 }
+/// Where git finds a repository, when the environment says: once gate-reuse's
+/// private source is entered, no command inherits these (source.rs).
+const GIT_LOCATIONS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+];
+static PRIVATE_SOURCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn cmd(p: &str, args: &[&str]) -> Command {
     let mut c = Command::new(p);
     c.args(args);
+    if PRIVATE_SOURCE.load(std::sync::atomic::Ordering::SeqCst) {
+        for k in GIT_LOCATIONS {
+            c.env_remove(k);
+        }
+    }
     c
 }
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -102,6 +126,13 @@ fn quote(v: &str) -> String {
 fn nix_string(v: &str) -> String {
     quote(v).replace('$', "\\$")
 }
+/// A build that prints nothing for this long has stopped making progress:
+/// nix kills it (its `max-silent-time`) and the gate fails, rather than hold
+/// its runner until the job's 6 hours run out (#1102). The rest of the
+/// builds go on (`--keep-going`), and a push's leg still keeps what they
+/// built. burrow's longest quiet stretch in a build that went on to pass
+/// was 14 to 16 minutes, codex linking on a hosted runner.
+const SILENT_SECONDS: u32 = 60 * 60;
 fn lines(v: &str) -> Vec<String> {
     v.lines().map(str::to_owned).collect()
 }
@@ -154,6 +185,17 @@ fn system() -> Result<String> {
     }
     Ok(v)
 }
+/// The nix config every build the worker starts reads: a caller's first,
+/// then a build's silence limit, and, in a run that may write the build
+/// store, what keeps a flake's own config out of it (builds.rs).
+fn worker_config(caller: &str, writes: bool) -> String {
+    let mut c = format!("{caller}\nmax-silent-time = {SILENT_SECONDS}");
+    if writes {
+        c.push('\n');
+        c.push_str(builds::NIX_CONFIG);
+    }
+    c
+}
 fn main() {
     let mode = env::args().nth(1).unwrap_or_default();
     // A child performs the work so its stdout and stderr share one pipe, as
@@ -177,6 +219,18 @@ fn main() {
             Ok(false) => std::process::exit(1),
             Err(e) => {
                 eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // gate-reuse's lookup, before anything is built; its answer goes to
+    // the step's outputs.
+    if mode == "reuse" {
+        match reuse::reuse() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("gate-reuse: can't tell ({e}), so the gate runs");
                 std::process::exit(1);
             }
         }
@@ -217,6 +271,12 @@ fn main() {
                 "--worker",
                 &mode,
             ],
+        )
+        // Every build the worker starts, its own and the nix and heavy
+        // processes it runs, reads this; a caller's settings come first.
+        .env(
+            "NIX_CONFIG",
+            worker_config(&var("NIX_CONFIG"), builds::writes()),
         )
         .stdout(Stdio::piped())
         .spawn()?;

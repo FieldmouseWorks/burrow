@@ -19,7 +19,7 @@ def stamp(t):
 
 
 def suite(id, age, jobs=0, status="QUEUED", run=77):
-    return {"id": id, "status": status, "conclusion": None, "checkRuns": {"totalCount": jobs},
+    return {"id": id, "createdAt": stamp(NOW - age), "status": status, "conclusion": None, "checkRuns": {"totalCount": jobs},
             "workflowRun": {"databaseId": run, "createdAt": stamp(NOW - age), "workflow": {"name": "flake"}}}
 
 

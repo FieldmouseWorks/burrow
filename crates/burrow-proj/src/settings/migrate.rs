@@ -36,7 +36,7 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
         .map(|(i, l)| (i + 1, l))
 }
 
-/// A roles file: `ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE]` a line.
+/// A roles file: `ROLE[@OWNER/REPO] ENGINE` a line.
 fn routes(path: &Path, text: &str) -> Result<BTreeMap<String, roles::Route>, String> {
     let mut out = BTreeMap::new();
     for (n, line) in lines(text) {
@@ -51,19 +51,10 @@ fn routes(path: &Path, text: &str) -> Result<BTreeMap<String, roles::Route>, Str
     Ok(out)
 }
 
-/// The efforts each engine's CLI took, as the old models file checked them:
-/// Claude Code's `--effort` has a fixed set; Codex's levels are its models'
-/// own, so any plain lowercase word.
-fn effort_ok(engine: &str, effort: &str) -> bool {
-    match engine {
-        "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
-        _ => {
-            !effort.is_empty()
-                && effort
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
-        }
-    }
+/// The efforts Claude Code's `--effort` took, as the old models file
+/// checked them.
+fn effort_ok(effort: &str) -> bool {
+    ["low", "medium", "high", "xhigh", "max"].contains(&effort)
 }
 
 /// A models file: `ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]` a line.
@@ -87,7 +78,7 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
         if model.as_deref().is_some_and(|m| !roles::plain(m)) {
             return Err(at("invalid model choice".into()));
         }
-        if let Some(e) = effort.filter(|e| !effort_ok(engine, e)) {
+        if let Some(e) = effort.filter(|e| !effort_ok(e)) {
             return Err(at(format!("{engine} takes no effort {e}")));
         }
         let tuning = Tuning {
@@ -257,17 +248,17 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("config");
         fs::create_dir_all(dir.join("roles.d")).unwrap();
-        fs::write(dir.join("roles.d/cheap"), "triage codex\n").unwrap();
+        fs::write(dir.join("roles.d/cheap"), "triage claude\n").unwrap();
         fs::write(
             dir.join("roles.d/usual"),
-            "# usual\ntriage claude\nfix@Sam/Box   codex over 80.5 claude\n",
+            "# usual\ntriage claude\nfix@Sam/Box   claude\n",
         )
         .unwrap();
         std::os::unix::fs::symlink(dir.join("roles.d/usual"), dir.join("roles")).unwrap();
         fs::write(dir.join("roles.previous"), "cheap\n").unwrap();
         fs::write(
             dir.join("models"),
-            "triage claude small low\nfix codex - ultra\n",
+            "triage claude small low\nfix claude - xhigh\n",
         )
         .unwrap();
         let settings = settings(d.path());
@@ -284,17 +275,15 @@ mod tests {
         cfg.check_config().unwrap();
         let force = settings.roles().unwrap();
         let fix = force.route("fix", Some("sam/box"));
-        assert_eq!(fix.engine, "codex");
-        assert_eq!(fix.over.as_ref().unwrap().pct, 80.5, "fractions kept");
+        assert_eq!(fix.engine, "claude");
         assert_eq!(force.route("triage", None).engine, "claude");
         assert_eq!(
             force.tuning("triage", None, "claude").model.as_deref(),
             Some("small")
         );
-        // Codex's own level, which its default offer lacks, comes with it.
         assert_eq!(
-            force.tuning("fix", None, "codex").effort.as_deref(),
-            Some("ultra")
+            force.tuning("fix", None, "claude").effort.as_deref(),
+            Some("xhigh")
         );
         let engines = settings.engines().unwrap();
         assert!(
@@ -327,13 +316,9 @@ mod tests {
                 "# old\nunused claude - enormous\n",
                 "claude takes no effort enormous",
             ),
-            (
-                "models",
-                "unused codex - Max\n",
-                "codex takes no effort Max",
-            ),
+            ("models", "unused codex - high\n", "unknown engine codex"),
             ("models", "unused claude a$b\n", "invalid model choice"),
-            ("roles", "work claude over 100.5 codex\n", "roles line 1"),
+            ("roles", "work codex\n", "roles line 1"),
         ] {
             let d = tempfile::tempdir().unwrap();
             fs::write(d.path().join(file), text).unwrap();
@@ -350,7 +335,11 @@ mod tests {
         let dir = d.path().join("config");
         fs::create_dir_all(dir.join("roles.d")).unwrap();
         fs::write(dir.join("roles.d/one"), "work claude\n").unwrap();
-        fs::write(dir.join("roles.d/two"), "work codex\n").unwrap();
+        fs::write(
+            dir.join("roles.d/two"),
+            "work claude\nwork@sam/two claude\n",
+        )
+        .unwrap();
         std::os::unix::fs::symlink(dir.join("roles.d/one"), dir.join("roles")).unwrap();
         let receipt = d.path().join("door/1-cycle.operation");
         fs::create_dir_all(receipt.parent().unwrap()).unwrap();
@@ -358,10 +347,7 @@ mod tests {
         fs::write(dir.join("roles.operation"), op.to_string()).unwrap();
         let settings = settings(d.path());
         run(&settings, &dir).unwrap();
-        assert_eq!(
-            settings.roles().unwrap().route("work", None).engine,
-            "codex"
-        );
+        assert!(settings.roles().unwrap().roles.contains_key("work@sam/two"));
         let engines = settings.engines().unwrap();
         assert!(
             engines.contains("Active: two\nPrevious: one\n"),

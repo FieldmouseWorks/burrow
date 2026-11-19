@@ -38,6 +38,53 @@ fn in_a_train_main_goes_live_with_nothing_put_up() {
     assert_eq!(said(&m), ("current".into(), "up to date".into()));
 }
 
+#[test]
+fn a_pr_put_live_before_it_landed_goes_on_to_the_main_past_it() {
+    let mut m = machine();
+    m.cfg.train = Some(train());
+    let none = || {
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "repos/sam/homelab/pulls?",
+            vec![ok(200, json!([]), &[])],
+        );
+        gh
+    };
+    // Someone puts a PR's head live by hand, stamped with the PR's own
+    // commit, and the train lands it squashed: main's tree, but a commit
+    // of its own, so the stamp is no ancestor of main.
+    let fix = lock(&[("nixpkgs", &sha('c')), ("burrow", &sha('b'))]);
+    m.origin(&["branch", "fix", "main"]);
+    m.pushed("pr", "fix", "README", "why it's needed");
+    let pr = m.pushed("pr", "fix", "flake.lock", &fix);
+    m.work(&["fetch", "-q", "origin", "fix"]);
+    m.work(&["checkout", "-q", &pr]);
+    let hand = crate::running::build(&m.cfg).unwrap();
+    m.runs(&hand);
+    m.landed("flake.lock", &fix);
+    let squashed = m.main();
+    assert_eq!(once(&m.cfg, &mut none(), false), 0);
+    assert_eq!(said(&m), ("current".into(), "up to date".into()));
+    // main moves on before any run deploys it: the box runs a main it has
+    // since moved past, so main goes live, and nothing holds.
+    m.landed(
+        "flake.lock",
+        &lock(&[("nixpkgs", &sha('d')), ("burrow", &sha('b'))]),
+    );
+    let main = m.main();
+    assert_ne!(main, squashed);
+    assert_eq!(once(&m.cfg, &mut none(), false), 0);
+    assert_eq!(
+        said(&m),
+        (
+            "ok".into(),
+            format!("live and confirmed: main {}", &main[..7])
+        )
+    );
+    assert!(!m.cfg.state.join("held-since").exists());
+}
+
 /// A train repo, where its last run proposed `nixpkgs` at `c` as #8.
 fn proposed() -> (Machine, String) {
     let mut m = machine();
