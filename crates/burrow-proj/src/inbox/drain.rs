@@ -40,6 +40,17 @@ use crate::github::api;
 use crate::snapshot::Priority;
 use crate::{Fail, io_fail, mtime, now, slot, swap, usage};
 
+/// What keeps the drain from handing a ready issue on now
+/// ([`Pass::admission`]).
+pub(super) enum Held {
+    /// Its `drainJobs` are all in use.
+    Cap,
+    /// No engine can be chosen for its job: why.
+    Unroutable(String),
+    /// The engine its job would run on has no room.
+    Engine(Engine),
+}
+
 /// What a turn's end kicks while a ready issue waits for a slot: the
 /// drain's own pass (burrow-events' handler of that name runs
 /// `proj-inbox drain`), which lists nothing.
@@ -120,9 +131,9 @@ impl Pass<'_> {
         let Some(t) = self.inbox.triage.clone() else {
             return Ok(());
         };
-        let Some(engine) = t.drain else {
+        if t.drain.is_none() {
             return Ok(());
-        };
+        }
         if let Some(until) = self
             .cfg
             .settings
@@ -132,13 +143,7 @@ impl Pass<'_> {
         {
             self.book(&repo, until);
         }
-        let Some(label) = self
-            .inbox
-            .labels
-            .iter()
-            .find(|(_, e)| **e == engine)
-            .map(|(l, _)| l.clone())
-        else {
+        let Some(label) = self.drain_label() else {
             return Ok(());
         };
         let waiting = files::drain_waiting(&self.inbox.state);
@@ -222,25 +227,20 @@ impl Pass<'_> {
                 self.renote_ready(&repo, &n, &now_issue)?;
                 continue;
             }
-            // Repair children bypass ordinary drain capacity and slot reservation.
-            // Their queued turn still enforces the selected engine's hard cap.
-            let unstick = self.lane(&now_issue);
-            if going >= t.drain_jobs && !unstick {
-                continue;
-            }
-            let engine = match self.drain_engine(&now_issue, &label, &repo) {
-                Ok(engine) => engine,
-                Err(error) => {
+            match self.admission(&label, &now_issue, &repo, going) {
+                Ok(_) => {}
+                Err(Held::Cap) => continue,
+                Err(Held::Unroutable(error)) => {
                     super::say(Fail::new(1, error));
                     self.retry(&repo);
                     passed.insert(repo);
                     continue;
                 }
-            };
-            if !unstick && !slot::room(self.cfg, engine, self.inbox.vm) {
-                blocked = true;
-                self.no_room(&repo, engine);
-                continue;
+                Err(Held::Engine(engine)) => {
+                    blocked = true;
+                    self.no_room(&repo, engine);
+                    continue;
+                }
             }
             if self.cfg.paused(&repo) {
                 continue;
@@ -264,6 +264,53 @@ impl Pass<'_> {
             let _ = fs::remove_file(&waiting);
         }
         Ok(())
+    }
+
+    /// The label the drain hands issues on with, its engine's: None while
+    /// the drain is off, or no label names its engine.
+    pub(super) fn drain_label(&self) -> Option<String> {
+        let engine = self.inbox.triage.as_ref()?.drain?;
+        self.inbox
+            .labels
+            .iter()
+            .find(|(_, e)| **e == engine)
+            .map(|(l, _)| l.clone())
+    }
+
+    /// Whether the drain hands `issue`, ready and admitted by its plan, on
+    /// now, with `going` of its jobs in use, and on which engine: the one
+    /// reading of its room that the drain acts on and `proj why` says.
+    /// Repair children bypass ordinary drain capacity and slot reservation;
+    /// their queued turn still enforces the selected engine's hard cap.
+    pub(super) fn admission(
+        &self,
+        label: &str,
+        issue: &Value,
+        repo: &str,
+        going: usize,
+    ) -> Result<Engine, Held> {
+        let repair = self.lane(issue);
+        let cap = self.inbox.triage.as_ref().map_or(0, |t| t.drain_jobs);
+        if going >= cap && !repair {
+            return Err(Held::Cap);
+        }
+        let engine = self
+            .drain_engine(issue, label, repo)
+            .map_err(Held::Unroutable)?;
+        // A repair's room isn't looked at. An observing pass (`proj why`)
+        // looks without releasing a usage hold a fresh meter proves over,
+        // or making the slots' folders.
+        let room = || {
+            if self.observe {
+                slot::seen_room(self.cfg, engine, self.inbox.vm)
+            } else {
+                slot::room(self.cfg, engine, self.inbox.vm)
+            }
+        };
+        if !repair && !room() {
+            return Err(Held::Engine(engine));
+        }
+        Ok(engine)
     }
 
     /// The engine the issue's job would run on once it carries the drain's

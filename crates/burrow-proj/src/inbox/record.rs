@@ -133,6 +133,16 @@ pub(crate) enum Wait {
     Job(String),
     /// A person's answer to this job's question.
     Answer(String),
+    /// The owner's answer to this job's one-way question: no deadline ends
+    /// it.
+    Owner(String),
+    /// The policy's park of this job, and what ends it, as the job's own
+    /// record says.
+    Policy { job: String, ends: String },
+    /// A free slot on this engine, which the drain would start its job on.
+    Engine(String),
+    /// A plan that can't go on as it stands: what's wrong.
+    Stuck(String),
     /// Its repo's pause.
     Paused,
     /// GitHub's quota, resetting then.
@@ -151,6 +161,10 @@ impl Wait {
             Wait::Plan(step) => format!("the plan step before it, {step}"),
             Wait::Job(id) => format!("job {id}"),
             Wait::Answer(id) => format!("an answer to job {id}'s question"),
+            Wait::Owner(id) => format!("the owner's answer to job {id}'s one-way question"),
+            Wait::Policy { job, .. } => format!("the policy's park of job {job}"),
+            Wait::Engine(engine) => format!("a free {engine} slot"),
+            Wait::Stuck(what) => format!("its plan, which can't go on: {what}"),
             Wait::Paused => "its repo's pause".into(),
             Wait::Quota(_) => "GitHub's quota".into(),
             Wait::Pass => "the inbox's next pass".into(),
@@ -166,6 +180,14 @@ impl Wait {
             Wait::Plan(step) => format!("{step} landing, or being dropped from the list"),
             Wait::Job(id) => format!("{id}'s turn ending (`proj why {id}` says what it waits on)"),
             Wait::Answer(_) => "a reply on the issue, or the question's deadline".into(),
+            Wait::Owner(_) => {
+                "the owner's reply on the issue (its deadline has passed, or it has none)".into()
+            }
+            Wait::Policy { ends, .. } => ends.clone(),
+            Wait::Engine(engine) => {
+                format!("one of {engine}'s jobs ending, or its usage coming back")
+            }
+            Wait::Stuck(_) => "someone putting its task list right: the inbox can't".into(),
             Wait::Paused => "the settings allowing its repo again".into(),
             Wait::Quota(reset) => format!("the quota resetting at {}", usage::when(*reset)),
             Wait::Pass => "an event on its repo, or the pass the inbox booked for it".into(),
@@ -318,6 +340,9 @@ pub(super) mod files {
     }
 }
 
+mod why;
+pub(crate) use why::{issue_target, why};
+
 /// One look at the inbox's state: [`Look::record`] for as many issues as
 /// the caller asks about, with what's the same for all of them (the
 /// drain's room, the claims of each repo's live jobs) read once.
@@ -429,6 +454,17 @@ impl Look<'_, '_> {
         if let Some(id) = read(&worker.join("job")).filter(|j| !j.is_empty()) {
             return self.working(repo, &name, &worker, &id, issue, paused);
         }
+        // Closed, as GitHub says now: what the inbox keeps of it with no job
+        // at it (a refusal, a sorting that ended, a task list its close
+        // left behind, a drained mark) no longer says where it stands. A
+        // close the inbox tried and GitHub didn't take leaves it open here,
+        // and a reopened issue reads by what's kept again.
+        let sorting = files::sorting(state, &k, n);
+        if issue.is_some_and(|i| i["state"] == "closed")
+            && read(&sorting.join("job")).is_none_or(|j| j.is_empty())
+        {
+            return Record::new(&name, Stage::Closed, "nothing: it's closed");
+        }
         if worker.join("drained").exists() {
             let r = Record::new(
                 &name,
@@ -453,13 +489,17 @@ impl Look<'_, '_> {
         // being carried out. One whose sorting ended without an answer gives
         // way to its labels: the pass never sorts an issue an author has
         // closed or labelled `ready` again, so it keeps that record forever.
-        if let Some(r) = self.sorting(repo, &name, &files::sorting(state, &k, n), paused) {
+        // A planned parent's list still holds it, whatever its labels.
+        let place = p.place(repo, n);
+        if let Some(r) = self.sorting(repo, &name, &sorting, paused) {
             if r.job.is_some() {
                 return r;
             }
-            return self
-                .closed_or_ready(repo, &name, n, issue, paused)
-                .unwrap_or(r);
+            if !matches!(place, Some(super::plans::Place::Parent(_))) {
+                return self
+                    .closed_or_ready(repo, &name, n, issue, paused)
+                    .unwrap_or(r);
+            }
         }
         let waiting = files::sorting_waits(state).join(format!("{}-{n}", k.to_lowercase()));
         if waiting.exists() {
@@ -472,7 +512,7 @@ impl Look<'_, '_> {
             .waiting(Wait::SortingSlot);
             return self.gated(r, repo, paused);
         }
-        if let Some(super::plans::Place::Parent(step)) = p.place(repo, n) {
+        if let Some(super::plans::Place::Parent(step)) = place {
             let r = match step {
                 Some(step) => Record::new(
                     &name,
@@ -550,60 +590,69 @@ impl Look<'_, '_> {
         let turns = job.turns().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
         let answered = number(&d.join("answered"));
         let closed = issue.is_some_and(|i| i["state"] == "closed");
-        use crate::record::{Stage as Turn, Wait as Held};
-        let asked = jr.wait.iter().any(|w| matches!(w, Held::Ask | Held::Owner));
-        let held = jr.wait.iter().any(Held::held);
+        use crate::record::Stage as Turn;
+        let ended = matches!(jr.stage, Turn::Ended(_));
         r.since = jr.since;
-        match &jr.stage {
-            Turn::Parked => {
-                r.next = "its job goes on once the settings let it run".into();
-                r = r.waiting(Wait::Paused);
+        if ended && answered < turns {
+            // Its answer, a question included, is posted before anyone can
+            // reply to it.
+            r.next = format!(
+                "its repo's next pass posts turn {}'s answer on the issue",
+                answered + 1
+            );
+            return self.gated(r.waiting(Wait::Pass), repo, paused);
+        }
+        match job_wait(id, &jr) {
+            Some(w @ (Wait::Answer(_) | Wait::Owner(_))) => {
+                if ended {
+                    r.stage = Stage::Answered;
+                    r.since = mtime(&d.join("answered")).unwrap_or(r.since);
+                }
+                r.next = match w {
+                    Wait::Owner(_) => "its job goes on once the owner answers".into(),
+                    _ => "its job goes on with the answer".into(),
+                };
+                r = r.waiting(w);
             }
-            Turn::Queued | Turn::Running => {
+            Some(w @ Wait::Policy { .. }) => {
+                r.next = "its job goes on once the settings let it run".into();
+                r = r.waiting(w);
+            }
+            Some(w) if !ended => {
                 r.next = if closed {
                     "its turn ends, its answer is posted, and the issue's closing ends the job"
                         .into()
                 } else {
                     "its turn ends, and the inbox posts its answer on the issue".into()
                 };
-                r = r.waiting(Wait::Job(id.to_owned()));
+                r = r.waiting(w);
                 r.overdue_at = jr.overdue_at;
             }
-            Turn::Ended(_) if answered < turns => {
-                r.next = format!(
-                    "its repo's next pass posts turn {}'s answer on the issue",
-                    answered + 1
-                );
-                r = self.gated(r.waiting(Wait::Pass), repo, paused);
-            }
-            Turn::Ended(_) if asked => {
-                r.stage = Stage::Answered;
-                r.since = mtime(&d.join("answered")).unwrap_or(r.since);
-                r.next = "its job goes on with the answer".into();
-                r = r.waiting(Wait::Answer(id.to_owned()));
-            }
-            Turn::Ended(_) if held => {
+            Some(w) => {
                 r.next = "its job goes on once what it awaits changes".into();
-                r = r.waiting(Wait::Job(id.to_owned()));
+                r = r.waiting(w);
                 r.overdue_at = jr.overdue_at;
             }
-            Turn::Ended(how) => {
+            None => {
                 r.stage = Stage::Answered;
                 r.since = mtime(&d.join("answered")).unwrap_or(r.since);
-                r.next = if how == "done" {
-                    "the inbox closes the issue, or an author's reply goes on with its job".into()
-                } else {
-                    format!("its job ended {how}: an author's reply goes on with it")
+                r.next = match &jr.stage {
+                    Turn::Ended(how) if how == "done" => {
+                        "the inbox closes the issue, or an author's reply goes on with its job"
+                            .into()
+                    }
+                    how => format!("its job ended {how}: an author's reply goes on with it"),
                 };
+                r = self.gated(r, repo, paused);
             }
-        }
-        if r.wait.is_none() {
-            r = self.gated(r, repo, paused);
         }
         r
     }
 
     /// The record of an issue with a sorting record at `d`, if it has one.
+    /// What its job waits on is read from the job's own record
+    /// ([`job_wait`]), as an issue's own job's is, whether or not it holds
+    /// a sorting slot.
     fn sorting(&self, repo: &str, name: &str, d: &Path, paused: bool) -> Option<Record> {
         if !d.is_dir() {
             return None;
@@ -619,27 +668,26 @@ impl Look<'_, '_> {
         };
         let mut r = Record::new(name, Stage::Sorting, "").since(mtime(&d.join("job")));
         r.job = Some(id.clone());
-        if self.pass.holds_sorting_slot(d) {
-            let job = Job::new(self.pass.cfg, &id);
-            let jr = crate::record::derive(&job);
-            let asked = jr
-                .wait
-                .iter()
-                .any(|w| matches!(w, crate::record::Wait::Ask | crate::record::Wait::Owner));
-            if asked {
-                r.next = "its sorting job goes on with the answer, then gives its verdict".into();
-                r = r.waiting(Wait::Answer(id));
-            } else {
-                r.next =
-                    "its sorting job gives its verdict, which the next pass carries out".into();
-                r = r.waiting(Wait::Job(id));
-            }
-            r.overdue_at = jr.overdue_at;
-            return Some(r);
+        let job = Job::new(self.pass.cfg, &id);
+        let jr = job.dir.is_dir().then(|| crate::record::derive(&job));
+        if let Some(w) = jr.as_ref().and_then(|jr| job_wait(&id, jr)) {
+            r.next = match &w {
+                Wait::Answer(_) => {
+                    "its sorting job goes on with the answer, then gives its verdict".into()
+                }
+                Wait::Owner(_) => {
+                    "its sorting job goes on once the owner answers, then gives its verdict".into()
+                }
+                Wait::Policy { .. } => {
+                    "its sorting job goes on once the settings let it run, then gives its verdict"
+                        .into()
+                }
+                _ => "its sorting job gives its verdict, which the next pass carries out".into(),
+            };
+            r.overdue_at = jr.and_then(|jr| jr.overdue_at);
+            return Some(r.waiting(w));
         }
-        if d.join("plan").is_file()
-            || super::settle::settled(&Job::new(self.pass.cfg, &id)).is_some()
-        {
+        if d.join("plan").is_file() || super::settle::settled(&job).is_some() {
             r.next = "the next pass that reaches GitHub carries out its verdict".into();
             return Some(r.waiting(Wait::Verdict));
         }
@@ -689,7 +737,7 @@ impl Look<'_, '_> {
     }
 
     /// Issue N as its repo's ready list has it, if it does.
-    fn listed(&self, repo: &str, n: &str) -> Option<Value> {
+    pub(super) fn listed(&self, repo: &str, n: &str) -> Option<Value> {
         let f = files::ready_lists(&self.pass.inbox.state).join(key(repo));
         std::fs::read(&f)
             .ok()
@@ -719,14 +767,8 @@ impl Look<'_, '_> {
         }
         let since = mtime(&files::ready_lists(&p.inbox.state).join(key(repo)));
         let r = Record::new(name, Stage::Ready, "the drain hands it on, in its order").since(since);
-        if let Some(super::plans::Place::Behind(step)) = p.place(repo, n) {
-            return Some(
-                Record {
-                    next: format!("the drain hands it on once {step} has landed"),
-                    ..r
-                }
-                .waiting(Wait::Plan(step)),
-            );
+        if let Some(held) = p.plan_hold(repo, n) {
+            return Some(held_by_plan(r, held, "the drain hands it on"));
         }
         let claimed = self
             .claimed
@@ -795,6 +837,11 @@ impl Look<'_, '_> {
             .waiting(Wait::Paused);
         }
         if p.engine(i).is_some() {
+            let n = raw(&i["number"]);
+            if let Some(held) = p.plan_hold(repo, &n) {
+                let r = Record::new(name, Stage::Planned, "");
+                return held_by_plan(r, held, "its repo's next pass starts its job");
+            }
             return Record::new(
                 name,
                 Stage::Unseen(Unseen::Unknown),
@@ -821,6 +868,72 @@ impl Look<'_, '_> {
     }
 }
 
+/// What an issue waits on while job `id` holds it, from the job's own
+/// record (`jr`): its question first, whatever the job's stage, since a
+/// turn that runs on an update keeps an older question open; then the
+/// policy's park, as the park says; then its turn; then what its ended turn
+/// holds open. A question an accepted answer retired reads as answered
+/// ([`crate::record::holds`]). An issue's own job and its sorting job are
+/// read the same way. None when the job holds nothing.
+fn job_wait(id: &str, jr: &crate::record::Record) -> Option<Wait> {
+    use crate::record::{Stage as Turn, Wait as Held};
+    if jr.wait.contains(&Held::Owner) {
+        return Some(Wait::Owner(id.to_owned()));
+    }
+    if jr.wait.contains(&Held::Ask) {
+        return Some(Wait::Answer(id.to_owned()));
+    }
+    match &jr.stage {
+        Turn::Parked => Some(Wait::Policy {
+            job: id.to_owned(),
+            ends: jr
+                .wait
+                .iter()
+                .find(|w| matches!(w, Held::Policy(_)))
+                .map_or_else(|| "the settings letting it run".into(), Held::ends),
+        }),
+        Turn::Queued | Turn::Running => Some(Wait::Job(id.to_owned())),
+        Turn::Ended(_) if jr.wait.iter().any(Held::held) => Some(Wait::Job(id.to_owned())),
+        Turn::Ended(_) => None,
+    }
+}
+
+/// A child's record while the task lists hold it ([`Pass::plan_hold`]):
+/// what holds it, and `then`, what happens once that ends. One its list
+/// landed or dropped is planned, and nothing more comes of its labels.
+fn held_by_plan(mut r: Record, held: super::plans::Place, then: &str) -> Record {
+    use super::plans::Place;
+    match held {
+        Place::Behind(step) => {
+            r.next = format!("{then} once {step} has landed");
+            r.waiting(Wait::Plan(step))
+        }
+        Place::ParentJob(id) => {
+            r.next = format!("{then} once its parent's own job, {id}, is done");
+            r.waiting(Wait::Job(id))
+        }
+        Place::Stuck(what) => {
+            r.next = format!("{then} once its plan can go on");
+            r.waiting(Wait::Stuck(what))
+        }
+        Place::Landed(parent) => {
+            r.stage = Stage::Planned;
+            r.next = format!("nothing: {parent}'s task list has it landed already");
+            r
+        }
+        Place::Superseded(parent) => {
+            r.stage = Stage::Planned;
+            r.next = format!("nothing: {parent} was replanned without it");
+            r
+        }
+        Place::Parent(_) => {
+            r.stage = Stage::Planned;
+            r.next = "its own task list hands its children on".into();
+            r
+        }
+    }
+}
+
 /// An issue's label names.
 fn labels(i: &Value) -> Vec<&str> {
     i["labels"]
@@ -844,77 +957,6 @@ pub(super) fn observer<'a>(cfg: &'a Config, inbox: &'a crate::config::Inbox) -> 
         drain_at: None,
         skipped: Vec::new(),
     }
-}
-
-/// `proj why OWNER/REPO#N [--json]`: the issue's record, then its job's
-/// when it has one. GitHub is asked about the issue only when nothing kept
-/// here places it, since only GitHub can say why such an issue is unseen.
-pub(crate) fn why(cfg: &Config, target: &str, json: bool) -> Result<String, crate::Fail> {
-    let (repo, n) = target
-        .rsplit_once('#')
-        .filter(|(r, n)| r.contains('/') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .ok_or_else(|| crate::Fail::new(2, "usage: proj why OWNER/REPO#N [--json]"))?;
-    let Some(inbox) = cfg.inbox.as_ref() else {
-        let r = Record::new(
-            target,
-            Stage::Unseen(Unseen::Off),
-            "nothing: the inbox isn't on here",
-        );
-        return Ok(says(cfg, &r, json));
-    };
-    Ok(observer(cfg, inbox).why(repo, n, json))
-}
-
-impl Pass<'_> {
-    /// [`why`], through this pass.
-    pub(super) fn why(&self, repo: &str, n: &str, json: bool) -> String {
-        let repo = self
-            .project
-            .keys()
-            .find(|r| r.eq_ignore_ascii_case(repo))
-            .cloned()
-            .unwrap_or_else(|| repo.to_owned());
-        let look = self.look();
-        let mut r = look.record(&repo, n, None);
-        if matches!(
-            r.stage,
-            Stage::Unseen(Unseen::Unknown | Unseen::Refused | Unseen::Parked)
-        ) && let Some(issue) = crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
-        {
-            r = look.record(&repo, n, Some(&issue));
-        }
-        let room = || {
-            self.inbox
-                .triage
-                .as_ref()
-                .is_some_and(|t| self.drain_records().len() < t.drain_jobs)
-        };
-        if r.stage == Stage::Ready && r.wait.is_none() && !room() {
-            r.next = "the drain hands it on once one of its jobs ends, in its order".into();
-            r = r.waiting(Wait::Drain);
-        }
-        says(self.cfg, &r, json)
-    }
-}
-
-/// The record as `proj why` prints it, followed into its job.
-fn says(cfg: &Config, r: &Record, json: bool) -> String {
-    let job = r
-        .job
-        .as_deref()
-        .map(|id| (id, Job::new(cfg, id)))
-        .filter(|(_, job)| job.dir.is_dir())
-        .map(|(id, job)| (id, crate::record::derive(&job)));
-    if json {
-        let mut v = r.json();
-        v["record"] = job.as_ref().map_or(Value::Null, |(id, jr)| jr.json(id));
-        return format!("{v}\n");
-    }
-    let mut out = r.why();
-    if let Some((id, jr)) = job {
-        out.push_str(&format!("\nIts job, {id}:\n{}", jr.why(id)));
-    }
-    out
 }
 
 /// The issues waiting for sorting, each with why, as the pass recorded

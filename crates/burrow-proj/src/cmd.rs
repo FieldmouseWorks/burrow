@@ -132,8 +132,9 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
                 Some("--json") if args.len() == 3 => true,
                 _ => return Err(Fail::new(2, usage)),
             };
-            // An issue's record, followed into its job.
-            if id.contains('#') {
+            // An issue's record, followed into its job. A job's id may hold
+            // a `#` (its project's name), but never OWNER/REPO.
+            if crate::inbox::record::issue_target(id).is_some() {
                 put(&view.plain(&crate::inbox::record::why(cfg, id, json)?));
                 return Ok(());
             }

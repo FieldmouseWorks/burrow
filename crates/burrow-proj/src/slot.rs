@@ -790,7 +790,9 @@ fn lock(path: &Path) -> Lock {
 }
 
 mod owner;
+mod room;
 pub(crate) mod table;
+pub use room::{room, seen_room};
 
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
 /// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
@@ -912,39 +914,6 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
         .map(|b| if b == 0 { b' ' } else { b })
         .collect();
     String::from_utf8_lossy(&cmdline).contains(&format!(" _exec {id} "))
-}
-
-/// Whether a turn on this engine started now would get a slot, as far as a
-/// look from outside the line can tell: for Claude, no hold on its turn (in
-/// a sandbox, `sandboxed`, or here), nobody in line a hold lets by and a slot
-/// free past the pipeline's; for Codex, one of its pool free. Advisory: one on
-/// its way may take it first, and the new one then waits in line like any
-/// other. For what work nobody waits on (proj-inbox's drain) starts on idle slots.
-pub fn room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
-    let free = |dir: &str, n: usize| -> usize {
-        let dir = cfg.jobs.join(dir);
-        if fs::create_dir_all(&dir).is_err() {
-            return 0;
-        }
-        // Only a slot seen free is room: one that can't be looked at isn't.
-        (1..=n)
-            .filter(|i| matches!(lock(&dir.join(i.to_string())), Lock::Free | Lock::Missing))
-            .count()
-    };
-    match engine {
-        Engine::Claude => {
-            usage::metered(cfg);
-            let hold = usage::out(cfg);
-            let held = |sandboxed| hold.as_ref().is_some_and(|h| h.holds_run(sandboxed));
-            !held(sandboxed)
-                && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
-                && line(cfg)
-                    .iter()
-                    .all(|w| held(usage::login::sandboxed(cfg, &w.job)))
-                && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
-        }
-        Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
-    }
 }
 
 /// Queue mutations and this census share the admission lock. An unreadable

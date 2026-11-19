@@ -268,7 +268,11 @@ into project jobs.
   ready, working, answered, closed), what it waits on and what ends that, and
   then its job's record when it has one. An issue the inbox never took up
   says why: not opened by an author, no engine label, a label that keeps it
-  back, closed, its repo paused, or GitHub refusing to list its repo.
+  back, closed, its repo paused, or GitHub refusing to list its repo. GitHub
+  is asked about an issue once when no job holds it, so one closed reads
+  closed whatever the inbox kept of it; a ready one says what the drain's
+  admission does (its cap, a repair past it, its engine's room, the drain
+  off), and a child what its plan holds it on.
 
 ### Triage and the drain: issues nobody labelled
 
