@@ -539,7 +539,9 @@ jobs:
       # keep-builds, on a PR: a leg that would compile something cold while
       # the push to the default branch it is merged onto is still building
       # (and will keep) it waits for that push's kept builds and restores them,
-      # rather than build the same thing in parallel (#863). Only a push to
+      # rather than build the same thing in parallel (#863), or a newer push's,
+      # which makes that push skip its own save, once one is listed (#1164).
+      # Only a push to
       # the default branch saves where a PR can read, so this is the one
       # source this wait can share. It plans
       # as the gate does, stopped before building, with a nix cache of its
@@ -582,12 +584,16 @@ jobs:
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         shell: bash
         run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
+      # The entry the wait named can be gone by now, pruned by a newer
+      # push's save (prune deletes what a newer commit's supersedes): this
+      # leg's newest is restored instead, as the first restore does.
       - id: kept-rewait
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kept
           key: ${{ steps.kept-wait.outputs.key }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
           fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       # With gate-reuse, Nix reads a commit of the tree alone, so the verdict
