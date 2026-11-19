@@ -45,19 +45,22 @@ let
   joined = lib.attrNames (lib.filterAttrs (n: u:
     n != controller && lib.elem controller (u.extraGroups or [ ])) config.users.users);
   # Conary's files set by hand beside the ones burrow renders: a flow config
-  # (each repo's is the steward's settings, autoland/shadow.nix, passed by
-  # --config, so nothing here sets CONARY_FLOW_CONFIG) or a class policy
-  # other than burrow.ledger.policy's. cn reads either from its environment,
-  # so a copy in the machine's or a unit's would be a second copy of the
-  # settings, read by whichever cn found it first.
+  # other than a repo's rendered from the steward's settings (autoland's
+  # flowConfigs, autoland/shadow.nix) or a class policy other than
+  # burrow.ledger.policy's. cn reads either from its environment, so a copy
+  # in the machine's or a unit's would be a second copy of the settings,
+  # read by whichever cn found it first.
   handWritten = let
-    rendered = { CONARY_POLICY = cfg.env.CONARY_POLICY; };
+    rendered = {
+      CONARY_POLICY = p: p == cfg.env.CONARY_POLICY;
+      CONARY_FLOW_CONFIG = p: autoland ? flowConfigs && lib.hasPrefix "${autoland.flowConfigs}/" p;
+    };
     units = kind: lib.mapAttrs' (n: s: lib.nameValuePair "systemd.${kind}.${n}.environment" s.environment);
     scopes = {
       "environment.variables" = config.environment.variables;
       "environment.sessionVariables" = config.environment.sessionVariables;
     } // units "services" config.systemd.services // units "user.services" config.systemd.user.services;
-    set = env: lib.filter (v: env ? ${v} && toString env.${v} != (rendered.${v} or null)) [ "CONARY_FLOW_CONFIG" "CONARY_POLICY" ];
+    set = env: lib.filter (v: env ? ${v} && !rendered.${v} (toString env.${v})) (lib.attrNames rendered);
   in lib.concatLists (lib.mapAttrsToList (where: env: map (v: "${where}.${v}") (set env)) scopes);
 
   # The passes' own state: when each repo's next pass is due, for

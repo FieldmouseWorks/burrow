@@ -91,7 +91,7 @@ let
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
   # A flow config or policy beside burrow's, in the machine's environment or
-  # a unit's, fails the build; the rendered ones the units carry don't.
+  # a unit's, fails the build; the rendered ones a unit carries don't.
   refused = modules: map (a: a.message) (lib.filter (a: !a.assertion)
     (self.nixosConfigurations.example.extendModules { inherit modules; }).config.assertions);
   says = what: lib.any (m: lib.hasInfix what m && lib.hasInfix "set by hand" m);
@@ -103,6 +103,11 @@ let
       burrow.autoland.shadow = [ "sam/plain" ];
       systemd.services."autoland-shadow@".environment.CONARY_FLOW_CONFIG = "/etc/conary/flow.json";
     }]);
+    # A unit handed a repo's rendered config, as the flow's own may be.
+    renderedFlowPasses = !(lib.any (lib.hasInfix "set by hand") (refused [({ config, ... }: {
+      burrow.autoland.shadow = [ "sam/plain" ];
+      systemd.services.conary-flow.environment.CONARY_FLOW_CONFIG = "${config.burrow.autoland.flowConfigs}/sam/plain.json";
+    })]));
     policyUnit = says "systemd.services.conary-mine.environment.CONARY_POLICY"
       (refused [{ systemd.services.conary-mine.environment.CONARY_POLICY = "/etc/conary/policy.json"; }]);
   };
