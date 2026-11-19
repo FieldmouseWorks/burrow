@@ -27,9 +27,11 @@
 //! when it started and what the job read of it (`input`: a verdict on an
 //! issue whose text or authors' comments changed since is dropped, and the
 //! issue sorted again), then the verdict's steps (`plan`) and how many of
-//! them GitHub has taken (`did`). A job whose issue an agent may no longer
-//! read (labelled outside text, or its opener no longer an author) is
-//! stopped wherever it is, queued or running. A job that ends with no answer at all (its
+//! them GitHub has taken (`did`). The verdict itself is read from what the
+//! job's end kept of its answer, with no GitHub call ([`super::settle`]).
+//! A job whose issue an agent may no longer read (labelled outside text, or
+//! its opener no longer an author) is stopped wherever it is, queued or
+//! running. A job that ends with no answer at all (its
 //! engine refused it, say) leaves `failed` there instead: the issue is
 //! sorted again once it changes, or once another issue's verdict shows
 //! sorting works again, and nothing is said on it meanwhile.
@@ -126,7 +128,7 @@ impl Pass<'_> {
     }
 
     pub(super) fn sorting_dir(&self) -> PathBuf {
-        self.inbox.state.join(".triage")
+        super::record::files::sorting_root(&self.inbox.state)
     }
 
     /// The labels triage puts on, as each repo is given them: name, colour,
@@ -240,10 +242,7 @@ impl Pass<'_> {
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
         let claimed = self.claimed(repo);
-        let going = dirs(&root, "")
-            .iter()
-            .filter(|d| self.sorting_slot(d))
-            .count();
+        let going = self.sorting_holders().len();
         let mut room = t.at_once.saturating_sub(going);
         let mut launch_failed = false;
         for issue in all {
@@ -265,8 +264,9 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
-                let why = (d.join("plan").is_file() && !self.sorting_slot(&d))
-                    .then_some("its verdict's steps are still being carried out");
+                let verdict =
+                    self.look().record(repo, &n, None).wait == Some(super::record::Wait::Verdict);
+                let why = verdict.then_some("its verdict's steps are still being carried out");
                 self.planner_wait(repo, &n, why);
                 continue;
             }
@@ -476,7 +476,14 @@ impl Pass<'_> {
             }
             let mut failed = false;
             if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
-                match told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into())) {
+                // The answer as its end kept it, with no GitHub call
+                // ([`super::settle`]); read now if it was never settled.
+                let answer = match super::settle::settled(&job) {
+                    Some(kept) => kept.answer.ok_or(()),
+                    None => told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into()))
+                        .map_err(drop),
+                };
+                match answer {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {
                             self.retry(repo);

@@ -1,13 +1,8 @@
 use super::*;
 
 #[test]
-fn initial_identity_requires_aware_handover_for_each_engine() {
-    for (mode, old_format) in [
-        ("new", "absent"),
-        ("new", "2"),
-        ("new-codex", "absent"),
-        ("new-codex", "2"),
-    ] {
+fn initial_identity_requires_aware_handover() {
+    for (mode, old_format) in [("new", "absent"), ("new", "2")] {
         let mut r = rig();
         let old = r.tmp.path().join("old-startup");
         let wrong = r.tmp.path().join("unaware-executed");
@@ -30,26 +25,14 @@ fn initial_identity_requires_aware_handover_for_each_engine() {
             serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
         value["deployed"] = old.to_str().unwrap().into();
         fs::write(config_path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let held = if mode == "new-codex" {
-            fs::create_dir_all(r.cfg.jobs.join(".codex-slots")).unwrap();
-            (1..=r.cfg.codex_slots)
-                .map(|i| {
-                    let file = File::create(r.cfg.jobs.join(format!(".codex-slots/{i}"))).unwrap();
-                    file.lock().unwrap();
-                    file
-                })
-                .collect::<Vec<_>>()
-        } else {
-            usage::record(
-                &r.cfg,
-                "hold",
-                Some(crate::now() + 3600),
-                "refused",
-                crate::now(),
-            )
-            .unwrap();
-            Vec::new()
-        };
+        usage::record(
+            &r.cfg,
+            "hold",
+            Some(crate::now() + 3600),
+            "refused",
+            crate::now(),
+        )
+        .unwrap();
         start(&mut r, "initial", mode, "/ordinary");
         let job = Job::new(&r.cfg, "initial");
         let choice = Identity::load(&job, "1").unwrap().unwrap().choice;
@@ -64,10 +47,7 @@ fn initial_identity_requires_aware_handover_for_each_engine() {
             "{mode}: unaware rollback executed an initial turn"
         );
         assert_eq!(Identity::load(&job, "1").unwrap().unwrap().choice, choice);
-        drop(held);
-        if mode == "new" {
-            usage::back(&r.cfg, None);
-        }
+        usage::back(&r.cfg, None);
         until(|| job.path("took").exists());
         assert!(!wrong.exists());
         assert_eq!(Identity::load(&job, "1").unwrap().unwrap().choice, choice);

@@ -10,7 +10,6 @@ draft mark) or one on hold (the hold label), carries NONE's, which is none,
 whatever stage its status names (settle sees to that)."""
 
 REVIEW = "review"  # its reviewers, or a judge, look at this head
-REVIEWER = "reviewer"  # a reviewer it waits on is out of service
 FIX = "fix"  # a Claude job or its session fixes findings, red CI or a conflict
 CI = "ci"  # reviewed clean, CI still running
 PROOF_SLOT = "proofSlot"  # in line for the machine's own checks
@@ -22,4 +21,4 @@ OWNER = "owner"  # the owner's to decide or settle
 BASE = "base"  # waits on its base: the PR below, or a red default branch's CI
 NONE = None
 
-ALL = (REVIEW, REVIEWER, FIX, CI, PROOF_SLOT, PROOF, RELEASE_AGE, TRAIN, MERGE, OWNER, BASE)
+ALL = (REVIEW, FIX, CI, PROOF_SLOT, PROOF, RELEASE_AGE, TRAIN, MERGE, OWNER, BASE)

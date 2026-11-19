@@ -208,7 +208,7 @@ UPKEEP_TIMEOUT = 300
 def upkeep(*args, input=None, as_app=True, bounded=True):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
     owner, as every GitHub call of a pass's, `input` on its stdin: what it
-    printed, read, with a rate limit it met noted for the pass (LIMITED).
+    printed, read, with the latest rate limit any call met noted (LIMITED).
     Not `as_app`, it's handed no token: `hooks` mints its own, for each
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
@@ -222,8 +222,8 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     if p.returncode:
         raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
-    if out["limited"] is not None and not LIMITED:
-        LIMITED.append(out["limited"])
+    if out["limited"] is not None:
+        LIMITED[:] = [max([*LIMITED, out["limited"]])]
     return out
 
 
@@ -309,8 +309,8 @@ def comment(repo, n, body):
 
 
 def me():
-    """The steward's login as REST gives it: its App's bot. The reviewers'
-    reviews, its statuses, comments and merges are posted as it, and nobody
+    """The steward's login as REST gives it: its App's bot. Its statuses,
+    comments, judges' verdicts and merges are posted as it, and nobody
     else can post as it: a user's login can't have "[bot]" in it."""
     return CFG["app"]["slug"] + "[bot]"
 
@@ -388,14 +388,14 @@ def seal(repo, n, name, verdict, head, base):
 
 
 def quote(body):
-    """A PR's description as the reviewers are shown it: each line quoted,
-    so nothing in it reads as their brief going on."""
+    """A PR's description as a judge is shown it: each line quoted, so
+    nothing in it reads as its brief going on."""
     return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
 
 
 def fingerprint(body):
-    """What a review or a judge's verdict carries of the description it was
-    on: the reasons a description gives are part of what's judged."""
+    """What a judge's verdict carries of the description it was on: the
+    reasons a description gives are part of what's judged."""
     return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
 
 

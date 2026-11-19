@@ -22,14 +22,26 @@
 //! commit's, whatever the PR targets. An optional `toolsRef` supplies a
 //! separate trusted origin branch checkout in PROOF_TOOLS; the command's
 //! current directory and PROOF_HEAD remain the head under test.
+//!
+//! Conary's flow proves through its own plugin (Conary's
+//! `docs/m6-plugins.md`, P), off until the flow's plugins are turned on:
+//!
+//! - `burrow-proof-plugin plugin CONFIG` is the plugin the flow runs
+//!   ([`plugin`]), and `burrow-proof-plugin producer CONFIG` its producer
+//!   ([`producer`]), which holds the key, signs and publishes;
+//! - `burrow-proof work CONFIG ID` is a run's worker ([`work`]), as
+//!   another user, in a unit of its own, whose exit is the verdict.
 
 pub mod comment;
 pub mod end;
 pub mod fence;
+pub mod plugin;
+pub mod producer;
 pub mod run;
 pub mod start;
 pub mod tools;
 pub mod trees;
+pub mod work;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -182,3 +194,7 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "producer_tests.rs"]
+mod producer_tests;

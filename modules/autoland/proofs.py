@@ -80,7 +80,7 @@ import time
 import urllib.parse
 
 import common as C
-import reviewers as V
+import mirror as M
 from common import CFG, STATE, load, log, save
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
@@ -209,7 +209,7 @@ def outputs(repo, pr, checks, st):
     key = output_key(repo, pr, checks)
     drvs = paths = None
     try:
-        mirror = V.fetch(repo, pr=pr)
+        mirror = M.fetch(repo, pr=pr)
         drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
         paths = paths or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
@@ -238,7 +238,7 @@ def merged(repo, pr, checks, st, tip):
         return None
     paths, failed = None, True
     try:
-        mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
+        mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
         up = subprocess.run(["git", "-C", mirror, "merge-base", "--is-ancestor", tip, head], capture_output=True, text=True)
         # 0: the head has the tip already; 1: it doesn't; else git can't say
         # (a tip that moved on again before the fetch, say).
@@ -253,9 +253,9 @@ def merged(repo, pr, checks, st, tip):
                 raise RuntimeError(f"git merge-tree: {tree.stderr.strip()[-300:]}")
         if tree and tree.returncode == 0:
             who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
-            rev = V.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
+            rev = M.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
                         "-m", f"#{n} brought up to date with {base}").decode().strip()
-            V.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
+            M.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
             paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
         failed = False
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:

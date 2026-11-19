@@ -157,8 +157,10 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
         utc(since),
         utc(m.now)
     );
-    for engine in ["claude", "codex"] {
-        out += &format!("{engine}: {} turns\n", counts.get(engine).unwrap_or(&0));
+    // Claude's always, and any other engine the window's turns ran on.
+    counts.entry("claude".into()).or_default();
+    for (engine, n) in &counts {
+        out += &format!("{engine}: {n} turns\n");
     }
     for (engine, n) in unknown {
         out += &format!(
@@ -192,14 +194,14 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
         if at < since as f64 || at > m.now as f64 {
             continue;
         }
-        let Some(engine @ ("claude" | "codex")) = v["engine"].as_str() else {
+        let Some(engine @ "claude") = v["engine"].as_str() else {
             continue;
         };
         if let Some(ws) = v["windows"].as_object() {
             for (name, w) in ws {
                 let name = match name.as_str() {
-                    "five_hour" | "300m" => "five_hour",
-                    "seven_day" | "10080m" => "seven_day",
+                    "five_hour" => "five_hour",
+                    "seven_day" => "seven_day",
                     _ => continue,
                 };
                 if let Some(used) = w["used"].as_f64() {

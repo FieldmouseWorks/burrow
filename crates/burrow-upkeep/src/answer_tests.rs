@@ -480,6 +480,8 @@ fn the_description_is_read_again_and_written_once() {
         let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
         reread(&mut hub, "open", PUSHED, BODY);
         hub.on("PATCH", "repos/sam/r/pulls/7$", reply(status, json!({})));
+        // A 429 is a rate limit: the pass asks when its budgets reset.
+        hub.on("GET", "rate_limit$", reply(200, json!({"resources": {}})));
         assert!(
             matches!(answered(&mut hub, &h), Err(Unposted::Unanswered(_))),
             "{status}"
@@ -490,4 +492,13 @@ fn the_description_is_read_again_and_written_once() {
             "{status}"
         );
     }
+}
+
+#[test]
+fn quiet_text_pings_nobody_and_marks_nothing() {
+    assert_eq!(
+        quiet("@evil @-x @é a@b @ <!-- x -->"),
+        "@\u{200b}evil @\u{200b}-x @\u{200b}é a@\u{200b}b @ &lt;!-- x -->"
+    );
+    assert_eq!(quiet("@"), "@");
 }

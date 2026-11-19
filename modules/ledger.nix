@@ -12,7 +12,9 @@
 # of its own, with no network and no git. Every Claude of burrow.user gets
 # them, and `why`, as the `conary` MCP server (conary-mcp). With `door`, an
 # `undo` issue in a repo (the probe's, by default) asks the ledger for an
-# undo with no Claude in between (crates/burrow-ledger-door).
+# undo with no Claude in between (crates/burrow-ledger-door). With
+# `gateReuse`, a conaryd of its own answers CI's gate-reuse lookups over
+# HTTP (Conary's docs/gate-reuse.md), apart from the socket's.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -21,30 +23,27 @@ let
   inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
-  # What the steward's reviewers aren't shown (their skipPaths, the
-  # machine's and each repo's) is the policy's `hidden`, which Conary
-  # matches as their snapshot hides a path and never takes for
-  # documentation: a change to it gets a review round, whose snapshot names
-  # it for the judge. A Conary without `hidden` refuses the file, so the
-  # docs shortcut never runs on a matcher that would miss one. A repo's are
-  # added to its policy entry by name, as GitHub has it in any case, so a
-  # repo is never in the file twice.
-  skips = let
-    on = autoland.enable or false;
-    own = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
-    theirs = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) (if on then autoland.repos else { }));
-    add = repos: name: paths:
-      let hit = lib.findFirst (k: lib.toLower k == lib.toLower name) null (lib.attrNames repos); in
-      if hit == null then repos // { ${name} = { hidden = paths; }; }
-      else repos // { ${hit} = repos.${hit} // { hidden = paths; }; };
-  in {
-    machine = if on then autoland.reviewers.skipPaths else [ ];
-    repos = lib.foldlAttrs add own theirs;
-  };
   # The machine's runners started fresh for one job each, if it has them.
   fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
+  # The flow's controller, when it has one of its own (controllerUser):
+  # the flow's passes and workers, and so its plugins, run as it, and it
+  # alone may ask a producer for work. Each producer listens in a directory
+  # of its own under `producers`, which only the controller's group may
+  # enter, and checks its peer is the controller too (crates/burrow-producer).
+  controller = cfg.controllerUser;
+  producers = "/run/conary-producers";
+  # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
+  # private to the controller.
+  flowData = "${config.burrow.stateDir}/flow";
+  # Units other than the flow's that run as the controller, and users in
+  # its group: the controller must be neither's.
+  others = lib.attrNames (lib.filterAttrs (_: s:
+    (s.serviceConfig.User or null) == controller
+    && (s.environment.CONARY_DATA or null) != flowData) config.systemd.services);
+  joined = lib.attrNames (lib.filterAttrs (n: u:
+    n != controller && lib.elem controller (u.extraGroups or [ ])) config.users.users);
 
   # The passes' own state: when each repo's next pass is due, for
   # burrow-events ({"OWNER/REPO": epoch}).
@@ -52,12 +51,18 @@ let
   wake = "${passDir}/wake.json";
   doorWake = "${passDir}/door-wake.json";
 
+  # Where the ledger's GitHub tokens come from: the machine's own App's, a
+  # repo's from its owner's installation (the repo is the last argument),
+  # else the user's own gh login, the same for every repo.
+  appToken = "${config.burrow.tools.gh-token}/bin/gh-token get";
+  userToken = "gh auth token";
+
   # How a writer of the ledger asks GitHub, and what it tells cn: the
   # passes' and the door's alike.
   writer = (if machineApp == null then ''
     # The user's own gh login reads GitHub and writes the anchor, notes and
     # undo PRs.
-    GH_TOKEN=$(gh auth token)
+    GH_TOKEN=$(${userToken})
     export GH_TOKEN
   '' else ''
     # The machine's own App reads GitHub and writes the anchor, notes and
@@ -65,7 +70,7 @@ let
     # each repo.
     # shellcheck source=/dev/null
     . ${machineApp.envFile}
-    export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
+    export CONARY_TOKEN_COMMAND=${lib.escapeShellArg appToken}
   '') + ''
     # What cn is told about the ledger (env, below).
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
@@ -86,6 +91,27 @@ let
     host = config.networking.hostName;
     cn = lib.getExe cfg.writer;
   });
+
+  # The gate-reuse lookup's: conaryd, apart from the socket's (`gateReuse`).
+  reuse = cfg.gateReuse;
+  # Its own socket, which nobody else may reach: conaryd always serves one.
+  reuseSocket = "/run/conary-gate-reuse/conaryd.sock";
+  # A repo's token for the lookup, as the ledger's writers get one: the
+  # program Conary runs with the repo as its last argument (token_command).
+  # It reads check runs, Actions jobs and artifacts, commits and PRs.
+  reuseToken = pkgs.writeShellApplication {
+    name = "burrow-ledger-token";
+    runtimeInputs = [ cfg.gh ];
+    text = if machineApp == null then ''
+      exec ${userToken}
+    '' else ''
+      GH_TOKEN_SOCKET=${lib.escapeShellArg machineApp.socket} exec ${appToken} "$1"
+    '';
+  };
+  # What conaryd reads (CONARY_GATE_REUSE_CONFIG; Conary's docs/gate-reuse.md,
+  # "Running it"), which refuses a field it doesn't know. Whose attestations
+  # count is the train's own, from `env`: one fact, one home.
+  reuseConfig = pkgs.writeText "conary-gate-reuse.json" (builtins.toJSON reuse.settings);
 
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
@@ -259,8 +285,7 @@ in
         changes are R2, which are documentation only, and which repos go
         live when they land, from the paths a change touches, renames and
         copies included. `cn class` reads it (CONARY_POLICY), and the
-        steward asks it for every PR it settles. The steward's reviewers'
-        skipPaths are never documentation: they go to Conary as `hidden`. The machine's R2 paths
+        steward asks it for every PR it settles. The machine's R2 paths
         default to CODEOWNERS (who signs off on what) and secrets. The rest
         of `.github/` isn't on it: the reviewers read workflow changes like
         any other, and the steward merges them once settled. Nor are
@@ -313,6 +338,53 @@ in
       '';
     };
 
+    controllerUser = mkOption {
+      type = types.nullOr (types.strMatching "[a-z_][a-z0-9_-]*");
+      default = null;
+      example = "conary-flow";
+      description = ''
+        A system user of its own, which no authoring job, sandbox or proj
+        run shares (and which nothing else on the machine runs as or is in
+        the group of), for Conary's flow: its passes and workers, and so the
+        plugins they run, run as it, and only it may ask a producer for
+        work, both by the producers' socket directory (${producers}, which
+        only its group may enter) and by each producer's peer check. Its
+        state (`CONARY_DATA`) is its own, in ${flowData}. It reads the
+        ledger as everyone does. Null, the default, runs the flow as
+        burrow.user, as before.
+      '';
+    };
+
+    flow = mkOption {
+      type = types.attrsOf types.anything;
+      readOnly = true;
+      default = {
+        user = if controller == null then user else controller;
+        # Whom a producer's peer check accepts: the controller, never
+        # burrow.user (null with no controller).
+        controller = controller;
+        # Where producers listen, each in a directory of its own; null
+        # with no controller, since a producer would trust burrow.user.
+        producers = if controller == null then null else producers;
+        env = lib.optionalAttrs (controller != null) { CONARY_DATA = flowData; };
+        # A producer unit's serviceConfig for its socket's directory,
+        # ${producers}/NAME: the producer is let through the directory only
+        # the controller's group may enter, to listen in its own.
+        # Refused with no controller: a producer would trust burrow.user.
+        producer = name: lib.throwIf (controller == null)
+          "burrow.ledger.controllerUser: a producer needs the flow's controller, or it would trust burrow.user" {
+          RuntimeDirectory = "${lib.removePrefix "/run/" producers}/${name}";
+          RuntimeDirectoryMode = "0755";
+          SupplementaryGroups = [ controller ];
+        };
+      };
+      description = ''
+        Who runs the flow, the environment it adds, where producers listen,
+        and a producer unit's serviceConfig for its socket's directory: for
+        the units that run `cn flow` and the producers.
+      '';
+    };
+
     env = mkOption {
       type = types.attrsOf types.str;
       readOnly = true;
@@ -334,8 +406,9 @@ in
         CONARY_POLICY = "${pkgs.runCommand "conary-policy.json" {
           policy = builtins.toJSON {
             inherit (cfg.policy) r2 docs live notDocs;
-            hidden = skips.machine;
-            repos = skips.repos;
+            # The reviewers read every path on GitHub: no snapshot hides one.
+            hidden = [ ];
+            repos = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
           };
           passAsFile = [ "policy" ];
         } ''
@@ -357,6 +430,69 @@ in
         On a machine with runners started fresh for one job each
         (burrow.dispatch.fresh), the start of their names.
       '';
+    };
+
+    gateReuse = {
+      enable = lib.mkEnableOption ''
+        Conary's gate-reuse lookup (its docs/gate-reuse.md): a conaryd of its
+        own answers, over HTTP on `listen`, whether CI already attested a pass
+        of a gate on a push's tree, for burrow's flake-check.yml (its
+        `gate-reuse` and `gate-reuse-lookup`). It runs as burrow.user, with
+        the ledger's GitHub tokens (as `writer` gets them) and the train's
+        signer workflow and fresh runners, and reaches the network; the
+        socket's conaryd stays as it is. The package must have conaryd from
+        FieldmouseWorks/Conary#380 or later
+      '';
+
+      listen = mkOption {
+        type = types.strMatching "([0-9.]+|\\[[0-9a-fA-F:.]+]):[0-9]+";
+        default = "127.0.0.1:8091";
+        example = "[::1]:8091";
+        description = ''
+          The address it listens on, IP:PORT. Plain HTTP: a runner on this
+          machine may ask it over loopback, any other asks over `path`.
+        '';
+      };
+
+      repos = mkOption {
+        type = types.listOf (types.strMatching "[^/]+/[^/]+");
+        default = [ ];
+        example = [ "sam/homelab" ];
+        description = "The repositories (OWNER/NAME) it answers for: any other is refused.";
+      };
+
+      path = mkOption {
+        type = types.nullOr (types.strMatching "/.*");
+        default = null;
+        example = "/conary/gate-reuse";
+        description = ''
+          Where on burrow.events' `host` nginx passes lookups to it, over
+          HTTPS, for runners GitHub hosts. null: no runner off this machine
+          can ask.
+        '';
+      };
+
+      url = mkOption {
+        type = types.nullOr types.str;
+        readOnly = true;
+        default = if reuse.path == null || config.burrow.events.host == null then null
+          else "https://${config.burrow.events.host}${reuse.path}";
+        defaultText = lib.literalExpression ''"https://''${config.burrow.events.host}''${path}"'';
+        description = "The lookup's URL for runners off this machine: a caller's `gate-reuse-lookup`.";
+      };
+
+      settings = mkOption {
+        type = types.attrs;
+        readOnly = true;
+        internal = true;
+        default = {
+          inherit (reuse) listen repos;
+          token_command = lib.getExe reuseToken;
+          signer = cfg.env.CONARY_SIGNER_WORKFLOW;
+          fresh = cfg.env.CONARY_FRESH_RUNNERS or null;
+        };
+        description = "What conaryd's gate-reuse configuration file holds.";
+      };
     };
 
     door = {
@@ -415,6 +551,14 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [{
+      assertion = controller != null -> controller != user && controller != "root";
+      message = "burrow.ledger.controllerUser: a user of its own, never burrow.user or root, or a producer would trust every authoring session.";
+    } {
+      # The controller's alone: only the flow's own units (those that run
+      # on its state, flow.env) run as it, and no user is in its group.
+      assertion = controller == null || (others == [ ] && joined == [ ]);
+      message = "burrow.ledger.controllerUser: ${toString controller} is already someone else's: ${lib.concatStringsSep ", " (others ++ joined)} run as it or join its group, so a producer would trust them.";
+    } {
       assertion = cfg.reviewers != [ ];
       message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";
     } {
@@ -423,6 +567,12 @@ in
     } {
       assertion = cfg.door.enable -> cfg.door.repo != null;
       message = "burrow.ledger.door.repo: name the repo whose issues ask for undos.";
+    } {
+      assertion = reuse.enable -> reuse.repos != [ ];
+      message = "burrow.ledger.gateReuse.repos: name the repositories the lookup answers for.";
+    } {
+      assertion = reuse.path != null -> reuse.enable && config.burrow.events.host != null;
+      message = "burrow.ledger.gateReuse.path: needs gateReuse.enable, and burrow.events.host to serve it on.";
     }];
 
     # `cn` for everyone, on this ledger.
@@ -436,7 +586,21 @@ in
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
       ${cfg.dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
       ${passDir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+    } // lib.optionalAttrs (controller != null) {
+      ${flowData}.d = { mode = "0700"; user = controller; group = controller; };
+      # Entered, not listed, by the controller's group alone; each producer
+      # is let in to make its own directory there (flow.producer).
+      ${producers}.d = { mode = "0710"; user = "root"; group = controller; };
     };
+
+    users.users = lib.mkIf (controller != null) {
+      ${controller} = {
+        isSystemUser = true;
+        group = controller;
+        description = "Conary's flow, and the only asker of its producers";
+      };
+    };
+    users.groups = lib.mkIf (controller != null) { ${controller} = { }; };
 
     burrow.events.handlers.ledger = {
       # A PR opened, pushed, retargeted, closed or merged; a review; CI
@@ -469,8 +633,9 @@ in
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
       `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
       `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
-      `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
-      a comment, and the steward settles it like any other.
+      `undo --since RFC3339_TIME --repo OWNER/REPO`, then `--reason WHY`, which
+      the undo keeps for good (no secrets or prompt text). The undo's PR comes
+      back as a comment, and the steward settles it like any other.
     '');
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.
@@ -483,6 +648,15 @@ in
     systemd.paths.conaryd = lib.mkIf cfg.daemon {
       wantedBy = [ "paths.target" ];
       pathConfig.PathExists = "${cfg.dir}/key.pub";
+    };
+    systemd.paths.conary-gate-reuse = lib.mkIf reuse.enable {
+      wantedBy = [ "paths.target" ];
+      pathConfig.PathExists = "${cfg.dir}/key.pub";
+    };
+    # For runners GitHub hosts. The lookup reads at most 64 KiB of a
+    # request, under nginx's own cap.
+    services.nginx.virtualHosts = lib.mkIf (reuse.path != null) {
+      ${config.burrow.events.host}.locations.${reuse.path}.proxyPass = "http://${reuse.listen}";
     };
     systemd.services = lib.genAttrs [ "burrow-ledger" "burrow-ledger@" ] (name: {
       description = if name == "burrow-ledger"
@@ -508,7 +682,6 @@ in
         path = [ cfg.gh ];
         environment.GH_NO_UPDATE_NOTIFIER = "1";
         environment.BURROW_DOOR_WAKE = doorWake;
-        environment.BURROW_DOOR_METER = config.burrow.github.doorMeter (config.burrow.github.appOf cfg.gh) cfg.door.repo;
       environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
         serviceConfig = {
           Type = "oneshot";
@@ -541,6 +714,40 @@ in
           ProtectHome = true;
           PrivateNetwork = true;
           RestrictAddressFamilies = [ "AF_UNIX" ];
+          CapabilityBoundingSet = "";
+          Restart = "always";
+          RestartSec = 1;
+        };
+      };
+      # Apart from the socket's conaryd, which keeps no network and no
+      # token: this one needs both, and serves a socket of its own that only
+      # it can reach.
+      conary-gate-reuse = lib.mkIf reuse.enable {
+        description = "ledger: answer gate-reuse lookups on ${reuse.listen}";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        unitConfig.ConditionPathExists = "${cfg.dir}/key.pub";
+        environment = {
+          CONARY_LEDGER = cfg.dir;
+          CONARY_SOCKET = reuseSocket;
+          CONARY_GATE_REUSE_CONFIG = "${reuseConfig}";
+        };
+        serviceConfig = {
+          ExecStart = "${cfg.package}/bin/conaryd";
+          # burrow.user, whose are the ledger's tokens (the App's socket
+          # lets only its users ask). It reads the ledger, which everyone
+          # may, and writes nothing but its socket's directory.
+          User = user;
+          RuntimeDirectory = builtins.baseNameOf (builtins.dirOf reuseSocket);
+          RuntimeDirectoryMode = "0700";
+          ProtectSystem = "strict";
+          # gh's login is in the user's home; the App's tokens aren't.
+          ProtectHome = if machineApp == null then "read-only" else true;
+          PrivateTmp = true;
+          NoNewPrivileges = true;
+          # The App's token socket, and GitHub.
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
           CapabilityBoundingSet = "";
           Restart = "always";
           RestartSec = 1;

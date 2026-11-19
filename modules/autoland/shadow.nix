@@ -14,7 +14,7 @@
 # seal keys stay out of it: they're secrets, and a config is a store path.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
-{ lib, pkgs, cfg, settings, ledger, steward, user, credentials }:
+{ lib, pkgs, cfg, settings, ledger, steward, credentials }:
 let
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
@@ -27,7 +27,7 @@ let
     let
       own = overrides repo;
       rc = settings.defaults // own;
-      codex = rc.codex && settings.reviewers.codex.enable;
+      codex = rc.codex;
     in {
       # Whose PRs are the steward's authors': its people, and the bots
       # (their REST logins) whose PRs it lands too.
@@ -47,8 +47,15 @@ let
         proof_timeout = minutes cfg.proofTimeoutMinutes;
         job_timeout = minutes cfg.jobTimeoutMinutes;
         reviewers = lib.optional codex "codex";
-        review_authors = [ stewardLogin ];
+        # Codex's GitHub connector posts the reviews.
+        review_authors = [ "chatgpt-codex-connector[bot]" ];
         verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
+        # No job engine's commits go to a judge on their own: there are no
+        # Codex jobs. One by none of the bots' addresses is someone editing a
+        # dependency update, as the steward reads a PR's commits (touches.py,
+        # burrow-upkeep's commits).
+        judge_engines = [ ];
+        bot_emails = [ settings.dependabotEmail ];
         renovate_email = settings.renovateEmail;
         renovate_login = settings.renovate;
         batch_label = cfg.labels.batch;
@@ -87,12 +94,13 @@ in
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     unitConfig.ConditionPathExists = config;
-    environment = ledger.env // {
+    environment = ledger.env // ledger.flow.env // {
       CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
     };
     serviceConfig = {
       Type = "oneshot";
-      User = user;
+      # The flow's controller where it has one (burrow.ledger.controllerUser).
+      User = ledger.flow.user;
       ExecStart = "${ledger.package}/bin/cn flow compare %I --config ${config}";
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";

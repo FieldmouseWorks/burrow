@@ -315,7 +315,7 @@ mod tests {
         let tracked = json!({
             "autoland.rounds": {"value": 3, "set": true, "default": 5},
             "autoland.jobIdleMinutes": {"value": 20, "set": false, "default": 20},
-            "autoland.reviewers.codex.effort": null,
+            "autoland.settleDelayMinutes": null,
             "proj.maxJobs": {"value": 6, "set": true, "default": 4},
             "proj.pipelineSlots": {"value": 1, "set": false, "default": 1},
             "proj.maxJobsPerProject": {"value": 2, "set": true, "default": 4},
@@ -326,8 +326,8 @@ mod tests {
             got,
             vec![
                 ("autoland.jobIdleMinutes", Origin::Default),
-                ("autoland.reviewers.codex.effort", Origin::Default),
                 ("autoland.rounds", Origin::Flake),
+                ("autoland.settleDelayMinutes", Origin::Default),
                 ("proj.maxJobs", Origin::Flake),
                 ("proj.maxJobsPerProject", Origin::Flake),
                 ("proj.pipelineSlots", Origin::Default),

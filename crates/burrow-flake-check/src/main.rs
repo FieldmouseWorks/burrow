@@ -3,6 +3,7 @@
 //! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
+mod builds;
 mod gate;
 mod memory;
 mod negative;
@@ -125,6 +126,13 @@ fn quote(v: &str) -> String {
 fn nix_string(v: &str) -> String {
     quote(v).replace('$', "\\$")
 }
+/// A build that prints nothing for this long has stopped making progress:
+/// nix kills it (its `max-silent-time`) and the gate fails, rather than hold
+/// its runner until the job's 6 hours run out (#1102). The rest of the
+/// builds go on (`--keep-going`), and a push's leg still keeps what they
+/// built. burrow's longest quiet stretch in a build that went on to pass
+/// was 14 to 16 minutes, codex linking on a hosted runner.
+const SILENT_SECONDS: u32 = 60 * 60;
 fn lines(v: &str) -> Vec<String> {
     v.lines().map(str::to_owned).collect()
 }
@@ -176,6 +184,17 @@ fn system() -> Result<String> {
         return Err(err(format!("can't evaluate for system {v}")));
     }
     Ok(v)
+}
+/// The nix config every build the worker starts reads: a caller's first,
+/// then a build's silence limit, and, in a run that may write the build
+/// store, what keeps a flake's own config out of it (builds.rs).
+fn worker_config(caller: &str, writes: bool) -> String {
+    let mut c = format!("{caller}\nmax-silent-time = {SILENT_SECONDS}");
+    if writes {
+        c.push('\n');
+        c.push_str(builds::NIX_CONFIG);
+    }
+    c
 }
 fn main() {
     let mode = env::args().nth(1).unwrap_or_default();
@@ -252,6 +271,12 @@ fn main() {
                 "--worker",
                 &mode,
             ],
+        )
+        // Every build the worker starts, its own and the nix and heavy
+        // processes it runs, reads this; a caller's settings come first.
+        .env(
+            "NIX_CONFIG",
+            worker_config(&var("NIX_CONFIG"), builds::writes()),
         )
         .stdout(Stdio::piped())
         .spawn()?;

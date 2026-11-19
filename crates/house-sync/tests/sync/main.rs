@@ -118,7 +118,6 @@ struct Setup<'a> {
     lock: PathBuf,
     wake: PathBuf,
     fails: bool,
-    meters: Option<burrow_github::quota::Kept>,
 }
 
 fn setup() -> Setup<'static> {
@@ -131,7 +130,6 @@ fn setup() -> Setup<'static> {
         wake: std::env::temp_dir()
             .join(format!("house-sync-test-{}-wake.json", std::process::id())),
         fails: false,
-        meters: None,
     }
 }
 
@@ -149,7 +147,6 @@ fn config(s: &Setup) -> Config {
         notify: "/nonexistent/notify".into(),
         wake: s.wake.clone(),
         dry_run: s.dry_run,
-        meters: s.meters.clone(),
     }
 }
 

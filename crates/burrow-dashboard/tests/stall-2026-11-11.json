@@ -19,16 +19,12 @@
     {"kind": "claude", "name": "3", "state": "parked", "since": 1794380000, "age": 18400,
      "holder": {"job": "career-20261110-224500-AsDf", "project": "career", "issue": "FieldmouseWorks/career#39", "role": "worker", "class": "normal", "engine": "claude", "model": "model-b", "effort": "xhigh", "awaits": ["https://github.com/FieldmouseWorks/career/pull/40", "https://github.com/FieldmouseWorks/career/issues/38"]}},
     {"kind": "unstick", "name": "unstick", "state": "idle", "since": null, "age": null, "holder": null},
-    {"kind": "codex", "name": "1", "state": "running", "since": 1794397000, "age": 1400,
-     "holder": {"job": "burrow-20261111-221000-Codx", "project": "burrow", "issue": "FieldmouseWorks/burrow#680", "role": "reviewer", "class": null, "engine": "codex", "model": null, "effort": "medium", "awaits": []}},
-    {"kind": "codex", "name": "2", "state": "idle", "since": null, "age": null, "holder": null},
     {"kind": "drain", "name": "1", "state": "starting", "since": 1794398300, "age": 100,
      "holder": {"job": null, "project": "burrow", "issue": "FieldmouseWorks/burrow#684", "role": null, "class": null, "engine": "claude", "model": null, "effort": null, "awaits": []}},
     {"kind": "heavy", "name": "1", "state": "busy", "since": null, "age": null, "holder": null}
   ],
   "meters": [
     {"engine": "claude", "reading": {"fiveHour": {"used": 41.5, "resetsAt": 1794409200}, "weekly": {"used": 87.0, "resetsAt": 1794700000}, "credits": false, "readAt": 1794398100, "age": 300, "fresh": true}, "hold": null},
-    {"engine": "codex", "reading": {"fiveHour": {"used": 12.0, "resetsAt": 1794412800}, "weekly": null, "credits": true, "readAt": 1794390000, "age": 8400, "fresh": false}, "hold": null},
     {"installation": {"app": "fixture-worker", "owner": "FieldmouseWorks"}, "remaining": 0, "reset": 1794399600, "retryAt": 1794398700, "readAt": 1794398340, "age": 60, "held": true},
     {"installation": {"app": "fixture-reader", "owner": "FieldmouseWorks"}, "remaining": null, "reset": null, "retryAt": null, "readAt": 1794398400, "age": 0, "held": false}
   ],

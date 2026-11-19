@@ -1,5 +1,6 @@
 //! Relaunch authority lives in the sandbox-denied host control directory.
 use super::*;
+use crate::record::TurnFile;
 use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize)]
@@ -15,7 +16,7 @@ pub(crate) struct Identity {
 }
 impl Identity {
     pub fn load(job: &Job, n: &str) -> Result<Option<Self>, String> {
-        match crate::state_reads::bytes(&job.turn(n, "execution")) {
+        match crate::state_reads::bytes(&job.turn_file(n, TurnFile::Execution)) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
                 .map_err(|e| e.to_string()),
@@ -44,7 +45,7 @@ impl Identity {
         }
         // Called only after kernel census-wait attestation. The old host
         // parent wrote N.engine before entering its initial wait or retry.
-        let recorded = read(&job.turn(n, "engine"));
+        let recorded = read(&job.turn_file(n, TurnFile::Engine));
         let choice = engine::requested(
             job.cfg,
             job,
@@ -56,7 +57,7 @@ impl Identity {
     fn save(job: &Job, n: &str, choice: engine::Choice) -> Result<(), String> {
         crate::ask::ensure(job)?;
         swap(
-            &job.turn(n, "execution"),
+            &job.turn_file(n, TurnFile::Execution),
             &serde_json::to_string(&Self {
                 choice,
                 files: crate::job::Request::load(job)?.captured_files(),
@@ -117,8 +118,11 @@ impl Identity {
         crate::job::Request::load(job)?
             .publish(job)
             .map_err(|e| e.to_string())?;
-        crate::state_reads::write(job.turn(n, "engine"), identity.choice.engine.name())
-            .map_err(|e| e.to_string())
+        crate::state_reads::write(
+            job.turn_file(n, TurnFile::Engine),
+            identity.choice.engine.name(),
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -128,20 +132,18 @@ impl Identity {
 /// directory are the sandbox's to write, so none of them says it is waiting.
 pub(super) fn holds_slot(cfg: &Config, pid: u32) -> io::Result<bool> {
     let mut held = std::collections::HashSet::new();
-    for pool in [".slots", ".codex-slots"] {
-        let entries = match fs::read_dir(cfg.jobs.join(pool)) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name != "unstick" && !name.bytes().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            if let Ok(meta) = fs::metadata(entry.path()) {
-                held.insert(lock_id(&meta));
-            }
+    let entries = match fs::read_dir(cfg.jobs.join(".slots")) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    for entry in entries.into_iter().flatten().filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != "unstick" && !name.bytes().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(entry.path()) {
+            held.insert(lock_id(&meta));
         }
     }
     holds(Path::new("/proc"), pid, &held)

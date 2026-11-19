@@ -295,48 +295,6 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
     Ok(Look { slots, busy, line })
 }
 
-/// Codex never consumes Claude's slots, its unstick slot or its usage hold.
-/// This small pool stays capped even for pipeline jobs, leaving the plan's
-/// reviewer service first claim. Locks survive exec just as Claude's do.
-fn codex_slot(
-    cfg: &Config,
-    id: &str,
-    n: &str,
-    given: Class,
-    may_hand_over: bool,
-) -> io::Result<File> {
-    let slots = cfg.jobs.join(".codex-slots");
-    fs::create_dir_all(&slots)?;
-    fs::create_dir_all(cfg.jobs.join(".slots"))?;
-    let job = Job::new(cfg, id);
-    fs::write(job.turn(n, "withdrawable"), "")?;
-    // A turn that waited in Claude's line and was handed to this proj brings
-    // its place with it, under this pid. It is Codex's now, and a place left in
-    // Claude's line would count as a live waiter there (waiter_alive) while it
-    // waits for, or runs in, Codex's pool.
-    let queue = cfg.jobs.join(".queue");
-    while let Some((left, _)) = place_left(&queue, id, process::id()) {
-        fs::remove_file(queue.join(left))?;
-    }
-    loop {
-        if may_hand_over && let Some(to) = successor(cfg) {
-            unmark(&job, n)?;
-            let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
-            lk.lock()?;
-            return Err(hand_over(cfg, &to, id, given));
-        }
-        for i in 1..=cfg.codex_slots {
-            let slot = File::create(slots.join(i.to_string()))?;
-            if slot.try_lock().is_ok() {
-                let slot = held(slot)?;
-                took_slot(&job, n, &format!("codex-{i}"))?;
-                return Ok(slot);
-            }
-        }
-        sleep(Duration::from_secs(2));
-    }
-}
-
 pub fn take_engine(
     cfg: &Config,
     id: &str,
@@ -347,7 +305,6 @@ pub fn take_engine(
 ) -> io::Result<File> {
     match engine {
         Engine::Claude => take(cfg, id, n, given, may_hand_over),
-        Engine::Codex => codex_slot(cfg, id, n, given, may_hand_over),
     }
 }
 
@@ -586,7 +543,6 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
                 && in_line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
-        Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
     }
 }
 

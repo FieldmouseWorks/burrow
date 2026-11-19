@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::PathBuf;
 
 use super::{Pass, dirs};
 use crate::job::Job;
@@ -12,9 +13,39 @@ impl Pass<'_> {
     /// Read the handed snapshot, never newer text that the job hasn't seen.
     pub(super) fn claimed(&self, repo: &str) -> BTreeSet<String> {
         let mut claimed = BTreeSet::new();
+        for (d, _, _) in self.live(repo) {
+            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
+            claimed.extend(references(repo, &input));
+        }
+        claimed
+    }
+
+    /// The live inbox job whose brief names issue N, if any: what
+    /// [`Pass::claimed`] counts it claimed by.
+    pub(super) fn claimer(&self, repo: &str, n: &str) -> Option<String> {
+        self.live(repo).into_iter().find_map(|(d, _, id)| {
+            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
+            references(repo, &input).contains(n).then_some(id)
+        })
+    }
+
+    /// The live inbox job whose own issue is N, if any. A brief that only
+    /// mentions N doesn't own it: a task list moves on unless its parent's
+    /// own job is still at it (mid-split, say).
+    pub(super) fn owner(&self, repo: &str, n: &str) -> Option<String> {
+        self.live(repo)
+            .into_iter()
+            .find(|(_, of, _)| of == n)
+            .map(|(_, _, id)| id)
+    }
+
+    /// Each queued, running or awaiting inbox job of this repo: its record,
+    /// its own issue's number and its job id.
+    fn live(&self, repo: &str) -> Vec<(PathBuf, String, String)> {
+        let mut live = vec![];
         for d in dirs(&self.inbox.state, "") {
             let issue = read(&d.join("issue")).unwrap_or_default();
-            let Some((of, _)) = issue.rsplit_once('#') else {
+            let Some((of, n)) = issue.rsplit_once('#') else {
                 continue;
             };
             if !of.eq_ignore_ascii_case(repo) {
@@ -36,10 +67,9 @@ impl Pass<'_> {
             {
                 continue;
             }
-            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
-            claimed.extend(references(repo, &input));
+            live.push((d, n.to_owned(), id));
         }
-        claimed
+        live
     }
 }
 

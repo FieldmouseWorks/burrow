@@ -28,11 +28,7 @@ pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str
 /// A stopped issue is excluded from automatic admission until an explicit
 /// engine enrollment is observed. `ready` alone cannot undo the owner's park.
 fn parking_path(inbox: &Inbox, repo: &str, n: &str) -> std::path::PathBuf {
-    inbox
-        .state
-        .join(".parked")
-        .join(key(repo).to_lowercase())
-        .join(n)
+    super::record::files::parked(&inbox.state, &key(repo), n)
 }
 pub(super) fn mark_parked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
     let _held = lock(inbox, repo, n)?;
@@ -267,12 +263,7 @@ impl Pass<'_> {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
         }
-        let root = self
-            .inbox
-            .state
-            .join(".retired")
-            .join(key(repo).to_lowercase())
-            .join(n);
+        let root = super::record::files::retired(&self.inbox.state, &key(repo), n);
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let retired = root.join(id);
         fs::rename(d, &retired).map_err(|e| io_fail(&retired, e))?;
@@ -298,12 +289,7 @@ impl Pass<'_> {
                     continue;
                 }
             }
-            let retiring = self
-                .inbox
-                .state
-                .join(".retired")
-                .join(key(repo).to_lowercase())
-                .join(&n);
+            let retiring = super::record::files::retired(&self.inbox.state, &key(repo), &n);
             if dirs(&retiring, "").iter().any(|d| {
                 read(&d.join("job")).is_some_and(|id| {
                     let job = Job::new(self.cfg, &id);
