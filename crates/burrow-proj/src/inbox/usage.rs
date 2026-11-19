@@ -34,9 +34,9 @@ mod tests {
         ] {
             let got = kind(
                 Some(&burrow_github::fake::author("steward[bot]")),
-                &json!({"user":burrow_github::fake::actor(login),"labels":[{"name":"codex"},{"name":"ready"}],"title":"private", "body":"private"}),
+                &json!({"user":burrow_github::fake::actor(login),"labels":[{"name":"claude"},{"name":"ready"}],"title":"private", "body":"private"}),
             );
-            assert_eq!(got, format!("inbox labels=codex,ready opener={expected}"));
+            assert_eq!(got, format!("inbox labels=claude,ready opener={expected}"));
         }
     }
 }

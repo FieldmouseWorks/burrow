@@ -7,7 +7,7 @@ import subprocess
 import urllib.parse
 
 import common as C
-import reviewers as V
+import mirror as M
 import train as T
 from common import CFG, CONTEXT, DRY, log
 
@@ -33,7 +33,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus body
+        createdAt updatedAt mergeStateStatus body lastEditedAt
         author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
@@ -44,6 +44,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
+        retargets: timelineItems(last: 1, itemTypes: [BASE_REF_CHANGED_EVENT]) { nodes { ... on BaseRefChangedEvent { createdAt } } }
         timelineItems(last: 50, itemTypes: [UNLABELED_EVENT, RENAMED_TITLE_EVENT]) { pageInfo { hasPreviousPage } nodes { ... on UnlabeledEvent { createdAt label { name } } ... on RenamedTitleEvent { createdAt previousTitle } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -293,9 +294,9 @@ def onto(repo, pr):
     if DRY:
         return None, False
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
-    mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
-    tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
-    if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
+    mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
+    tip = M.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
+    if M.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
         return tip, False
     merged = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
                             capture_output=True, text=True)
@@ -304,7 +305,7 @@ def onto(repo, pr):
         return tip, False
     if merged.returncode:
         raise RuntimeError(f"git merge-tree: {merged.stderr.strip()[-300:]}")
-    return tip, merged.stdout.split()[0] == V.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
+    return tip, merged.stdout.split()[0] == M.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
 
 
 def land(repo, pr, repo_info):

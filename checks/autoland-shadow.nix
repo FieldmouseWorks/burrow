@@ -48,7 +48,7 @@ let
   taken = (self.nixosConfigurations.example.extendModules {
     modules = [{
       burrow.autoland.shadow = [ "sam/plain" ];
-      burrow.ledger.controllerUser = "autoland-review";
+      burrow.ledger.controllerUser = "burrow-events";
     }];
   }).config;
   failed = map (a: a.message) (lib.filter (a: !a.assertion) taken.assertions);
@@ -74,7 +74,7 @@ let
     timeout = shadow.serviceConfig.TimeoutStartSec == "10min";
     user = shadow.serviceConfig.User == machine.burrow.user && !(shadow.environment ? CONARY_DATA);
     controlledHolds = lib.all (a: a.assertion) controlled.assertions;
-    taken = lib.any (lib.hasInfix "autoland-review is already someone else's") failed;
+    taken = lib.any (lib.hasInfix "burrow-events is already someone else's") failed;
     producerNeedsController = !uncontrolled.success && controlled.burrow.ledger.flow.controller == "conary-flow"
       && machine.burrow.ledger.flow.controller == null;
     controller = controlledShadow.serviceConfig.User == "conary-flow"
@@ -102,8 +102,8 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e '.evidence == null and (.settings.train | not)' ${withApp.plain} >/dev/null || fail "plain has evidence with no train negative"
   jq -e '.settings.settle_delay == 120 and .settings.reviewers == [] and .settings.proof_slots == 1
     and .settings.proofs == {gate: {Run: [.settings.proofs.gate.Run[0], "-c", "make check"]}, vm: {Build: "checks.x86_64-linux.vm"}}
-    and .settings.review_authors == ["sams-steward[bot]"] and .settings.people == ["sam"]
-    and .settings.judge_engines == ["codex"]
+    and .settings.review_authors == ["chatgpt-codex-connector[bot]"] and .settings.people == ["sam"]
+    and .settings.judge_engines == []
     and .settings.bot_emails == ["49699333+dependabot[bot]@users.noreply.github.com"]' \
     ${withApp.plain} >/dev/null || fail "plain's settings aren't the steward's: $(jq -c .settings ${withApp.plain})"
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]", "sam-workers[bot]"]' ${withApp.plain} >/dev/null \

@@ -13,7 +13,7 @@ import subprocess
 import time
 
 import common as C
-import reviewers as V
+import mirror as M
 from common import CFG, DRY, load, log, save
 import claims
 from tasks import RED_BRANCH, UNDO_BRANCH, red_default_task, red_fix
@@ -103,11 +103,10 @@ def reset(r, k, known, failed):
     aside, proj-inbox forgets its issues and its Claude jobs are stopped
     (they'd push its history to the new one, or answer the new one's
     issues), and all the steward kept about it goes: its PRs' state (so a new
-    PR doesn't take on an old one's of the same number), their reviews,
-    snapshots and the reviewers' sessions (so no look at a new PR resumes
-    an old one's), its dashboard's and quarantine's, and the reviewers'
-    clone of it. The name is out of known, and of failed, so the new one's
-    baseline job starts straight away.
+    PR doesn't take on an old one's of the same number), its dashboard's
+    and quarantine's, and the steward's clone of it. The name is out of
+    known, and of failed, so the new one's baseline job starts straight
+    away.
 
     Its settings (repo-K.json) are what says it was remade, so they go
     last: a pass that fails partway leaves them, and the next one does it
@@ -121,12 +120,7 @@ def reset(r, k, known, failed):
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     retire_checkouts(repo, k)
-    # The repo as its state spells it: an owner's name has no `_`.
-    left = V.sweep(k.replace("_", "/", 1), set())
-    if left:
-        raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
-                           "that couldn't be marked gone")
-    mirrors = os.path.join(C.STATE, V.GIT)
+    mirrors = os.path.join(C.STATE, M.GIT)
     for x in sorted(os.listdir(mirrors)) if os.path.isdir(mirrors) else []:
         if x.lower() == f"{repo.replace('/', '__')}.git".lower():
             shutil.rmtree(os.path.join(mirrors, x))
@@ -549,7 +543,7 @@ def hooks(repos):
 # pipeline's own trouble (a job that keeps failing, a review that won't run,
 # a merge GitHub won't take, a PR stuck a day, a branch it couldn't
 # archive), which a Claude job on this machine takes when proj's inbox is on.
-OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
+OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
           "No reviewer can review it", "Flaky tests someone else quarantined", "Jobs waiting for the owner")
 
 
@@ -616,7 +610,7 @@ def stuck_brief():
     who = CFG["notify"]["assignee"] or "the owner"
     stalls = " (and `burrow-watchdog status` for what stalled past its deadline)" if CFG["watch"] else ""
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
-one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
+one, find out why: `journalctl -u autoland` here, and the steward's state in \
 {CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
 this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
 repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \

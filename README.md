@@ -27,7 +27,8 @@ You talk to one Claude session, the operator, from the Claude app or
 claude.ai. It changes the machine through the machine's own flake checkout,
 and hands project work to Claude jobs inside each project (`proj`), or to a
 microVM when a task should be fenced off (`agents`). Work lands as pull
-requests: the steward (`autoland`) has Codex review each one, has Claude jobs
+requests: Codex reviews each one through its GitHub connector, the steward
+(`autoland`) has Claude jobs
 fix every finding and red check, and merges once the head's own change is
 reviewed clean and the head is green. A merge to the machine's flake goes live through
 `HOST-update`, behind the dead man's switch (`switch`) and a health check, and
@@ -57,9 +58,7 @@ Each has an entry below, and each can be imported on its own.
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch; `proj` makes the same guard Codex's managed hook for its Codex jobs
-  (`/etc/codex/requirements.toml`), on their commands and apply_patch, refusing
-  where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  branch. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.
@@ -164,7 +163,7 @@ Each has an entry below, and each can be imported on its own.
   ceiling of its own: the jobs are what the machine gives up first when it
   runs short (the kernel kills them first, and systemd-oomd watches their
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
-  default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
+  default). With `inbox.enable`, an issue labelled `claude` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it; `proj done` closes its issue.
   Automated admission and runtime pauses use [the settings source](docs/settings.md).
@@ -201,11 +200,11 @@ Each has an entry below, and each can be imported on its own.
   `proj usage hold UNTIL [--reason TEXT]` starts a fresh owner pause until a
   future Unix timestamp, even after a previous release. Successful turns and
   fresh meters cannot release an owner pause; `proj usage back` can.
-  A plain budget hold lets running turns continue and keeps Codex eligible.
-  Add `--only pipeline` to vacate and park every excluded repository across
-  both engines, reviews and proofs; [runtime settings](docs/settings.md) own
+  A plain budget hold lets running turns continue.
+  Add `--only pipeline` to vacate and park every excluded repository's jobs
+  and proofs; [runtime settings](docs/settings.md) own
   the allow list and independent off switch.
-  `burrow.proj.inbox.planning` defaults on: a fresh Codex
+  `burrow.proj.inbox.planning` defaults on: a fresh
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist
   updated when each child's PR lands. Durable creation receipts admit
@@ -214,10 +213,9 @@ Each has an entry below, and each can be imported on its own.
   [task planning](docs/task-planning.md) for the state and retry protocol.
   After a reset, `burrow.proj.usageTrickle` caps concurrent Claude
   turns while the pre-reset queue drains, including pipeline turns. The emergency
-  `--unstick` slot and Codex remain independent; ordinary concurrency returns
+  `--unstick` slot stays independent; ordinary concurrency returns
   once no pre-reset turn remains queued.
-  Each role's engine (`claude` or `codex`, with an overflow to the other
-  when its own is short), model and effort are live settings
+  Each role's model and effort are live settings
   ([settings](docs/settings.md#engines-models-and-efforts-per-role)).
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
@@ -236,21 +234,15 @@ Each has an entry below, and each can be imported on its own.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.
-  Both engines consume the
+  Jobs consume the
   [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
   project and scratch, job state (`proj await`, `ask`, `done`), host facts (`proj probe`),
   git metadata,
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and
-  the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
-  capability probes inside a job on each engine and removes a Codex grant to
-  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`)
-  and command sandbox; log it in with `autoland-codex-login job`, separately
-  from `autoland-codex-login review`. A turn on a different engine receives
-  the preceding turns' questions and answers.
-  The deliberate authorship exception: a Codex-written head is judged by
-  Claude, so its author never grades its own head.
+  the network and login/App environment. A turn whose conversation is lost
+  receives the preceding turns' questions and answers.
   Local jobs inspect and recover other host jobs with the ordinary
   `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
   commands through a per-turn host socket. The broker keeps host paths,
@@ -305,13 +297,14 @@ Each has an entry below, and each can be imported on its own.
   pass, never folded into it (the steward's full pass yields after a slice),
   and a handler can yield to another (`yieldTo`, the steward's
   continuations), starting nothing while that one is busy, which in turn waits
-  out a pass of the yielder's that runs. A turn ending, a review
-  coming back and the passes' own wake-ups (a settle delay, a reviewer's
-  timeout) kick them locally, and so does a switch that changes a handler's
+  out a pass of the yielder's that runs. A turn ending and the
+  passes' own wake-ups (a settle delay, a review that hasn't come) kick them
+  locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never
   resends and repos too new to have a hook.
 - **`autoland`** (`burrow.autoland`): The PR steward for every repo you own:
-  Codex reviews each ready PR, Claude jobs settle every finding, red check and
+  Codex reviews each ready PR through its GitHub connector (on the owner's
+  ChatGPT account, set up once per repo), Claude jobs settle every finding, red check and
   conflict with its base (what a job says it did goes up only once its push is
   the PR's head, and one whose PR someone else pushes to stands down), and
   once Codex finds nothing in the head's own change and CI is green on the
@@ -342,13 +335,6 @@ Each has an entry below, and each can be imported on its own.
   exact commit, each run as a user systemd makes for it, and its verdict
   signed with the producer's own key (`plugins.proof.keyFile`) and posted
   as a check run; it needs `burrow.ledger.controllerUser` too.
-  `plugins.review.enable` (off) runs Conary's review plugin and its
-  producer (crates/burrow-review-producer): each request a fresh Codex look
-  through the reviewers' service, on a snapshot of its own briefed with the
-  role's earlier findings, and a sign pass, on each submitted review, that
-  signs the flow's publication with the producer's own key
-  (`plugins.review.keyFile`) only once it holds all the look recorded; it
-  needs `burrow.ledger.controllerUser` and Codex as a reviewer.
   `plugins.judge.enable` (off) runs Conary's judge plugin and its producer
   (crates/burrow-judge): each request held to the PR's head, base,
   description and discussion on GitHub, judged as a fresh proj job on the
@@ -530,10 +516,8 @@ Each has an entry below, and each can be imported on its own.
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
   It books its own next look, sooner the faster the week is going, and never
-  more than 15 minutes on: no timer. Each pass also keeps the engines' meters
-  for proj's role overflow: Claude's five-hour session and week, and, with
-  proj's Codex, Codex's windows and whether it has credits (read through its
-  app-server's `account/rateLimits/read`). Each fresh reading replaces
+  more than 15 minutes on: no timer. Each pass also keeps Claude's meters,
+  its five-hour session and week, for proj's usage holds. Each fresh reading replaces
   `meters/ENGINE.json` and appends to `meters/log` in its state dir.
 
 - **`ops`** (`burrow.ops`): perf, bpftrace, bcc, strace, gdb, tcpdump,

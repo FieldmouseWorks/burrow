@@ -1,8 +1,8 @@
 """What the steward's checks share (check.py runs them): its config and
 state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
 Conary's `cn` (each records how it was run, then does what it's told) and
-burrow-events' kick port; the reviewers' service, with its own stand-ins
-for the agent and its sandbox; and PRs shaped like its query's."""
+burrow-events' kick port; and PRs shaped like its query's, Codex's
+connector's posts among them."""
 
 import http.server
 import json
@@ -18,12 +18,12 @@ import time
 import urllib.parse
 
 tmp = tempfile.mkdtemp()
-SETTINGS = os.path.abspath(sys.argv[9])
-# burrow-brief (argv[10]), which the steward's tasks read their policy text
-# from, and where briefs.py's goldens are (argv[11],
+SETTINGS = os.path.abspath(sys.argv[7])
+# burrow-brief (argv[8]), which the steward's tasks read their policy text
+# from, and where briefs.py's goldens are (argv[9],
 # crates/burrow-brief/tests/golden).
-BRIEF = os.path.abspath(sys.argv[10])
-BRIEF_GOLDEN = os.path.abspath(sys.argv[11])
+BRIEF = os.path.abspath(sys.argv[8])
+BRIEF_GOLDEN = os.path.abspath(sys.argv[9])
 
 
 def admission(allowed, pipeline=(), until=None):
@@ -75,24 +75,19 @@ os.makedirs(f"{tmp}/home")
 with open(f"{tmp}/cred/webhook", "w") as f:
     f.write("hook-secret\n")
 
-# The reviewers' service, burrow-review (argv[3]), with its own tests'
-# stand-ins for codex and bubblewrap (argv[4], crates/burrow-review/tests/fakes):
-# codex records how it was run and does what $HOME/.fake/codex.json says.
-REVIEW, FAKES = sys.argv[3], sys.argv[4]
-# burrow-upkeep (argv[5]), which a pass runs on each repo, and its source
-# (argv[6], crates/burrow-upkeep/src).
-UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
-# burrow-proof (argv[7]), which starts a proof run's unit (runs.py).
-PROOF_RUN = os.path.abspath(sys.argv[7])
+# burrow-upkeep (argv[3]), which a pass runs on each repo, and its source
+# (argv[4], crates/burrow-upkeep/src).
+UPKEEP, UPKEEP_SRC = sys.argv[3], sys.argv[4]
+# burrow-proof (argv[5]), which starts a proof run's unit (runs.py).
+PROOF_RUN = os.path.abspath(sys.argv[5])
 # The Rust question rows consumed by the owner digest.
-PROJ_ASK_SRC = sys.argv[8]
+PROJ_ASK_SRC = sys.argv[6]
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
 # every fix job as it was and says nothing of any (unpushed.py runs the real
-# one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
-# which ask GitHub nothing, its `carry`, which reads the stand-in for
-# GitHub's git remote, and its `commits`, which reads GitHub's compare as
+# one). Its `token` is the real one's, and so is its `verdict`, which asks
+# GitHub nothing, and its `commits`, which reads GitHub's compare as
 # serve_compare has it, on the config upkeep_config writes (UPKEEP_REAL).
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
@@ -144,33 +139,11 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|carry|commits|ci) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|verdict|commits|ci) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
 os.chmod(f"{tmp}/upkeep-none", 0o755)
-os.makedirs(f"{tmp}/agents")
-os.makedirs(f"{tmp}/home/.fake")
-for fake, at in (("codex", f"{tmp}/agents/codex"), ("bwrap", f"{tmp}/bwrap")):
-    with open(f"{FAKES}/{fake}.bash") as src, open(at, "w") as f:
-        f.write(f"#!{shutil.which('bash')}\n" + src.read())
-    os.chmod(at, 0o755)
-with open(f"{tmp}/store-paths", "w") as f:
-    f.write("/nix/store/aaaa-review-agents\n")
-
-
-def review_service():
-    """`autoland-review`: burrow-review works through the queue, as the
-    module runs it, on the steward's state here."""
-    with open(f"{tmp}/review.json", "w") as f:
-        json.dump({"settings": json.load(open(C.CFG["settings"]["config"])), "queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
-                   "sessions": f"{tmp}/state/review/sessions", "snapshots": f"{tmp}/trees",
-                   "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
-                   "agents": f"{tmp}/agents", "path": os.environ["PATH"], "sandbox": f"{tmp}/bwrap",
-                   "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt", "links": {}},
-                   "leadRepos": C.CFG["leadRepos"], "pipelineRepos": C.CFG["pipelineRepos"], "kick": C.CFG["kick"]}, f)
-    subprocess.run([REVIEW, "work"], check=True, env={"REVIEW_CONFIG": f"{tmp}/review.json", "HOME": f"{tmp}/home",
-                                                      "PATH": os.environ["PATH"]})
 
 
 # Conary's cn: it records how it was run, then answers what CN says for its
@@ -260,22 +233,10 @@ def touching(number, sha, files, labels=()):
         json.dump(touched, f)
 
 
-def agent(**do):
-    """What the stand-in codex does from now on, and a log that starts over."""
-    with open(f"{tmp}/home/.fake/codex.json", "w") as f:
-        json.dump(do, f)
-    open(f"{tmp}/home/.fake/codex.log", "w").close()
-
-
-def agent_runs():
-    return [json.loads(x) for x in open(f"{tmp}/home/.fake/codex.log")]
-
-
-agent()
 cn()
 # Each stage's label (labels.nix's labels.waiting), as the module gives them.
 WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for k, x in (
-    ("review", "review"), ("reviewer", "reviewer"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
+    ("review", "review"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
     ("proof", "machine checks"), ("releaseAge", "release age"), ("train", "train"), ("merge", "merge"),
     ("owner", "Sam"), ("base", "base branch"))}
 # The example machine's generated CONARY_POLICY, including hidden paths.
@@ -288,14 +249,14 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
-        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "dependabotEmail": "dependabot@bots.example", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": WAITING}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "postingAccountId": 2, "authors": [{"login":"sam","id":1}]},
+        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "dependabotEmail": "dependabot@bots.example", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": WAITING}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude"}, "unstickLabel": "unstick", "postingAccountId": 2, "authors": [{"login":"sam","id":1}]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"], "brief": [BRIEF],
         "defaults": {"rounds": 5,
                      "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True,
+                     "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True,
                      "train": False, "trainSize": 8, "trainRequire": [], "trainNegative": None, "trainStallAfter": 240},
         "trainContext": "conary/train",
         "conary": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab",
@@ -305,7 +266,6 @@ with open(f"{tmp}/config.json", "w") as f:
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
                   "renovateSweep": True},
         "renovateRun": 7200,
-        "reviewers": {"codex": {"enable": True}, "rival": {"enable": True}},
         "nix": f"{tmp}/nix",
         "proofRun": PROOF_RUN, "bash": shutil.which("bash"), "git": shutil.which("git"), "runsDir": f"{tmp}/runs",
     }, f)
@@ -319,6 +279,7 @@ sys.argv = ["steward"]
 import common as C  # noqa: E402,F401
 import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
+import mirror as M  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401
 import step as H  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
@@ -329,21 +290,11 @@ REAL_UPKEEP = C.upkeep
 from selection import shape  # noqa: E402 (needs prs, set up above)
 # The App's installation tokens, one an owner (passes.py checks the real one).
 C.token = lambda owner: f"ghs_app_{owner}"
-# A second reviewer beside Codex, standing in for any a machine adds: the
-# steward settles a PR on every reviewer it has, so its checks need two to
-# tell one's word from the other's. review.py runs the one real agent.
-V.NAMES["rival"] = "Rival"
-
-for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
-    os.makedirs(os.path.join(f"{tmp}/state", d))
+os.makedirs(os.path.join(f"{tmp}/state", M.GIT))
 
 
 def sh(*a, cwd=None):
     return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout
-
-
-# The paths no reviewer reads, in burrow-upkeep's config (snapshot.rs).
-SKIP = ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"]
 
 
 def upkeep_config(path=f"{tmp}/upkeep.json", **over):
@@ -362,29 +313,16 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
                               "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
                               "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
                    "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"},
-                   "git": f"{tmp}/origin", "snapshot": {"dir": V.TREES, "skipPaths": SKIP, "repos": {}}, **over}, f)
+                   "git": f"{tmp}/origin", **over}, f)
     return [UPKEEP_RUN, path]
 
 
 upkeep_config(UPKEEP_REAL)
 
-# A reviewer's session for a PR on its base, as burrow-review names it
-# (queue.rs `session_name`), and the mark the sweep gives a closed PR's
-# (queue.rs `GONE`).
-GONE = ".gone-"
-
-
-def session_name(r, snap):
-    pr, _, base = snap.rsplit("-", 2)
-    return f"{r}--{pr}-{base}"
-
-
 head = "a" * 40
-WROTE, JOBS, POSTED, FORGOT = [], [], [], []
+WROTE, JOBS, FORGOT = [], [], []
 SINCE = []  # each job's place in line (C.job's since), in the order they started
 ROLES = []  # and the kind of work each is (C.job's role), which picks its model
-DESCRIBED = []  # the description each posted review was shown (its fingerprint)
-CARRY = {}  # what V.carry says of a head: nothing carries unless set
 COMMITS = {}  # a PR's commits' author emails, by number, as GitHub's compare gives them (None: the ask fails)
 COMMITTERS = {}  # and their committers' (None: the ask fails too)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -554,30 +492,6 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, *, rol
     return f"job-{len(JOBS)}"
 
 
-# The snapshot and the posting have their own checks (review.py, post.py):
-# for handle() a queued review is a file, and a posted one is a line in POSTED.
-STUB = {"queue": None, "post": None}  # an error each raises, when set
-
-
-def queue(repo, pr, key, r):
-    if STUB["queue"]:
-        raise STUB["queue"]
-    C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
-           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"],
-            "description": C.fingerprint(pr["body"])})
-
-
-def post(repo, pr, r, answer, description):
-    if STUB["post"]:
-        raise STUB["post"]
-    if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
-        raise ValueError("not a review")
-    POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
-    DESCRIBED.append(description)
-    # Its review covers the PR's description if it was shown it (post.rs).
-    return "findings" if answer["findings"] else "clean", description == C.fingerprint(pr["body"])
-
-
 STATES = {}  # a job's state, by id, as `proj lifecycle` says it: running unless set
 HELD = {}  # what a job holds open, by id, as `proj lifecycle` says it: nothing unless set
 STOPPED = []  # the jobs `proj stop` ended, in order
@@ -609,14 +523,25 @@ info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAll
 STEWARD = {"login": "steward", "__typename": "Bot"}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", body=""):
-    """A review the steward posted for reviewer r, with k findings, shown
-    the description `body`; with who, one a user of that login posted with
-    the same marker."""
-    author = STEWARD if who is None else {"login": who, "__typename": "User"}
-    return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
-            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k,
-                                                          "description": C.fingerprint(body)}) + " -->"}
+# Codex's GitHub connector, as GraphQL gives its posts' author.
+CODEX = {"login": "chatgpt-codex-connector", "__typename": "Bot"}
+
+
+def summary(sha=head, findings=False, status="completed", at="2026-10-24T00:11:00Z", who=CODEX, n=900):
+    """The connector's summary comment on the PR: the commit it last
+    reviewed, and whether it found anything there; with `who`, one someone
+    else posted with the same markers."""
+    state = {"code_review": {"commit_sha": sha, "status": status, "has_any_findings": findings,
+                             "has_unresolved_findings": findings}}
+    return {"author": who, "createdAt": at, "updatedAt": at, "databaseId": n,
+            "body": "<!-- codex-pull-request-review-summary -->\n"
+                    f"<!-- codex-review-state:v1 {json.dumps(state)} -->\n\nCodex Review: Didn't find any major issues."}
+
+
+def found(sha=head, at="2026-10-24T00:11:00Z", who=CODEX):
+    """A review of the connector's with findings on `sha`: a round."""
+    return {"author": who, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
+            "body": f"<!-- codex-review-receipt:v1 -->\n\n**Reviewed commit:** `{sha[:10]}`\n\nP1: something's off."}
 
 
 def judgment(v, n=6, sha=head, base="main", body="", on=None):
@@ -642,11 +567,12 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
          branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=(), cut=False,
-         author=None):
+         author=None, retargeted=None, edited=None):
     touching(number, sha, files, labels)
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
+        "lastEditedAt": edited, "retargets": {"nodes": [{"createdAt": retargeted}] if retargeted else []},
         "mergeStateStatus": "CLEAN", "author": author or {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
@@ -660,13 +586,8 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
 
 
 def clean(sha=head, comments=(), reviews=(), **kw):
-    """A PR both reviewers found nothing on, at `sha` on its base, shown its description."""
-    base, body = kw.get("base", "main"), kw.get("body", "")
-    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base, body=body), rv_review("rival", 0, sha, base=base, body=body)],
-                comments=comments, sha=sha, **kw)
-
-
-QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
+    """A PR Codex found nothing on at `sha`."""
+    return mkpr(reviews=reviews, comments=[*comments, summary(sha)], sha=sha, **kw)
 
 
 def run(pr, after, held=None, below=None):
@@ -680,7 +601,6 @@ def run(pr, after, held=None, below=None):
     ROLES.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
-    POSTED.clear()
     digest = []
     serve_compare(COMPARE[pr["number"]] if pr["number"] in COMPARE else fixture_pages(pr["number"], pr["headRefOid"]))
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
@@ -699,37 +619,17 @@ def merged():
     return bool(merges())
 
 
-def queued():
-    """The reviewers queued, one entry a review."""
-    return sorted(x.partition("--")[0] for x in os.listdir(QDIR))
-
-
-def worker(**back):
-    """autoland-review, through the queue: each reviewer answers what
-    `back` says it does, a clean review unless told otherwise."""
-    for x in os.listdir(QDIR):
-        r = x.partition("--")[0]
-        item = json.load(open(f"{QDIR}/{x}"))
-        said = back.get(r, {"result": "review", "answer": {"findings": []}})
-        # A review carries the description it was shown, as the service's do.
-        shown = {"description": item["description"]} if said["result"] == "review" else {}
-        C.save(f"{V.DONE}/{x}", {**shown, **said, "at": C.NOW, "head": item.get("headRefOid"), "base": item.get("baseRefName")})
-        os.remove(f"{QDIR}/{x}")
-
-
 def pr_state(n=5):
     return json.load(open(f"{tmp}/state/pr-sam_r-{n}.json"))
 
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    shutil.rmtree(V.TREES)
-    for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
-        os.makedirs(os.path.join(f"{tmp}/state", d))
+    os.makedirs(os.path.join(f"{tmp}/state", M.GIT))
 
 
 REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
-        "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
+        "onto": H.onto}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
@@ -743,10 +643,8 @@ def onto(repo, pr):
 
 
 def stand_in():
-    """gh, Claude jobs, the queue, the posting, what a merge would change
-    (every merge changes something unless ALREADY says) and which earlier
-    heads' looks carry (none unless CARRY says), for handle() and the
-    passes."""
+    """gh, Claude jobs and what a merge would change (every merge changes
+    something unless ALREADY says), for handle() and the passes."""
     H.onto = onto
     C.gh = gh_stub
     C.write = write
@@ -754,6 +652,3 @@ def stand_in():
     C.lifecycle = lambda jid: (STATES.get(jid, "running"), HELD.get(jid, []))
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
-    V.queue = queue
-    V.post = post
-    V.carry = lambda repo, pr, st, names: CARRY.get(pr["headRefOid"])

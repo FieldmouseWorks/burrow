@@ -3,8 +3,10 @@
 //! legs and all, in `train`, from main's copy of the shared workflow, the only
 //! copy whose result Conary counts (its docs/ci-attestation.md, "Checking
 //! one", rule 2); `check` stays off it, so a candidate takes one gate, not
-//! two. A PR to main gets `train`'s negative run too, beside its own whole
-//! gate in `check`, which stays until the train lands burrow's PRs. The
+//! two. A PR to main gets its negative run from `train` alone, and its whole
+//! gate from `check`, which stays until the train lands burrow's PRs; a PR to
+//! any other base gets both from `check`. One negative run a head, never two:
+//! each takes about 25 minutes on a hosted runner (burrow#1209). The
 //! train asks for the check runs these name: `train / check` and
 //! `train / negative`.
 
@@ -58,9 +60,19 @@ fn runs(job: &Value, ctx: &Ctx) -> bool {
     }
 }
 
-/// Execute the caller's router with the workflow's own environment bindings,
-/// then evaluate the dependent call's condition using its actual output.
+/// Which of the caller's two calls a run takes.
 fn routes(wf: &Value, run: &Run, from: Option<&str>) -> (bool, bool) {
+    let ctx = routed(wf, run, from);
+    (
+        runs(&wf["jobs"]["check"], &ctx),
+        runs(&wf["jobs"]["train"], &ctx),
+    )
+}
+
+/// Execute the caller's router with the workflow's own environment bindings,
+/// and give the run's context with its actual output, which the calls'
+/// conditions and inputs read.
+fn routed(wf: &Value, run: &Run, from: Option<&str>) -> Ctx {
     let mut ctx = run.ctx();
     ctx.insert(
         "github.event.changes.base".into(),
@@ -76,6 +88,7 @@ fn routes(wf: &Value, run: &Run, from: Option<&str>) -> (bool, bool) {
         "${{ steps.route.outputs.train }}"
     );
     assert_eq!(wf["jobs"]["train"]["needs"], "train-route");
+    assert_eq!(wf["jobs"]["check"]["needs"], "train-route");
     let output = if runs(router, &ctx) {
         let s = Scratch::default();
         let route = step(router, "route");
@@ -100,10 +113,22 @@ fn routes(wf: &Value, run: &Run, from: Option<&str>) -> (bool, bool) {
         "needs.train-route.outputs.train".into(),
         output.as_str().into(),
     );
-    (
-        runs(&wf["jobs"]["check"], &ctx),
-        runs(&wf["jobs"]["train"], &ctx),
-    )
+    ctx
+}
+
+/// The `negative` input a call gives the shared workflow on a run: what its
+/// `with` says, worked out, or the input's default.
+fn negative_input(shared: &Value, call: &Value, ctx: &Ctx) -> V {
+    match call["with"].get("negative") {
+        Some(Value::Bool(b)) => V::Bool(*b),
+        Some(Value::String(e)) => value(e, ctx),
+        Some(other) => panic!("a negative that's neither text nor a boolean: {other:?}"),
+        None => {
+            let input = &shared["on"]["workflow_call"]["inputs"]["negative"];
+            assert_eq!(input["type"], "boolean");
+            V::Bool(input["default"].as_bool().expect("a default"))
+        }
+    }
 }
 
 /// Which of the caller's two calls each run takes.
@@ -234,47 +259,57 @@ fn retargets_and_case_variants_keep_only_their_intended_work() {
 
         // With the train selected, the shared workflow must give an exact
         // default PR only negative/commit work. The check call keeps its
-        // existing gate, including on case variants and other bases.
+        // existing gate, including on case variants and other bases. One
+        // call runs the negative on a head, never both (burrow#1209): the
+        // train's on a PR to main, the one it counts, and check's otherwise.
         let shared = workflow(".github/workflows/flake-check.yml");
         let s = Scratch::default();
-        for name in ["check", "train"] {
-            if name == "train" && !expected.1 {
-                continue;
+        for (wf, from) in [(&caller, None), (&retarget, Some("release"))] {
+            let ctx = routed(wf, &run, from);
+            let mut negatives = vec![];
+            for name in ["check", "train"] {
+                if name == "train" && !expected.1 {
+                    continue;
+                }
+                let call = &wf["jobs"][name];
+                let negative = negative_input(&shared, call, &ctx);
+                let pr_gate = call["with"]["pr-gate"].as_bool().unwrap_or(true);
+                let ran = s.bash(
+                    script(step(&shared["jobs"]["lane"], "base")),
+                    s.path(),
+                    &[
+                        ("BASE", base),
+                        ("DEFAULT", "main"),
+                        ("PR_GATE", if pr_gate { "true" } else { "false" }),
+                    ],
+                );
+                assert_eq!(ran.code, 0, "{}", ran.said());
+                let lands = ran.outputs.trim() == "lands=true";
+                assert_eq!(lands, name == "train", "{name}, {base}");
+                let mut ctx = run.ctx();
+                ctx.extend([
+                    ("cancelled()".into(), false.into()),
+                    ("needs.lane.result".into(), "success".into()),
+                    (
+                        "needs.lane.outputs.gate".into(),
+                        if lands { "train" } else { "full" }.into(),
+                    ),
+                    // A PR never asks gate-reuse (reuse.rs).
+                    ("needs.reuse.outputs.hit".into(), V::Null),
+                    ("inputs.negative".into(), negative),
+                ]);
+                assert_eq!(
+                    runs(&shared["jobs"]["check"], &ctx),
+                    !lands,
+                    "{name}, {base}"
+                );
+                assert!(runs(&shared["jobs"]["commits"], &ctx), "{name}, {base}");
+                if runs(&shared["jobs"]["negative"], &ctx) {
+                    negatives.push(name);
+                }
             }
-            let pr_gate = caller["jobs"][name]["with"]["pr-gate"]
-                .as_bool()
-                .unwrap_or(true);
-            let ran = s.bash(
-                script(step(&shared["jobs"]["lane"], "base")),
-                s.path(),
-                &[
-                    ("BASE", base),
-                    ("DEFAULT", "main"),
-                    ("PR_GATE", if pr_gate { "true" } else { "false" }),
-                ],
-            );
-            assert_eq!(ran.code, 0, "{}", ran.said());
-            let lands = ran.outputs.trim() == "lands=true";
-            assert_eq!(lands, name == "train", "{name}, {base}");
-            let mut ctx = run.ctx();
-            ctx.extend([
-                ("cancelled()".into(), false.into()),
-                ("needs.lane.result".into(), "success".into()),
-                (
-                    "needs.lane.outputs.gate".into(),
-                    if lands { "train" } else { "full" }.into(),
-                ),
-                // A PR never asks gate-reuse (reuse.rs).
-                ("needs.reuse.outputs.hit".into(), V::Null),
-            ]);
-            assert_eq!(
-                runs(&shared["jobs"]["check"], &ctx),
-                !lands,
-                "{name}, {base}"
-            );
-            for work in ["negative", "commits"] {
-                assert!(runs(&shared["jobs"][work], &ctx), "{name}, {base}, {work}");
-            }
+            let want = if expected.1 { "train" } else { "check" };
+            assert_eq!(negatives, [want], "{base}, from {from:?}");
         }
     }
 }
@@ -291,10 +326,18 @@ fn the_train_gate_is_the_whole_gate_from_mains_copy() {
     assert_eq!(check["uses"], "./.github/workflows/flake-check.yml");
     assert_eq!(train["permissions"], check["permissions"]);
     assert_eq!(train["permissions"]["id-token"], "write");
+    // check's negative is off where train's runs, and train's is the
+    // input's default (main's copy may predate the input).
+    assert_eq!(check["needs"], "train-route");
+    assert_eq!(
+        check["with"]["negative"],
+        "${{ needs.train-route.outputs.train != 'true' }}"
+    );
+    assert!(train["with"].get("negative").is_none());
     let mut with = check["with"].clone();
-    with.as_mapping_mut()
-        .unwrap()
-        .insert("pr-gate".into(), false.into());
+    let w = with.as_mapping_mut().unwrap();
+    w.remove("negative");
+    w.insert("pr-gate".into(), false.into());
     assert_eq!(train["with"], with);
     // The four legs, and the agents check skipped only where it always was.
     assert_eq!(train["with"]["legs"], 4);
@@ -349,6 +392,10 @@ fn the_train_asks_for_names_the_shared_workflow_gives() {
     assert!(negative.get("name").is_none(), "{:?}", negative["name"]);
     assert_eq!(NEGATIVE.strip_prefix("train / "), Some("negative"));
     ctx.insert("github.event_name".into(), V::from("pull_request"));
+    ctx.insert(
+        "inputs.negative".into(),
+        negative_input(&shared, train, &ctx),
+    );
     assert!(
         condition(text_if(negative), &ctx),
         "a PR has no negative run"

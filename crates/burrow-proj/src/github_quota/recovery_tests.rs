@@ -334,7 +334,7 @@ fn host_registration_and_replay_attribute_the_configured_client() {
         if let Some(app) = selected {
             swap(job.path("app"), app).unwrap();
         }
-        swap(job.turn("1", "engine"), Engine::Codex.name()).unwrap();
+        swap(job.turn("1", "engine"), Engine::Claude.name()).unwrap();
         swap(job.path("link"), "sam/r#7").unwrap();
         fs::write(d.path().join("limited"), "").unwrap();
         crate::cmd::record_wait(
@@ -363,7 +363,7 @@ fn host_registration_and_replay_attribute_the_configured_client() {
         let renewed = meters(&cfg);
         assert_eq!(renewed[0].app, "host-app");
         assert_eq!(renewed[0].retry_at, Some(due as u64));
-        assert!(held(&cfg, &job, Engine::Codex).is_none());
+        assert!(held(&cfg, &job).is_none());
     }
 }
 
@@ -545,9 +545,9 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     let since = now() - 10;
     for (id, engine, app, emergency) in [
         ("claude", Engine::Claude, "workers", false),
-        ("codex", Engine::Codex, "workers", false),
+        ("another", Engine::Claude, "workers", false),
         ("emergency", Engine::Claude, "workers", true),
-        ("other", Engine::Codex, "other", false),
+        ("other", Engine::Claude, "other", false),
     ] {
         let job = Job::new(&cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
@@ -592,7 +592,7 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
         crate::watch::look(&cfg, "").unwrap(); // the quota-observation event
         let snapshot: serde_json::Value =
             serde_json::from_str(&read(cfg.waits.as_ref().unwrap()).unwrap()).unwrap();
-        for id in ["claude", "codex", "emergency"] {
+        for id in ["claude", "another", "emergency"] {
             let fact = Job::new(&cfg, id).facts().unwrap();
             assert_eq!(fact.quota_reset, Some((since, deadline)));
             assert_eq!(
@@ -677,7 +677,7 @@ fn job_files_cannot_impose_installation_holds_or_meter_readings() {
         .unwrap();
     }
     assert!(meters(&cfg).is_empty());
-    assert!(held(&cfg, &job, Engine::Codex).is_none());
+    assert!(held(&cfg, &job).is_none());
     let json = serde_json::to_value(crate::snapshot::Snapshot::take(&cfg, 15).unwrap()).unwrap();
     assert!(
         json["meters"]
@@ -688,7 +688,7 @@ fn job_files_cannot_impose_installation_holds_or_meter_readings() {
     );
     // Replacing a former observation and changing labels are no authority.
     swap(job.path("app"), "other").unwrap();
-    assert!(held(&cfg, &job, Engine::Codex).is_none());
+    assert!(held(&cfg, &job).is_none());
     let _ = d;
 }
 

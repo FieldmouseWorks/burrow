@@ -76,8 +76,9 @@ fn a_missing_policy_never_opts_a_repository_in() {
 }
 
 #[test]
-fn paused_turns_follow_a_deployed_policy_on_both_engines() {
-    for mode in ["paused-hand-over", "paused-codex-hand-over"] {
+fn paused_turns_follow_a_deployed_policy() {
+    {
+        let mode = "paused-hand-over";
         let tmp = TempDir::new().unwrap();
         clones(&tmp);
         let jobs = jobs_dir(&tmp);
@@ -309,7 +310,7 @@ fn legacy_inbox_identity_comes_from_its_host_owned_source() {
 
 #[test]
 fn restoration_reserves_order_until_the_earlier_worker_registers() {
-    for codex in [false, true] {
+    {
         let tmp = TempDir::new().unwrap();
         clones(&tmp);
         let jobs = jobs_dir(&tmp);
@@ -331,14 +332,11 @@ fn restoration_reserves_order_until_the_earlier_worker_registers() {
             .unwrap();
             fs::write(crate::policy::path(&job, "order"), order).unwrap();
             fs::write(crate::policy::path(&job, "restoring"), "reserved").unwrap();
-            if codex {
-                fs::write(job.path("engine"), "codex").unwrap();
-            }
         }
         let later = Job::new(&cfg, "later");
         assert!(crate::policy::earlier_pending(&later));
         let _child = spawn_child(
-            if codex { "codex" } else { "take" },
+            "take",
             &jobs,
             1,
             &["_exec".into(), "later".into(), "1".into(), "normal".into()],
@@ -707,8 +705,6 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
         ("ownedlock", true),
         ("retry", true),
         ("await-failed", true),
-        ("codex-refused", true),
-        ("owned-codex-refused", true),
         ("quota-refused", true),
         ("owned-quota-refused", true),
         ("quota-no-await", true),
@@ -734,14 +730,6 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
                         fs::write(job.turn("1", "wait"), "1000\theavy slot").unwrap();
                     }
                 }
-            }
-            "codex-refused" | "owned-codex-refused" => {
-                fs::write(
-                    job.turn("1", "outcome"),
-                    "usage limit; waiting for Codex's reset",
-                )
-                .unwrap();
-                fs::write(job.path("await"), "usage-limit\t1000\t2000\n").unwrap();
             }
             "quota-refused" | "owned-quota-refused" | "quota-no-await" | "quota-pending" => {
                 fs::write(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();

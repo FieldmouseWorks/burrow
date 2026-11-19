@@ -19,7 +19,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::pass::Pass;
-use crate::post::quiet;
 
 /// The PR, what its job was handed, and what the job left.
 #[derive(Debug)]
@@ -396,6 +395,24 @@ pub fn pusher(p: &mut Pass, h: &Head) -> Result<Option<String>, Error> {
         })
         .and_then(|x| x["actor"]["login"].as_str())
         .map(String::from))
+}
+
+/// Model text goes out as the steward's App: no @-mentions from it, and no
+/// marks of the steward's.
+pub fn quiet(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '@'
+            && chars
+                .peek()
+                .is_some_and(|n| n.is_alphanumeric() || *n == '_' || *n == '-')
+        {
+            out.push('\u{200b}');
+        }
+    }
+    out.replace("<!--", "&lt;!--")
 }
 
 #[cfg(test)]
