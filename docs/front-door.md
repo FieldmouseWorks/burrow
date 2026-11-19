@@ -257,7 +257,16 @@ into project jobs.
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.
 - On the box: `proj-inbox status` maps issues to jobs, `proj log ID` shows an
-  answer.
+  answer, and `proj why OWNER/REPO#N` (the probe's `why OWNER/REPO#N` off the
+  box) prints the issue's record: its stage (unseen and why, sorting, planned,
+  ready, working, answered, closed), what it waits on and what ends that, and
+  then its job's record when it has one. An issue the inbox never took up
+  says why: not opened by an author, no engine label, a label that keeps it
+  back, closed, its repo paused, or GitHub refusing to list its repo. GitHub
+  is asked about an issue once when no job holds it, so one closed reads
+  closed whatever the inbox kept of it; a ready one says what the drain's
+  admission does (its cap, a repair past it, its engine's room, the drain
+  off), and a child what its plan holds it on.
 
 ### Triage and the drain: issues nobody labelled
 

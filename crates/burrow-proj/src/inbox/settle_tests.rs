@@ -110,7 +110,7 @@ fn slots(b: &Box) -> (Vec<String>, Vec<String>) {
     let p = b.pass();
     let mut counted: Vec<String> = super::dirs(&p.sorting_dir(), "")
         .into_iter()
-        .filter(|d| p.sorting_slot(d))
+        .filter(|d| p.holds_sorting_slot(d))
         .map(|d| {
             let name = d.file_name().unwrap().to_string_lossy().into_owned();
             let (repo, n) = name.rsplit_once('-').unwrap();

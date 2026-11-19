@@ -278,7 +278,7 @@ Each has an entry below, and each can be imported on its own.
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
-  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `why OWNER/REPO#N`, `deployed`,
   `oom [SINCE]`, one a line, above any `---` rule (a signature under it is
   left be). No shell, journals only of the units on its allowlist, every
   answer through a secret scrubber before it's posted, and only `authors` get

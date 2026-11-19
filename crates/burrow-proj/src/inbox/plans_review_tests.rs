@@ -690,7 +690,7 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
         );
         let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
         assert!(b.pass().sorted("sam/box", t, &parent, &Default::default()));
-        assert_eq!(b.pass().pick_ready(t, &[parent.clone()]), None);
+        assert_eq!(b.pass().pick_ready(&[parent.clone()]), None);
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&record).unwrap();
         fs::write(record.join("drained"), "sam/box#7").unwrap();
@@ -724,7 +724,7 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
         fs::remove_dir_all(record).unwrap();
         parent["labels"] = json!([{"name":"ready"}]);
         assert_eq!(
-            b.pass().pick_ready(t, &[parent]),
+            b.pass().pick_ready(&[parent]),
             Some(("sam/box".into(), "7".into()))
         );
     }

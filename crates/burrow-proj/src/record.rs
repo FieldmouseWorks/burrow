@@ -539,8 +539,13 @@ pub(crate) fn holds(job: &Job) -> Result<Vec<Wait>, String> {
         }
         None => false,
     };
-    let question = text(&crate::ask::host_path(job, "question"))?.is_some();
-    if text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
+    // A question an accepted answer has retired is answered, though the
+    // cleanup that removes its files ([`crate::question::recover`]) may not
+    // have run yet: every reader sees it answered, recovered or not.
+    let id = text(&crate::ask::host_path(job, "question-id"))?.unwrap_or_default();
+    let retired = crate::question::retiring(job, &id);
+    let question = !retired && text(&crate::ask::host_path(job, "question"))?.is_some();
+    if !retired && text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
         held.push(Wait::Owner);
     } else if asked || question {
         held.push(Wait::Ask);

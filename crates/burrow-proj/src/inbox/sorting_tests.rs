@@ -413,7 +413,7 @@ fn a_question_notice_is_never_handed_to_a_job() {
     fix["created_at"] = json!("2026-11-02T00:00:00Z");
     p.note_ready("sam/box", &[notice(1, &["updates", "ready"]), fix])
         .unwrap();
-    let next: Vec<String> = p.next_ready(&t).into_iter().map(|c| c.n).collect();
+    let next: Vec<String> = p.next_ready().into_iter().map(|c| c.n).collect();
     assert_eq!(next, ["2"]);
 }
 
@@ -948,11 +948,11 @@ fn the_machinery_apps_issues_are_sorted_and_ranked() {
     let mut ready = issue(2, "workers[bot]", &["ready"]);
     ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
     ready["created_at"] = json!("2026-11-01T00:00:00Z");
-    let ranked = p.pick_ready(&t, &[ready]);
+    let ranked = p.pick_ready(&[ready]);
     assert_eq!(ranked, Some(("sam/box".into(), "2".into())));
     let mut stranger = issue(3, "workers", &["ready"]);
     stranger["repository_url"] = json!("https://api.github.com/repos/sam/box");
-    assert_eq!(p.pick_ready(&t, &[stranger]), None);
+    assert_eq!(p.pick_ready(&[stranger]), None);
 }
 
 #[path = "sorting_slot_tests.rs"]

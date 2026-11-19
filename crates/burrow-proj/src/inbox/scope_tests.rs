@@ -6,7 +6,6 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-use super::drain::READY_LISTS;
 use super::scope::issues_in;
 use super::sorting_tests::{Box, issue};
 
@@ -106,7 +105,7 @@ fn an_issue_events_pass_keeps_what_it_has_of_the_rest() {
     p.note_ready("sam/box", &[ready(9)]).unwrap();
     let state = &b.cfg.inbox.as_ref().unwrap().state;
     let listed = || -> Vec<u64> {
-        let text = fs::read(state.join(READY_LISTS).join("sam_box")).unwrap();
+        let text = fs::read(super::record::files::ready_lists(state).join("sam_box")).unwrap();
         let list: Vec<Value> = serde_json::from_slice(&text).unwrap();
         list.iter().filter_map(|i| i["number"].as_u64()).collect()
     };

@@ -76,10 +76,9 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
         issue["created_at"] = json!("2026-11-01T00:00:00Z");
         issue
     };
-    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    assert_eq!(b.pass().pick_ready(t, &[ready(9)]), None);
+    assert_eq!(b.pass().pick_ready(&[ready(9)]), None);
     assert_eq!(
-        b.pass().pick_ready(t, &[ready(8)]),
+        b.pass().pick_ready(&[ready(8)]),
         Some(("sam/box".into(), "8".into()))
     );
     // Closing an issue alone does not release another implementation.
@@ -92,7 +91,7 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(b.pass().child_admissible("sam/box", "9"));
     assert_eq!(
-        b.pass().pick_ready(t, &[ready(9)]),
+        b.pass().pick_ready(&[ready(9)]),
         Some(("sam/box".into(), "9".into()))
     );
     assert!(b.pass().child_can_close("sam/box", "8", None).closes());
@@ -872,7 +871,7 @@ fn the_snapshot_queue_asks_github_nothing() {
     assert_eq!(b.log(), before, "the snapshot asked GitHub");
     // The drain's pass checks the parent on GitHub before it hands one on.
     assert_eq!(
-        b.pass().pick_ready(&t, &[ready(8)]),
+        b.pass().pick_ready(&[ready(8)]),
         Some(("sam/box".into(), "8".into()))
     );
     assert!(

@@ -576,6 +576,22 @@ fn units_and_queue_ask_the_user_manager_too() {
 }
 
 #[test]
+fn why_asks_proj_as_the_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cfg, fake) = (
+        config(dir.path()),
+        Fake::default().on("proj", "why", 0, "sam/box#7 is ready, since then.\n"),
+    );
+    let m = machine(&cfg, dir.path(), &fake);
+    let q = Query::parse("why sam/box#7").unwrap();
+    assert_eq!(m.answer(&q).unwrap(), "sam/box#7 is ready, since then.\n");
+    let asked = fake.asked.borrow();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].1, ["why", "sam/box#7"]);
+    assert!(asked[0].2, "as the user, whose proj it is");
+}
+
+#[test]
 fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     use std::fs::FileTimes;
     use std::time::{Duration, UNIX_EPOCH};
