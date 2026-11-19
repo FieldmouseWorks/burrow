@@ -69,8 +69,8 @@ change nothing else in the same PR.
   threads resolved, CODEOWNERS honoured, and the `review-settled` status
   required from the steward's App (in a repo with its merge train on, the
   train's `conary/train` too, from the same App). Repo admins can still
-  merge past it from the PR page, except with the train on: there no one
-  bypasses it, so only the train lands. A repo whose
+  merge past it from the PR page, with the train on too: the owner's way to
+  land a fix by hand when the pipeline itself is stuck. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. A `baseline` that lacks one of these gets it the next time the settings
   are kept, whenever it was made. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
