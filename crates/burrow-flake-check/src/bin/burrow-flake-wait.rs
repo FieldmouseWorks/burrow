@@ -13,13 +13,15 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// How long a base push's leg is worth waiting for from its start, in
-/// seconds, unless `WAIT_DEADLINE` says otherwise: 4 hours. A leg that
-/// compiles a large package cold (codex) takes 2 to 3 hours on a hosted
-/// runner and then saves it, which is worth the wait, as building it here
-/// takes as long; burrow's slowest that saved, in 150 pushes to 2026-11-14,
-/// took 194 minutes. Past 4 hours a leg has stopped making progress, and
-/// the job cuts it off at 6, keeping nothing.
-const DEADLINE: i64 = 4 * 60 * 60;
+/// seconds, unless `WAIT_DEADLINE` says otherwise: not at all. The wait was
+/// for codex, which took 2 to 3 hours to build cold on a hosted runner;
+/// #1204 took it off the machine. On 2026-11-19, across 45 PR legs, the 18
+/// that waited spent 12.3 minutes waiting and 4.9 building (17.2), and the
+/// 27 that didn't built in 7.6. So a leg running now is never waited for.
+/// Builds a base push has already saved are still restored, without
+/// waiting (`State::Saved` is read before `State::Late`), and #989 retires
+/// this wait with the kept builds.
+const DEADLINE: i64 = 0;
 /// How often, in seconds, the leg's kept entries are read while the base
 /// push's leg builds, unless `WAIT_NEWER` says otherwise: a newer push's
 /// entry turning up means the base push won't save (#1164). Each read is
