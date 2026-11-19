@@ -3,6 +3,7 @@
 use super::super::sorting_tests::{Box, issue};
 use super::tests::parent_fixture;
 use super::*;
+use crate::inbox::record::files;
 
 /// The child, as GitHub has it now.
 fn child(b: &Box, state: &str) {
@@ -322,7 +323,7 @@ fn a_closure_whose_text_wasnt_checked_keeps_nothing() {
         serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
     rest["body"] = json!("It's broken, and the docs need it too.");
     // Its answer posted, as the jobs pass does first.
-    fs::write(d.join("answered"), "1\n").unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
     let job = crate::job::Job::new(&b.cfg, "j1");
     assert!(!b.pass().keep_landing("sam/box", "7", &job, &d, &rest));
     assert_eq!(kept(&b), None);

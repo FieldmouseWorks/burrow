@@ -1,6 +1,7 @@
 //! An issue's event's pass ([`Pass::scope`]): the issues burrow-events told
 //! it, each asked for by number, and nothing it keeps of the rest changed.
 
+use crate::inbox::record::files;
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -27,10 +28,10 @@ fn record(b: &Box, n: u64, id: &str) -> std::path::PathBuf {
         .join(format!("sam_box-{n}"));
     fs::create_dir_all(&d).unwrap();
     for (f, v) in [
-        ("issue", format!("sam/box#{n}")),
-        ("job", id.into()),
-        ("answered", "0".into()),
-        ("seen", "0".into()),
+        (files::File::Issue, format!("sam/box#{n}")),
+        (files::File::Job, id.into()),
+        (files::File::Answered, "0".into()),
+        (files::File::Seen, "0".into()),
     ] {
         fs::write(d.join(f), format!("{v}\n")).unwrap();
     }
@@ -63,7 +64,10 @@ fn an_issue_events_pass_asks_for_its_issue_alone() {
     assert!(b.posted().contains("Fixed in #12."), "{}", b.posted());
     assert!(!b.posted().contains("Fixed in #13."), "{}", b.posted());
     assert!(!seven.exists());
-    assert_eq!(fs::read_to_string(eight.join("answered")).unwrap(), "0\n");
+    assert_eq!(
+        fs::read_to_string(eight.join(files::File::Answered)).unwrap(),
+        "0\n"
+    );
 
     fs::remove_file(b.path("log")).unwrap();
     b.pass().run("sam/box").unwrap();
@@ -201,7 +205,10 @@ fn scoped_fetches_reject_redirects_and_book_a_full_reconciliation() {
             p.finish("sam/box").unwrap();
             assert_eq!(p.unreached, ["sam/box"]);
             assert!(p.wake.contains_key("sam/box"));
-            assert_eq!(fs::read_to_string(saved.join("answered")).unwrap(), "0\n");
+            assert_eq!(
+                fs::read_to_string(saved.join(files::File::Answered)).unwrap(),
+                "0\n"
+            );
             assert!(b.posted().is_empty());
             assert!(!b.log().contains("api -X"), "{}", b.log());
             assert!(!b.log().contains("repos/else/"), "{}", b.log());

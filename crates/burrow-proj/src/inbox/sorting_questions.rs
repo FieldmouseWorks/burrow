@@ -1,8 +1,10 @@
 //! Sorting questions stay with their job until a person answers or it resolves.
 use super::{Pass, raw, seconds};
+use crate::inbox::record::files::{self, File};
+use crate::record::{JobFile, TurnFile};
 use crate::{Fail, ask, cmd::reply_answer, job::Job, read};
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::path::Path;
 
 impl Pass<'_> {
     /// An outstanding question is never a sorting verdict. Timed-out one-way
@@ -19,7 +21,7 @@ impl Pass<'_> {
         {
             let _held = job
                 .lock()
-                .map_err(|e| crate::io_fail(&job.path("lock"), e))?;
+                .map_err(|e| crate::io_fail(&job.file(JobFile::Lock), e))?;
             if let Err(e) = crate::question::recover(job) {
                 eprintln!("proj sorting question recovery: {e}");
                 self.retry(repo);
@@ -47,13 +49,13 @@ impl Pass<'_> {
         let identity = read(&ask::host_path(job, "question-id"))
             .ok_or_else(|| Fail::new(1, "sorting question has no host identity"))?;
         let notice = format!("{identity}\t{}", if pending { "one-way" } else { "ask" });
-        if read(&d.join("question-notice")).as_deref() != Some(notice.as_str()) {
+        if files::question_notice(d).as_deref() != Some(notice.as_str()) {
             let question = read(&ask::host_path(job, "question-text")).unwrap_or_default();
             let body = if pending {
                 format!(
                     "{question}\n\n{}",
                     job.turns()
-                        .and_then(|t| read(&job.turn(&t, "result")))
+                        .and_then(|t| read(&job.turn_file(&t, TurnFile::Result)))
                         .unwrap_or_default()
                 )
             } else {
@@ -66,7 +68,9 @@ impl Pass<'_> {
                 )
             };
             if self.post(repo, n, &body) {
-                fs::write(d.join("question-notice"), &notice).map_err(|e| crate::io_fail(d, e))?;
+                files::mark(d, File::QuestionNotice)
+                    .write(&notice)
+                    .map_err(|e| crate::io_fail(d, e))?;
             } else {
                 self.miss(repo);
                 return Ok(true);
@@ -87,7 +91,7 @@ impl Pass<'_> {
         else {
             return Ok(true);
         };
-        let seen = read(&d.join("seen"))
+        let seen = files::seen(d)
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
         let replies: Vec<_> = written
@@ -119,7 +123,9 @@ impl Pass<'_> {
             .filter_map(|c| c["id"].as_i64())
             .max()
             .unwrap_or(seen);
-        fs::write(d.join("seen"), newest.to_string()).map_err(|e| crate::io_fail(d, e))?;
+        files::mark(d, File::Seen)
+            .write(newest.to_string())
+            .map_err(|e| crate::io_fail(d, e))?;
         Ok(true)
     }
 }

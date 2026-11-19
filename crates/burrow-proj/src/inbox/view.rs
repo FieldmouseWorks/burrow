@@ -4,6 +4,7 @@
 //! Only reads: no GitHub (an observing pass, [`Pass::observe`]), no
 //! question recovered.
 
+use crate::inbox::record::files;
 use std::path::Path;
 
 use jiff::Timestamp;
@@ -12,7 +13,6 @@ use super::Pass;
 use super::drain::Candidate;
 use crate::config::{Config, Triage};
 use crate::snapshot::{Holder, Ready, Slot, SlotKind, SlotState, held, job_slot};
-use crate::{mtime, read};
 
 #[derive(Default)]
 pub(crate) struct View {
@@ -41,25 +41,30 @@ impl Pass<'_> {
                 .map(|c| ready(c, at))
                 .collect();
             let records = self.drain_records();
-            view.slots
-                .extend(self.slots(SlotKind::Drain, t.drain_jobs, &records, "drained", at));
+            view.slots.extend(self.slots(
+                SlotKind::Drain,
+                t.drain_jobs,
+                &records,
+                files::drained_since,
+                at,
+            ));
         }
         let sorting = self.sorting_holders();
         view.slots
-            .extend(self.slots(SlotKind::Sorting, t.at_once, &sorting, "job", at));
+            .extend(self.slots(SlotKind::Sorting, t.at_once, &sorting, files::job_since, at));
         view
     }
 
     /// `room` slots of `kind`, each record holding one in turn (more when
     /// more hold them: repair children go past the cap), the rest idle. A
-    /// record's `mark` file says since when it has held its slot while its
+    /// record's `since` says since when it has held its slot while its
     /// job hasn't started.
     fn slots(
         &self,
         kind: SlotKind,
         room: usize,
         records: &[std::path::PathBuf],
-        mark: &str,
+        since: fn(&Path) -> Option<i64>,
         at: i64,
     ) -> Vec<Slot> {
         (0..room.max(records.len()))
@@ -69,14 +74,14 @@ impl Pass<'_> {
                     return held(kind, name, SlotState::Idle, None, at);
                 };
                 let issue = record_issue(d);
-                match read(&d.join("job")).filter(|id| !id.is_empty()) {
+                match files::job(d).filter(|id| !id.is_empty()) {
                     Some(id) => job_slot(self.cfg, kind, name, &id, issue, at),
                     None => Slot {
                         holder: Some(Holder {
                             issue,
                             ..Holder::default()
                         }),
-                        ..held(kind, name, SlotState::Starting, mtime(&d.join(mark)), at)
+                        ..held(kind, name, SlotState::Starting, since(d), at)
                     },
                 }
             })

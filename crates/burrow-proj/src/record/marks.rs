@@ -238,7 +238,12 @@ pub(crate) fn outcome_checked(job: &Job, n: &str) -> Result<Option<Vec<u8>>, Unr
 /// Whether turn N's end is written down: its outcome, or the mark its
 /// `_ended` left ([`Job::mark_ended`]).
 pub(crate) fn ended_down(job: &Job, n: &str) -> bool {
-    has_outcome(job, n) || job.turn_marker(n, TurnMarker::Ended).exists()
+    has_outcome(job, n) || ended_marked(job, n)
+}
+
+/// Whether turn N's `_ended` left its mark ([`Job::mark_ended`]).
+pub(crate) fn ended_marked(job: &Job, n: &str) -> bool {
+    job.turn_marker(n, TurnMarker::Ended).exists()
 }
 
 /// How turn N said it ends: done, ask, await, undeclared.

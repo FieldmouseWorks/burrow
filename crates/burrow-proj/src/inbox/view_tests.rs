@@ -1,6 +1,7 @@
 //! The inbox's part of the live snapshot, against the stand-ins in
 //! [`super::sorting_tests`].
 
+use crate::inbox::record::files;
 use std::fs;
 
 use serde_json::Value;
@@ -50,8 +51,8 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
         .state
         .join(format!("sam_game-{n}"));
     fs::create_dir_all(&r).unwrap();
-    fs::write(r.join("drained"), format!("sam/game#{n}\n")).unwrap();
-    fs::write(r.join("job"), format!("{id}\n")).unwrap();
+    fs::write(r.join(files::File::Drained), format!("sam/game#{n}\n")).unwrap();
+    fs::write(r.join(files::File::Job), format!("{id}\n")).unwrap();
 }
 
 /// 2026-11-11's stall: three jobs the drain handed on, each parked on an
@@ -152,7 +153,7 @@ fn a_parked_sorting_job_holds_its_slot() {
     fs::remove_dir_all(state.join("sam_game-21")).unwrap();
     let r = state.join(".triage").join("sam_game-21");
     fs::create_dir_all(&r).unwrap();
-    fs::write(r.join("job"), "sort-21\n").unwrap();
+    fs::write(r.join(files::File::Job), "sort-21\n").unwrap();
     let snap = Snapshot::take(&b.cfg, 15).unwrap();
     let sorting: Vec<_> = snap
         .slots
@@ -193,7 +194,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
                 .state
                 .join(format!("sam_game-{count}"));
             fs::create_dir_all(&r).unwrap();
-            fs::write(r.join("drained"), format!("sam/game#{count}")).unwrap();
+            fs::write(r.join(files::File::Drained), format!("sam/game#{count}")).unwrap();
             if count == 2 {
                 let job = b.cfg.jobs.join("old-job");
                 fs::create_dir_all(&job).unwrap();
@@ -205,7 +206,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
                     crate::policy::Kind::Automated,
                 )
                 .unwrap();
-                fs::write(r.join("job"), "old-job").unwrap();
+                fs::write(r.join(files::File::Job), "old-job").unwrap();
             }
         }
         let status = Snapshot::take(&b.cfg, 0).unwrap().status();

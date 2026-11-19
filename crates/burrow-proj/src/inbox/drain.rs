@@ -27,18 +27,18 @@
 //! gap's end instead. A turn's end, which only frees a slot, kicks that pass
 //! alone: it reads the saved lists and lists nothing.
 
+use crate::inbox::record::files::{self, File};
 use std::collections::BTreeSet;
 use std::fs;
 
 use serde_json::Value;
 
-use super::record::files;
 use super::triage::READY;
 use super::{Pass, RETRY, dirs, key, raw};
 use crate::engine::Engine;
 use crate::github::api;
 use crate::snapshot::Priority;
-use crate::{Fail, io_fail, mtime, now, slot, swap, usage};
+use crate::{Fail, io_fail, now, slot, swap, usage};
 
 /// What keeps the drain from handing a ready issue on now
 /// ([`Pass::admission`]).
@@ -90,7 +90,7 @@ impl Pass<'_> {
             .as_ref()
             .is_some_and(|t| t.drain.is_some())
             && (has_ready(&self.inbox.state)
-                || self.drain_records().iter().any(|d| !d.join("job").exists()));
+                || self.drain_records().iter().any(|d| !files::has_job(d)));
         if asks {
             let stamp = self.inbox.state.join(DRAIN_ASKED);
             let now = now();
@@ -113,11 +113,7 @@ impl Pass<'_> {
 
     /// Whether the issue's record says the drain handed it on.
     pub(super) fn drained(&self, repo: &str, n: &str) -> bool {
-        self.inbox
-            .state
-            .join(format!("{}-{n}", key(repo)))
-            .join("drained")
-            .exists()
+        files::drained(&files::worker(&self.inbox.state, &key(repo), n))
     }
 
     /// One ready issue handed on, if there's room for it. Whatever holds it
@@ -156,12 +152,11 @@ impl Pass<'_> {
         // another issue that would stall the same way.
         let mut going = 0;
         for d in self.drain_records() {
-            let mark = d.join("drained");
-            if d.join("job").exists() {
+            if files::has_job(&d) {
                 going += 1;
-            } else if !self.still_handed(&mark, &label) {
+            } else if !self.still_handed(&d, &label) {
                 let _ = fs::remove_dir_all(&d);
-            } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
+            } else if let Some(m) = files::drained_since(&d).filter(|m| now() - m < 2 * RETRY) {
                 going += 1;
                 if let Some(repo) = self.wake_repo() {
                     self.book(&repo, m + 2 * RETRY);
@@ -247,8 +242,7 @@ impl Pass<'_> {
             }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-            fs::write(d.join("drained"), format!("{repo}#{n}\n"))
-                .map_err(|e| io_fail(&d.join("drained"), e))?;
+            files::mark(&d, File::Drained).put(format!("{repo}#{n}\n"))?;
             if !self.add_label(&repo, &n, &label) {
                 let _ = fs::remove_dir_all(&d);
                 self.miss(&repo);
@@ -353,20 +347,20 @@ impl Pass<'_> {
             .into_iter()
             .filter(|d| self.drain_user(d).is_some())
             .collect();
-        held.sort_by_key(|d| (mtime(&d.join("drained")).unwrap_or(0), d.clone()));
+        held.sort_by_key(|d| (files::drained_since(d).unwrap_or(0), d.clone()));
         held
     }
 
     /// Active turns and enrollments reserve capacity only in enabled repos.
     pub(super) fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
-        let named = crate::read(&dir.join("drained"))?;
+        let named = files::drained_for(dir)?;
         let (repo, n) = named.split_once('#')?;
         if !self.record_uses_capacity(dir)
             || (self.inbox.planning && self.has_task_list(Some(repo), n))
         {
             return None;
         }
-        if let Some(id) = crate::read(&dir.join("job")) {
+        if let Some(id) = files::job(dir) {
             let job = crate::job::Job::new(self.cfg, &id);
             if crate::policy::path(&job, "restoring").exists() {
                 return Some(format!("{named} ({id}: restoring)"));
@@ -383,8 +377,8 @@ impl Pass<'_> {
     /// the engine's label still on, as GitHub has it now. One GitHub won't
     /// say about counts as still handed on, its repo's retry booked; a mark
     /// that names none is let go.
-    fn still_handed(&mut self, mark: &std::path::Path, label: &str) -> bool {
-        let named = fs::read_to_string(mark).unwrap_or_default();
+    fn still_handed(&mut self, d: &std::path::Path, label: &str) -> bool {
+        let named = files::drained_for(d).unwrap_or_default();
         let Some((repo, n)) = named.trim().split_once('#') else {
             return false;
         };

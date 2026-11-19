@@ -2,6 +2,7 @@
 //! of an issue, which every reader asks and asking never changes, and
 //! `proj why OWNER/REPO#N`.
 
+use crate::inbox::record::files;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ fn state(b: &Box) -> PathBuf {
 fn sorting(b: &Box, n: u64, id: &str) -> PathBuf {
     let d = state(b).join(".triage").join(format!("sam_box-{n}"));
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), format!("{id}\n")).unwrap();
+    fs::write(d.join(files::File::Job), format!("{id}\n")).unwrap();
     d
 }
 
@@ -143,7 +144,7 @@ fn each_stage_an_issue_can_be_in_derives_to_its_record() {
     check(&b, 7, Some(closed), Stage::Closed, None);
     let refused = state(&b).join("sam_box-8");
     fs::create_dir_all(&refused).unwrap();
-    fs::write(refused.join("refused"), "").unwrap();
+    fs::write(refused.join(files::File::Refused), "").unwrap();
     check(&b, 8, None, Stage::Unseen(Unseen::Refused), None);
     let unreached = state(&b).join(".unreached");
     fs::create_dir_all(&unreached).unwrap();
@@ -173,7 +174,7 @@ fn each_stage_an_issue_can_be_in_derives_to_its_record() {
     assert_eq!(r.job.as_deref(), Some("s11"));
     fs::remove_file(b.path("active")).unwrap();
     fs::write(b.cfg.jobs.join("s11/1.outcome"), "done\n").unwrap();
-    fs::write(sorting(&b, 11, "s11").join("plan"), "[]").unwrap();
+    fs::write(sorting(&b, 11, "s11").join(files::File::Plan), "[]").unwrap();
     check(&b, 11, None, Stage::Sorting, Some(Wait::Verdict));
 
     // Ready, from its repo's ready list.
@@ -203,7 +204,7 @@ fn each_stage_an_issue_can_be_in_derives_to_its_record() {
     fs::remove_file(b.path("active")).unwrap();
     fs::write(b.cfg.jobs.join("j1/1.outcome"), "done\n").unwrap();
     check(&b, 7, None, Stage::Working, Some(Wait::Pass));
-    fs::write(d.join("answered"), "1\n").unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
     check(&b, 7, None, Stage::Answered, None);
     fs::write(b.cfg.jobs.join("j1/1.end"), "ask\n").unwrap();
     check(
@@ -254,7 +255,7 @@ fn a_ready_label_outranks_a_sorting_that_ended_without_an_answer() {
     let b = Box::new();
     let d = state(&b).join(".triage").join("sam_box-14");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("failed"), "2026-11-01T00:00:00Z").unwrap();
+    fs::write(d.join(files::File::Failed), "2026-11-01T00:00:00Z").unwrap();
     let p = b.pass();
     let r = p.look().record("sam/box", "14", None);
     assert_eq!(
@@ -393,7 +394,7 @@ fn a_planned_parent_stays_planned_when_its_replan_ends_without_an_answer() {
     plan(&b, 20, &[(Some(21), false), (Some(22), false)], &[]);
     let failed = state(&b).join(".triage").join("sam_box-20");
     fs::create_dir_all(&failed).unwrap();
-    fs::write(failed.join("failed"), "2026-11-01T00:00:00Z").unwrap();
+    fs::write(failed.join(files::File::Failed), "2026-11-01T00:00:00Z").unwrap();
     let ready = listed(20, &["ready"]);
     ready_list(&b, &[&ready]);
     let p = b.pass();
@@ -442,10 +443,10 @@ fn a_closed_issue_reads_closed_whatever_inert_records_it_keeps() {
     plan(&b, 20, &[(Some(21), true)], &[]);
     let refused = state(&b).join("sam_box-8");
     fs::create_dir_all(&refused).unwrap();
-    fs::write(refused.join("refused"), "").unwrap();
+    fs::write(refused.join(files::File::Refused), "").unwrap();
     let failed = state(&b).join(".triage").join("sam_box-14");
     fs::create_dir_all(&failed).unwrap();
-    fs::write(failed.join("failed"), "2026-11-01T00:00:00Z").unwrap();
+    fs::write(failed.join(files::File::Failed), "2026-11-01T00:00:00Z").unwrap();
     let p = b.pass();
     let look = p.look();
     for (n, kept) in [
@@ -560,7 +561,7 @@ fn proj_why_says_the_drains_own_admission() {
     let mut b = Box::new();
     let drained = state(&b).join("sam_box-7");
     fs::create_dir_all(&drained).unwrap();
-    fs::write(drained.join("drained"), "sam/box#7\n").unwrap();
+    fs::write(drained.join(files::File::Drained), "sam/box#7\n").unwrap();
     fs::write(
         b.path("repos_sam_box_issues_7"),
         listed(7, &["claude"]).to_string(),
@@ -648,7 +649,7 @@ fn a_jobs_question_and_park_are_what_its_issue_waits_on() {
     fs::write(crate::ask::host_path(&w, "question"), "{}").unwrap();
     fs::write(crate::ask::host_path(&w, "question-needs-owner"), "1\n").unwrap();
     let d = b.record("j1");
-    fs::write(d.join("answered"), "1\n").unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
     let r = b.pass().look().record("sam/box", "7", None);
     assert_eq!(
         (r.stage, r.wait),

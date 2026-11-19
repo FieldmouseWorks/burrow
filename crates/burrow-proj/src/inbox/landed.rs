@@ -13,6 +13,8 @@
 //! line `Continued as OWNER/REPO#N`) hands its place to that issue: the list
 //! waits on it, saying so, and is done when a merged PR closes it.
 use super::{List, Pass, key};
+use crate::inbox::record::files;
+use crate::record::TurnFile;
 use crate::{Fail, job::Job, read, swap};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -79,9 +81,9 @@ pub(in crate::inbox) fn declared_done(job: &Job) -> bool {
         return false;
     };
     job.state() == "done"
-        && read(&job.turn(&turn, "end")).as_deref() == Some("done")
-        && !job.turn(&turn, "stopped").exists()
-        && !job.turn(&turn, "timeout").exists()
+        && crate::record::end(job, &turn).as_deref() == Some("done")
+        && !crate::record::stopped(job, &turn)
+        && !job.turn_file(&turn, TurnFile::Timeout).exists()
         && !crate::ask::host_path(job, "question-needs-owner").exists()
 }
 
@@ -97,7 +99,8 @@ fn awaited_targets(job: &Job) -> Vec<String> {
     (1..=turns)
         .rev()
         .flat_map(|turn| {
-            let text = read(&job.turn(&turn.to_string(), "github-awaits")).unwrap_or_default();
+            let text =
+                read(&job.turn_file(&turn.to_string(), TurnFile::GithubAwaits)).unwrap_or_default();
             text.lines()
                 .rev()
                 .filter_map(|l| reference(l.split('\t').next().unwrap_or_default()))
@@ -397,8 +400,8 @@ impl Pass<'_> {
             return true;
         }
         let turns = job.turns().unwrap_or_default();
-        let number = |path: &Path| read(path).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
-        if !declared_done(job) || number(&d.join("answered")) < number(&job.path("turns")) {
+        let number = |t: Option<String>| t.and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
+        if !declared_done(job) || number(files::answered(d)) < turns.parse::<i64>().unwrap_or(0) {
             return true;
         }
         let Some(written) = self.written(repo, issue) else {
@@ -409,7 +412,7 @@ impl Pass<'_> {
         if !written.matches(issue) {
             return false;
         }
-        let seen = number(&d.join("seen"));
+        let seen = number(files::seen(d));
         let after = |c: &Value| c["id"].as_i64().is_some_and(|i| i > seen);
         let had: Vec<Value> = written
             .comments

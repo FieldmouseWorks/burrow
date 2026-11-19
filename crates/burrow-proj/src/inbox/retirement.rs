@@ -1,9 +1,10 @@
 //! Retirement is independent of notification delivery and of a reopened issue.
+use crate::inbox::record::files::{self, File};
 use std::{fs, path::Path};
 
-use super::record::files;
 use super::{Pass, dirs, say};
-use crate::{Fail, cmd::halt, github::api, io_fail, read};
+use crate::record::JobFile;
+use crate::{Fail, cmd::halt, github::api, io_fail};
 
 pub(super) fn records(state: &Path) -> Vec<std::path::PathBuf> {
     dirs(&files::retired_root(state), "")
@@ -16,14 +17,14 @@ pub(super) fn records(state: &Path) -> Vec<std::path::PathBuf> {
 impl Pass<'_> {
     pub(super) fn retired(&mut self, repo: &str) -> Result<(), Fail> {
         for d in records(&self.inbox.state) {
-            let Some(issue) = read(&d.join("issue")) else {
+            let Some(issue) = files::issue(&d) else {
                 continue;
             };
             let Some((of, n)) = issue.rsplit_once('#') else {
                 continue;
             };
             if of.eq_ignore_ascii_case(repo)
-                && let Some(id) = read(&d.join("job"))
+                && let Some(id) = files::job(&d)
             {
                 self.retire(repo, n, &id, &d)?;
             }
@@ -37,7 +38,9 @@ impl Pass<'_> {
             true
         } else {
             let job = crate::job::Job::new(self.cfg, id);
-            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let _held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
             super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
             match halt(self.cfg, &job, false) {
                 Ok(()) => true,
@@ -52,7 +55,7 @@ impl Pass<'_> {
         }
         let job = crate::job::Job::new(self.cfg, id);
         let turns = job.turns().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0);
-        let answered = read(&d.join("answered"))
+        let answered = files::answered(d)
             .and_then(|n| n.parse::<i64>().ok())
             .unwrap_or(0);
         let mut snapshot = None;
@@ -66,7 +69,7 @@ impl Pass<'_> {
             }
             snapshot = Some(issue);
         }
-        if !d.join("reported").exists() {
+        if !files::reported(d) {
             let Some(issue) =
                 snapshot.or_else(|| api(self.cfg, &format!("repos/{repo}/issues/{n}")))
             else {
@@ -78,7 +81,7 @@ impl Pass<'_> {
                     self.miss(repo);
                     return Ok(());
                 };
-                let seen = read(&d.join("seen"))
+                let seen = files::seen(d)
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(0);
                 let mut unread: Vec<i64> = written
@@ -124,12 +127,11 @@ impl Pass<'_> {
                         self.miss(repo);
                         return Ok(());
                     }
-                    fs::write(d.join("seen"), format!("{}\n", unread[end - 1]))
-                        .map_err(|e| io_fail(&d.join("seen"), e))?;
+                    files::mark(d, File::Seen).put(format!("{}\n", unread[end - 1]))?;
                     at = end;
                 }
             }
-            fs::write(d.join("reported"), "\n").map_err(|e| io_fail(&d.join("reported"), e))?;
+            files::mark(d, File::Reported).put("\n")?;
         }
         if stopped {
             fs::remove_dir_all(d).map_err(|e| io_fail(d, e))?;

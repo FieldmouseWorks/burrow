@@ -173,9 +173,6 @@ pub mod github;
 pub mod github_quota;
 pub mod guest;
 pub mod host_jobs;
-// The inbox still reads a job's files by name (Job::path, Job::turn), until
-// #975 moves it onto the record.
-#[allow(deprecated)]
 pub mod inbox;
 pub mod job;
 pub mod pick;

@@ -1,5 +1,6 @@
 use super::super::sorting_tests::{Box, issue};
 use super::*;
+use crate::inbox::record::files;
 use crate::read;
 
 pub(super) fn parent_fixture() -> (Box, Value, List) {
@@ -254,7 +255,7 @@ fn a_human_claude_issue_is_sized_on_a_fresh_planner_job_before_implementation() 
         .unwrap()
         .state
         .join(".triage/sam_box-7");
-    let id = read(&record.join("job")).expect("a size-planning job");
+    let id = read(&record.join(files::File::Job)).expect("a size-planning job");
     let job = crate::job::Job::new(&b.cfg, &id);
     assert_eq!(
         crate::job::Request::load(&job).unwrap().role.as_deref(),
@@ -309,7 +310,10 @@ fn existing_cutoff_recovery_and_answer_accounting_are_preserved() {
         .unwrap();
     assert_eq!(job.turns().as_deref(), Some("2"));
     assert!(read(&job.path("prompt.2")).unwrap().contains("cut off"));
-    assert_eq!(read(&record.join("answered")).as_deref(), Some("1"));
+    assert_eq!(
+        read(&record.join(files::File::Answered)).as_deref(),
+        Some("1")
+    );
 }
 #[test]
 fn existing_workers_are_not_resized_on_every_reply() {
@@ -375,13 +379,17 @@ fn tracker_split_transactions_recover_every_durable_stage() {
                 .state
                 .join(".triage/sam_box-7");
             fs::create_dir_all(&record).unwrap();
-            fs::write(record.join("job"), "planner").unwrap();
+            fs::write(record.join(files::File::Job), "planner").unwrap();
             Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
             let steps = vec![
                 super::super::triage::Step::Split(tasks.clone()),
                 super::super::triage::Step::Label("tracker".into()),
             ];
-            fs::write(record.join("plan"), serde_json::to_string(&steps).unwrap()).unwrap();
+            fs::write(
+                record.join(files::File::Plan),
+                serde_json::to_string(&steps).unwrap(),
+            )
+            .unwrap();
             let mut children = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
                 let mut child = issue(8 + i as u64, "sam", &["later"]);
@@ -403,7 +411,7 @@ fn tracker_split_transactions_recover_every_durable_stage() {
                 list.rendered.clear();
             }
             if stage == "label" || stage == "did" {
-                fs::write(record.join("did"), "1").unwrap();
+                fs::write(record.join(files::File::Did), "1").unwrap();
             }
             assert!(b.pass().save_list("sam/box", "7", &list));
             let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
@@ -415,7 +423,10 @@ fn tracker_split_transactions_recover_every_durable_stage() {
             assert!(!record.exists(), "{stage}: {}", b.log());
             if stage != "label" && stage != "did" {
                 assert!(
-                    b.pass().plan_dir("sam/box", "8").join("input").exists(),
+                    b.pass()
+                        .plan_dir("sam/box", "8")
+                        .join(files::File::Input)
+                        .exists(),
                     "{stage}"
                 );
                 let saved: List = serde_json::from_slice(
@@ -441,7 +452,7 @@ fn live_job(b: &Box, state: &str, of: &str) {
     Pass::hand(&record, "Deliver #7").unwrap();
     let lane = record.with_file_name(format!("sam_box-{of}"));
     fs::rename(record, &lane).unwrap();
-    fs::write(lane.join("issue"), format!("sam/box#{of}")).unwrap();
+    fs::write(lane.join(files::File::Issue), format!("sam/box#{of}")).unwrap();
     if state == "awaiting" {
         fs::write(b.cfg.jobs.join("lane/await"), "sam/box#99\t0\told\n").unwrap();
     } else {
@@ -709,7 +720,7 @@ fn unstick_preflight_bypasses_ordinary_triage_admission() {
                 .state
                 .join(format!(".triage/other_repo-{n}"));
             fs::create_dir_all(&record).unwrap();
-            fs::write(record.join("job"), id).unwrap();
+            fs::write(record.join(files::File::Job), id).unwrap();
         }
         assert_eq!(
             b.cfg
@@ -815,7 +826,7 @@ fn a_ready_verdict_retains_trailing_task_whitespace_exactly() {
         .state
         .join(".triage/sam_box-7");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "planner").unwrap();
+    fs::write(d.join(files::File::Job), "planner").unwrap();
     Pass::hand(&d, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
     b.pass()
