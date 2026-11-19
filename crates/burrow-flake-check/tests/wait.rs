@@ -255,6 +255,8 @@ fn a_leg_on_a_runner_is_waited_for_to_its_end_and_restored() {
     c.serve("caches", 1, &saved());
     c.set("WAIT_POLL", "1");
     c.set("WAIT_MAX", "1");
+    // A caller that still wants the wait sets a deadline of its own.
+    c.set("WAIT_DEADLINE", "14400");
     let o = c.run();
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("Saved"), "{}", text(&o));
@@ -408,6 +410,25 @@ fn a_leg_that_runs_past_its_deadline_while_waited_for_is_given_up() {
 
 /// A late leg's run may still have saved the exact key (an earlier
 /// attempt): that save is restored, not built again.
+/// By default nothing running is waited for: with codex gone a waiting leg
+/// spent 12.3 minutes to save 2.7 of building (2026-11-19). A base leg that
+/// started a minute ago, unsaved, means building cold at once.
+#[test]
+fn by_default_a_running_base_leg_is_not_waited_for() {
+    let c = Case::new("burrow-proj\n");
+    going(&c);
+    c.serve("jobs", 1, &jobs_since(&[(LEG, "in_progress", 60)]));
+    c.serve("caches", 1, NONE);
+    let started = Instant::now();
+    let o = c.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(text(&o).contains("Late"), "{}", text(&o));
+    assert!(text(&o).contains("building cold"), "{}", text(&o));
+    assert_eq!(c.out(), "");
+    assert_eq!(c.asked("/jobs?"), 1, "{}", c.log());
+}
+
 #[test]
 fn a_late_legs_exact_save_is_still_restored() {
     let c = Case::new("a\n");
@@ -496,6 +517,7 @@ fn a_newer_entry_that_turns_up_mid_wait_ends_it_at_the_next_read() {
     compare(&c, "behind");
     c.set("WAIT_POLL", "1");
     c.set("WAIT_NEWER", "3");
+    c.set("WAIT_DEADLINE", "14400");
     let o = c.run();
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("Newer"), "{}", text(&o));

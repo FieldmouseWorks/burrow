@@ -77,14 +77,13 @@ Only an unfinished push of the same workflow at the merged base's exact SHA
 on the default branch justifies waiting, and only while that push's own leg
 (the job named as this one, `LEG_JOB`) is running on a runner. One still
 queued, or not created yet, may want the very runner this leg holds, so the
-leg builds cold rather than wait (#929). A leg on a runner is waited for to
-its end, with no cap of the waiter's own (a wait cut off part way buys
-nothing), until its deadline: 4 hours from that leg's own start
-(`WAIT_DEADLINE`, in seconds), past which it isn't waited for at all and
-this leg builds cold (#1102). A leg compiling a large package cold takes 2
-to 3 hours on a hosted runner and saves it, which is worth the wait; one
-past 4 hours has stopped making progress, and its job's timeout keeps
-nothing. A failed push is no reason not to wait: its legs keep their
+leg builds cold rather than wait (#929). A leg on a runner isn't waited for: its deadline
+(`WAIT_DEADLINE`, in seconds, from that leg's own start) defaults to 0, so
+this leg builds cold now, and restores the base's builds only if they're
+already saved. The wait was for codex, whose cold build took 2 to 3 hours;
+since it left the machine (#1204), a waiting leg spent 12.3 minutes waiting
+to save 2.7 of building (45 PR legs, 2026-11-19). #989 retires the wait
+with the kept builds. A failed push is no reason not to wait: its legs keep their
 builds whether its gate passed or not (#812), under its own commit, which
 is the key this leg restores. A newer push's entry for the leg is: the
 base push's leg skips its save once one is listed, and deletes its own
