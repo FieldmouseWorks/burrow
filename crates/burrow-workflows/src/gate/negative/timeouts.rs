@@ -88,3 +88,31 @@ fn a_timeout_that_isnt_the_new_tests_own_cant_tell() {
         assert!(ran.out.contains(says), "{says}: {}", ran.out);
     }
 }
+
+/// A check that's a fetch timing out can be the network's: it can't tell,
+/// whatever the base and the head do.
+#[test]
+fn a_fetch_timing_out_cant_tell() {
+    let r = Repo::new();
+    let flake = read(&r.origin.join("flake.nix"));
+    let fetch = flake.replace(
+        "inherit system want;",
+        &format!(
+            r#"inherit system want; pair = builtins.readFile ./lib.txt + "/" + want; outputHashMode = "flat"; outputHash = "sha256-" + (if want == "2
+" then "{}" else "{}");"#,
+            "A".repeat(43) + "=",
+            "B".repeat(42) + "E="
+        ),
+    );
+    assert_ne!(fetch, flake);
+    write(&r.origin.join("flake.nix"), &fetch);
+    r.g.s.git(&r.origin, &["commit", "-qam", "t a fetch"]);
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let ran = r.run_with(&head, "", &[("BUILD_TIMEOUT_TEXT", NEGATIVE)]);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("is a fetch"), "{}", ran.out);
+}
