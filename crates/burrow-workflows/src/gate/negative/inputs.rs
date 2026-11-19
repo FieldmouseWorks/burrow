@@ -152,12 +152,12 @@ fn an_input_the_failing_evaluation_fetched_first_still_counts() {
 }
 
 /// An input nothing evaluates, whose host is out of reach, as
-/// spectrum-os.org was for microvm's `spectrum` (#1212): the failing
-/// evaluation never fetched it, so its second try is held to it without it,
+/// spectrum-os.org was for microvm's `spectrum` (#1212): it can't be
+/// fetched for the second try, which is held to its failure without it,
 /// and the host being down decides nothing, nor keeps out the input it
 /// does read.
 #[test]
-fn an_input_nothing_reads_isnt_fetched_for_the_second_try() {
+fn an_input_nothing_reads_from_a_host_thats_gone_decides_nothing() {
     let r = Repo::new();
     let s = &r.g.s;
     let dep = serve(tarball(&r, "dep"));

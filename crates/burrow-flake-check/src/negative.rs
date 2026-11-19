@@ -43,6 +43,9 @@ struct Negative {
     checks: Vec<String>,
     skipped: Vec<String>,
     unrun: Vec<String>,
+    /// The lock files whose inputs are in the store apart already, so a
+    /// host out of reach costs its timeout once a run, not once a check.
+    apart: std::sync::Mutex<Vec<String>>,
 }
 impl Negative {
     fn found(&self, result: &str, tree: Option<&str>) -> Result<bool> {
@@ -119,6 +122,11 @@ impl Negative {
     /// can't decide the PR, and a second try that reaches for an input it
     /// wasn't given fetched on the way, so can't tell.
     fn inputs_apart(&self, tree: &Path) -> Result<()> {
+        let lock = fs::read_to_string(tree.join("flake.lock")).unwrap_or_default();
+        let mut apart = self.apart.lock().map_err(|_| err("poisoned"))?;
+        if apart.contains(&lock) {
+            return Ok(());
+        }
         let o = output(cmd(
             "nix",
             &["flake", "prefetch-inputs", "--no-update-lock-file", s(tree)],
@@ -160,6 +168,7 @@ impl Negative {
         }
         let held: Vec<_> = paths.iter().filter(|p| !absent.contains(p)).collect();
         if held.is_empty() {
+            apart.push(lock);
             return Ok(());
         }
         let mut c = cmd(
@@ -178,6 +187,7 @@ impl Negative {
                 "its inputs can't be copied into a store apart, so it can't tell",
             ));
         }
+        apart.push(lock);
         Ok(())
     }
     fn evaluate(&self, tree: &Path, q: &str, root_name: &str) -> Result<Output> {
@@ -251,6 +261,7 @@ pub fn negative() -> Result<bool> {
         checks: vec![],
         skipped: vec![],
         unrun: vec![],
+        apart: Default::default(),
     };
     let work = n.work.0.clone();
     let base = var("BASE");
