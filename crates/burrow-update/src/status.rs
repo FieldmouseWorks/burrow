@@ -161,7 +161,7 @@ pub fn now() -> String {
 }
 
 fn iso(t: Timestamp) -> String {
-    t.to_zoned(TimeZone::system())
+    t.to_zoned_datetime(TimeZone::system())
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
 }

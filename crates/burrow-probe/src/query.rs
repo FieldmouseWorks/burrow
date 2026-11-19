@@ -156,7 +156,7 @@ impl When {
         if word.len() == 10 {
             let date: jiff::civil::Date = word.parse().map_err(|_| bad())?;
             let t = date
-                .to_zoned(jiff::tz::TimeZone::UTC)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .map_err(|_| bad())?
                 .timestamp();
             return Ok(When::At(t.as_second()));

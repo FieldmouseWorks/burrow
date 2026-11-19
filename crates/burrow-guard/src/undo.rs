@@ -51,8 +51,8 @@ pub fn snapshot(config: &Config, mark: &Path, now: SystemTime) -> Option<String>
     if !due(mark, now) {
         return None;
     }
-    let stamp = jiff::Zoned::try_from(now)
-        .unwrap_or_else(|_| jiff::Zoned::now())
+    let stamp = jiff::ZonedDateTime::try_from(now)
+        .unwrap_or_else(|_| jiff::ZonedDateTime::now())
         .strftime("%Y%m%d-%H%M%S")
         .to_string();
     let names = datasets.iter().map(|d| format!("{d}@pre-{stamp}"));

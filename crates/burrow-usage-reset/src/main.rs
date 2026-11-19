@@ -138,7 +138,7 @@ fn tell(notify: &str, notice: Notice) {
 fn local_time(t: f64) -> String {
     match jiff::Timestamp::from_second(t.round() as i64) {
         Ok(at) => at
-            .to_zoned(TimeZone::system())
+            .to_zoned_datetime(TimeZone::system())
             .strftime("%a %-I:%M %p %Z")
             .to_string(),
         Err(_) => format!("{} (epoch)", t.round()),

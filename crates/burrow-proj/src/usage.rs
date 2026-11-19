@@ -964,7 +964,7 @@ pub fn when(t: i64) -> String {
     Timestamp::from_second(t).map_or_else(
         |_| t.to_string(),
         |at| {
-            at.to_zoned(TimeZone::system())
+            at.to_zoned_datetime(TimeZone::system())
                 .strftime("%a %b %-d, %-I:%M %p %Z")
                 .to_string()
         },
