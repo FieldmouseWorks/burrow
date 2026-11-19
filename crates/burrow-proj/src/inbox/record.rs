@@ -292,6 +292,10 @@ impl Record {
 /// The inbox's state files, which only this module and the inbox's own
 /// writers name: a reader asks the record.
 pub(super) mod files;
+pub(crate) use files::{job_issue, undrain};
+// Tests outside the inbox build a record folder by hand too.
+#[cfg(test)]
+pub(crate) use files::File;
 
 mod why;
 pub(crate) use why::{issue_target, why};

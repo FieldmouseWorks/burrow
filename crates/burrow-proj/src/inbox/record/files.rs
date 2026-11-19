@@ -58,7 +58,7 @@ pub(in crate::inbox) fn drain_waiting(state: &Path) -> PathBuf {
 /// A file in an issue's record folder: its worker record, its sorting
 /// record, or a retired one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::inbox) enum File {
+pub(crate) enum File {
     /// The job it was handed to (empty while a sorting record waits for one).
     Job,
     /// The issue, OWNER/REPO#N.
@@ -278,4 +278,27 @@ pub(in crate::inbox) fn stopped_told(d: &Path) -> Option<String> {
 /// Whether a retired record's last answer was posted.
 pub(in crate::inbox) fn reported(d: &Path) -> bool {
     path(d, File::Reported).exists()
+}
+
+/// The issue of the record folder in the inbox's `state` that names job
+/// `id`, OWNER/REPO#N as written: for whoever outside the inbox asks.
+pub(crate) fn job_issue(state: &Path, id: &str) -> Option<String> {
+    for entry in fs::read_dir(state).ok()?.flatten() {
+        let d = entry.path();
+        if job(&d).as_deref() == Some(id) {
+            return issue(&d);
+        }
+    }
+    None
+}
+
+/// Each record folder in the inbox's `state` that names job `id` let go by
+/// the drain: its `drained` mark removed.
+pub(crate) fn undrain(state: &Path, id: &str) {
+    for entry in fs::read_dir(state).into_iter().flatten().flatten() {
+        let d = entry.path();
+        if job(&d).as_deref() == Some(id) {
+            let _ = mark(&d, File::Drained).remove();
+        }
+    }
 }
