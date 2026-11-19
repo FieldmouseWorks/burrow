@@ -554,6 +554,16 @@ OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
 MOVING = ("Open over a day",)
 
 
+def known_by(why, line, desc):
+    """What a digest entry is known by, so what's news: the whole entry, so a
+    PR listed again for something else, or for the same thing with another
+    diagnosis, is news too; but a kind whose words are the PR's own status
+    (MOVING) by its kind and PR alone. Each new one is a comment, and a turn
+    of the stuck issue's job: so an entry's words say what is stuck and why,
+    and since when, never for how long (burrow#1228)."""
+    return f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else "")
+
+
 def job_questions():
     result = subprocess.run([CFG["proj"], "_questions"], capture_output=True, text=True, timeout=30, check=True)
     return json.loads(result.stdout)
@@ -637,12 +647,7 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
     for why, line, desc in digest:
         groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
     body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
-    # What's news, by what it's known by: the whole entry, so a PR listed
-    # again for something else, or for the same thing with another
-    # diagnosis, is news too; but a kind whose words are the PR's own status
-    # (MOVING) by its kind and PR alone.
-    news = {f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else ""):
-            f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
+    news = {known_by(why, line, desc): f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
     entries = sorted(news)
     if DRY or not nrepo:
         log(f"--- {title} ---\n" + (body or "(nothing)"))
