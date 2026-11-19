@@ -8,7 +8,7 @@
 use super::*;
 
 /// A cache with one output a check makes (a fixed output, which needs no
-/// signature), in a directory standing in for the build store, and a flake
+/// signature), in a directory to serve as the build store, and a flake
 /// whose checks are that one and one no store has, with `extra` beside its
 /// outputs.
 fn store_and_flake(g: &Gate, extra: &str) -> (PathBuf, PathBuf) {
@@ -59,7 +59,7 @@ fn configs(g: &Gate) -> Vec<String> {
 fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
     let g = Gate::new();
     let (cache, flake) = store_and_flake(&g, "");
-    let url = format!("file://{}", cache.display());
+    let url = burrow_test::build_store(&cache);
     // A runner whose own config would take a flake's.
     let runner = format!("{}\naccept-flake-config = true", g.nix_config);
     let ran = g.run(
@@ -96,7 +96,7 @@ fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
     assert!(!built.is_empty(), "{}", ran.out);
     for c in &built {
         assert!(
-            !c.contains(cache.to_str().unwrap()),
+            !c.contains(&url) && !c.contains(cache.to_str().unwrap()),
             "a build substitutes from the store: {c}"
         );
         assert!(
@@ -128,7 +128,7 @@ fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
 fn the_whole_flakes_fallback_says_what_the_store_has_too() {
     let g = Gate::new();
     let (cache, flake) = store_and_flake(&g, r#"nixConfig.bash-prompt = "x";"#);
-    let url = format!("file://{}", cache.display());
+    let url = burrow_test::build_store(&cache);
     let shadow = |skip: &str| {
         let ran = g.run(
             &flake,

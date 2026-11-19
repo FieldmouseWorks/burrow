@@ -2,7 +2,6 @@
 //! a directory, served over HTTP as the build store is. Needs nix, jq, curl
 //! and coreutils on PATH, as the flake's check has them.
 use super::*;
-use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 
 /// A chroot store, a cache beside it, and nix's config for them.
@@ -75,43 +74,9 @@ impl Here {
         (hash, path)
     }
 
-    /// The cache, served over HTTP under `/builds` as nginx serves the
-    /// build store: a file it holds, or a 404.
+    /// The cache, served over HTTP as the build store is.
     fn store(&self) -> String {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/builds", l.local_addr().unwrap());
-        let cache = self.join("cache");
-        std::thread::spawn(move || {
-            for c in l.incoming() {
-                let Ok(mut c) = c else { continue };
-                let mut r = BufReader::new(c.try_clone().unwrap());
-                let mut line = String::new();
-                let _ = r.read_line(&mut line);
-                let mut w = line.split_whitespace();
-                let (method, target) = (w.next().unwrap_or(""), w.next().unwrap_or(""));
-                let mut h = String::new();
-                while r.read_line(&mut h).is_ok_and(|n| n > 0) && h != "\r\n" {
-                    h.clear();
-                }
-                let file = target
-                    .strip_prefix("/builds/")
-                    .filter(|f| !f.split('/').any(|p| p == ".." || p.is_empty()))
-                    .and_then(|f| fs::read(cache.join(f)).ok());
-                let (status, body) = match file {
-                    Some(b) => ("200 OK", b),
-                    None => ("404 Not Found", Vec::new()),
-                };
-                let _ = write!(
-                    c,
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                if method != "HEAD" {
-                    let _ = c.write_all(&body);
-                }
-            }
-        });
-        url
+        burrow_test::build_store(self.join("cache"))
     }
 
     /// The derivation this expression is, instantiated in the store.
@@ -336,7 +301,7 @@ fn an_http_store_with_none_of_the_outputs_says_none() {
 fn a_store_that_doesnt_answer_is_an_error_to_say() {
     let h = Here::new();
     let drv = h.drv(&built("missing"));
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/builds", closed.local_addr().unwrap());
     drop(closed);
     let store = Store {
