@@ -36,7 +36,9 @@ pub fn resets(text: &str, now: i64) -> Option<i64> {
     let (when, rest) = after.split_once(" (")?;
     let (zone, _) = rest.split_once(')')?;
     let tz = TimeZone::get(zone).ok()?;
-    let today = Timestamp::from_second(now).ok()?.to_zoned_datetime(tz.clone());
+    let today = Timestamp::from_second(now)
+        .ok()?
+        .to_zoned_datetime(tz.clone());
     // "Nov 4, 2027, 9am", "Nov 4, 12pm" or "3:30pm".
     let (date, clock) = match when.rsplit_once(", ") {
         Some((date, clock)) => (Some(date), clock),

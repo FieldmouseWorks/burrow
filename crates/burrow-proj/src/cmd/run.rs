@@ -661,7 +661,9 @@ fn resume_one(
 fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
     fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
     let name = id_name(project);
-    let when = jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S").to_string();
+    let when = jiff::ZonedDateTime::now()
+        .strftime("%Y%m%d-%H%M%S")
+        .to_string();
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let random = RandomState::new();
     for attempt in 0u64.. {
