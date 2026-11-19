@@ -2,11 +2,12 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Install an executable without ever opening it for writing in this process.
 ///
@@ -48,6 +49,124 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
         }
     }
     command
+}
+
+/// What a command run to a deadline said, and whether it was killed there.
+pub struct Within {
+    pub output: Output,
+    /// It ran past the deadline, so it and everything it started were
+    /// killed.
+    pub killed: bool,
+}
+
+/// Run a command to its end or to `deadline`, whichever comes first, its
+/// output in files: at the deadline it and everything it started (in
+/// process groups of their own too, as a request with a deadline is) are
+/// killed, and nothing left holds its output open. A test of code that
+/// should stop waiting then fails in seconds on code that waits forever,
+/// rather than hold its build until Nix's timeout.
+pub fn output_within(command: &mut Command, deadline: Duration) -> Within {
+    let mut out = tempfile::tempfile().unwrap();
+    let mut err = tempfile::tempfile().unwrap();
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(out.try_clone().unwrap())
+        .stderr(err.try_clone().unwrap())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if started.elapsed() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let killed = status.is_none();
+    let status = status.unwrap_or_else(|| {
+        // Not yet reaped, so its pid and its descendants' parent links hold.
+        end_tree(i32::try_from(child.id()).unwrap());
+        child.wait().unwrap()
+    });
+    let read = |f: &mut fs::File| {
+        let mut v = Vec::new();
+        f.rewind().unwrap();
+        f.read_to_end(&mut v).unwrap();
+        v
+    };
+    Within {
+        output: Output {
+            status,
+            stdout: read(&mut out),
+            stderr: read(&mut err),
+        },
+        killed,
+    }
+}
+
+/// A process and every process descended from it, from the kernel's
+/// parent links.
+fn tree(root: i32) -> Vec<i32> {
+    let parents: Vec<(i32, i32)> = fs::read_dir("/proc")
+        .map(|dir| {
+            dir.filter_map(|e| {
+                let pid: i32 = e.ok()?.file_name().to_str()?.parse().ok()?;
+                let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                // After the name: state, then parent.
+                let parent = stat.rsplit_once(") ")?.1.split_whitespace().nth(1)?;
+                Some((pid, parent.parse().ok()?))
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    let mut found = vec![root];
+    let mut i = 0;
+    while i < found.len() {
+        let parent = found[i];
+        found.extend(
+            parents
+                .iter()
+                .filter(|(_, p)| *p == parent)
+                .map(|(c, _)| *c),
+        );
+        i += 1;
+    }
+    found
+}
+
+/// Stop a process and its descendants, until no new one turns up, so none
+/// starts another or leaves the tree as its parent dies; then kill them.
+fn end_tree(root: i32) {
+    use rustix::process::{Pid, Signal, kill_process};
+    let signal = |pid: i32, s: Signal| {
+        if let Some(pid) = Pid::from_raw(pid) {
+            let _ = kill_process(pid, s);
+        }
+    };
+    let started = Instant::now();
+    let mut stopped: Vec<i32> = Vec::new();
+    loop {
+        let new: Vec<i32> = tree(root)
+            .into_iter()
+            .filter(|p| !stopped.contains(p))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{new:?}, started by {root}, won't stop"
+        );
+        for pid in new {
+            signal(pid, Signal::STOP);
+            stopped.push(pid);
+        }
+    }
+    for pid in stopped {
+        signal(pid, Signal::KILL);
+    }
 }
 
 /// Change fixture permissions, never making a regular file executable.
@@ -144,6 +263,44 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// A command that never ends is killed at the deadline, with what it
+    /// started in a process group of its own; one that ends says what it
+    /// said.
+    #[test]
+    fn a_command_that_never_ends_is_killed_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let started = Instant::now();
+        let ran = output_within(
+            Command::new("sh").args([
+                "-c",
+                "set -m; echo said; sleep infinity & echo $! > \"$0\"; wait",
+                pid.to_str().unwrap(),
+            ]),
+            Duration::from_millis(500),
+        );
+        assert!(ran.killed);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!ran.output.status.success());
+        assert_eq!(ran.output.stdout, b"said\n");
+        let pid = fs::read_to_string(&pid).unwrap();
+        let gone = Instant::now();
+        // Gone, or only waiting to be reaped.
+        while fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+            .is_ok_and(|s| !s.contains(") Z "))
+        {
+            assert!(gone.elapsed() < Duration::from_secs(5), "{pid} still runs");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ran = output_within(
+            Command::new("sh").args(["-c", "echo done; exit 3"]),
+            Duration::from_secs(60),
+        );
+        assert!(!ran.killed);
+        assert_eq!(ran.output.status.code(), Some(3));
+        assert_eq!(ran.output.stdout, b"done\n");
     }
 
     #[test]

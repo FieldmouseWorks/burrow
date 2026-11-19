@@ -152,6 +152,7 @@ printf '%s\n' '{}'
   build)
     echo "$*" >> "$NIX_LOG"
     {real_nix} config show max-silent-time >> "$NIX_LOG.silent"
+    echo "$({real_nix} config show timeout) $*" >> "$NIX_LOG.timeout"
     # Where it would substitute from, and whether a flake's config or an
     # unsandboxed build could change that (store.rs).
     {real_nix} config show --json | jq -c '{{substituters: .substituters.value, "accept-flake-config": .["accept-flake-config"].value, sandbox: .sandbox.value}}' >> "$NIX_LOG.config"
@@ -170,9 +171,11 @@ printf '%s\n' '{}'
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
     # Or, for each derivation it's given, when one in its closure holds, as
     # nix's compact JSON, one of BUILD_FAIL_TEXT, or BUILD_SIGNAL_TEXT (its
-    # builder killed), or BUILD_FLAKY_TEXT in the first BUILD_FLAKY_TIMES
-    # builds (2 if not given): nix's error for each that failed, its
-    # builder exiting BUILD_EXIT (1 if not given), and for the one given,
+    # builder killed), or BUILD_TIMEOUT_TEXT (its builder never ending), or
+    # BUILD_FLAKY_TEXT in the first BUILD_FLAKY_TIMES builds (2 if not
+    # given): nix's error for each that failed, its builder exiting
+    # BUILD_EXIT (1 if not given), or timing out, as nix says it, unnamed,
+    # at its timeout (its max-silent-time if none), and for the one given,
     # in nix's words. One with none of them is built, its outputs in the
     # store (nix-store, below, says), and the rest are tried too, as
     # --keep-going does.
@@ -186,16 +189,23 @@ printf '%s\n' '{}'
     for a in "$@"; do
       case $a in /nix/store/*.drv*) ;; *) continue ;; esac
       d=${{a%^*}}
-      bad=$({real_nix} derivation show -r "$d" | jq -r --arg fail "$BUILD_FAIL_TEXT $flaky" --arg signal "$BUILD_SIGNAL_TEXT" '
+      bad=$({real_nix} derivation show -r "$d" | jq -r --arg fail "$BUILD_FAIL_TEXT $flaky" --arg signal "$BUILD_SIGNAL_TEXT" --arg timeout "$BUILD_TIMEOUT_TEXT" '
         def holds($ps): tojson as $j | $ps | split(" ") | any(.[]; . != "" and (. as $p | $j | contains($p)));
         (.derivations // .) | to_entries[] | (if .key | contains("/") then .key else "/nix/store/" + .key end) as $k
-        | if .value | holds($signal) then "\($k) signal" elif .value | holds($fail) then "\($k) exit" else empty end')
+        | if .value | holds($signal) then "\($k) signal" elif .value | holds($timeout) then "\($k) timeout" elif .value | holds($fail) then "\($k) exit" else empty end')
       if [ -z "$bad" ]; then
         {real_bin}/nix-store -q --outputs "$d" >> "$NIX_LOG.valid"
         continue
       fi
       failed=1
       while read -r k how; do
+        if [ "$how" = timeout ]; then
+          echo "building '$k'..." >&2
+          t=$({real_nix} config show timeout)
+          [ "$t" != 0 ] || t=$({real_nix} config show max-silent-time)
+          echo "error: timed out after $t seconds" >&2
+          continue
+        fi
         echo "error: Cannot build '$k'." >&2
         if [ "$how" = signal ]; then
           echo "       Reason: builder failed due to signal 9 (Killed)." >&2

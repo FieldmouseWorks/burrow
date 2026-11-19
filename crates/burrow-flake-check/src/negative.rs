@@ -43,6 +43,9 @@ struct Negative {
     checks: Vec<String>,
     skipped: Vec<String>,
     unrun: Vec<String>,
+    /// The PR's head, where a check that timed out on the negative tree has
+    /// to pass.
+    head: String,
     /// The lock files whose inputs are in the store apart already, so a
     /// host out of reach costs its timeout once a run, not once a check.
     apart: std::sync::Mutex<Vec<String>>,
@@ -199,6 +202,137 @@ impl Negative {
         Ok(o)
     }
 }
+/// How long a check the negative builds may take once what it's built from
+/// has built: Nix's `timeout`, well under the hour of silence every build
+/// gets (`SILENT_SECONDS`). A check's build takes minutes: the longest in
+/// seven negative runs on 2026-11-19 was burrow-test's, 18½ minutes on a
+/// hosted runner with its compile (run 44600817795), so this is that with
+/// room for a slower runner. A test that waits forever on the base, as one
+/// about a wait ending does on the code with that bug, held run 44510799194
+/// for nearly three hours, an hour a build (#1212).
+const CHECK_SECONDS: u32 = 30 * 60;
+/// How a check built on its own ended.
+enum Alone {
+    Passed,
+    /// Its own build failed, with this log.
+    Failed(Vec<u8>),
+    /// What it's built from didn't build, or can't be told.
+    Unsure,
+}
+impl Negative {
+    /// A check built on its own: what it's built from first, under the
+    /// gate's limits (a cold dependency can be slow), once more if that
+    /// fails, as a flaky one can; then the check alone, in a child given
+    /// [`CHECK_SECONDS`], its log kept to say why it failed.
+    fn alone(&self, drv: &str, roots: &Path) -> Result<Alone> {
+        let Ok(deps) = classify::inputs(drv) else {
+            println!("can't tell what {drv} is built from");
+            return Ok(Alone::Unsure);
+        };
+        if !build::checks(None, &deps, roots)? && !build::checks(None, &deps, roots)? {
+            println!("what {drv} is built from didn't build, so it can't tell");
+            return Ok(Alone::Unsure);
+        }
+        // The exact shared builder, heavy's wrapper included, in a child.
+        let mut c = merged(
+            s(&env::current_exe()?),
+            &["--build", s(roots), &format!("{drv}^*")],
+        );
+        c.env(
+            "NIX_CONFIG",
+            format!("{}\ntimeout = {CHECK_SECONDS}", var("NIX_CONFIG")),
+        );
+        let mut log = Vec::new();
+        Ok(if tee(c, &mut log)? == 0 {
+            Alone::Passed
+        } else {
+            Alone::Failed(log)
+        })
+    }
+    /// Whether a check that failed on its own failed on the new tests: its
+    /// own builder failed with a test's exit code, or it timed out and the
+    /// same check passes on the head; and the same check on the base
+    /// passes. Anything else can't tell.
+    fn caught(&self, t: &Target, log: &[u8], work: &Path) -> Result<bool> {
+        let timed_out = classify::timed_out(&t.drv, log);
+        if !timed_out && !self.own_failure(&t.drv, log) {
+            return Ok(false);
+        }
+        if !t.base.is_empty() && !matches!(self.alone(&t.base, &work.join("roots"))?, Alone::Passed)
+        {
+            println!(
+                "{}, the same check on the base, fails too, so it can't tell",
+                t.base
+            );
+            return Ok(false);
+        }
+        if timed_out {
+            return self.passes_on_head(t, work);
+        }
+        Ok(true)
+    }
+    /// Whether nix says the check's own builder failed with a test's exit
+    /// code, and it isn't a fetch, whose failure can be the network's.
+    fn own_failure(&self, drv: &str, log: &[u8]) -> bool {
+        match classify::fetch(drv) {
+            Ok(false) if classify::builder_failed(drv, log) => true,
+            Ok(false) => {
+                println!(
+                    "nix doesn't say {drv}'s own builder failed with a test's exit code, so it can't tell"
+                );
+                false
+            }
+            Ok(true) => {
+                println!("{drv} is a fetch, whose failure can be the network's, so it can't tell");
+                false
+            }
+            Err(_) => {
+                println!("can't tell whether {drv} is a fetch, so it can't tell");
+                false
+            }
+        }
+    }
+    /// A check that timed out with the new tests on the old code, built on
+    /// the PR's head: passing there, its timing out is the new tests
+    /// catching the base (a test of a wait's end waits forever on code
+    /// that never ends it), and isn't built a second time.
+    fn passes_on_head(&self, t: &Target, work: &Path) -> Result<bool> {
+        println!(
+            "{} timed out after {} minutes: building the same check on the head",
+            t.drv,
+            CHECK_SECONDS / 60
+        );
+        let tree = work.join("head");
+        if !tree.exists() {
+            checkout(&self.head, &tree)?;
+        }
+        let o = self.evaluate(&tree, &t.q, &format!("{}.head", t.i))?;
+        let drv = value(&o);
+        if drv.is_empty() {
+            println!(
+                "check {} doesn't evaluate on the head, so its timing out can't tell:",
+                t.name
+            );
+            classify::errors(&o.stderr);
+            return Ok(false);
+        }
+        if drv == t.drv {
+            println!("{drv} is the same check on the head, which timed out, so it can't tell");
+            return Ok(false);
+        }
+        if !matches!(self.alone(&drv, &work.join("roots"))?, Alone::Passed) {
+            println!(
+                "{drv}, the same check on the head, doesn't pass, so its timing out can't tell"
+            );
+            return Ok(false);
+        }
+        println!(
+            "{} timed out with the new tests on the old code, and passes on the head: the new tests catch the base",
+            t.drv
+        );
+        Ok(true)
+    }
+}
 fn negative_commit(tree: &str, fork: &str, head: &str, when: &str, one: bool) -> Result<String> {
     let mut c = git(&[
         "-c",
@@ -248,6 +382,7 @@ fn value(o: &Output) -> String {
     }
 }
 struct Target {
+    i: usize,
     name: String,
     q: String,
     drv: String,
@@ -261,11 +396,12 @@ pub fn negative() -> Result<bool> {
         checks: vec![],
         skipped: vec![],
         unrun: vec![],
+        head: var("HEAD_SHA"),
         apart: Default::default(),
     };
     let work = n.work.0.clone();
     let base = var("BASE");
-    let head = var("HEAD_SHA");
+    let head = n.head.clone();
     let skip = var("SKIP");
     let tip = string(git(&[
         "rev-parse",
@@ -405,6 +541,7 @@ pub fn negative() -> Result<bool> {
             println!("check {name} reads the new tests: building it");
             n.checks.push(name.clone());
             targets.push(Target {
+                i,
                 name: name.clone(),
                 q,
                 drv: nv,
@@ -413,78 +550,29 @@ pub fn negative() -> Result<bool> {
         }
     }
     let roots = work.join("roots");
-    let builds: Vec<_> = targets.iter().map(|t| format!("{}^*", t.drv)).collect();
-    if !build::checks(None, &builds, &roots)? {
-        let mut unsure = false;
-        for t in &targets {
-            if classify::built(&t.drv)? {
-                continue;
-            }
-            println!("{} failed: checking that it's its own failure", t.drv);
-            let deps = match classify::inputs(&t.drv) {
-                Ok(v) => v,
-                Err(_) => {
-                    println!("can't tell what {} is built from", t.drv);
-                    unsure = true;
-                    continue;
-                }
-            };
-            if !build::checks(None, &deps, &roots)? {
-                println!(
-                    "what {} is built from didn't build, so it can't tell",
-                    t.drv
-                );
-                unsure = true;
-            } else if !t.base.is_empty()
-                && !build::checks(None, &[format!("{}^*", t.base)], &roots)?
-            {
-                println!(
-                    "{}, the same check on the base, fails too, so it can't tell",
-                    t.base
-                );
-                unsure = true;
-            } else {
-                // Run the exact shared builder in a child to retain its complete
-                // diagnostics for classification, including heavy's wrapper.
-                let log = work.join("again");
-                let o = output(cmd(
-                    s(&env::current_exe()?),
-                    &["--build", s(&roots), &format!("{}^*", t.drv)],
-                ))?;
-                show(&o)?;
-                let mut text = o.stdout.clone();
-                text.extend_from_slice(&o.stderr);
-                fs::write(&log, &text)?;
-                if o.status.success() {
-                    println!("{} built once what it's built from had: it passes", t.drv);
+    if !targets.is_empty() {
+        println!(
+            "each check builds on its own, once what it's built from has: for {} minutes at most",
+            CHECK_SECONDS / 60
+        );
+    }
+    let built = memory::parallel(&targets, side, |t| n.alone(&t.drv, &roots));
+    let mut unsure = false;
+    for (t, b) in targets.iter().zip(built) {
+        match b.map_err(|e| err(e.to_string()))? {
+            Alone::Passed => println!("{} built: it passes", t.drv),
+            Alone::Unsure => unsure = true,
+            Alone::Failed(log) => {
+                if n.caught(t, &log, &work)? {
+                    caught = true;
                 } else {
-                    match classify::fetch(&t.drv) {
-                        Ok(false) if classify::builder_failed(&t.drv, &text) => caught = true,
-                        Ok(false) => {
-                            println!(
-                                "nix doesn't say {}'s own builder failed with a test's exit code, so it can't tell",
-                                t.drv
-                            );
-                            unsure = true;
-                        }
-                        Ok(true) => {
-                            println!(
-                                "{} is a fetch, whose failure can be the network's, so it can't tell",
-                                t.drv
-                            );
-                            unsure = true;
-                        }
-                        Err(_) => {
-                            println!("can't tell whether {} is a fetch, so it can't tell", t.drv);
-                            unsure = true;
-                        }
-                    }
+                    unsure = true;
                 }
             }
         }
-        if !caught && unsure {
-            return Ok(false);
-        }
+    }
+    if !caught && unsure {
+        return Ok(false);
     }
     if caught {
         println!("the new tests fail on the old code, as they should");

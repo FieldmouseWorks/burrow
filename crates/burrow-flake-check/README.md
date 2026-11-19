@@ -142,6 +142,15 @@ The other builds go on (`--keep-going`), and a push's leg keeps what they
 built. The longest quiet stretch in a burrow build that went on to pass was
 14 to 16 minutes (codex linking, on a hosted runner).
 
+The negative builds each check it judges on its own, once what the check is
+built from has built under that hour, with Nix's `timeout` of 30 minutes
+(`CHECK_SECONDS` in `src/negative.rs` says why that figure), and keeps its
+log to say why it failed: no check is built a second time. A check that
+timed out there, where every build its log started was its own, is the new
+tests catching the base when the same check passes on the base and on the
+PR's head: a test that a wait ends waits forever on the code with that
+bug. Anything else about a timeout can't tell (#1212).
+
 ## Reusing an attested pass
 
 With the workflow's `gate-reuse` input on (it's off by default, and no

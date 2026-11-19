@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const GH: &str = r#"#!/bin/sh
 printf '%s\n' "$5" >> "$FAKE/log"
 [ -z "$STALL" ] || exec sleep 30
+[ -z "$HANG" ] || { echo $$ > "$FAKE/hung"; exec sleep infinity; }
 case $5 in
   */jobs\?*) kind=jobs ;;
   */actions/runs\?*) kind=runs ;;
@@ -36,6 +37,11 @@ const WORKFLOW: &str = "CI +&%#";
 /// This leg's job, as the workflow names it.
 const LEG: &str = "leg 2 of 4";
 
+/// How long a case may run: the longest takes 2 seconds, so code that
+/// waits where it should stop fails here in seconds, not at its build's
+/// timeout (#1212: #1172's negative held its runner for nearly three hours).
+const DEADLINE: Duration = Duration::from_secs(20);
+
 struct Case {
     dir: tempfile::TempDir,
     env: Vec<(&'static str, String)>,
@@ -61,6 +67,16 @@ impl Case {
         self.env.push((k, v.to_owned()));
     }
     fn run(&self) -> Output {
+        let ran = self.run_within(DEADLINE);
+        assert!(
+            !ran.killed,
+            "the waiter ran past the case's {DEADLINE:?}, so it was killed:\n{}",
+            text(&ran.output)
+        );
+        ran.output
+    }
+    /// The waiter, as the workflow runs it, to its end or the deadline.
+    fn run_within(&self, deadline: Duration) -> burrow_test::Within {
         let p = self.dir.path();
         let path = format!(
             "{}:{}",
@@ -82,7 +98,7 @@ impl Case {
             .env("WAIT_POLL", "0")
             .env("WAIT_REQUEST", "5")
             .envs(self.env.iter().map(|(k, v)| (k, v)));
-        c.output().unwrap()
+        burrow_test::output_within(&mut c, deadline)
     }
     fn out(&self) -> String {
         fs::read_to_string(self.dir.path().join("out")).unwrap_or_default()
@@ -323,6 +339,29 @@ fn a_stalled_request_fails_the_soft_step_at_its_deadline() {
     assert!(!o.status.success(), "{}", text(&o));
     assert!(started.elapsed() < Duration::from_secs(15));
     assert_eq!(c.out(), "");
+}
+
+/// A waiter that never ends fails its case at the deadline, in seconds,
+/// with the request it was waiting on killed too: a test that a wait ends
+/// can't hold its build on code that waits forever (#1212).
+#[test]
+fn a_waiter_that_never_ends_is_killed_at_the_cases_deadline() {
+    let mut c = Case::new("a\n");
+    c.set("HANG", "1");
+    c.set("WAIT_REQUEST", "3600");
+    let started = Instant::now();
+    let ran = c.run_within(Duration::from_secs(2));
+    assert!(ran.killed, "{}", text(&ran.output));
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let hung = fs::read_to_string(c.dir.path().join("fake/hung")).unwrap();
+    let gone = Instant::now();
+    // Gone, or only waiting to be reaped.
+    while fs::read_to_string(format!("/proc/{}/stat", hung.trim()))
+        .is_ok_and(|s| !s.contains(") Z "))
+    {
+        assert!(gone.elapsed() < Duration::from_secs(5), "{hung} still runs");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
