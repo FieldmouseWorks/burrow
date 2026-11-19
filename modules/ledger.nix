@@ -406,8 +406,6 @@ in
         CONARY_POLICY = "${pkgs.runCommand "conary-policy.json" {
           policy = builtins.toJSON {
             inherit (cfg.policy) r2 docs live notDocs;
-            # The reviewers read every path on GitHub: no snapshot hides one.
-            hidden = [ ];
             repos = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
           };
           passAsFile = [ "policy" ];
