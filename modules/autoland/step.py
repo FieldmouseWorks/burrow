@@ -306,13 +306,30 @@ class Pass(Context, Jobs, Actions):
         elif (not clean and not capped) or what:
             if not what:
                 # Every finding answered without a new commit: the reviewers that
-                # had findings look again.
+                # had findings are asked to look again, through the owner's
+                # door, once for what they last said; the owner hears of a
+                # look that doesn't come.
                 for r in live:
                     if said[r][0] == "findings":
                         self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
-                        if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
-                            why = "Every finding is answered; this head has no push to review."
-                            self.tried("ask", V.ask(self.repo, self.pr, self.st, why))
+                        if C.NOW - said[r][1] <= self.rc["settleDelay"] * MIN:
+                            continue
+                        at, unasked = V.asked(self.repo, self.pr, said[r][1]), None
+                        if at is None:
+                            at, unasked, failed = V.ask(self.repo, self.pr)
+                            self.tried("ask", failed)
+                            unasked = unasked or failed
+                        # Listed for the owner as a head with no review is: LOST
+                        # minutes after Codex's word, and once asked, only when
+                        # the ask too went unanswered.
+                        due = max(said[r][1] + review_step.LOST * MIN, (at or 0) + review_step.ANSWERED * MIN)
+                        if C.NOW < due:
+                            self.after(due, 0)  # ends: its look, or listed for the owner
+                            continue
+                        how = f"asked as the owner at {clock(at)}, unanswered" if at else f"not asked as the owner: {unasked or 'not asked'}"
+                        stuck.append(f"{V.NAMES[r]}: findings answered without a push; {how}")
+                        self.digest.append((f"{V.NAMES[r]} hasn't looked again", self.line,
+                                            f"its findings are answered without a push; {how}"))
                 self.settle(
                     "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
                 )

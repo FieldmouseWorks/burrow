@@ -814,6 +814,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-review-ask"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "burrow-upkeep",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-robot"
 version = "0.0.0"
 dependencies = [

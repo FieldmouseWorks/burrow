@@ -152,8 +152,14 @@ root only.
    each repo). It posts its findings as review threads and a summary comment
    naming the commit it reviewed; the steward reads its verdict from those
    (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
-   half an hour after its push is asked for once (`@codex review`), and after
-   two hours the stuck issue says so. Codex's word binds only the commit:
+   half an hour after its push is asked for once, and after two hours (and
+   half an hour after the ask) the owner's digest says so. The connector
+   takes that ask only from the owner, never from an App, so in the repos
+   `burrow.autoland.askAsOwner.repos` lists the owner's door,
+   [burrow-review-ask](../crates/burrow-review-ask/src/lib.rs), posts the
+   bare `@codex review` as the machine user's own gh login, once a head: the
+   one thing the steward does as the owner. Elsewhere nothing is asked.
+   Codex's word binds only the commit:
    nothing it posts says which base or description it read, or when a review
    began. So a PR retargeted onto another base, or whose description is
    edited, after its head was pushed (as GitHub dates both) isn't Codex's to
@@ -172,8 +178,10 @@ root only.
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
    as on a hold, until proj resumes the job to bring the fix in.
-4. Codex looks again at each push, and the steward asks it to when every
-   finding was answered without one, until it finds nothing on the head.
+4. Codex looks again at each push, and the steward asks it to (through the
+   owner's door, as in step 2) when every finding was answered without one,
+   until it finds nothing on the head. A look that isn't asked for, or
+   doesn't come, goes to the owner's digest.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. A check run cancelled with nothing run through since

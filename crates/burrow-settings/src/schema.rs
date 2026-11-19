@@ -436,6 +436,20 @@ pub static SETTINGS: &[Setting] = &[
         "The most baseline jobs one pass starts.",
     ),
     flake(
+        "autoland.askAsOwner.repos",
+        &REPOS,
+        Is("[]"),
+        "autoland",
+        "Repos where the steward asks Codex's connector for a late review as the owner, through its one door that acts as them (crates/burrow-review-ask).",
+    ),
+    flake(
+        "autoland.askAsOwner.perDay",
+        &Kind::Count { min: 1 },
+        Is("20"),
+        "autoland",
+        "The most review asks that door posts in any 24 hours.",
+    ),
+    flake(
         "autoland.repos",
         &Kind::Map(&Kind::Object),
         Is("{}"),

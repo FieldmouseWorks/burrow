@@ -9,14 +9,14 @@ import os
 import sys
 import time
 
-from harness import (FAIL, REAL_GH, REAL, STATES, T, UPKEEP_RAN, WROTE, C, P, H, S, clean, found, fresh_pr_state,
+from harness import (FAIL, OWNER_ASKS, REAL_GH, REAL, STATES, T, UPKEEP_RAN, WROTE, C, P, H, S, clean, found, fresh_pr_state,
                      head, info, mkpr, pr_state, run, summary, tmp)
 
 # A pass that waits on time books its repo's next pass for when the wait
 # ends: a head Codex hasn't reviewed is asked about QUIET minutes after its
 # push (its review's own posts kick a pass sooner), and the owner hears at
 # LOST; findings sit a while before a job.
-asks = lambda: [x for x in WROTE if "@codex review" in x]  # noqa: E731
+asks = lambda: OWNER_ASKS  # noqa: E731
 fresh_pr_state()
 run(mkpr(), 10)
 assert C.WAKE == {"sam/r": T + 10 + 30 * 60 + 1}, C.WAKE

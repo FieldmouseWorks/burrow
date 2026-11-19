@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 
-from harness import (C, CI_GREEN, FAIL, HELD, JOBS, P, R, H, S, SINCE, STATES, T0, UPKEEP_RAN,
+from harness import (C, CI_GREEN, FAIL, HELD, JOBS, OWNER_ASKS, P, R, H, S, SINCE, STATES, T0, UPKEEP_RAN,
                      WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
                      found, gh_stub, mkpr, pr_state, run, said, stand_in, summary, swept, tmp)
 
@@ -51,16 +51,18 @@ assert "Codex is reviewing this commit" in status and not merged(), status
 status, _ = run(clean(), 960)
 assert "Codex found nothing in this commit's change" in status and merged() and JOBS == [], status
 
-# Quiet QUIET minutes after its push, it's asked once, saying why, and not
-# again within the hour; quiet LOST minutes, the digest says so.
+# Quiet QUIET minutes after its push, it's asked for once, as the owner
+# (owner_asks.py has the rest), never by the App; quiet LOST minutes, the
+# digest says so.
 fresh_pr_state()
 run(mkpr(), 0)
 status, digest = run(mkpr(), 30 * 60)
-assert len(asks()) == 1 and "No review of aaaaaaa came after its push." in asks()[0] and digest == [], (WROTE, digest)
+assert OWNER_ASKS == [("sam/r", 5, head)] and asks() == [] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 31 * 60)
-assert asks() == [] and digest == [], (WROTE, digest)
+assert OWNER_ASKS == [] and asks() == [] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 120 * 60)
-assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa since its push at " in status, (status, digest)
+assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa since its push at " in digest[0][2], (status, digest)
+assert "Codex: no review since its push at " in status, status
 # The same stall only older is the same entry, known by the same words, so
 # the stuck issue gets no new comment and its job isn't resumed with it;
 # nor does the PR's status change (burrow#1228).
@@ -89,15 +91,15 @@ assert JOBS == [] and "Round 1: 1 open review thread; a Claude job takes it at 1
 status, _ = run(threads, 45 * 60)
 assert len(JOBS) == 1 and not merged(), (status, JOBS)
 # Every finding answered without a push: once that has sat the settle delay,
-# the connector is asked to look again, once.
+# the connector is asked to look again, once, as the owner.
 fresh_pr_state()
 answered = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[True])
 status, _ = run(answered, 700)
-assert "Findings answered; review round 2 next" in status and asks() == [] and JOBS == [], status
+assert "Findings answered; review round 2 next" in status and OWNER_ASKS == [] and JOBS == [], status
 status, _ = run(answered, 900)
-assert len(asks()) == 1 and "Every finding is answered" in asks()[0] and not merged(), WROTE
+assert OWNER_ASKS == [("sam/r", 5, head)] and asks() == [] and not merged(), WROTE
 status, _ = run(answered, 960)
-assert asks() == [], WROTE
+assert OWNER_ASKS == [] and asks() == [], WROTE
 
 # Codex's word binds only the commit: retargeted, or its description edited,
 # after its push (as GitHub dates both, however late a pass first sees it), a

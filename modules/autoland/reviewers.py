@@ -3,18 +3,26 @@ Codex Connector App, set up on the owner's ChatGPT account to review every
 push). It reviews each head on its own and posts on the PR: findings as a
 review with inline threads, and a summary comment naming the commit it last
 reviewed and whether it found anything. The steward reads its verdict from
-those (`verdict`, burrow-upkeep's, crates/burrow-upkeep/src/verdict.rs) and
-asks for a look only when one is owed and no push will bring it (`ask`)."""
+those (`verdict`, burrow-upkeep's, crates/burrow-upkeep/src/verdict.rs).
 
+When a look is owed and no push will bring it, the steward asks for one
+(`ask`). The connector takes that ask only from the owner: an App's gets no
+review. So the steward never posts it itself: the owner's door,
+burrow-review-ask (crates/burrow-review-ask), posts the bare ask as the
+machine user's own gh login, in a unit of that user's own, in the repos the
+machine lists (askAsOwner), once a head; the steward only reads its record
+(`asked`)."""
+
+import hashlib
 import json
+import os
+import subprocess
 
 import common as C
 import prs as P
-from common import DRY, MIN, log
+from common import CFG, DRY, log
 
 NAMES = {"codex": "Codex"}
-# What asks the connector for a review, as its docs give it.
-ASK = "@codex review"
 
 
 def on(repo):
@@ -40,21 +48,66 @@ def verdict(repo, pr):
     return s["verdict"], s["at"], s["rounds"], s["changed"]
 
 
-def ask(repo, pr, st, why):
-    """Ask the connector to look at the PR's head again, once a head and at
-    most once an hour: after its findings were answered without a push, or
-    when a push brought no review. `why` goes in the comment. st is the PR's
-    state. What GitHub said if it refused the comment, which isn't counted
-    as asked (the caller strikes it), else None."""
+def door(repo):
+    """Whether the owner's door may ask in this repo (askAsOwner)."""
+    d = CFG.get("askAsOwner")
+    return bool(d) and repo.lower() in (r.lower() for r in d["repos"])
+
+
+def asked(repo, pr, said):
+    """When the owner's door asked for a review of the PR's head with
+    Codex's word on it as it is (said: when Codex last said anything of the
+    head, 0 for nothing), from the door's own record, or None."""
+    if not CFG.get("askAsOwner"):
+        return None
+    try:
+        record = json.load(open(CFG["askAsOwner"]["record"]))["asked"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
     head = pr["headRefOid"]
-    asked = st.setdefault("asked", {})
-    if asked.get("head") == head and C.NOW - asked.get("at", 0) < 60 * MIN:
-        return None
+    return next((a["at"] for a in record if a["repo"].lower() == repo.lower() and a["pr"] == pr["number"]
+                 and a["head"] == head and a["said"] == int(said)), None)
+
+
+def ask(repo, pr):
+    """Have the owner's door ask the connector to review the PR's head:
+    (when it was asked, or None; why not, or None; what failed, or None).
+    A door that failed (GitHub refused the comment, or systemd-run wouldn't
+    start it) is the caller's to strike; one whose checks said no isn't."""
+    if not door(repo):
+        return None, "this repo isn't one the owner's door asks in", None
+    n, head = pr["number"], pr["headRefOid"]
     if DRY:
-        log(f"  would: ask Codex to review {repo}#{pr['number']} at {head[:7]}")
-        return None
-    if C.comment(repo, pr["number"], f"{ASK}\n\n{why}") is None:
-        return "GitHub refused the comment"
-    st["asked"] = {"head": head, "at": C.NOW}
-    log(f"{repo}#{pr['number']}: asked Codex to review {head[:7]}: {why}")
-    return None
+        log(f"  would: ask Codex as the owner to review {repo}#{n} at {head[:7]}")
+        return None, None, None
+    out = ask_as_owner(repo, n, head)
+    what = out.get("outcome")
+    if what in ("posted", "asked"):
+        if what == "posted":
+            log(f"{repo}#{n}: asked Codex, as the owner, to review {head[:7]}")
+        return out["at"], None, None
+    if what == "declined":
+        return None, out["why"], None
+    return None, None, out.get("why") or "the owner's door said nothing"
+
+
+def ask_as_owner(repo, n, head):
+    """The owner's door (burrow-review-ask, config.askAsOwner) on the PR's
+    head: what came of it, as it says (its Outcome). It runs as a unit of
+    the machine user's own, as a proof build does, so it acts as that
+    user's gh login while this unit never holds it, and nothing of this
+    unit's environment (its App token) goes with it. Waited for: it
+    reads the PR and posts at most one comment."""
+    unit = "autoland-ask-" + hashlib.sha256(f"{repo}#{n}@{head}".encode()).hexdigest()[:16]
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    try:
+        p = subprocess.run(["systemd-run", "--user", "--wait", "--pipe", "--quiet", "--collect", f"--unit={unit}",
+                            "--", *CFG["askAsOwner"]["command"], repo, str(n), head],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"outcome": "failed", "why": f"systemd-run: {e}"}
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return {"outcome": "failed", "why": f"systemd-run: {p.stderr.strip()[-300:] or p.returncode}"}

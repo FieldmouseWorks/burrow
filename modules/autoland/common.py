@@ -2,11 +2,11 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, kick, token) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place.
 
-The steward talks to GitHub only as its GitHub App (config.app): the API
-through gh and git both, each owner's repos with a token of the App's
-installation on that owner. Whose repos a call is about is set around it
-(`acting_for`); a call outside one fails rather than going as the machine
-user's own gh login, which every Claude session on the machine shares.
+The steward talks to GitHub only as its GitHub App (config.app), through gh
+and git, each owner's repos with its installation's token on that owner, but
+for its one door that acts as the owner (reviewers.ask_as_owner), in a unit
+of its own. Whose repos a call is about is set around it (`acting_for`); a
+call outside one fails rather than going as the machine user's own gh login.
 `autoland-steward status` changes nothing, and reads as whoever runs it."""
 
 import contextlib

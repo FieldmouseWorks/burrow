@@ -265,6 +265,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "renovateRun": 7200,
         "nix": f"{tmp}/nix",
         "proofRun": PROOF_RUN, "bash": shutil.which("bash"), "git": shutil.which("git"), "runsDir": f"{tmp}/runs",
+        "askAsOwner": {"command": [f"{tmp}/review-ask"], "record": f"{tmp}/review-ask/asked.json", "repos": ["sam/r"]},
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
@@ -587,11 +588,40 @@ def clean(sha=head, comments=(), reviews=(), **kw):
     return mkpr(reviews=reviews, comments=[*comments, summary(sha)], sha=sha, **kw)
 
 
+# The owner's door (burrow-review-ask), stood in: the asks it posted as the
+# owner, (repo, number, head), and its record, kept as the real one keeps it
+# (reviewers.asked reads it). DOOR, while set, is what it says instead
+# (a declined or failed outcome), posting nothing.
+OWNER_ASKS, DOOR, SHOWN = [], {}, {}
+
+
+def owner_door(repo, n, head):
+    if DOOR:
+        return dict(DOOR)
+    said = int(V.verdict(repo, SHOWN["pr"])[1])
+    path = C.CFG["askAsOwner"]["record"]
+    try:
+        record = json.load(open(path))
+    except OSError:
+        record = {"asked": []}
+    for a in record["asked"]:
+        if (a["repo"], a["pr"], a["head"], a["said"]) == (repo, n, head, said):
+            return {"outcome": "asked", "at": a["at"]}
+    record["asked"].append({"repo": repo, "pr": n, "head": head, "said": said, "at": int(C.NOW)})
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(record, f)
+    OWNER_ASKS.append((repo, n, head))
+    return {"outcome": "posted", "at": int(C.NOW)}
+
+
 def run(pr, after, held=None, below=None):
     """One pass, `after` seconds after the head first showed up; held, a
     red-branch fix the branch's watch holds, and why; below, the open PR
     whose head branch is its base."""
     C.NOW = C.ts(T0) + after
+    SHOWN["pr"] = pr
+    OWNER_ASKS.clear()
     WROTE.clear()
     JOBS.clear()
     SINCE.clear()
@@ -622,11 +652,13 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
+    shutil.rmtree(f"{tmp}/review-ask", ignore_errors=True)
+    DOOR.clear()
     os.makedirs(os.path.join(f"{tmp}/state", M.GIT))
 
 
 REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
-        "onto": H.onto}  # the steward's own, for the checks of what it runs
+        "onto": H.onto, "ask_as_owner": V.ask_as_owner}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
@@ -649,3 +681,4 @@ def stand_in():
     C.lifecycle = lambda jid: (STATES.get(jid, "running"), HELD.get(jid, []))
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
+    V.ask_as_owner = owner_door
