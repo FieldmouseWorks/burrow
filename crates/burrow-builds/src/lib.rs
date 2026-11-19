@@ -35,6 +35,12 @@ pub fn audience(manifest: &[u8]) -> String {
     format!("{AUDIENCE}{}", hex(&Sha256::digest(manifest)))
 }
 
+/// Whether `s` is an upload's audience: [`AUDIENCE`], then 64 lowercase hex.
+pub fn is_audience(s: &str) -> bool {
+    s.strip_prefix(AUDIENCE)
+        .is_some_and(|d| d.len() == 64 && d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
 /// What an upload says it holds: each path, as `nix path-info --json` says
 /// it, in the order its NARs follow.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

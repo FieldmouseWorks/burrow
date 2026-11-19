@@ -308,6 +308,10 @@ impl Http {
             // Inside the token's five minutes, which the door reads after
             // nginx has the whole upload.
             .timeout_global(Some(std::time::Duration::from_secs(270)))
+            // nginx checks the token from the head before it reads a byte of
+            // the body (its 100 Continue), and refuses it before that: the
+            // refusal is read, not a body sent into a closed connection.
+            .timeout_await_100(Some(std::time::Duration::from_secs(30)))
             .http_status_as_error(false)
             .build()
             .into();
@@ -369,6 +373,7 @@ impl Door for Http {
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/octet-stream")
             .header("Content-Length", &len.to_string())
+            .header("Expect", "100-continue")
             .send(ureq::SendBody::from_reader(body))
             .map_err(|e| format!("the store at {} didn't answer: {e}", self.url))?;
         let status = r.status().as_u16();

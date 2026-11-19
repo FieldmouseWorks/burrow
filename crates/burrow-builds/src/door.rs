@@ -2,6 +2,13 @@
 //! (systemd's `Accept=yes`). It admits a job by Conary's rule, asked of `cn
 //! attest job` and never copied here, then only a public repo the machine
 //! lists, and hands the body to [`Store::upload`].
+//!
+//! Before nginx takes an upload's body it asks [`serve_admit`] (its
+//! `auth_request`, on a socket of its own) whether the head's token may
+//! write at all: the same [`admit`], asked with the audience the token
+//! claims, since the manifest it must name is in the body. So a client
+//! without a job's token is refused before nginx buffers a byte, and the
+//! door still holds the token to the manifest's audience once it has it.
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
@@ -10,7 +17,10 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{Key, Manifest, Stopped, Store, audience};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use crate::{Key, Manifest, Stopped, Store, audience, is_audience};
 
 /// What the module tells the door.
 #[derive(Debug, Clone, Deserialize)]
@@ -50,9 +60,51 @@ fn refused(status: u16, why: impl Into<String>) -> Answer {
     answer(status, json!({ "refused": why.into() }))
 }
 
-/// Serves one request from `input`, answering on `output`.
+/// What a request without a token is told.
+const NO_TOKEN: &str = "an upload carries its job's token, as Authorization: Bearer";
+
+/// The most bytes of a refusal [`serve_admit`] puts in its header, well
+/// inside what nginx takes of an upstream's head (proxy_buffer_size).
+const MOST_REASON: usize = 1024;
+
+/// Serves one upload from `input`, answering on `output`.
 pub fn serve(cfg: &Config, input: &mut dyn BufRead, output: &mut dyn Write) -> io::Result<()> {
-    let a = handle(cfg, input);
+    write_answer(output, &handle(cfg, input), "")
+}
+
+/// Serves one header-time check from `input`, nginx's `auth_request` before
+/// it takes an upload's body: 200 when the head's token may write, or the
+/// refusal [`admit`] gives. nginx drops a subrequest's body, so the refusal
+/// rides a header too (`Burrow-Refused`), for nginx to answer the client.
+pub fn serve_admit(
+    cfg: &Config,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    let a = check(cfg, input);
+    let header = if a.status == 200 {
+        String::new()
+    } else {
+        // JSON escapes every control character: it stays one header line,
+        // cut to fit as it's sent.
+        let mut why: Vec<char> = a.body["refused"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .collect();
+        why.truncate(MOST_REASON);
+        let line = loop {
+            let line = json!({ "refused": why.iter().collect::<String>() }).to_string();
+            if line.len() <= MOST_REASON || why.pop().is_none() {
+                break line;
+            }
+        };
+        format!("Burrow-Refused: {line}\r\n")
+    };
+    write_answer(output, &a, &header)
+}
+
+fn write_answer(output: &mut dyn Write, a: &Answer, headers: &str) -> io::Result<()> {
     let body = format!("{}\n", a.body);
     let reason = match a.status {
         200 => "OK",
@@ -67,7 +119,7 @@ pub fn serve(cfg: &Config, input: &mut dyn BufRead, output: &mut dyn Write) -> i
     };
     write!(
         output,
-        "HTTP/1.0 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.0 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
         a.status,
         body.len()
     )?;
@@ -135,6 +187,44 @@ fn handle(cfg: &Config, input: &mut dyn BufRead) -> Answer {
     a
 }
 
+/// The header-time check: the head's token, by [`admit`], with the audience
+/// it claims. That holds it to everything but the manifest it names (who
+/// signed it, until when, which job, which repo); the upload holds it to
+/// that once nginx has the body.
+fn check(cfg: &Config, input: &mut dyn BufRead) -> Answer {
+    let head = match head(input) {
+        Ok(h) => h,
+        Err(e) => return refused(400, e),
+    };
+    let Some(token) = head.token else {
+        return refused(401, NO_TOKEN);
+    };
+    let Some(claimed) = claimed_audience(&token) else {
+        return refused(
+            403,
+            "the token isn't a job's for this door: it names no upload's audience",
+        );
+    };
+    match admit(cfg, &token, &claimed) {
+        Ok(()) => answer(200, json!({ "admitted": true })),
+        Err(a) => a,
+    }
+}
+
+/// The audience a token claims, unverified: its payload's `aud`, when that
+/// is one upload's audience ([`is_audience`]) and nothing else. Only ever
+/// handed to cn, which verifies the token signs it.
+fn claimed_audience(token: &str) -> Option<String> {
+    let [_, payload, _] = token.split('.').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    claims["aud"]
+        .as_str()
+        .filter(|a| is_audience(a))
+        .map(str::to_owned)
+}
+
 /// An upload's body: its manifest's line, then its NARs.
 fn upload(cfg: &Config, token: Option<&str>, body: &mut dyn BufRead) -> Answer {
     let mut line = Vec::new();
@@ -152,10 +242,7 @@ fn upload(cfg: &Config, token: Option<&str>, body: &mut dyn BufRead) -> Answer {
         Err(e) => return refused(400, e),
     };
     let Some(token) = token else {
-        return refused(
-            401,
-            "an upload carries its job's token, as Authorization: Bearer",
-        );
+        return refused(401, NO_TOKEN);
     };
     if let Err(a) = admit(cfg, token, &audience(manifest)) {
         return a;

@@ -1,9 +1,11 @@
-# The build store as its module runs it: nginx serves the cache and hands
-# an upload to the socket-activated door, which asks cn (a stand-in here,
-# admitting the token `public` as a public listed repo's run and refusing
-# any other, as Conary's `cn attest job` does) and writes only NARs whose
-# hash is the manifest's. A store that trusts only the machine's key then
-# substitutes from it over HTTP, and nginx's fetch is what the cap reads.
+# The build store as its module runs it: nginx serves the cache, asks the
+# door's check whether an upload's head carries a job's token before it
+# reads the body, and hands the upload to the socket-activated door, which
+# asks cn (a stand-in here, admitting a token signed `public` for the
+# audience it's asked, refusing any other as Conary's `cn attest job` does)
+# and writes only NARs whose hash is the manifest's. A store that trusts
+# only the machine's key then substitutes from it over HTTP, and nginx's
+# fetch is what the cap reads.
 # Conary's own tests hold `cn attest job` to the signer rule; the crate's
 # hold the door to cn's answer and the cache to its cap.
 #
@@ -15,10 +17,37 @@
 let
   cn = pkgs.writeShellScriptBin "cn" ''
     case "$1" in policy) exit 0 ;; attest) ;; *) exit 1 ;; esac
-    case "$(cat)" in
+    while [ $# -gt 0 ]; do [ "$1" = --audience ] && asked=$2; shift; done
+    token=$(cat)
+    # The token's payload, base64url as a JWT's: its audience.
+    payload=$(printf %s "$token" | cut -d. -f2 | tr _- /+)
+    while [ $(( ''${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+    aud=$(printf %s "$payload" | base64 -d | ${pkgs.jq}/bin/jq -r .aud)
+    if [ "$aud" != "$asked" ]; then
+      echo "cn: the job's token doesn't hold: it's for $aud, not $asked" >&2; exit 65
+    fi
+    case "''${token##*.}" in
       public) echo '{"repository":"sam/homelab","visibility":"public"}' ;;
+      busy) exit 75 ;;
       *) echo "cn: the job's token doesn't hold: its token expired" >&2; exit 65 ;;
     esac
+  '';
+  # A client that says a gigabyte follows and sends a kilobyte: the status
+  # line nginx answers inside ten seconds, or a timeout. nginx that reads
+  # the body before it checks the token waits for the rest.
+  headOnly = pkgs.writeText "head-only.py" ''
+    import socket, sys
+    s = socket.create_connection(("localhost", 80), timeout=10)
+    auth = f"Authorization: Bearer {sys.argv[1]}\r\n" if sys.argv[1:] else ""
+    s.sendall(("POST /builds/upload HTTP/1.1\r\nHost: localhost\r\n" + auth
+               + "Content-Length: 1073741824\r\n\r\n").encode() + b"x" * 1024)
+    got = b""
+    while b"\r\n\r\n" not in got:
+        more = s.recv(65536)
+        if not more:
+            break
+        got += more
+    print(got.split(b"\r\n")[0].decode())
   '';
   # Two small paths of the machine's own, with no references.
   one = pkgs.writeText "one" "built once\n";
@@ -51,14 +80,23 @@ pkgs.testers.runNixOSTest {
     # burrow.user's default, whose group the ledger's directories take.
     users.users.dev.isNormalUser = true;
     nix.settings.experimental-features = [ "nix-command" ];
-    environment.systemPackages = [ pkgs.curl pkgs.jq ];
+    environment.systemPackages = [ pkgs.curl pkgs.jq pkgs.python3Minimal ];
     system.extraDependencies = [ one two three ];
     # Another site on the same nginx, which the store mustn't take down.
     services.nginx.virtualHosts."other.test".locations."/".return = "200 'other site'";
   };
 
   testScript = ''
-    import json
+    import base64, hashlib, json
+
+    def token(aud, sig):
+        """A job's token as GitHub shapes one: its payload claims `aud`, its
+        signature is what the stand-in cn reads."""
+        payload = base64.urlsafe_b64encode(json.dumps({"aud": aud}).encode()).decode().rstrip("=")
+        return f"e30.{payload}.{sig}"
+
+    def audience(m):
+        return "burrow-builds:v1:sha256:" + hashlib.sha256(m.encode()).hexdigest()
 
     def manifest(path):
         q = lambda f: machine.succeed(f"nix-store -q --{f} {path}").strip()
@@ -66,16 +104,18 @@ pkgs.testers.runNixOSTest {
         return {"path": path, "narHash": q("hash"), "narSize": int(q("size")),
                 "references": sorted(q("references").split(), reverse=True)}
 
-    def upload(token, paths, nars=None):
-        """POSTs paths' manifest and NARs (or `nars`, a file): the status."""
+    def upload(sig, paths, nars=None, aud=None):
+        """POSTs paths' manifest and NARs (or `nars`, a file) with a token
+        signed `sig` for the manifest (or `aud`): the status."""
         m = json.dumps({"paths": [manifest(p) for p in paths]})
+        t = token(aud or audience(m), sig)
         machine.succeed(f"printf '%s\\n' '{m}' >/tmp/body")
         if nars:
             machine.succeed(f"cat {nars} >>/tmp/body")
         for p in [] if nars else paths:
             machine.succeed(f"nix-store --dump {p} >>/tmp/body")
         return machine.succeed(
-            f"curl -sS -o /tmp/answer -w '%{{http_code}}' -H 'Authorization: Bearer {token}' "
+            f"curl -sS -o /tmp/answer -w '%{{http_code}}' -H 'Authorization: Bearer {t}' "
             "--data-binary @/tmp/body http://localhost/builds/upload"
         )
 
@@ -93,6 +133,7 @@ pkgs.testers.runNixOSTest {
     start_all()
     machine.wait_for_unit("burrow-builds-init.service")
     machine.wait_for_unit("burrow-builds.socket")
+    machine.wait_for_unit("burrow-builds-admit.socket")
     machine.wait_for_unit("nginx.service")
 
     with subtest("the cache is served, its key and nginx's fetches aren't"):
@@ -108,6 +149,37 @@ pkgs.testers.runNixOSTest {
         assert got == "403", got + machine.succeed("cat /tmp/answer")
         machine.succeed("grep 'its token expired' /tmp/answer")
         assert substitute("${one}", "/tmp/b") != 0
+
+    with subtest("without a job's token, nginx refuses before it reads the body"):
+        aud = audience("{}")
+        for sent, status in [
+            ("", "401"),
+            ("forged", "403"),
+            (token(aud, "forged"), "403"),
+        ]:
+            arg = f" '{sent}'" if sent else ""
+            got = machine.succeed(f"python3 ${headOnly}{arg}").strip()
+            assert got.split(" ")[1] == status, f"{sent!r}: {got}"
+        # The refusal is the door's, as it said it.
+        forged = token(aud, "forged")
+        got = machine.succeed(
+            f"curl -sS -o /tmp/answer -w '%{{http_code}}' -H 'Authorization: Bearer {forged}' "
+            "-H 'Content-Length: 1073741824' -X POST http://localhost/builds/upload"
+        )
+        assert got == "403", got
+        machine.succeed("jq -e '.refused | test(\"its token expired\")' /tmp/answer")
+
+    with subtest("a token for another upload is refused once its manifest is read"):
+        other = audience(json.dumps({"paths": [manifest("${two}")]}))
+        got = upload("public", ["${one}"], aud=other)
+        assert got == "403", got + machine.succeed("cat /tmp/answer")
+        machine.succeed(f"grep 'it.s for {other}, not' /tmp/answer")
+        assert substitute("${one}", "/tmp/b") != 0
+
+    with subtest("a check GitHub can't answer just now is one to try again"):
+        got = upload("busy", ["${one}"])
+        assert got == "503", got + machine.succeed("cat /tmp/answer")
+        machine.succeed("jq -e '.refused | test(\"try again\")' /tmp/answer")
 
     with subtest("a NAR that isn't its manifest's is never written"):
         machine.succeed("nix-store --dump ${two} >/tmp/two.nar")

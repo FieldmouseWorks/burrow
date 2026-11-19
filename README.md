@@ -459,8 +459,10 @@ Each has an entry below, and each can be imported on its own.
   `PATH/public-key`). A run writes it through the door
   ([crates/burrow-builds](crates/burrow-builds)) at `PATH/upload`: its
   manifest, NARs and its job's OIDC token, whose audience names the
-  manifest. The door asks Conary's `cn attest job` whether the job may sign,
-  takes only a public repo in `repos`, writes each NAR only once its hash is
+  manifest. The door asks Conary's `cn attest job` whether the job may sign
+  (from the request's head first, before nginx takes the body, so a client
+  without a job's token can't make nginx buffer an upload; then for the
+  manifest's audience), takes only a public repo in `repos`, writes each NAR only once its hash is
   the manifest's, and past `maxSize` drops what nginx served longest ago.
   flake-check.yml writes it, in shadow for now, once a repo's or its
   organization's Actions variables name it: `BURROW_BUILDS_URL`

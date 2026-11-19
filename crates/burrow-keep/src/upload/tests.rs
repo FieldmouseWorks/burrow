@@ -217,6 +217,8 @@ impl Machine {
                     let mut input = BufReader::new(s.try_clone().unwrap());
                     let mut output = s;
                     if &first == b"POST" {
+                        // As nginx, once it has checked the head.
+                        output.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
                         door::serve(&cfg, &mut input, &mut output).unwrap();
                     } else {
                         serve_file(&cfg.dir, &mut input, &mut output);
