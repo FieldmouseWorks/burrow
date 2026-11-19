@@ -44,6 +44,7 @@ pub fn shadow(cold: &[String]) {
         key: var("BUILDS_KEY"),
         temp: temp(),
         nix_config: None,
+        deadline: DEADLINE,
     };
     let mut lines = Vec::new();
     if at.key.is_empty() {
@@ -174,6 +175,8 @@ pub struct Store {
     pub temp: PathBuf,
     /// The nix config to ask with, when not the process's.
     pub nix_config: Option<String>,
+    /// How long one question to it may take, in seconds: [`DEADLINE`].
+    pub deadline: &'static str,
 }
 
 impl Store {
@@ -190,7 +193,7 @@ impl Store {
     /// A nix command that asks the store only, under a deadline, with a
     /// narinfo cache of its own (`work`) so what it learns stays here.
     fn asking(&self, work: &Path, args: &[&str]) -> Command {
-        let mut c = self.nix("timeout", &[DEADLINE, "nix"]);
+        let mut c = self.nix("timeout", &[self.deadline, "nix"]);
         c.args(["--extra-experimental-features", "nix-command"])
             .args(args)
             .args([
@@ -232,16 +235,18 @@ impl Store {
         }
         let dir = work.join("narinfo");
         fs::create_dir_all(&dir)?;
+        // One deadline for the whole batch: curl's own `--max-time` is each
+        // transfer's, so a stalled store would hold a leg once per output.
         let mut c = self.nix(
-            "curl",
+            "timeout",
             &[
+                self.deadline,
+                "curl",
                 "-sS",
                 "--proto",
                 "=https,http",
                 "--connect-timeout",
                 "10",
-                "--max-time",
-                DEADLINE,
                 "-w",
                 "%{urlnum} %{response_code}\\n",
             ],
@@ -254,6 +259,13 @@ impl Store {
                 .arg(format!("{url}/{hash}.narinfo"));
         }
         let o = output(c)?;
+        if o.status.code() == Some(124) {
+            return Err(err(format!(
+                "its narinfos for {} paths took past the {}s deadline",
+                paths.len(),
+                self.deadline
+            )));
+        }
         let mut answered = vec![None; paths.len()];
         for l in String::from_utf8_lossy(&o.stdout).lines() {
             if let Some((Ok(i), Ok(code))) = l
@@ -381,7 +393,7 @@ impl Store {
                     "--connect-timeout",
                     "10",
                     "--max-time",
-                    DEADLINE,
+                    self.deadline,
                     "-r",
                     &format!("0-{}", SAMPLE - 1),
                     "-o",

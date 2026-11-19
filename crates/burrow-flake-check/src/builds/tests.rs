@@ -248,6 +248,7 @@ fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
         key: fs::read_to_string(&pk).unwrap().trim().to_owned(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     let r = store.ask(&[served, unsigned, missing]).unwrap();
     assert_eq!(r.served, ["x"]);
@@ -294,6 +295,7 @@ fn with_no_key_named_only_what_needs_no_signature_counts() {
         key: String::new(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     let r = store.ask(&cold).unwrap();
     assert_eq!(r.served, ["x"]);
@@ -316,6 +318,7 @@ fn an_http_store_with_none_of_the_outputs_says_none() {
         key: String::new(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     let r = store.ask(&cold).unwrap();
     assert!(r.served.is_empty() && r.bytes == 0, "{:?}", r.served);
@@ -341,8 +344,45 @@ fn a_store_that_doesnt_answer_is_an_error_to_say() {
         key: String::new(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     assert!(store.ask(&[drv]).is_err());
+}
+
+/// A store that takes its connections and never answers holds a leg for
+/// one deadline, however many outputs it's asked about: curl's own
+/// `--max-time` is each transfer's, so the batch has a deadline of its own.
+#[test]
+fn a_store_that_stalls_holds_a_leg_one_deadline_not_one_per_output() {
+    let h = Here::new();
+    let cold = [
+        h.drv(&built("one")),
+        h.drv(&built("two")),
+        h.drv(&built("three")),
+    ];
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/builds", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for c in l.incoming() {
+            held.extend(c.ok());
+        }
+    });
+    let store = Store {
+        url,
+        key: String::new(),
+        temp: h.dir.clone(),
+        nix_config: Some(h.config()),
+        deadline: "2",
+    };
+    let start = std::time::Instant::now();
+    let e = store.ask(&cold).unwrap_err().to_string();
+    let took = start.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "three stalled outputs took {took:?}"
+    );
+    assert!(e.contains("past the 2s deadline"), "{e}");
 }
 
 #[test]
