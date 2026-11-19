@@ -31,7 +31,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use burrow_github::{Api, Error, call, encode, query};
+use burrow_github::{Api, call, encode, query};
 use burrow_upkeep::flaky::login;
 use burrow_upkeep::verdict::{self, CONNECTOR, Verdict};
 use serde::{Deserialize, Serialize};
