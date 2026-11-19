@@ -22,10 +22,9 @@ fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value
 fn the_drain_picks() {
     let b = Box::new();
     let mut p = b.pass();
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let old = "2026-10-01T00:00:00Z";
     let new = "2026-11-01T00:00:00Z";
-    let mut pick = |items: &[Value]| p.pick_ready(&t, items);
+    let mut pick = |items: &[Value]| p.pick_ready(items);
 
     let game = found("sam/game", 4, "sam", &["ready"], old);
     let game_newer = found("sam/game", 5, "sam", &["ready"], new);
@@ -47,7 +46,7 @@ fn the_drain_picks() {
 
     for passed_over in [
         found("sam/game", 4, "player", &["ready"], old),
-        found("sam/game", 4, "sam", &["ready", "codex"], old),
+        found("sam/game", 4, "sam", &["ready", "claude"], old),
         found("sam/game", 4, "sam", &["ready", "needs-owner"], old),
         found("sam/game", 4, "sam", &["ready", "probe"], old),
         found("sam/elsewhere", 4, "sam", &["ready"], old),
@@ -68,25 +67,12 @@ fn the_drain_picks() {
     );
 }
 
-// Room for the drain: a Codex slot free; for Claude, a slot free beyond the
-// pipeline's and nobody in line.
+// Room for the drain: a slot free beyond the pipeline's and nobody in line.
 #[test]
 fn room_for_the_drain() {
     let b = Box::new();
     let cfg = &b.cfg;
-    assert!(crate::slot::room(cfg, Engine::Codex));
-    let held: Vec<fs::File> = (1..=cfg.codex_slots)
-        .map(|i| {
-            let f = fs::File::create(cfg.jobs.join(".codex-slots").join(i.to_string())).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
-    assert!(!crate::slot::room(cfg, Engine::Codex));
-    drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Codex)));
-
-    assert!(crate::slot::room(cfg, Engine::Claude));
+    assert!(crate::slot::room(cfg, Engine::Claude, false));
     let slots = cfg.jobs.join(".slots");
     let held: Vec<fs::File> = (1..cfg.max_jobs)
         .map(|i| {
@@ -96,9 +82,9 @@ fn room_for_the_drain() {
         })
         .collect();
     // One free, and it's the pipeline's.
-    assert!(!crate::slot::room(cfg, Engine::Claude));
+    assert!(!crate::slot::room(cfg, Engine::Claude, false));
     drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Claude)));
+    assert!(soon(|| crate::slot::room(cfg, Engine::Claude, false)));
 }
 
 /// Whether `f` holds within a second. A slot's lock dropped here can still
@@ -134,16 +120,17 @@ fn the_drain_picks_across_every_repo() {
         &[boxed.clone(), found("sam/box", 9, "sam", &["later"], old)],
     )
     .unwrap();
-    // Not open any more, as GitHub has it now: left, its repo's pass booked.
+    // Closed, as GitHub has it now: left (and its list put right).
     let mut p = b.pass();
     p.drain().unwrap();
     assert!(!b.log().contains("labels[]="), "{}", b.log());
-    assert!(p.wake.contains_key("sam/box"));
     on_github(&b, &boxed);
+    p.note_ready("sam/box", std::slice::from_ref(&boxed))
+        .unwrap();
     b.pass().drain().unwrap();
     assert!(
         b.log()
-            .contains("-X POST repos/sam/box/issues/8/labels -f labels[]=codex"),
+            .contains("-X POST repos/sam/box/issues/8/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -155,7 +142,7 @@ fn the_drain_picks_across_every_repo() {
     on_github(&b, &game[game.len() - 1]);
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
+        b.log().contains("issues/4/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -190,18 +177,9 @@ fn the_drain_comes_back() {
     fs::remove_file(b.path("fail")).unwrap();
 
     on_github(&b, &four);
-    let cfg = &b.cfg;
-    let held: Vec<fs::File> = (1..=cfg.codex_slots)
-        .map(|i| {
-            let dir = cfg.jobs.join(".codex-slots");
-            fs::create_dir_all(&dir).unwrap();
-            let f = fs::File::create(dir.join(i.to_string())).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
+    let held = hold_engine(&b, Engine::Claude);
     b.pass().drain().unwrap();
-    let waiting = state(&b).join(super::WAITING);
+    let waiting = super::record::files::drain_waiting(&state(&b));
     assert_eq!(fs::read_to_string(&waiting).unwrap(), "sam/game\n");
     drop(held);
     assert!(
@@ -211,7 +189,7 @@ fn the_drain_comes_back() {
         }),
         "handed on: no longer waiting"
     );
-    assert!(b.log().contains("issues/4/labels -f labels[]=codex"));
+    assert!(b.log().contains("issues/4/labels -f labels[]=claude"));
 
     // Handed on, its job not started yet: at its limit (one here), the pass
     // books another for when the mark is let go.
@@ -221,7 +199,7 @@ fn the_drain_comes_back() {
             "sam/game",
             4,
             "sam",
-            &["ready", "codex"],
+            &["ready", "claude"],
             "2026-10-01T00:00:00Z",
         ),
     );
@@ -258,7 +236,7 @@ fn one_repo_cannot_hold_up_the_drain() {
         b.log()
     );
     assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
+        b.log().contains("issues/4/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -289,13 +267,13 @@ fn a_label_refused_does_not_hold_up_the_drain() {
     let mut p = b.pass();
     p.drain().unwrap();
     let log = b.log();
-    assert!(log.contains("issues/8/labels -f labels[]=codex"), "{log}");
+    assert!(log.contains("issues/8/labels -f labels[]=claude"), "{log}");
     assert!(!state.join("sam_box-8").exists(), "its record goes");
     assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
     assert!(!log.contains("api repos/sam/box/issues/9"), "{log}");
-    assert!(log.contains("issues/4/labels -f labels[]=codex"), "{log}");
+    assert!(log.contains("issues/4/labels -f labels[]=claude"), "{log}");
     assert!(state.join("sam_game-4/drained").exists());
-    assert_eq!(log.matches("labels[]=codex").count(), 2, "{log}");
+    assert_eq!(log.matches("labels[]=claude").count(), 2, "{log}");
 
     // Taken again: the retry hands the refused one on, the pipeline's first.
     fs::remove_file(b.path("fail")).unwrap();
@@ -303,8 +281,8 @@ fn a_label_refused_does_not_hold_up_the_drain() {
     let before = b.log().len();
     b.pass().drain().unwrap();
     let log = b.log()[before..].to_owned();
-    assert!(log.contains("issues/8/labels -f labels[]=codex"), "{log}");
-    assert_eq!(log.matches("labels[]=codex").count(), 1, "{log}");
+    assert!(log.contains("issues/8/labels -f labels[]=claude"), "{log}");
+    assert_eq!(log.matches("labels[]=claude").count(), 1, "{log}");
     assert!(state.join("sam_box-8/drained").exists());
 }
 
@@ -335,18 +313,18 @@ fn a_stalled_hand_on_holds_its_place() {
             .unwrap();
     };
     b.pass().drain().unwrap();
-    assert!(b.log().contains("issues/4/labels -f labels[]=codex"));
+    assert!(b.log().contains("issues/4/labels -f labels[]=claude"));
     assert_eq!(
         fs::read_to_string(state.join("sam_game-4/drained")).unwrap(),
         "sam/game#4\n"
     );
     // Its job never started, and GitHub has the label on still.
     backdate(4);
-    on_github(&b, &found("sam/game", 4, "sam", &["ready", "codex"], old));
+    on_github(&b, &found("sam/game", 4, "sam", &["ready", "claude"], old));
     let before = b.log().len();
     b.pass().drain().unwrap();
     let log = b.log()[before..].to_owned();
-    assert!(!log.contains("labels[]=codex"), "{log}");
+    assert!(!log.contains("labels[]=claude"), "{log}");
     assert!(state.join("sam_game-4/drained").exists());
     // Removing the last engine label parks #4 and releases its reservation.
     // The next ready issue can start, while #4 stays excluded.
@@ -354,8 +332,8 @@ fn a_stalled_hand_on_holds_its_place() {
     let before = b.log().len();
     b.pass().drain().unwrap();
     let log = b.log()[before..].to_owned();
-    assert!(!log.contains("issues/4/labels -f labels[]=codex"), "{log}");
-    assert!(log.contains("issues/5/labels -f labels[]=codex"), "{log}");
+    assert!(!log.contains("issues/4/labels -f labels[]=claude"), "{log}");
+    assert!(log.contains("issues/5/labels -f labels[]=claude"), "{log}");
     assert!(!state.join("sam_game-4/drained").exists());
     let mark = state.join("sam_game-5/drained");
     let made = crate::mtime(&mark).unwrap();
@@ -378,7 +356,7 @@ fn running_handed_references_are_not_drained() {
     fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
     let mut p = b.pass();
-    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(p.pick_ready(std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
     assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
@@ -390,29 +368,28 @@ fn running_handed_references_are_not_drained() {
         ("sam/game", 7, false),
     ] {
         let i = found(repo, n, "sam", &["ready"], "2026-10-01T00:00:00Z");
-        assert_eq!(p.pick_ready(t, &[i]).is_none(), claimed);
+        assert_eq!(p.pick_ready(&[i]).is_none(), claimed);
     }
     p.note_ready("sam/box", std::slice::from_ref(&seven))
         .unwrap();
     on_github(&b, &seven);
     b.pass().drain().unwrap();
-    assert!(!b.log().contains("labels[]=codex"));
+    assert!(!b.log().contains("labels[]=claude"));
     // Waiting for a slot still owns the brief.
     fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
-    assert_eq!(b.pass().pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(b.pass().pick_ready(std::slice::from_ref(&seven)), None);
     fs::remove_file(b.path("active")).unwrap();
     assert!(
         !b.pass()
             .sorted("sam/box", t, &unsorted, &b.pass().claimed("sam/box"))
     );
     b.pass().drain().unwrap();
-    assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
+    assert!(b.log().contains("issues/7/labels -f labels[]=claude"));
 }
 
 fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
     let (dir, count) = match engine {
         Engine::Claude => (".slots", b.cfg.max_jobs),
-        Engine::Codex => (".codex-slots", b.cfg.codex_slots),
     };
     let dir = b.cfg.jobs.join(dir);
     fs::create_dir_all(&dir).unwrap();
@@ -426,48 +403,20 @@ fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
 }
 
 #[test]
-fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
-    for (opener, labels, roles, mapping, selected) in [
-        ("worker[bot]", vec!["ready"], "", None, Engine::Claude),
-        (
-            "worker[bot]",
-            vec!["ready"],
-            "machine-inbox codex",
-            None,
-            Engine::Codex,
-        ),
-        (
-            "worker[bot]",
-            vec!["ready"],
-            "machine-inbox claude\nmachine-inbox@SAM/GAME codex",
-            None,
-            Engine::Codex,
-        ),
+fn drain_admission_follows_room_on_the_candidates_engine() {
+    for (opener, labels, roles, mapping) in [
+        ("worker[bot]", vec!["ready"], "", None),
+        ("worker[bot]", vec!["ready"], "machine-inbox claude", None),
         (
             "sam",
             vec!["ready", "kind"],
-            "special claude\nspecial@sam/game codex",
+            "special claude\nspecial@sam/game claude",
             Some("kind"),
-            Engine::Codex,
         ),
         // The label the drain is about to add can itself select a role.
-        (
-            "sam",
-            vec!["ready"],
-            "special claude",
-            Some("codex"),
-            Engine::Claude,
-        ),
-        // Ordinary human issues keep the enrollment label's engine.
-        (
-            "sam",
-            vec!["ready"],
-            "machine-inbox claude",
-            None,
-            Engine::Codex,
-        ),
+        ("sam", vec!["ready"], "special claude", Some("claude")),
     ] {
-        for full in [Engine::Claude, Engine::Codex] {
+        for full in [false, true] {
             let mut b = Box::new();
             let dir = b.path("settings");
             crate::config::tests::routes(&mut b.cfg, &dir, roles);
@@ -483,23 +432,17 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
                 .note_ready("sam/game", std::slice::from_ref(&i))
                 .unwrap();
             on_github(&b, &i);
-            let _held = hold_engine(&b, full);
+            let _held = full.then(|| hold_engine(&b, Engine::Claude));
             b.pass().drain().unwrap();
-            let admitted = b.log().contains("issues/4/labels -f labels[]=codex");
+            let admitted = b.log().contains("issues/4/labels -f labels[]=claude");
             assert_eq!(
                 admitted,
-                selected != full,
-                "{roles:?}, {mapping:?}, {opener}, full={full:?}: {}",
+                !full,
+                "{roles:?}, {mapping:?}, {opener}, full={full}: {}",
                 b.log()
             );
             assert_eq!(
-                b.cfg
-                    .inbox
-                    .as_ref()
-                    .unwrap()
-                    .state
-                    .join(super::WAITING)
-                    .exists(),
+                super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists(),
                 !admitted
             );
         }
@@ -507,82 +450,7 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
 }
 
 #[test]
-fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
-    for (roles, selected) in [
-        ("machine-inbox claude", Engine::Claude),
-        (
-            "machine-inbox claude\nmachine-inbox@sam/game codex",
-            Engine::Codex,
-        ),
-        ("machine-inbox claude over 80 codex", Engine::Codex),
-    ] {
-        for full_codex in [false, true] {
-            let mut b = Box::new();
-            let dir = b.path("settings");
-            crate::config::tests::routes(&mut b.cfg, &dir, roles);
-            b.cfg
-                .inbox
-                .as_mut()
-                .unwrap()
-                .authors
-                .push(burrow_github::fake::author("worker[bot]"));
-            fs::create_dir_all(&b.cfg.jobs).unwrap();
-            let until = crate::now() + 3600;
-            fs::write(
-                b.cfg.jobs.join(crate::usage::FILE),
-                json!({"at":crate::now(), "until":until, "said":"spent", "job":"old"}).to_string(),
-            )
-            .unwrap();
-            let meters = b.path("meters");
-            fs::create_dir_all(&meters).unwrap();
-            fs::write(
-                meters.join("codex.json"),
-                json!({"windows":{}, "credits":true, "read_at":crate::now()}).to_string(),
-            )
-            .unwrap();
-            b.cfg.meters = Some(meters);
-            let i = found(
-                "sam/game",
-                4,
-                "worker[bot]",
-                &["ready"],
-                "2026-10-01T00:00:00Z",
-            );
-            b.pass()
-                .note_ready("sam/game", std::slice::from_ref(&i))
-                .unwrap();
-            on_github(&b, &i);
-            let _held = full_codex.then(|| hold_engine(&b, Engine::Codex));
-            let mut p = b.pass();
-            p.drain().unwrap();
-            let admitted = b.log().contains("issues/4/labels -f labels[]=codex");
-            assert_eq!(
-                admitted,
-                selected == Engine::Codex && !full_codex,
-                "{roles}: {}",
-                b.log()
-            );
-            if selected == Engine::Claude {
-                assert_eq!(p.wake.get("sam/game"), Some(&until));
-            } else {
-                assert_ne!(p.wake.get("sam/game"), Some(&until));
-            }
-            assert_eq!(
-                b.cfg
-                    .inbox
-                    .as_ref()
-                    .unwrap()
-                    .state
-                    .join(super::WAITING)
-                    .exists(),
-                !admitted
-            );
-        }
-    }
-}
-
-#[test]
-fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
+fn a_usage_hold_books_the_drain_for_its_reset() {
     let mut b = Box::new();
     b.cfg
         .inbox
@@ -590,47 +458,29 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
         .unwrap()
         .authors
         .push(burrow_github::fake::author("worker[bot]"));
-    let older = found(
+    fs::create_dir_all(&b.cfg.jobs).unwrap();
+    let until = crate::now() + 3600;
+    fs::write(
+        b.cfg.jobs.join(crate::usage::FILE),
+        json!({"at":crate::now(), "until":until, "said":"spent", "job":"old"}).to_string(),
+    )
+    .unwrap();
+    let i = found(
         "sam/game",
         4,
         "worker[bot]",
         &["ready"],
         "2026-10-01T00:00:00Z",
     );
-    let newer = found("sam/game", 5, "sam", &["ready"], "2026-11-01T00:00:00Z");
     b.pass()
-        .note_ready("sam/game", &[older.clone(), newer.clone()])
+        .note_ready("sam/game", std::slice::from_ref(&i))
         .unwrap();
-    on_github(&b, &older);
-    on_github(&b, &newer);
-    let held = hold_engine(&b, Engine::Claude);
-    b.pass().drain().unwrap();
-    assert!(
-        !b.log().contains("issues/4/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
-    assert!(
-        b.log().contains("issues/5/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
-    let state = &b.cfg.inbox.as_ref().unwrap().state;
-    assert!(
-        state.join(super::WAITING).exists(),
-        "the blocked engine still needs a wake-up"
-    );
-    // The successful enrollment is now visible on the live issue snapshot.
-    let mut enrolled = newer.clone();
-    enrolled["labels"] = json!([{"name":"ready"},{"name":"codex"}]);
-    on_github(&b, &enrolled);
-    drop(held);
-    b.pass().drain().unwrap();
-    assert!(
-        !b.log().contains("issues/4/labels -f labels[]=codex"),
-        "drainJobs remains one: {}",
-        b.log()
-    );
+    on_github(&b, &i);
+    let mut p = b.pass();
+    p.drain().unwrap();
+    assert!(!b.log().contains("labels[]="), "{}", b.log());
+    assert_eq!(p.wake.get("sam/game"), Some(&until));
+    assert!(super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists());
 }
 
 // A finished turn parked on GitHub still owns its brief until its live wait goes.
@@ -652,9 +502,9 @@ fn awaiting_handed_references_are_not_drained() {
     // A declaration for a future turn and an empty live wait do not own work.
     fs::write(job.join("await.next"), &wait).unwrap();
     fs::write(job.join("await"), "").unwrap();
-    assert!(p.pick_ready(t, std::slice::from_ref(&seven)).is_some());
+    assert!(p.pick_ready(std::slice::from_ref(&seven)).is_some());
     fs::write(job.join("await"), &wait).unwrap();
-    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    assert_eq!(p.pick_ready(std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
     assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
@@ -662,12 +512,12 @@ fn awaiting_handed_references_are_not_drained() {
         .unwrap();
     on_github(&b, &seven);
     b.pass().drain().unwrap();
-    assert!(!b.log().contains("labels[]=codex"));
+    assert!(!b.log().contains("labels[]=claude"));
     // Stopping or finishing the job removes its live wait, releasing the brief.
     fs::remove_file(job.join("await")).unwrap();
     assert!(!p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     b.pass().drain().unwrap();
-    assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
+    assert!(b.log().contains("issues/7/labels -f labels[]=claude"));
 }
 
 #[test]
@@ -690,7 +540,7 @@ fn paused_ready_issues_wait_without_relabelling() {
     on_github(&b, &active);
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
+        b.log().contains("issues/4/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -702,9 +552,8 @@ fn paused_ready_issues_wait_without_relabelling() {
         .unwrap()
         .allowed
         .push("sam/box".into());
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     assert_eq!(
-        b.pass().pick_ready(&t, &[paused]),
+        b.pass().pick_ready(&[paused]),
         Some(("sam/box".into(), "8".into()))
     );
 }
@@ -733,12 +582,12 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         .unwrap()
         .at_once = 1;
     let p = b.pass();
-    assert!(!p.sorting_slot(&sorting));
+    assert!(!p.holds_sorting_slot(&sorting));
     assert!(!p.record_uses_capacity(&drained));
     // A genuinely active paused turn still consumes shared capacity.
     fs::write(b.path("active"), "").unwrap();
     fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
-    assert!(p.sorting_slot(&sorting));
+    assert!(p.holds_sorting_slot(&sorting));
     assert!(p.record_uses_capacity(&drained));
     // A queued automated worker of a paused repository is held, not counted.
     fs::write(b.cfg.jobs.join("s1/role"), "work\n").unwrap();
@@ -752,7 +601,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     on_github(&b, &ready);
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
+        b.log().contains("issues/4/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -765,7 +614,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert_eq!(
         super::dirs(&state.join(".triage"), "")
             .iter()
-            .filter(|d| b.pass().sorting_slot(d))
+            .filter(|d| b.pass().holds_sorting_slot(d))
             .count(),
         0
     );
@@ -810,7 +659,7 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         ),
     ];
     for i in &items {
-        let (repo, n) = p.pick_ready(&t, std::slice::from_ref(i)).unwrap();
+        let (repo, n) = p.pick_ready(std::slice::from_ref(i)).unwrap();
         p.note_ready(
             &repo,
             &items
@@ -843,7 +692,7 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
     );
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
+        b.log().contains("issues/4/labels -f labels[]=claude"),
         "{}",
         b.log()
     );
@@ -887,7 +736,7 @@ fn drain_counts_turns_instead_of_parked_jobs() {
                 fs::write(job.turn("1", "slot"), "1").unwrap();
             }
             if state == "paused" {
-                crate::policy::mark(&job, "running", false).unwrap();
+                crate::policy::mark(&job, "running", false, None).unwrap();
                 b.cfg
                     .settings
                     .as_mut()
@@ -937,7 +786,7 @@ fn drain_counts_turns_instead_of_parked_jobs() {
         }
         b.pass().drain().unwrap();
         assert_eq!(
-            b.log().contains("issues/4/labels -f labels[]=codex"),
+            b.log().contains("issues/4/labels -f labels[]=claude"),
             !blocked,
             "{state}: {}",
             b.log()
@@ -992,7 +841,7 @@ fn full_drain_only_fetches_cached_repair_candidates() {
         );
     }
     assert!(log.contains("api repos/sam/game/issues/10"), "{log}");
-    assert!(log.contains("issues/10/labels -f labels[]=codex"), "{log}");
+    assert!(log.contains("issues/10/labels -f labels[]=claude"), "{log}");
 }
 
 mod admission;

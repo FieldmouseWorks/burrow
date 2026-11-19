@@ -19,6 +19,15 @@ to extract; exact-key lookup after save detects a save that produced no entry.
 The negative job already makes extraction failure a hard failure when its
 lookup found an entry.
 
+The build store's upload (`soft/builds-write`, after the gate, in
+flake-check.yml) degrades when the store can't be written: it doesn't
+answer, it fails, or it takes longer than the step's deadline. A store
+whose door refuses the job isn't degraded: who may write is the door's
+decision (Conary's signer rule), and a PR's run of its own copy of the
+workflow is refused on every push, which would otherwise read as a standing
+degradation. The step says so in its summary and succeeds, as it does for a
+job with no OIDC token to send.
+
 Any machine importing burrow's watchdog module can set:
 
 ```nix
@@ -73,7 +82,8 @@ run clears the consecutive-default condition; PR signals expire with their
 24-hour window. A stall that persists keeps its original start time.
 
 A run that never starts has no step outcome to report. That is the separate
-missing-runner case in [#598](https://github.com/FieldmouseWorks/burrow/issues/598),
+missing-runner case, which the steward handles by running such a head again
+([#694](https://github.com/FieldmouseWorks/burrow/issues/694), fixed in #778),
 not a degradation signal. Likewise a service that dies before writing its
 source is covered by failed-unit and stale-source watches; this signal does
 not replace those.

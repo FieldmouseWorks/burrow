@@ -1,4 +1,5 @@
 //! Bounded plans are data, never a conversation to resume.
+use crate::record::{JobFile, TurnFile};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TASKS: usize = 16;
@@ -7,7 +8,7 @@ pub const MAX_INPUT: usize = 64_000;
 
 /// All turn-start paths, including question defaults, honor the same hold.
 pub(crate) fn admit(job: &crate::job::Job) -> Result<(), String> {
-    if job.path("planning-hold").exists() || pending_split(job).is_some() {
+    if job.file(JobFile::PlanningHold).exists() || pending_split(job).is_some() {
         return Err(format!("{} is waiting for a bounded task plan", job.id));
     }
     Ok(())
@@ -31,8 +32,11 @@ pub(crate) fn pending_split(job: &crate::job::Job) -> Option<String> {
 }
 
 pub(crate) fn declare_split(job: &crate::job::Job, n: &str, tasks: &[Task]) -> std::io::Result<()> {
-    crate::swap(&job.turn(n, "split"), &serde_json::to_string(tasks)?)?;
-    crate::swap(&job.path("planning-hold"), n)
+    crate::swap(
+        &job.turn_file(n, TurnFile::Split),
+        &serde_json::to_string(tasks)?,
+    )?;
+    crate::swap(&job.file(JobFile::PlanningHold), n)
 }
 
 pub fn prompt(input: &str, source: &std::path::Path) -> String {
@@ -188,7 +192,7 @@ mod tests {
             let given = prompt(&source, std::path::Path::new("@PROJ_TASK_SOURCE@"));
             let new = crate::cmd::New {
                 task_source: Some(source.clone()),
-                engine: Some(crate::engine::Engine::Codex),
+                engine: Some(crate::engine::Engine::Claude),
                 local_work: true,
                 ..Default::default()
             };
@@ -203,7 +207,7 @@ mod tests {
             let actual = std::fs::read_to_string(job.path("prompt.1")).unwrap();
             assert!(actual.len() < MAX_INPUT);
             assert!(actual.contains(&job.path("task-source").to_string_lossy().to_string()));
-            assert_eq!(crate::read(&job.path("engine")).as_deref(), Some("codex"));
+            assert_eq!(crate::read(&job.path("engine")).as_deref(), Some("claude"));
             previous.push(id);
         }
     }

@@ -526,13 +526,15 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       # prompt (the update came between turns, or ran across one).
       machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && mv 2.result result && touch outcome result'")
       assert state(job) == "done", state(job)
-      machine.succeed(f"test -s {d}/2.outcome && test -e {d}/2.result && ! test -e {d}/outcome && ! test -e {d}/result")
+      # Reading its state moves nothing: the next turn's start adopts them.
+      machine.succeed(f"test -s {d}/outcome && test -e {d}/result && ! test -e {d}/2.outcome")
+      machine.succeed(f"su - dev -c 'cd {d} && mv outcome 2.outcome && mv result 2.result'")
       # One older than the latest turn's prompt is an earlier turn's, not its.
       machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && touch -d \"1 hour ago\" outcome'")
       assert state(job) == "failed", state(job)
-      machine.fail(f"test -e {d}/outcome")
       machine.succeed(f"su - dev -c 'echo done >{d}/2.outcome'")
       assert state(job) == "done", state(job)
+      machine.succeed(f"rm {d}/outcome")
 
   with subtest("a turn running across the update keeps its outcome until it ends"):
       # The old _exec reads its outcome back to publish its waits.

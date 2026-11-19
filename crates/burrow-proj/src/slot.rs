@@ -47,6 +47,7 @@ use crate::config::Config;
 use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
+use crate::record::{JobFile, TurnFile, TurnMarker};
 use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
 
@@ -148,7 +149,7 @@ pub(crate) fn entry_at(job: &Job, id: &str, given: Class, arrived: i64) -> Strin
         return order;
     }
     let prefix = if given == Class::First { 1 } else { 2 };
-    let since = read(&job.path("since"));
+    let since = read(&job.file(JobFile::Since));
     let began = since.as_deref().and_then(|s| s.lines().next());
     match began.filter(|s| !s.is_empty()) {
         Some(s) => format!("{prefix}-{s}000000000-{id}"),
@@ -171,9 +172,9 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some()
+    if usage::login::out_for(cfg, usage::login::sandboxed(cfg, id)).is_some()
         || automation_paused(cfg, &job)
-        || crate::github_quota::held(cfg, &job, Engine::Claude).is_some()
+        || crate::github_quota::held(cfg, &job).is_some()
     {
         return Ok(None);
     }
@@ -194,14 +195,17 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
 fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     let _held = job.lock()?;
     if automation_paused(job.cfg, job) {
-        crate::policy::mark(job, "queued", false).map_err(io::Error::other)?;
+        crate::policy::mark(job, "queued", false, Some(crate::policy::DENIED))
+            .map_err(io::Error::other)?;
+        crate::record::noted(job, &format!("turn {n} parked by the policy"));
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
     let _ = fs::remove_file(crate::policy::path(job, "order"));
-    crate::state_reads::write(job.turn(n, "class"), format!("{class}\n"))?;
-    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
+    crate::state_reads::write(job.turn_file(n, TurnFile::Class), format!("{class}\n"))?;
+    crate::record::mark_turn(job, n, TurnMarker::Slot).write(format!("{s}\n"))?;
     crate::policy::accepted(job).map_err(io::Error::other)?;
     snapshot::stream::notify(job.cfg);
+    crate::record::noted(job, &format!("turn {n} took a slot"));
     Ok(())
 }
 
@@ -212,7 +216,7 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
 /// at the top of its [`take`].
 fn unmark(job: &Job, n: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    match crate::state_reads::remove(job.turn(n, "withdrawable")) {
+    match crate::state_reads::remove(job.turn_file(n, TurnFile::Withdrawable)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -349,9 +353,7 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             continue;
         }
         let other = Job::new(cfg, fid);
-        if automation_paused(cfg, &other)
-            || crate::github_quota::held(cfg, &other, Engine::Claude).is_some()
-        {
+        if automation_paused(cfg, &other) || crate::github_quota::held(cfg, &other).is_some() {
             continue;
         }
         if name == me {
@@ -373,62 +375,6 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
     Ok(Look { slots, busy, line })
 }
 
-/// Codex never consumes Claude's slots, its unstick slot or its usage hold.
-/// This small pool stays capped even for pipeline jobs, leaving the plan's
-/// reviewer service first claim. Locks survive exec just as Claude's do.
-fn codex_slot(
-    cfg: &Config,
-    id: &str,
-    n: &str,
-    given: Class,
-    may_hand_over: bool,
-) -> io::Result<File> {
-    let slots = cfg.jobs.join(".codex-slots");
-    fs::create_dir_all(&slots)?;
-    fs::create_dir_all(cfg.jobs.join(".slots"))?;
-    let job = Job::new(cfg, id);
-    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
-    // A turn that waited in Claude's line and was handed to this proj brings
-    // its place with it, under this pid. It is Codex's now, and a place left in
-    // Claude's line would count as a live waiter there (waiter_alive) while it
-    // waits for, or runs in, Codex's pool.
-    let queue = cfg.jobs.join(".queue");
-    // Removal cannot hide a live rename: a census retaining this old name
-    // treats its missing timestamp conservatively until its next look. Keep
-    // this escape pool independent of a stalled Claude admission lock.
-    while let Some((left, _)) = place_left(&queue, id, process::id()) {
-        fs::remove_file(queue.join(left))?;
-        snapshot::stream::notify(cfg);
-    }
-    loop {
-        if may_hand_over
-            && let Some(to) = successor(cfg)
-            && retry_compatible(&to)
-        {
-            unmark(&job, n)?;
-            let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
-            lk.lock()?;
-            return Err(hand_over(cfg, &to, id, given));
-        }
-        if automation_paused(cfg, &job)
-            || crate::policy::earlier_pending(&job)
-            || crate::github_quota::held(cfg, &job, Engine::Codex).is_some()
-        {
-            sleep(Duration::from_secs(2));
-            continue;
-        }
-        for i in 1..=cfg.codex_slots {
-            let slot = File::create(slots.join(i.to_string()))?;
-            if slot.try_lock().is_ok() {
-                let slot = held(slot)?;
-                took_slot(&job, n, &format!("codex-{i}"), given.name())?;
-                return Ok(slot);
-            }
-        }
-        sleep(Duration::from_secs(2));
-    }
-}
-
 /// Recheck bound repository admission before taking any slot. Explicit pauses
 /// vacate every role; unlisted repos can still sort issues.
 fn automation_paused(_cfg: &Config, job: &Job) -> bool {
@@ -446,7 +392,6 @@ pub fn take_engine(
     crate::waits::rewatch_later(cfg, id);
     match engine {
         Engine::Claude => take(cfg, id, n, given, may_hand_over),
-        Engine::Codex => codex_slot(cfg, id, n, given, may_hand_over),
     }
 }
 
@@ -465,11 +410,12 @@ pub fn take(
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
+    let sandboxed = usage::login::sandboxed(cfg, id);
     // This turn says it has its slot only under its job's lock ([`took_slot`]),
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
     // from the moment this one hands it over ([`unmark`]).
-    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn_file(n, TurnFile::Withdrawable), "")?;
     // maxWait goes by when this turn came, not its name's WHEN, which for a job
     // run --since is when its work began.
     let retry = crate::retry::Checkpoint::load(&job, n)?;
@@ -489,17 +435,18 @@ pub fn take(
     loop {
         let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
-        // run would be refused, an --unstick turn's too.
+        // run would be refused, an --unstick turn's too. A sandbox's isn't
+        // by this machine's expired login (usage/login.rs).
         usage::metered(cfg);
-        let spent = usage::out(cfg).is_some();
+        let spent = usage::login::out_for(cfg, sandboxed).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if !paused && job.path("unstick").exists() {
+        if !paused && crate::record::unstuck(&job) {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             if fs::remove_file(queue.join(&me)).is_ok() {
                 snapshot::stream::notify(cfg);
             }
-            if spent || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
+            if spent || crate::github_quota::held(cfg, &job).is_some() {
                 usage::remind(cfg);
                 sleep(Duration::from_secs(2));
                 continue;
@@ -555,7 +502,7 @@ pub fn take(
             me = to;
         }
         if spent {
-            if !job.path("unstick").exists() && !publish(cfg, &queue, &me, original)? {
+            if !crate::record::unstuck(&job) && !publish(cfg, &queue, &me, original)? {
                 drop(lk);
                 sleep(Duration::from_secs(2));
                 continue;
@@ -597,12 +544,20 @@ pub fn take(
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
-        if !due(&slots, &queue.join(&me), looked) || usage::out(cfg).is_some() {
+        let hold = usage::out(cfg);
+        if !due(&slots, &queue.join(&me), looked)
+            || hold.as_ref().is_some_and(|h| h.holds_run(sandboxed))
+        {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;
         }
-        let seen = look(cfg, &me, &job.dir, class)?;
+        let mut seen = look(cfg, &me, &job.dir, class)?;
+        // Only the turns a hold lets by take what's free.
+        if let Some(h) = &hold {
+            seen.line
+                .retain(|w| !h.holds_run(usage::login::sandboxed(cfg, job_of(&w.name))));
+        }
         looked = now();
         let cutoff = match usage::admission_cutoff(cfg) {
             Ok(cutoff) => cutoff,
@@ -652,7 +607,7 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
-                fs::write(job.turn(n, "queue-order"), &me)?;
+                fs::write(job.turn_file(n, TurnFile::QueueOrder), &me)?;
                 took_slot(&job, n, &n_slot.to_string(), class.name())?;
                 return Ok(slot);
             }
@@ -776,8 +731,11 @@ fn lock(path: &Path) -> Lock {
 }
 
 mod owner;
+mod room;
+pub(crate) mod table;
+pub use room::{room, seen_room};
 
-/// Every slot of the line's, Codex's pool and the machine's heavy work, for
+/// Every slot of the line's and the machine's heavy work, for
 /// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
 /// says took its lock, with matching lock evidence on that live process's
 /// file descriptor, checked again after collecting the job metadata:
@@ -804,10 +762,11 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
                     let id = owner.job.clone();
                     let job = Job::new(cfg, &id);
                     let n = job.turns().unwrap_or_default();
-                    if read(&job.turn(&n, "slot")).as_deref() == Some(key.as_str()) {
+                    if crate::record::slot(&job, &n).as_deref() == Some(key.as_str()) {
                         let mut s = job_slot(cfg, kind, name, &id, None, at);
                         if let Some(h) = s.holder.as_mut() {
-                            h.class = read(&job.turn(&n, "class")).filter(|c| !c.is_empty());
+                            h.class =
+                                read(&job.turn_file(&n, TurnFile::Class)).filter(|c| !c.is_empty());
                         }
                         s
                     } else {
@@ -850,16 +809,6 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
         dir.join("unstick"),
         Lock::Free,
     );
-    let codex = cfg.jobs.join(".codex-slots");
-    for i in 1..=cfg.codex_slots {
-        one(
-            SlotKind::Codex,
-            i.to_string(),
-            format!("codex-{i}"),
-            codex.join(i.to_string()),
-            Lock::Free,
-        );
-    }
     if let Some(heavy) = &cfg.heavy_dir {
         for i in 1..=cfg.heavy_slots {
             // Nothing of proj's takes these: whose they are is heavy's.
@@ -896,35 +845,6 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
         .map(|b| if b == 0 { b' ' } else { b })
         .collect();
     String::from_utf8_lossy(&cmdline).contains(&format!(" _exec {id} "))
-}
-
-/// Whether a turn on this engine started now would get a slot, as far as a
-/// look from outside the line can tell: for Claude, usage not spent, nobody
-/// in line and a slot free beyond the ones kept for the pipeline; for Codex,
-/// one of its pool free. Advisory: a turn already on its way may take the
-/// slot first, and the new one then waits in line like any other. For what
-/// work nobody is waiting on (proj-inbox's drain) starts only on idle slots.
-pub fn room(cfg: &Config, engine: Engine) -> bool {
-    let free = |dir: &str, n: usize| -> usize {
-        let dir = cfg.jobs.join(dir);
-        if fs::create_dir_all(&dir).is_err() {
-            return 0;
-        }
-        // Only a slot seen free is room: one that can't be looked at isn't.
-        (1..=n)
-            .filter(|i| matches!(lock(&dir.join(i.to_string())), Lock::Free | Lock::Missing))
-            .count()
-    };
-    match engine {
-        Engine::Claude => {
-            usage::metered(cfg);
-            usage::out(cfg).is_none()
-                && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
-                && line(cfg).is_empty()
-                && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
-        }
-        Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
-    }
 }
 
 /// Queue mutations and this census share the admission lock. An unreadable

@@ -42,7 +42,6 @@ fn kind_word(k: SlotKind) -> &'static str {
     match k {
         SlotKind::Claude => "claude",
         SlotKind::Unstick => "unstick",
-        SlotKind::Codex => "codex",
         SlotKind::Drain => "drain",
         SlotKind::Sorting => "sorting",
         SlotKind::Heavy => "heavy",

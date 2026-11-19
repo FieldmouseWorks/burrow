@@ -1,29 +1,14 @@
 use std::fs;
 
-use super::{github_app, gone_quiet, stopped};
-use crate::config::Config;
-use crate::engine::Engine;
+use super::watch::gone_quiet;
+use super::{github_app, stopped};
 
-// A Codex turn reaches GitHub as an App, its job's own or the machine's,
-// never as the user, whose logins its sandbox hides; with neither it
-// doesn't start. Claude's acts as the user unless its job names an App.
+// A turn acts as the user unless its job names an App.
 #[test]
-fn a_codex_turn_acts_as_an_app_or_not_at_all() {
-    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-    let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-    assert_eq!(app(None, Engine::Codex), Ok(Some("workers".into())));
-    assert_eq!(app(Some(""), Engine::Codex), Ok(Some("workers".into())));
-    assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-    assert_eq!(app(None, Engine::Claude), Ok(None));
-    assert_eq!(app(Some("other"), Engine::Claude), Ok(Some("other".into())));
-    for none in [None, Some(String::new())] {
-        cfg.machinery = none;
-        let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-        let refused = app(None, Engine::Codex).unwrap_err();
-        assert!(refused.contains("only as a GitHub App"), "{refused}");
-        assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-        assert_eq!(app(None, Engine::Claude), Ok(None));
-    }
+fn a_turn_acts_as_its_jobs_app_or_the_user() {
+    assert_eq!(github_app(None), None);
+    assert_eq!(github_app(Some(String::new())), None);
+    assert_eq!(github_app(Some("other".into())), Some("other".into()));
 }
 
 // A sandbox's VM counts as stopped, everything a refused run left in it

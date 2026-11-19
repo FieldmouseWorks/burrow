@@ -612,7 +612,7 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         let inbox = f.cfg.inbox.as_mut().unwrap();
         inbox.state = f.dir.path().join("inbox");
         fs::create_dir_all(&inbox.state).unwrap();
-        fs::write(inbox.state.join(crate::inbox::WAITING), "sam/repo").unwrap();
+        fs::write(crate::inbox::record::drain_waiting_mark(&f.cfg), "sam/repo").unwrap();
         f.ending(1, "ask");
         let mut request = crate::job::Request::load(&f.job()).unwrap();
         request.owned = true;
@@ -644,7 +644,7 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         let calls = got.lock().unwrap();
         for expected in [
             "/kick/completion",
-            "/kick/proj-inbox/sam/repo",
+            "/kick/proj-inbox-drain",
             "/kick/proj-watch",
         ] {
             assert!(calls.iter().any(|s| s == expected), "{failure}: {calls:?}");

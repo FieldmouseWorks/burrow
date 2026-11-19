@@ -1,5 +1,9 @@
 //! Exercise the operator migration and answer route through the real CLI.
 //! This test also runs on the feature's base, where merge-questions is absent.
+// It builds a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn).
+#![allow(deprecated)]
+
 use burrow_proj::{
     config::Config,
     job::Job,
@@ -23,9 +27,9 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         "stallAfterMinutes":1, "awaitHours":1, "kick":"", "wake":dir.path().join("wake"),
         "waits":null, "inboxMark":"", "pipelineRepos":[], "leadRepos":[],
         "flake":"/unused", "deployed":"/unused", "apps":{}, "machinery":null,
-        "notify":null, "meters":null, "codexSlots":1,
-        "codexHooks":"/unused", "inbox":null,
-        "tools":{"gh":"unused", "git":"git", "codex":"unused", "bwrap":"unused",
+        "notify":null, "meters":null,
+        "inbox":null,
+        "tools":{"gh":"unused", "git":"git",
             "bash":"unused", "flock":"unused", "systemctl":systemctl,
             "systemdRun":"true", "timeout":"unused"}
     });
@@ -51,12 +55,15 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         fs::write(host.join("question-id"), format!("question-{id}")).unwrap();
         fs::write(host.join("question-since"), since).unwrap();
         fs::write(host.join("question-text"), "May I proceed?").unwrap();
-        policy::mark(&job, "done", false).unwrap(); // accepted answers stay parked
+        policy::mark(&job, "done", false, None).unwrap(); // accepted answers stay parked
     }
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_burrow-proj"))
             .env("PROJ_CONFIG", &config)
             .env("PROJ_SELF", env!("CARGO_BIN_EXE_burrow-proj"))
+            .env_remove("PROJ_JOB")
+            .env_remove("PROJ_HOST_JOBS_SOCKET")
+            .env_remove("PROJ_PROBE_SOCKET")
             .args(args)
             .output()
             .unwrap();

@@ -471,6 +471,10 @@ pub mod tests {
         pub instances: Vec<String>,
         /// Why they couldn't be listed, if they couldn't.
         pub unlisted: Option<String>,
+        /// Once the first path is read, the second answers this instead:
+        /// what moved on while the first was read.
+        pub moves: BTreeMap<String, (String, Value)>,
+        pub moved: RefCell<BTreeMap<String, Value>>,
     }
 
     impl Fake {
@@ -486,10 +490,18 @@ pub mod tests {
 
     impl World for Fake {
         fn github(&self, path: &str) -> Result<Value, String> {
-            self.github
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| Err(format!("GET {path}: HTTP 404")))
+            let got = match self.moved.borrow().get(path) {
+                Some(v) => Ok(v.clone()),
+                None => self
+                    .github
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| Err(format!("GET {path}: HTTP 404"))),
+            };
+            if let Some((other, v)) = self.moves.get(path) {
+                self.moved.borrow_mut().insert(other.clone(), v.clone());
+            }
+            got
         }
         fn unit(&self, unit: &str) -> Unit {
             let mut looks = self.looks.borrow_mut();
@@ -551,6 +563,7 @@ pub mod tests {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
                 "logs": dir.join("logs"), "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
+                "held": {"sam/pin": "dddddddddddd"},
                 "after": 1800.0, "run": 5400.0, "ride": 18000.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
@@ -842,6 +855,13 @@ pub mod tests {
             (3, 1_793_289_660.0, "c3", "aaa")
         );
         assert_eq!(snap.deploys["sam/kit"].count, 0);
+        // One the flake holds at a commit isn't compared: nothing's read of
+        // it (the fake has nothing of sam/pin's to give), so nothing waits.
+        assert_eq!(
+            snap.deploys.keys().collect::<Vec<_>>(),
+            ["sam/box", "sam/kit"]
+        );
+        assert!(!snap.unread.contains_key("sam/pin"), "{:?}", snap.unread);
         assert_eq!(
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"

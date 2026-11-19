@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use super::{drain, enrollment, key};
+use super::record::files;
+use super::{enrollment, key};
 use crate::config::Config;
 use crate::job::Job;
 use crate::{Fail, io_fail, read};
@@ -85,8 +86,8 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
             ));
         }
     }
-    for namespace in [".triage", ".plans"] {
-        for (name, path) in names(&state.join(namespace)) {
+    for root in [files::sorting_root(state), state.join(".plans")] {
+        for (name, path) in names(&root) {
             if name
                 .to_lowercase()
                 .rsplit_once('-')
@@ -96,7 +97,7 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
             }
         }
     }
-    for (name, path) in names(&state.join(".triage-waiting")) {
+    for (name, path) in names(&files::sorting_waits(state)) {
         if name
             .to_lowercase()
             .rsplit_once('-')
@@ -105,15 +106,19 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
             fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
-    for namespace in [".retired", ".parked"] {
-        for (name, path) in names(&state.join(namespace)) {
+    for root in [files::retired_root(state), files::parked_root(state)] {
+        for (name, path) in names(&root) {
             if name.eq_ignore_ascii_case(&want) {
                 fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
             }
         }
     }
-    for dir in [".unreached", drain::READY_LISTS] {
-        for (name, path) in names(&state.join(dir)) {
+    for root in [
+        files::unreached(state),
+        files::ready_lists(state),
+        state.join(super::scope::LISTED),
+    ] {
+        for (name, path) in names(&root) {
             if !name.starts_with('.') && name.to_lowercase() == want {
                 fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
             }

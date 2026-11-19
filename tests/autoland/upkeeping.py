@@ -345,7 +345,7 @@ seen.clear()
 def upkeep(repo, mine):  # noqa: F811 (as the bridge fails: within itself)
     seen.append(f"upkeep {repo}")
     if repo == "sam/r":
-        waits.failed(repo)
+        waits.failed(repo, op="upkeep")
         C.wake(repo, C.NOW + 300)
         return
     mine.append(("Still quarantined a day after a Claude job", f"{repo}#4", "x"))
