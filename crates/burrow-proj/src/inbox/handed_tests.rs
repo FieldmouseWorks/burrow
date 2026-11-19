@@ -2,6 +2,7 @@
 //! handed: an edit, or a record that doesn't say, hands the job the issue as
 //! it stands instead. Against [`super::sorting_tests`]'s stand-ins.
 
+use crate::inbox::record::files;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,15 +27,15 @@ fn finished(b: &mut Box, had: &Value, seen: u64, comments: &[Value], now: &Value
     b.job("j1", "done", "Fixed in #12.");
     fs::write(b.cfg.jobs.join("j1/session"), "s1\n").unwrap();
     let d = b.record("j1");
-    fs::write(d.join("answered"), "1\n").unwrap();
-    fs::write(d.join("seen"), format!("{seen}\n")).unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
+    fs::write(d.join(files::File::Seen), format!("{seen}\n")).unwrap();
     let handed: Vec<Value> = comments
         .iter()
         .filter(|c| c["id"].as_u64().is_some_and(|i| i <= seen))
         .cloned()
         .collect();
     let input = b.pass().issue_text("sam/box", had, &handed);
-    fs::write(d.join("input"), input).unwrap();
+    fs::write(d.join(files::File::Input), input).unwrap();
     fs::write(b.path("comments"), json!([comments]).to_string()).unwrap();
     let mut on = now.clone();
     on["state"] = json!("open");
@@ -70,7 +71,10 @@ fn handed_whole_listed(
     );
     let whole = b.pass().issue_text("sam/box", now, comments);
     assert!(prompt.contains(&whole), "{prompt}");
-    assert_eq!(fs::read_to_string(d.join("input")).unwrap(), whole);
+    assert_eq!(
+        fs::read_to_string(d.join(files::File::Input)).unwrap(),
+        whole
+    );
     // Handed it, and nothing more since: closed next time.
     fs::write(b.cfg.jobs.join("j1/turns"), "1\n").unwrap();
     b.pass()
@@ -131,7 +135,7 @@ fn a_record_without_what_its_job_had_is_handed_on() {
     let now = issue(7, "sam", &["claude"]);
     let mut b = Box::new();
     let d = finished(&mut b, &now, 5, &[said(5, "the red one")], &now);
-    fs::remove_file(d.join("input")).unwrap();
+    fs::remove_file(d.join(files::File::Input)).unwrap();
     handed_whole(&b, &d, &now, &[said(5, "the red one")]);
 }
 
@@ -149,7 +153,7 @@ fn a_reply_alone_is_handed_as_a_reply() {
     let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
     assert_eq!(prompt, "sam replied on the issue:\n\nand the blue\n");
     assert_eq!(
-        fs::read_to_string(d.join("input")).unwrap(),
+        fs::read_to_string(d.join(files::File::Input)).unwrap(),
         b.pass().issue_text("sam/box", &now, &comments)
     );
     fs::write(b.cfg.jobs.join("j1/turns"), "1\n").unwrap();
@@ -245,7 +249,7 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
             }
             let mut b = Box::new();
             let d = finished(&mut b, &had, 0, &[], &had);
-            let input = fs::read_to_string(d.join("input")).unwrap();
+            let input = fs::read_to_string(d.join(files::File::Input)).unwrap();
             fs::write(b.path("new-issue"), edited.to_string()).unwrap();
             burrow_test::executable(
                 b.path("hook"),
@@ -260,7 +264,10 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
                 .unwrap();
             assert!(!b.log().contains("state=closed"));
             assert!(!b.cfg.jobs.join("j1/prompt.2").exists());
-            assert_eq!(fs::read_to_string(d.join("input")).unwrap(), input);
+            assert_eq!(
+                fs::read_to_string(d.join(files::File::Input)).unwrap(),
+                input
+            );
             assert!(p.wake.contains_key("sam/box"));
             b.pass().jobs("sam/box", "box", &[edited]).unwrap();
             let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
@@ -287,7 +294,7 @@ fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
         ),
     )
     .unwrap();
-    fs::write(d.join("answered"), "0\n").unwrap();
+    fs::write(d.join(files::File::Answered), "0\n").unwrap();
     b.pass()
         .jobs("sam/box", "box", std::slice::from_ref(&now))
         .unwrap();
@@ -339,7 +346,10 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
             .jobs("sam/box", "box", std::slice::from_ref(&had))
             .unwrap();
         assert!(job.join("open-question").exists());
-        assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
+        assert_eq!(
+            fs::read_to_string(d.join(files::File::Seen)).unwrap(),
+            "0\n"
+        );
         let blocked = if fault == "receipt" {
             crate::ask::host_path(&crate::job::Job::new(&b.cfg, "j1"), "resume-2.new")
         } else {
@@ -359,7 +369,10 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
             .jobs("sam/box", "box", std::slice::from_ref(&had))
             .unwrap();
         assert_eq!(job.join("open-question").exists(), fault != "none");
-        assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+        assert_eq!(
+            fs::read_to_string(d.join(files::File::Seen)).unwrap(),
+            "1\n"
+        );
         assert!(
             !fs::read_to_string(job.join("prompt.2"))
                 .unwrap()
@@ -373,7 +386,10 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
                 .jobs("sam/box", "box", std::slice::from_ref(&had))
                 .unwrap();
             assert_eq!(fs::read_to_string(job.join("turns")).unwrap().trim(), "2");
-            assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+            assert_eq!(
+                fs::read_to_string(d.join(files::File::Seen)).unwrap(),
+                "1\n"
+            );
         }
         assert!(
             crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask")
@@ -445,7 +461,7 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         b.pass()
             .new_issues("sam/box", std::slice::from_ref(&now))
             .unwrap();
-        let fresh = fs::read_to_string(d.join("job")).unwrap();
+        let fresh = fs::read_to_string(d.join(files::File::Job)).unwrap();
         assert_ne!(fresh.trim(), "j1");
         assert_eq!(
             fs::read_to_string(b.cfg.jobs.join(fresh.trim()).join("turns"))
@@ -458,7 +474,7 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         b.cfg.tools.systemctl = b.path("systemctl");
         b.pass().retired("sam/box").unwrap();
         assert!(!retired.exists());
-        assert_eq!(fs::read_to_string(d.join("job")).unwrap(), fresh);
+        assert_eq!(fs::read_to_string(d.join(files::File::Job)).unwrap(), fresh);
         let posted = b.posted();
         assert!(posted.contains("unread author replies"), "{posted}");
         assert!(posted.contains("#issuecomment-6"), "{posted}");
@@ -498,7 +514,7 @@ fn retirement_does_not_repeat_a_delivered_notice_when_stopping_failed() {
         .unwrap()
         .state
         .join(".retired/sam_box/7/j1");
-    assert!(retired.join("reported").exists());
+    assert!(retired.join(files::File::Reported).exists());
     let posted = b.posted();
     b.cfg.tools.systemctl = b.path("systemctl");
     b.pass().retired("sam/box").unwrap();
@@ -580,10 +596,10 @@ fn long_repository_issue_and_job_names_retire_without_combining_components() {
         let active = root.join(format!("{key}-{number}"));
         fs::create_dir_all(&active).unwrap();
         for (file, body) in [
-            ("job", id.clone()),
-            ("issue", format!("{repo}#{number}")),
-            ("answered", "1".into()),
-            ("seen", "0".into()),
+            (files::File::Job, id.clone()),
+            (files::File::Issue, format!("{repo}#{number}")),
+            (files::File::Answered, "1".into()),
+            (files::File::Seen, "0".into()),
         ] {
             fs::write(active.join(file), body).unwrap();
         }
@@ -594,7 +610,7 @@ fn long_repository_issue_and_job_names_retire_without_combining_components() {
                 .join(&key)
                 .join(number.to_string())
                 .join(&id)
-                .join("reported")
+                .join(files::File::Reported)
                 .exists()
         );
     }

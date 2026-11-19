@@ -3,6 +3,7 @@
 //! sorting job waiting for that slot is let in, and the verdict's GitHub
 //! steps run once GitHub answers, once.
 
+use crate::inbox::record::files;
 use std::fs;
 use std::path::PathBuf;
 
@@ -95,7 +96,7 @@ fn queued_behind(b: &Box) {
         .state
         .join(".triage/sam_box-8");
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "s2\n").unwrap();
+    fs::write(d.join(files::File::Job), "s2\n").unwrap();
     let job = Job::new(&b.cfg, "s2");
     let held = job.lock().unwrap();
     crate::turn::start(&b.cfg, "s2", "A person answered.", false).unwrap();
@@ -110,7 +111,7 @@ fn slots(b: &Box) -> (Vec<String>, Vec<String>) {
     let p = b.pass();
     let mut counted: Vec<String> = super::dirs(&p.sorting_dir(), "")
         .into_iter()
-        .filter(|d| p.sorting_slot(d))
+        .filter(|d| p.holds_sorting_slot(d))
         .map(|d| {
             let name = d.file_name().unwrap().to_string_lossy().into_owned();
             let (repo, n) = name.rsplit_once('-').unwrap();
@@ -296,7 +297,7 @@ fn a_late_end_never_settles_the_job_that_replaced_it() {
     }
     fs::remove_dir_all(&d).unwrap();
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), "s3\n").unwrap();
+    fs::write(d.join(files::File::Job), "s3\n").unwrap();
     fs::remove_file(b.path("pause")).unwrap();
     rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
     assert!(settled(&Job::new(&b.cfg, "s3")).is_none());

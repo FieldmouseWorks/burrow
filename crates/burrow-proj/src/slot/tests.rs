@@ -94,7 +94,7 @@ impl Drop for Kid {
 
 fn spawn_child(what: &str, jobs: &Path, max_jobs: usize, args: &[String]) -> Kid {
     admission::bind_fixture(jobs, max_jobs);
-    let child = Command::new(env::current_exe().unwrap())
+    let child = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::child",
@@ -128,10 +128,7 @@ fn child() {
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if matches!(
-        what.as_str(),
-        "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
-    ) {
+    if matches!(what.as_str(), "hand-over" | "stay" | "paused-hand-over") {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         burrow_test::executable(
@@ -152,33 +149,21 @@ esac
         if what.starts_with("paused-") {
             cfg.settings.as_mut().unwrap().allowed.clear();
             fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
-            let engine = if what == "paused-codex-hand-over" {
-                crate::engine::Engine::Codex
-            } else {
-                crate::engine::Engine::Claude
-            };
-            super::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap_err();
+            super::take_engine(
+                &cfg,
+                &id,
+                "1",
+                Class::Normal,
+                true,
+                crate::engine::Engine::Claude,
+            )
+            .unwrap_err();
         } else if what == "hand-over" {
             take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
         } else {
             held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
             publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
         }
-    }
-    if what == "codex" {
-        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
-        held = Some(
-            super::take_engine(
-                &cfg,
-                &id,
-                "1",
-                Class::Normal,
-                false,
-                crate::engine::Engine::Codex,
-            )
-            .unwrap(),
-        );
-        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     if what == "soon" {
         cfg.max_wait = 4;
@@ -275,7 +260,7 @@ fn line_of_size(tmp: &TempDir, jobs: &Path, n: usize) -> Kid {
 #[test]
 fn a_look_runs_git_once_a_project() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::counted_look",
@@ -660,7 +645,7 @@ fn a_place_left_by_a_hand_over() {
 #[test]
 fn who_is_handed_over_to() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::successors",
@@ -937,8 +922,6 @@ mod reset;
 mod usage;
 
 mod admission;
-
-mod codex;
 
 mod github;
 

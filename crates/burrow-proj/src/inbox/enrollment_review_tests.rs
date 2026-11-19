@@ -1,6 +1,7 @@
 //! Parking must survive admission, refreshed snapshots and legacy retirement.
 use super::parking_tests::{fixture, on_github};
 use super::sorting_tests::issue;
+use crate::inbox::record::files;
 use crate::{ask, job::Job, read};
 use serde_json::{Value, json};
 use std::fs;
@@ -62,7 +63,7 @@ fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
             assert!(exclusion.exists());
             assert!(!b.path("launched").exists());
             assert!(pass.wake.contains_key("sam/box"));
-            on_github(&b, &listed(7, &["ready", "codex"]));
+            on_github(&b, &listed(7, &["ready", "claude"]));
             fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();
             pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
                 .unwrap();
@@ -231,7 +232,7 @@ esac
         assert!(old.turn("1", "stopped").exists());
         assert!(!old.path("await").exists());
         assert!(pass.wake.contains_key("sam/box"));
-        let restored = listed(7, &["ready", "codex"]);
+        let restored = listed(7, &["ready", "claude"]);
         // Subsequent stops no longer change the restored live labels.
         fs::write(b.path("parked-issue"), restored.to_string()).unwrap();
         on_github(&b, &restored);
@@ -263,7 +264,7 @@ fn retiring_a_worker_preserves_parking_against_both_automatic_admissions() {
             "sorting must not restart parked work"
         );
         assert!(
-            !b.log().contains("labels[]=codex"),
+            !b.log().contains("labels[]=claude"),
             "drain must not restore the engine label"
         );
         assert!(b.pass().drain_records().is_empty());
@@ -276,12 +277,12 @@ fn retiring_a_worker_preserves_parking_against_both_automatic_admissions() {
         assert!(b.log().contains("POST repos/sam/box/issues/8/labels"));
 
         // Explicit enrollment permits a fresh worker for the parked issue.
-        let restored = listed(7, &["ready", "codex"]);
+        let restored = listed(7, &["ready", "claude"]);
         on_github(&b, &restored);
         b.pass().new_issues("sam/box", &[restored]).unwrap();
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-        assert_ne!(read(&record.join("job")).as_deref(), Some("j1"));
-        assert!(record.join("job").exists());
+        assert_ne!(read(&record.join(files::File::Job)).as_deref(), Some("j1"));
+        assert!(record.join(files::File::Job).exists());
     }
 }
 
@@ -311,8 +312,8 @@ fn a_refused_pending_enrollment_releases_drain_capacity_immediately() {
     let b = fixture();
     let dir = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-8");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("drained"), "sam/box#8").unwrap();
-    let parked = listed(8, &["ready", "later", "codex"]);
+    fs::write(dir.join(files::File::Drained), "sam/box#8").unwrap();
+    let parked = listed(8, &["ready", "later", "claude"]);
     on_github(&b, &parked);
     b.pass().note_ready("sam/box", &[parked]).unwrap();
     b.pass().drain().unwrap();
@@ -331,7 +332,7 @@ fn final_refresh_governs_closure_replies_and_missing_session_fallback() {
             let b = fixture();
             let job = Job::new(&b.cfg, "j1");
             let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-            fs::write(record.join("answered"), "1").unwrap();
+            fs::write(record.join(files::File::Answered), "1").unwrap();
             if action == "close" {
                 fs::write(job.turn("1", "end"), "done").unwrap();
             } else {
@@ -383,7 +384,7 @@ fn every_legacy_worker_retirement_keeps_the_old_conversation_stopped() {
         fs::remove_file(job.path("inbox-issue")).unwrap();
         fs::remove_file(job.path("link")).unwrap();
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-        fs::write(record.join("answered"), "1").unwrap();
+        fs::write(record.join(files::File::Answered), "1").unwrap();
         let active = listed(7, &["claude"]);
         on_github(&b, &active);
         match ending {
@@ -425,7 +426,7 @@ fn every_legacy_worker_retirement_keeps_the_old_conversation_stopped() {
         assert!(!record.exists(), "{ending}");
         on_github(&b, &active);
         b.pass().new_issues("sam/box", &[active]).unwrap();
-        assert_ne!(read(&record.join("job")).as_deref(), Some("j1"));
+        assert_ne!(read(&record.join(files::File::Job)).as_deref(), Some("j1"));
         {
             let _held = job.lock().unwrap();
             assert!(
@@ -482,7 +483,7 @@ fn missing_session_replacement_retires_the_old_worker_and_its_await() {
     on_github(&b, &active);
     b.pass().jobs("sam/box", "box", &[active]).unwrap();
     let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-    let fresh = read(&record.join("job")).unwrap();
+    let fresh = read(&record.join(files::File::Job)).unwrap();
     assert_ne!(fresh, "j1");
     assert_eq!(Job::new(&b.cfg, &fresh).turns().as_deref(), Some("1"));
     assert!(old.turn("1", "stopped").exists());

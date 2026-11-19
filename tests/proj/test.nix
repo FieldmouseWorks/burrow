@@ -144,8 +144,12 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(8788)
 
     def kicks():
-        # The watchdog's are looked at apart: proj kicks it at every change.
-        return [k for k in machine.succeed("cat /tmp/kicks").split() if k != "/kick/watchdog"]
+        # proj's own. The watchdog's are looked at apart: proj kicks it at
+        # every change. And the watchdog's kick of its units source isn't
+        # proj's: a unit this machine fails (burrow-settings-reconcile) is a
+        # stall of its own, and on a slow runner its deadline can pass while
+        # a test is still counting proj's kicks.
+        return [k for k in machine.succeed("cat /tmp/kicks").split() if k not in ("/kick/watchdog", "/kick/units")]
 
     def waits(until=None, timeout=30):
         # What proj last told the watchdog; with `until`, once that holds of

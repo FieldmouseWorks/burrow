@@ -173,10 +173,6 @@ fn each_state_reads_as_main_printed_it() {
         if name == "held for usage" {
             assert_eq!(state, "failed");
             assert!(held.contains(&"await usage-limit".to_owned()), "{held:?}");
-            assert!(
-                held.iter().any(|l| l.starts_with("usage Claude ")),
-                "{held:?}"
-            );
             continue;
         }
         let (_, s, h) = want.iter().find(|w| w.0 == name).unwrap();
@@ -248,7 +244,7 @@ fn why_names_each_wait_and_what_ends_it() {
             "for the owner",
             "It waits on owner, which ends with the owner's reply",
         ),
-        ("held for usage", "It waits on usage Claude "),
+        ("held for usage", "It waits on await usage-limit"),
         (
             "parked",
             "It waits on policy, which ends with the settings letting it run (it waits for its repo to be allowed)",
@@ -359,4 +355,51 @@ fn a_jobs_own_outcome_cant_break_a_history_line() {
     let h = derive(&j).history;
     assert_eq!(h.len(), 1, "{h:?}");
     assert_eq!(h[0].why, "its turn ended");
+}
+
+#[test]
+fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = rig(tmp.path(), true);
+    let j = job(&cfg, "j");
+    let choice = crate::engine::Choice {
+        engine: crate::engine::Engine::Claude,
+        model: Some("a-model".into()),
+        effort: Some("high".into()),
+    };
+    j.record_choice("1", &choice).unwrap();
+    fs::write(
+        j.turn("1", "jsonl"),
+        "{\"type\":\"system\",\"session_id\":\"s-1\"}\n{\"type\":\"result\",\"session_id\":\"s-1\",\"result\":\"done\",\"is_error\":false}\n",
+    )
+    .unwrap();
+    let json = derive(&j).json("j");
+    assert_eq!(
+        json["turn"],
+        serde_json::json!({"n": "1", "engine": "claude", "model": "a-model",
+            "effort": "high", "session": "s-1"})
+    );
+    // A turn on the engine's own model and effort says none, and one whose
+    // engine has named no session yet says none either.
+    j.record_choice(
+        "1",
+        &crate::engine::Choice {
+            engine: crate::engine::Engine::Claude,
+            model: None,
+            effort: None,
+        },
+    )
+    .unwrap();
+    fs::write(j.turn("1", "jsonl"), "").unwrap();
+    let json = derive(&j).json("j");
+    assert_eq!(
+        json["turn"],
+        serde_json::json!({"n": "1", "engine": "claude", "model": null,
+            "effort": null, "session": null})
+    );
+    assert!(json["ends"].is_array());
+    // Before its first turn, there's none.
+    let k = Job::new(&cfg, "k");
+    fs::create_dir_all(&k.dir).unwrap();
+    assert_eq!(derive(&k).json("k")["turn"], serde_json::Value::Null);
 }

@@ -20,6 +20,15 @@ A failed restore never fails a job: the kept builds only save time, so a
 leg or the negative whose lookup found an entry it then couldn't restore
 builds without it and reports `degraded/kept-restore` (#1161).
 
+The build store's upload (`soft/builds-write`, after the gate, in
+flake-check.yml) degrades when the store can't be written: it doesn't
+answer, it fails, or it takes longer than the step's deadline. A store
+whose door refuses the job isn't degraded: who may write is the door's
+decision (Conary's signer rule), and a PR's run of its own copy of the
+workflow is refused on every push, which would otherwise read as a standing
+degradation. The step says so in its summary and succeeds, as it does for a
+job with no OIDC token to send.
+
 Any machine importing burrow's watchdog module can set:
 
 ```nix

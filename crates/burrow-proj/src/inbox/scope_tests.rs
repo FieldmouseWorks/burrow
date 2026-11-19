@@ -1,12 +1,12 @@
 //! An issue's event's pass ([`Pass::scope`]): the issues burrow-events told
 //! it, each asked for by number, and nothing it keeps of the rest changed.
 
+use crate::inbox::record::files;
 use std::collections::BTreeSet;
 use std::fs;
 
 use serde_json::{Value, json};
 
-use super::drain::READY_LISTS;
 use super::scope::issues_in;
 use super::sorting_tests::{Box, issue};
 
@@ -28,10 +28,10 @@ fn record(b: &Box, n: u64, id: &str) -> std::path::PathBuf {
         .join(format!("sam_box-{n}"));
     fs::create_dir_all(&d).unwrap();
     for (f, v) in [
-        ("issue", format!("sam/box#{n}")),
-        ("job", id.into()),
-        ("answered", "0".into()),
-        ("seen", "0".into()),
+        (files::File::Issue, format!("sam/box#{n}")),
+        (files::File::Job, id.into()),
+        (files::File::Answered, "0".into()),
+        (files::File::Seen, "0".into()),
     ] {
         fs::write(d.join(f), format!("{v}\n")).unwrap();
     }
@@ -64,7 +64,10 @@ fn an_issue_events_pass_asks_for_its_issue_alone() {
     assert!(b.posted().contains("Fixed in #12."), "{}", b.posted());
     assert!(!b.posted().contains("Fixed in #13."), "{}", b.posted());
     assert!(!seven.exists());
-    assert_eq!(fs::read_to_string(eight.join("answered")).unwrap(), "0\n");
+    assert_eq!(
+        fs::read_to_string(eight.join(files::File::Answered)).unwrap(),
+        "0\n"
+    );
 
     fs::remove_file(b.path("log")).unwrap();
     b.pass().run("sam/box").unwrap();
@@ -106,7 +109,7 @@ fn an_issue_events_pass_keeps_what_it_has_of_the_rest() {
     p.note_ready("sam/box", &[ready(9)]).unwrap();
     let state = &b.cfg.inbox.as_ref().unwrap().state;
     let listed = || -> Vec<u64> {
-        let text = fs::read(state.join(READY_LISTS).join("sam_box")).unwrap();
+        let text = fs::read(super::record::files::ready_lists(state).join("sam_box")).unwrap();
         let list: Vec<Value> = serde_json::from_slice(&text).unwrap();
         list.iter().filter_map(|i| i["number"].as_u64()).collect()
     };
@@ -202,7 +205,10 @@ fn scoped_fetches_reject_redirects_and_book_a_full_reconciliation() {
             p.finish("sam/box").unwrap();
             assert_eq!(p.unreached, ["sam/box"]);
             assert!(p.wake.contains_key("sam/box"));
-            assert_eq!(fs::read_to_string(saved.join("answered")).unwrap(), "0\n");
+            assert_eq!(
+                fs::read_to_string(saved.join(files::File::Answered)).unwrap(),
+                "0\n"
+            );
             assert!(b.posted().is_empty());
             assert!(!b.log().contains("api -X"), "{}", b.log());
             assert!(!b.log().contains("repos/else/"), "{}", b.log());

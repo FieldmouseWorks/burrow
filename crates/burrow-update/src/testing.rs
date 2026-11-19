@@ -50,7 +50,9 @@ pub const BRANCH: &str = "box-update";
 ///   or fails, with HOME/unfetchable-INPUT there.
 /// - heavy takes a slot (HOME/nix.log says so) and runs what follows `--`.
 /// - proj logs each call to HOME/proj.log and says its job's id, unless
-///   HOME/proj-down is there: then it fails.
+///   HOME/proj-down is there: then it fails. A run under a --key whose job
+///   is at work (HOME/keys/KEY, `/` as `+`, holds its id) joins it: says
+///   that id. Taking the file away is that job ending.
 /// - claude says its version, the claude-code.json of the system that runs
 ///   (T/current-system), and answers a prompt (logged in HOME/claude.log)
 ///   with OK, unless HOME/claude-mute is there.
@@ -62,7 +64,7 @@ pub const BRANCH: &str = "box-update";
 ///   T/switch-rc's code when there is one; confirm fails with
 ///   T/confirm-fails there.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
-///   that's there.
+///   that's there, or healthy, then T/excused when that's there.
 /// - notify keeps what it opens and closes in T/notices, and each notice's
 ///   body in T/notice-KEY.
 /// - vulnix reports, for a system, each line "COMMIT CVE PACKAGE SCORE" of
@@ -169,7 +171,13 @@ exec "$@"
                 r#"#!/bin/sh
 printf '%s\n' "$*" >>"$HOME/proj.log"
 [ ! -e "$HOME/proj-down" ] || { echo "proj: no slot for it" >&2; exit 1; }
-echo "homelab-$(wc -l <"$HOME/proj.log" | tr -d ' ')"
+key=
+while [ $# -gt 0 ]; do [ "$1" != --key ] || key=$2; shift; done
+held="$HOME/keys/$(printf %s "$key" | tr / +)"
+[ -z "$key" ] || [ ! -e "$held" ] || exec cat "$held"
+id="homelab-$(wc -l <"$HOME/proj.log" | tr -d ' ')"
+[ -z "$key" ] || { mkdir -p "$HOME/keys" && echo "$id" >"$held"; }
+echo "$id"
 "#,
             ),
             (
@@ -222,7 +230,8 @@ case $1 in
   snapshot) [ ! -e "$T/snapshot-fails" ] && echo healthy >"$2" ;;
   compare)
     [ -e "$2" ] || exit 9
-    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; } ;;
+    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; }
+    echo healthy; [ ! -e "$T/excused" ] || cat "$T/excused" ;;
   *) exit 9 ;;
 esac
 "#,

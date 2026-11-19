@@ -1,5 +1,6 @@
 //! A parent's plain task list is the sequencer's only memory.
 use super::{Pass, dirs, key, raw};
+use crate::inbox::record::files::{self, File};
 use crate::{
     github::{api, every},
     job::Job,
@@ -8,6 +9,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod place;
+pub(super) use place::Place;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -163,7 +167,7 @@ impl Pass<'_> {
 
     pub(super) fn approved_input(&self, repo: &str, n: &str, input: &str) -> bool {
         !self.has_task_list(Some(repo), n)
-            && fs::read_to_string(self.plan_dir(repo, n).join("input"))
+            && files::input(&self.plan_dir(repo, n))
                 .is_ok_and(|had| had == input && self.list_bound(repo, n, input).unwrap_or(false))
     }
     fn child_body(repo: &str, parent: &str, index: usize, task: &Task) -> String {
@@ -176,13 +180,7 @@ impl Pass<'_> {
     }
     /// Size a job once before it starts, not again for every PR reply.
     pub(super) fn started_issue_job(&self, repo: Option<&str>, n: &str) -> bool {
-        repo.is_some_and(|repo| {
-            self.inbox
-                .state
-                .join(format!("{}-{n}", key(repo)))
-                .join("job")
-                .exists()
-        })
+        repo.is_some_and(|repo| files::has_job(&files::worker(&self.inbox.state, &key(repo), n)))
     }
     pub(super) fn worker_split_pending(&self, repo: Option<&str>, n: &str) -> bool {
         self.started_issue_job(repo, n)
@@ -262,10 +260,18 @@ impl Pass<'_> {
         self.child_admissible_at(repo, n, 0)
     }
     fn child_admissible_at(&mut self, repo: &str, n: &str, depth: usize) -> bool {
-        if depth >= 64 {
+        if !self.inbox.planning {
+            return true;
+        }
+        // What the lists alone hold it on, its ancestors' included: the
+        // same reading its record gives ([`Pass::plan_hold`]).
+        if depth >= 64 || self.plan_hold(repo, n).is_some() {
             return false;
         }
-        if !self.inbox.planning {
+        // An observing pass asks GitHub nothing: the child's place rests
+        // on its plan's order alone. The drain asks about the one it
+        // picks, its parents included, before it hands it on.
+        if self.observe {
             return true;
         }
         for d in self.plan_dirs(repo) {
@@ -275,18 +281,17 @@ impl Pass<'_> {
             let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
                 return false;
             };
-            for old in &list.retained {
-                if list
-                    .children
-                    .iter()
-                    .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
-                {
-                    break;
-                }
-                if old.child.number.map(|v| v.to_string()).as_deref() == Some(n) {
-                    return false;
-                }
-                if old.child.attempted && old.child.number.is_none() && !self.observe {
+            if !list
+                .children
+                .iter()
+                .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
+            {
+                // A replanned child opened without its number recorded: its
+                // marker on GitHub says whether N is it.
+                for old in &list.retained {
+                    if !(old.child.attempted && old.child.number.is_none()) {
+                        continue;
+                    }
                     let Some(issues) = every(
                         self.cfg,
                         &format!("repos/{repo}/issues?state=all&per_page=100"),
@@ -305,34 +310,15 @@ impl Pass<'_> {
                         return false;
                     }
                 }
-            }
-            let Some(index) = list
-                .children
-                .iter()
-                .position(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
-            else {
                 continue;
-            };
+            }
             let Some(parent) = d
                 .file_name()
                 .and_then(|s| s.to_str())
-                .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
+                .and_then(|s| s.rsplit_once('-').map(|(_, n)| n.to_owned()))
             else {
                 return false;
             };
-            if self.owner(repo, parent).is_some() {
-                return false;
-            }
-            // An observing pass asks GitHub nothing: the child's place rests
-            // on its plan's order alone. The drain asks about the one it
-            // picks, its parents included, before it hands it on.
-            if self.observe {
-                if list.next() != Some(index) || !self.child_admissible_at(repo, parent, depth + 1)
-                {
-                    return false;
-                }
-                continue;
-            }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{parent}")) else {
                 self.miss(repo);
                 return false;
@@ -340,8 +326,7 @@ impl Pass<'_> {
             if !self.eligible(repo, &issue)
                 || issue["state"] != "open"
                 || !self.verified_source(repo, &issue).unwrap_or(false)
-                || list.next() != Some(index)
-                || !self.child_admissible_at(repo, parent, depth + 1)
+                || !self.child_admissible_at(repo, &parent, depth + 1)
             {
                 return false;
             }
@@ -420,7 +405,7 @@ impl Pass<'_> {
     }
     fn same_source(&self, repo: &str, issue: &Value) -> Option<bool> {
         let n = raw(&issue["number"]);
-        let had = match fs::read_to_string(self.plan_dir(repo, &n).join("input")) {
+        let had = match files::input(&self.plan_dir(repo, &n)) {
             Ok(had) => had,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
             Err(_) => return None,
@@ -442,7 +427,7 @@ impl Pass<'_> {
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);
         fs::create_dir_all(&d)?;
-        swap(&d.join("input"), input)
+        files::mark(&d, File::Input).swap(input)
     }
     fn save_list(&self, repo: &str, n: &str, list: &List) -> bool {
         serde_json::to_string_pretty(list)
@@ -550,7 +535,7 @@ impl Pass<'_> {
                 Err(_) => return false,
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => List {
-                source: fs::read_to_string(d.join("input")).ok(),
+                source: files::input(&d).ok(),
                 revision: 0,
                 retained: vec![],
                 tasks: tasks.to_vec(),
@@ -672,7 +657,7 @@ impl Pass<'_> {
             // The parent already sized this exact generated child. Retain
             // that approval instead of paying a second planner to repeat it.
             let number = list.children[i].number.unwrap().to_string();
-            if self.plan_dir(repo, &number).join("input").exists() {
+            if files::has_input(&self.plan_dir(repo, &number)) {
                 continue;
             }
             let Some(child) = api(self.cfg, &format!("repos/{repo}/issues/{number}")) else {

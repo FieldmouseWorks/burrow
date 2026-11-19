@@ -29,6 +29,8 @@ fn config(root: &Path) -> Config {
 
 struct Rig {
     tmp: TempDir,
+    /// The old generation's `burrow-proj`: this test binary under that name.
+    old: TempDir,
     cfg: Config,
     children: Vec<Child>,
 }
@@ -54,11 +56,14 @@ fn rig() -> Rig {
     let jobs = root.join("jobs");
     fs::create_dir_all(jobs.join(".queue")).unwrap();
     fs::create_dir_all(jobs.join(".slots")).unwrap();
-    fs::create_dir(root.join("old")).unwrap();
-    burrow_test::executable(
-        root.join("old/burrow-proj"),
-        fs::read(std::env::current_exe().unwrap()).unwrap(),
-    );
+    // A hard link, not a copy: a debug test binary is over 100M, and copying
+    // it into every rig wrote gigabytes while the retry tests ran together,
+    // enough to stall a runner's disk past their waits (#865). Its directory
+    // sits beside the binary, so the link never crosses a filesystem; the
+    // parent's /proc exe still reads as the link's own path.
+    let exe = std::env::current_exe().unwrap();
+    let old = TempDir::new_in(exe.parent().unwrap()).unwrap();
+    fs::hard_link(&exe, old.path().join("burrow-proj")).unwrap();
     let systemctl = root.join("systemctl");
     burrow_test::executable(
         &systemctl,
@@ -123,6 +128,7 @@ echo $! >'{jobs}'/$id/pid
     let cfg = config(root);
     Rig {
         tmp,
+        old,
         cfg,
         children: Vec::new(),
     }
@@ -144,15 +150,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.path("prompt.1"), "the original prompt\n").unwrap();
     fs::write(job.path("session"), "conversation-123\n").unwrap();
-    fs::write(
-        job.turn("1", "engine"),
-        if mode.ends_with("codex") {
-            "codex\n"
-        } else {
-            "claude\n"
-        },
-    )
-    .unwrap();
+    fs::write(job.turn("1", "engine"), "claude\n").unwrap();
     if mode.ends_with("unstick") {
         fs::write(job.path("unstick"), "").unwrap();
     }
@@ -171,11 +169,11 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     .unwrap();
     Identity::capture(&job, "1").unwrap();
     let exe = if mode.starts_with("old") || mode.starts_with("nb") {
-        r.tmp.path().join("old/burrow-proj")
+        r.old.path().join("burrow-proj")
     } else {
         std::env::current_exe().unwrap()
     };
-    let child = Command::new(exe)
+    let child = burrow_test::command(exe)
         .args([
             "--exact",
             "retry::tests::child",
@@ -212,10 +210,7 @@ fn child() {
         .unwrap();
     let job = Job::new(&cfg, &id);
     if mode.starts_with("old-running") || mode.starts_with("nb-running") {
-        let (path, label) = if mode.ends_with("codex") {
-            fs::create_dir_all(cfg.jobs.join(".codex-slots")).unwrap();
-            (".codex-slots/1", "codex-1")
-        } else if mode.ends_with("unstick") {
+        let (path, label) = if mode.ends_with("unstick") {
             (".slots/unstick", "unstick")
         } else {
             (".slots/1", "1")
@@ -254,27 +249,7 @@ fn child() {
     if mode == "new-retry" {
         Checkpoint::retry(&job, "1", false, now_nanos(), "refused").unwrap();
     }
-    let held = if mode == "old-codex" {
-        legacy_slot::take_engine(
-            &cfg,
-            &id,
-            "1",
-            legacy_pick::Class::Normal,
-            false,
-            engine::Engine::Codex,
-        )
-        .unwrap()
-    } else if mode == "nb-codex" {
-        nonblocking_slot::take_engine(
-            &cfg,
-            &id,
-            "1",
-            nonblocking_pick::Class::Normal,
-            false,
-            engine::Engine::Codex,
-        )
-        .unwrap()
-    } else if mode.starts_with("nb") {
+    let held = if mode.starts_with("nb") {
         nonblocking_slot::take(&cfg, &id, "1", nonblocking_pick::Class::Normal, false).unwrap()
     } else if mode.starts_with("old") {
         legacy_slot::take(&cfg, &id, "1", legacy_pick::Class::Normal, false).unwrap()
@@ -595,7 +570,7 @@ fn transferred_pipeline_retries_keep_both_reserved_shares_ahead_of_lead_backlog(
 }
 
 #[test]
-fn deployment_barrier_leaves_codex_and_emergency_pools_independent() {
+fn deployment_barrier_leaves_the_emergency_pool_independent() {
     let mut r = rig();
     usage::record(
         &r.cfg,
@@ -606,8 +581,6 @@ fn deployment_barrier_leaves_codex_and_emergency_pools_independent() {
     )
     .unwrap();
     for (id, mode) in [
-        ("c0", "old-codex"),
-        ("c1", "old-codex"),
         ("emergency", "old-unstick"),
         ("w0", "old"),
         ("w1", "old"),
@@ -615,16 +588,15 @@ fn deployment_barrier_leaves_codex_and_emergency_pools_independent() {
     ] {
         start(&mut r, id, mode, "/ordinary");
     }
-    until(|| r.cfg.jobs.join("c0/took").exists() && r.cfg.jobs.join("c1/took").exists());
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() >= 3);
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
     native_waits(&r);
     pass(&r.cfg).unwrap();
     usage::back(&r.cfg, None);
-    until(|| took(&r.cfg) == 5);
+    until(|| took(&r.cfg) == 3);
     sleep(Duration::from_secs(3));
-    assert_eq!(took(&r.cfg), 5, "two ordinary, two Codex, one emergency");
+    assert_eq!(took(&r.cfg), 3, "two ordinary, one emergency");
     assert!(r.cfg.jobs.join("emergency/took").exists());
     assert!(
         !Job::new(&r.cfg, "emergency")
@@ -640,7 +612,7 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
     until(|| r.cfg.jobs.join("running/running").exists());
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
-    let consumer = Command::new(std::env::current_exe().unwrap())
+    let consumer = burrow_test::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "retry::tests::child",
@@ -657,13 +629,15 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
     fs::write(r.cfg.jobs.join("running/refuse"), "").unwrap();
     until(|| !r.cfg.jobs.join("running/1.slot").exists());
     usage::back(&r.cfg, None);
-    until(|| {
-        Job::new(&r.cfg, "running")
-            .turn("1", "retry-migration")
-            .exists()
-    });
-    usage::back(&r.cfg, None);
+    // The checkpoint lasts only from the watcher's transfer until the turn it
+    // launches resumes it, which can all come between two looks: wait for
+    // what lasts. The old parent can't take a slot past the barrier, so the
+    // slot is the launched turn's, taken by resuming the transferred refusal.
     until(|| r.cfg.jobs.join("running/took").exists());
+    let job = Job::new(&r.cfg, "running");
+    assert!(job.turn("1", "retry-attempt").exists());
+    assert!(job.turn("1", "spent").exists());
+    assert!(!job.turn("1", "retry-migration").exists());
     assert_eq!(
         read(&r.cfg.jobs.join("running/session")).as_deref(),
         Some("conversation-123")
@@ -671,21 +645,34 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
 }
 
 #[test]
-fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape() {
+fn transferred_turn_pins_its_conversation_choice_and_rejects_queue_path_escape() {
     let mut r = rig();
     let dir = r.tmp.path().join("settings");
-    crate::config::tests::routes(&mut r.cfg, &dir, "work codex");
+    crate::config::tests::set(
+        &mut r.cfg,
+        &dir,
+        &[
+            "offer claude models pinned other",
+            "model work claude pinned",
+        ],
+    );
     let job = Job::new(&r.cfg, "queued");
     fs::create_dir(&job.dir).unwrap();
     fs::write(job.path("role"), "work\n").unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.turn("1", "engine"), "claude\n").unwrap();
-    assert_eq!(
-        engine::choice(&r.cfg, &job).unwrap().engine,
-        engine::Engine::Codex
-    );
+    let model = |r: &Rig| engine::choice(&r.cfg, &job).unwrap().model;
+    assert_eq!(model(&r).as_deref(), Some("pinned"));
     Identity::capture(&job, "1").unwrap();
-    fs::write(job.path("engine"), "claude").unwrap();
+    let change: Vec<String> = ["model", "work", "claude", "other"]
+        .map(str::to_owned)
+        .into();
+    r.cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .command(&change, "test")
+        .unwrap();
     let checkpoint = Checkpoint {
         waited: now_nanos(),
         said: Some("refused".into()),
@@ -700,10 +687,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         &serde_json::to_string(&checkpoint).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        engine::choice(&r.cfg, &job).unwrap().engine,
-        engine::Engine::Codex
-    );
+    assert_eq!(model(&r).as_deref(), Some("pinned"));
     let invalid = Checkpoint {
         name: "2-100-../../outside".into(),
         ..checkpoint
@@ -866,38 +850,6 @@ fn failed_resume_write_retains_checkpoint_and_does_not_double_extend_the_deadlin
     let deadline: i64 = read(&job.turn("1", "deadline")).unwrap().parse().unwrap();
     assert!(deadline <= state.deadline.unwrap() + now_nanos() - state.waited);
     assert!(!job.turn("1", "retry-migration").exists());
-}
-
-#[test]
-fn waiting_codex_turn_transfers_back_to_its_own_pool() {
-    let mut r = rig();
-    fs::create_dir_all(r.cfg.jobs.join(".codex-slots")).unwrap();
-    let held: Vec<_> = (1..=2)
-        .map(|i| {
-            let f = File::create(r.cfg.jobs.join(format!(".codex-slots/{i}"))).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
-    start(&mut r, "codex", "old-codex", "/ordinary");
-    until(|| r.cfg.jobs.join("codex/1.withdrawable").exists());
-    let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
-    barrier.lock().unwrap();
-    native_waits(&r);
-    pass(&r.cfg).unwrap();
-    assert!(
-        Job::new(&r.cfg, "codex")
-            .turn("1", "retry-migration")
-            .exists()
-    );
-    drop(held);
-    until(|| r.cfg.jobs.join("codex/took").exists());
-    assert!(
-        read(&r.cfg.jobs.join("codex/1.slot"))
-            .unwrap()
-            .starts_with("codex-")
-    );
-    assert!(!r.cfg.jobs.join(".slots/1").exists());
 }
 
 mod review;

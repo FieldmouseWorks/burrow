@@ -26,8 +26,7 @@
 //! isn't left waiting. A person's issue is work they asked for, so its job
 //! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
-//! one. A Codex turn, whoever's issue it is, acts as an App all the same
-//! (`turn::github_app`).
+//! one (`turn::github_app`).
 //!
 //! Discovery uses REST; text is read with its edit history through GraphQL.
 
@@ -136,26 +135,7 @@ fn release_parked(cfg: &Config, pass: resumption::Permit) {
 
 /// Which issue is which job.
 fn status(cfg: &Config, inbox: &Inbox) {
-    for d in dirs(&inbox.state, "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let issue = read(&d.join("issue")).unwrap_or_default();
-        let st = Job::new(cfg, &id).state();
-        println!("{issue:<40} {st:<8} {id}");
-    }
-    for d in dirs(&inbox.state.join(".triage"), "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let name = d
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let issue = name
-            .rsplit_once('-')
-            .map(|(k, n)| format!("{}#{n} (sorting)", k.replacen('_', "/", 1)))
-            .unwrap_or(name);
+    for (issue, id) in record::observer(cfg, inbox).kept_jobs() {
         let st = Job::new(cfg, &id).state();
         println!("{issue:<40} {st:<8} {id}");
     }
@@ -232,12 +212,22 @@ use dirs::dirs;
 mod forget;
 use forget::{forget, lock_within};
 mod scope;
+use record::files::{self, File};
 use scope::told;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
 /// folder itself, never a linked worktree of it (.git is a file there) or a
 /// second clone. A hidden folder counts only when it's named for its repo
 /// (o/.github in .github), and a plain one goes first.
+/// The folder of `repo`'s own clone among the projects, by [`projects`]'
+/// rule, the repo's name compared as GitHub does, without case.
+pub(crate) fn project_of(cfg: &Config, repo: &str) -> Option<String> {
+    projects(cfg)
+        .into_iter()
+        .find(|(r, _)| r.eq_ignore_ascii_case(repo))
+        .map(|(_, folder)| folder)
+}
+
 fn projects(cfg: &Config) -> BTreeMap<String, String> {
     let mut all: Vec<(String, PathBuf)> = fs::read_dir(&cfg.projects)
         .map(|d| {
@@ -486,7 +476,7 @@ impl Pass<'_> {
             .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
-    /// A Codex label takes precedence when an issue has both labels.
+    /// The engine its label selects; the first, by name, when it has more.
     fn engine(&self, issue: &Value) -> Option<crate::engine::Engine> {
         let labels = issue["labels"].as_array()?;
         self.inbox
@@ -498,7 +488,7 @@ impl Pass<'_> {
                     .any(|l| l["name"].as_str() == Some(name.as_str()))
             })
             .map(|(_, engine)| *engine)
-            .max_by_key(|e| *e == crate::engine::Engine::Codex)
+            .next()
     }
 
     /// Whether an issue's job waits in no line (proj run --unstick): it has
@@ -565,12 +555,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// its `input`, the [`Pass::issue_text`] it was last given. A record
     /// without one (made before inputs were kept) wasn't handed it.
     pub(super) fn handed(d: &Path, now: &str) -> bool {
-        fs::read_to_string(d.join("input")).is_ok_and(|kept| kept == now)
+        files::input(d).is_ok_and(|kept| kept == now)
     }
 
     /// Kept in the job's record (`d`): what it's been handed of its issue now.
     pub(super) fn hand(d: &Path, input: &str) -> Result<(), Fail> {
-        fs::write(d.join("input"), input).map_err(|e| io_fail(&d.join("input"), e))
+        files::mark(d, File::Input).put(input)
     }
 
     /// Each job works in a worktree of its own, in its own scratch (proj's
@@ -790,8 +780,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// An issue passed over (its opener not one of the authors, or its text
     /// from outside them): said on the issue once, or tried again next pass.
     fn refuse(&mut self, repo: &str, n: &str, said: &str, d: &Path) -> Result<(), Fail> {
-        let refused = d.join("refused");
-        if refused.exists() {
+        if files::refused(d) {
             return Ok(());
         }
         if !self.post(repo, n, said) {
@@ -799,7 +788,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             return Ok(());
         }
         fs::create_dir_all(d).map_err(|e| io_fail(d, e))?;
-        fs::write(&refused, "").map_err(|e| io_fail(&refused, e))
+        files::mark(d, File::Refused).put("")
     }
 
     /// The wake-ups, in place of the ones the repos looked at had; who's out
@@ -836,7 +825,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         // too, whatever pass it ran in), until a pass reaches it again in
         // full: a scoped success, or a pass that left the listing to a later
         // one, hasn't verified the failed work.
-        let gone = self.inbox.state.join(".unreached");
+        let gone = record::files::unreached(&self.inbox.state);
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
         for repo in &self.unreached {
             let f = gone.join(key(repo));
@@ -962,8 +951,9 @@ mod retirement;
 pub(crate) mod settle;
 mod written;
 
-pub(crate) use drain::{DRAIN_KICK, WAITING};
+pub(crate) use drain::DRAIN_KICK;
 mod planner_waits;
+pub(crate) mod record;
 mod sorting_questions;
 mod triage;
 mod write;
@@ -982,6 +972,8 @@ mod parking_tests;
 mod pass_release_tests;
 #[cfg(test)]
 mod question_tests;
+#[cfg(test)]
+mod record_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]

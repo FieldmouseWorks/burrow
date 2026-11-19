@@ -173,6 +173,8 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     let since: i64 = m.recorded("held-since").unwrap().parse().unwrap();
     assert!((epoch() - since).abs() < 60);
     assert_eq!(m.did("notices"), "");
+    // Its status says when the owner hears of it, for burrow-dispatch.
+    assert_eq!(m.status()["offMain"], serde_json::json!(since + 6 * 3600));
     // Six hours on, the owner hears of it.
     fs::write(
         m.cfg.state.join("held-since"),
@@ -198,6 +200,7 @@ fn a_box_running_changes_that_arent_on_main_holds() {
             .contains("close not-on-main: box is back on main.\n")
     );
     assert_eq!(said(&m).0, "ok");
+    assert_eq!(m.status().get("offMain"), None);
 }
 
 #[test]
@@ -225,7 +228,7 @@ fn an_input_that_doesnt_build_is_held_back_and_the_rest_go() {
     assert!(!logs.join("build-nixpkgs.log").exists());
     let job = jobs(&m);
     assert!(
-        job.starts_with("run --pipeline --role update homelab box-update: these updates don't build with box's flake: burrow. "),
+        job.starts_with("run --pipeline --role update --key box-update/build-inputs/burrow --join homelab box-update: these updates don't build with box's flake: burrow. "),
         "{job}"
     );
     assert!(m.cfg.state.join("jobs/build-inputs").exists());
@@ -292,6 +295,12 @@ fn a_vm_test_the_updates_break_holds_them() {
     assert!(jobs(&m).contains(
         "box-update: the VM test vm fails with these updates on top of main: nixpkgs aaaaaaa -> ccccccc. It passes on main, so the updates break it."
     ));
+    // One job for the test and the inputs it fails with.
+    assert!(
+        jobs(&m).contains("--key box-update/check-vm/burrow:nixpkgs --join "),
+        "{}",
+        jobs(&m)
+    );
     assert_eq!(m.recorded("clean-vm"), None, "never passed first time");
     // Remembered for a day: not run again.
     assert_eq!(go(&m), 1);
@@ -476,6 +485,24 @@ fn unhealthy_after_the_switch_goes_straight_back() {
     assert!(!m.cfg.state.join("jobs/health").exists());
     let log = fs::read_to_string(m.cfg.state.join("logs/switch.log")).unwrap();
     assert_eq!(log.matches("switching to").count(), 1, "this run's: {log}");
+}
+
+#[test]
+fn what_a_failing_check_explains_is_noted_not_reverted() {
+    // Claude Code logged out before the switch: HOST-health doesn't count
+    // the servers that can't start again against it, and says so.
+    let m = machine();
+    m.upstream("nixpkgs", &sha('c'));
+    let excused = "claude-rc@web.service failed, but not counted: check:claude-login is failing, and it can't pass without that";
+    fs::write(m.path("excused"), format!("{excused}\n")).unwrap();
+    assert_eq!(go(&m), 0);
+    assert_eq!(said(&m).0, "ok");
+    assert!(m.did("calls").ends_with("confirm\n"));
+    assert_eq!(
+        m.did("journal"),
+        format!("-t box-update -p warning: not the switch's doing: {excused}\n")
+    );
+    assert!(!m.cfg.state.join("jobs/health").exists());
 }
 
 #[test]

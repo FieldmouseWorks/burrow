@@ -70,6 +70,9 @@ pub struct Run<'a> {
     /// Its open PR's number, while it brings in nothing newer for that to
     /// land (main still deploys).
     pub(crate) behind: Option<u64>,
+    /// Held while the box runs changes that aren't on main: when the owner
+    /// hears of it (status.rs's note).
+    pub(crate) off_main: Option<i64>,
     /// Whether this run brings in anything new: not while main isn't live
     /// yet or an open PR of its own waits for the train.
     pub(crate) bumping: bool,
@@ -146,6 +149,7 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         inputs: Vec::new(),
         replacing: None,
         behind: None,
+        off_main: None,
         bumping: false,
         changed: false,
         unfetched: Vec::new(),
@@ -201,7 +205,7 @@ impl Run<'_> {
 
     /// Says what the run did, and ends it: 1 when it failed, 0 otherwise.
     pub(crate) fn end(&self, outcome: Outcome, message: &str) -> End {
-        note(self.cfg, outcome, message, self.behind);
+        note(self.cfg, outcome, message, self.behind, self.off_main);
         End::Exit(if outcome == Outcome::Failed { 1 } else { 0 })
     }
 
@@ -227,7 +231,13 @@ impl Run<'_> {
     }
 
     pub(crate) fn dispatch(&self, key: &str, prompt: &str) {
-        if let Some(id) = dispatch(self.cfg, key, prompt) {
+        self.dispatch_of(key, &[], prompt);
+    }
+
+    /// [`dispatch`], for a problem about `of` (the inputs that don't build,
+    /// or that a VM test fails with): one job each set while it's at work.
+    pub(crate) fn dispatch_of(&self, key: &str, of: &[String], prompt: &str) {
+        if let Some(id) = dispatch(self.cfg, key, of, prompt) {
             println!("handed to Claude: proj log {id}");
         }
     }
@@ -295,6 +305,7 @@ impl Run<'_> {
                     .git_hushed(&["merge-base", "--is-ancestor", rev, &self.main])
                     .is_ok()
         }) || run.current == cfg.recorded("deployed")
+            || running::was_main(cfg, run, &self.main)
             || running::same_as_running(cfg, run);
         if !in_sync {
             let since = cfg.state.join("held-since");
@@ -316,6 +327,7 @@ impl Run<'_> {
                     ),
                 );
             }
+            self.off_main = Some(held + HELD_FOR);
             return Err(self.end(
                 Outcome::Held,
                 &format!(
@@ -421,8 +433,9 @@ impl Run<'_> {
         if self.failed.is_empty() {
             settled(cfg, "build-inputs", "Cleared by a later run.");
         } else {
-            self.dispatch(
+            self.dispatch_of(
                 "build-inputs",
+                &self.failed,
                 &format!(
                     "{}: these updates don't build with {}'s flake: {}. The logs are {}/build-<input>.log. Everything else went through without them. Make them build. {}",
                     cfg.update,
@@ -676,7 +689,7 @@ impl Run<'_> {
                 .unwrap_or_default(),
             self.held_back()
         );
-        note(cfg, Outcome::Ok, &message, self.behind);
+        note(cfg, Outcome::Ok, &message, self.behind, None);
         if let Some(boot) = &cfg.tools.boot {
             let queued = Command::new(boot)
                 .arg("status")
@@ -721,7 +734,7 @@ impl Run<'_> {
             self.url.as_deref().unwrap_or(""),
             self.held_back()
         );
-        note(cfg, Outcome::Ok, &message, self.behind);
+        note(cfg, Outcome::Ok, &message, self.behind, None);
         Ok(())
     }
 

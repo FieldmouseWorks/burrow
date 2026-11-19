@@ -21,8 +21,19 @@ use crate::job::{Await, Job, Request, USAGE_LIMIT, awaits};
 use crate::waits::{Facts, job_wait};
 use crate::{filled, mtime, now, read, systemd, usage};
 
+mod files;
+mod marks;
 #[cfg(test)]
 mod tests;
+
+pub use files::{JobFile, TurnFile};
+pub(crate) use files::{Marker, TurnMarker};
+pub(crate) use marks::{
+    Unread, await_checked, await_text, await_written, awaiting, checkpoint, deadline, end,
+    end_checked, end_said_at, ended_down, ended_marked, has_await, has_outcome, has_slot,
+    left_open, mark, mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped,
+    transferring, unstuck,
+};
 
 /// Where a job stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +188,33 @@ pub struct Record {
     pub ends: Vec<String>,
     /// What the watchdog reads of its latest turn; None before the first.
     pub facts: Option<Facts>,
+    /// Its latest turn, as recorded; None before the first.
+    pub turn: Option<Turn>,
+}
+
+/// A turn as proj recorded it: what it ran on and the session its engine
+/// named. What a starter that reports a job's work (burrow-fix) says ran.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turn {
+    pub n: String,
+    /// Its N.engine, N.model and N.effort: no model or effort for the
+    /// engine's own.
+    pub engine: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// The session its stream names, once the engine has named one.
+    pub session: Option<String>,
+}
+
+/// Turn `n` of `job`, as recorded.
+fn turn(job: &Job, n: &str) -> Turn {
+    Turn {
+        n: n.to_owned(),
+        engine: read(&job.turn_file(n, TurnFile::Engine)),
+        model: read(&job.turn_file(n, TurnFile::Model)),
+        effort: read(&job.turn_file(n, TurnFile::Effort)),
+        session: crate::engine::stream_session(&job.turn_file(n, TurnFile::Jsonl)),
+    }
 }
 
 impl Record {
@@ -191,6 +229,22 @@ impl Record {
             self.stage.to_string(),
             self.wait.iter().filter_map(Wait::line).collect(),
         ))
+    }
+
+    /// Whether it's still at work: parked, queued or running, or its turn
+    /// over but holding something open that resumes it ([`Wait::held`]: a
+    /// transfer, a question, an await) or a usage hold still to reset, as
+    /// the steward reads one. A spent limit, or a release, holds nothing.
+    /// An error when what it waits on couldn't be read.
+    pub fn at_work(&self, now: i64) -> Result<bool, String> {
+        if let Some(e) = &self.unread {
+            return Err(e.clone());
+        }
+        Ok(!matches!(self.stage, Stage::Ended(_))
+            || self
+                .wait
+                .iter()
+                .any(|w| w.held() || matches!(w, Wait::Usage { reset, .. } if *reset > now)))
     }
 
     /// Its stage and waits in one line, as the history notes them.
@@ -267,6 +321,11 @@ impl Record {
             "history": self.history.iter().map(|c| serde_json::json!({
                 "at": c.at, "from": c.from, "to": c.to, "why": c.why,
             })).collect::<Vec<_>>(),
+            "ends": self.ends,
+            "turn": self.turn.as_ref().map(|t| serde_json::json!({
+                "n": t.n, "engine": t.engine, "model": t.model, "effort": t.effort,
+                "session": t.session,
+            })),
         })
     }
 }
@@ -321,20 +380,21 @@ pub fn derive(job: &Job) -> Record {
         awaits: awaited,
         ends: ends(job, &n),
         facts,
+        turn: (!n.is_empty()).then(|| turn(job, &n)),
     }
 }
 
 /// Each PR or issue it awaits, as its await says.
 pub(crate) fn awaited(job: &Job) -> Vec<Await> {
-    match read(&job.path("await")) {
-        Some(text) if filled(&job.path("await")) => awaits(&text),
+    match read(&job.marker(Marker::Await)) {
+        Some(text) if filled(&job.marker(Marker::Await)) => awaits(&text),
         _ => Vec::new(),
     }
 }
 
 /// How turn N said it ends, a line each.
 pub(crate) fn ends(job: &Job, n: &str) -> Vec<String> {
-    crate::turn::lines(&job.turn(n, "end"))
+    crate::turn::lines(&job.turn_marker(n, TurnMarker::End))
 }
 
 /// What its stage waits on: the policy for a parked job, a slot for a
@@ -344,7 +404,7 @@ pub(crate) fn stage_waits(job: &Job, stage: &Stage, n: &str) -> Vec<Wait> {
     match stage {
         Stage::Parked => vec![Wait::Policy(crate::policy::waits_for(job))],
         Stage::Queued if !job.retry_pending(n) => vec![Wait::Slot],
-        Stage::Running => crate::turn::lines(&job.turn(n, "wait"))
+        Stage::Running => crate::turn::lines(&job.turn_marker(n, TurnMarker::Wait))
             .into_iter()
             .filter_map(|l| {
                 let mut fields = l.split('\t');
@@ -376,26 +436,63 @@ fn next(stage: &Stage, wait: &[Wait], facts: Option<&Facts>) -> String {
     }
 }
 
-/// Turn N's file of kind `f`, or, for a job from before each turn kept its
+/// A turn's file that jobs from before each turn kept its own have
+/// unnumbered ([`Job::adopt`] moves it into place).
+#[derive(Clone, Copy, PartialEq)]
+enum Kept {
+    Slot,
+    Outcome,
+    Result,
+}
+
+impl Kept {
+    const ALL: [Kept; 3] = [Kept::Slot, Kept::Outcome, Kept::Result];
+
+    /// Turn N's own.
+    fn numbered(self, job: &Job, n: &str) -> PathBuf {
+        match self {
+            Kept::Slot => job.turn_marker(n, TurnMarker::Slot),
+            Kept::Outcome => job.turn_marker(n, TurnMarker::Outcome),
+            Kept::Result => job.turn_file(n, TurnFile::Result),
+        }
+    }
+
+    /// The unnumbered one.
+    fn unnumbered(self, job: &Job) -> PathBuf {
+        job.unnumbered(match self {
+            Kept::Slot => "slot",
+            Kept::Outcome => "outcome",
+            Kept::Result => "result",
+        })
+    }
+}
+
+/// Turn N's `kept` file, or, for a job from before each turn kept its
 /// own, the unnumbered one where [`Job::adopt`] would move it into place:
 /// when the job has a turn, the file is no older than that turn's prompt,
 /// and, for an outcome, the unit that may still read it back is gone.
-pub(crate) fn turn_file(job: &Job, n: &str, f: &str) -> PathBuf {
-    let numbered = job.turn(n, f);
+fn kept(job: &Job, n: &str, kept: Kept) -> PathBuf {
+    let numbered = kept.numbered(job, n);
     if numbered.exists() || !crate::job::valid_turn(n) {
         return numbered;
     }
-    let old = job.path(f);
+    let old = kept.unnumbered(job);
     let mtime = |p: &Path| fs::metadata(p).ok()?.modified().ok();
-    match (mtime(&old), mtime(&job.path(&format!("prompt.{n}")))) {
+    match (mtime(&old), mtime(&job.prompt(n))) {
         (Some(t), prompt)
             if prompt.is_none_or(|p| p <= t)
-                && (f != "outcome" || systemd::gone(job.cfg, &job.unit())) =>
+                && (kept != Kept::Outcome || systemd::gone(job.cfg, &job.unit())) =>
         {
             old
         }
         _ => numbered,
     }
+}
+
+/// Turn N's answer: its N.result, or a job's from before each turn kept its
+/// own, where [`Job::adopt`] would move it from.
+pub(crate) fn result_file(job: &Job, n: &str) -> PathBuf {
+    kept(job, n, Kept::Result)
 }
 
 /// Where it stands: parked while the policy keeps it; queued while a
@@ -410,9 +507,9 @@ pub(crate) fn stage(job: &Job) -> Stage {
     if job.retry_pending(&n) {
         return Stage::Queued;
     }
-    let outcome = turn_file(job, &n, "outcome");
+    let outcome = kept(job, &n, Kept::Outcome);
     if systemd::active(job.cfg, &job.unit()) {
-        if turn_file(job, &n, "slot").exists() {
+        if kept(job, &n, Kept::Slot).exists() {
             Stage::Running
         } else {
             Stage::Queued
@@ -452,20 +549,25 @@ pub(crate) fn holds(job: &Job) -> Result<Vec<Wait>, String> {
     if job.turns().is_some_and(|n| job.retry_pending(&n)) {
         held.push(Wait::Retry);
     }
-    let asked = match text(&job.path("turns"))?.filter(|n| crate::job::valid_turn(n)) {
+    let asked = match text(&job.marker(Marker::Turns))?.filter(|n| crate::job::valid_turn(n)) {
         Some(n) => {
-            !there(&job.turn(&n, "stopped"))?
-                && text(&job.turn(&n, "end"))?.as_deref() == Some("ask")
+            !there(&job.turn_marker(&n, TurnMarker::Stopped))?
+                && text(&job.turn_marker(&n, TurnMarker::End))?.as_deref() == Some("ask")
         }
         None => false,
     };
-    let question = text(&crate::ask::host_path(job, "question"))?.is_some();
-    if text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
+    // A question an accepted answer has retired is answered, though the
+    // cleanup that removes its files ([`crate::question::recover`]) may not
+    // have run yet: every reader sees it answered, recovered or not.
+    let id = text(&crate::ask::host_path(job, "question-id"))?.unwrap_or_default();
+    let retired = crate::question::retiring(job, &id);
+    let question = !retired && text(&crate::ask::host_path(job, "question"))?.is_some();
+    if !retired && text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
         held.push(Wait::Owner);
     } else if asked || question {
         held.push(Wait::Ask);
     }
-    for a in awaits(&text(&job.path("await"))?.unwrap_or_default()) {
+    for a in awaits(&text(&job.marker(Marker::Await))?.unwrap_or_default()) {
         if !a.target.trim().is_empty() {
             held.push(Wait::Await(a.target.trim().to_owned()));
         }
@@ -480,11 +582,9 @@ fn limits(job: &Job, state: &str, facts: Option<&Facts>) -> Vec<Wait> {
         if let Some((_, reset)) = facts.quota_reset {
             held.push(Wait::Quota(reset));
         }
-        let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
-            (state == "queued")
-                .then(|| facts.spent.as_ref().map(|s| s.release()))
-                .flatten()
-        });
+        let reset = (state == "queued")
+            .then(|| facts.spent.as_ref().map(|s| s.release()))
+            .flatten();
         if matches!(state, "queued" | "running")
             && let Some(release) = usage::last_release(job.cfg)
             && job.engine_label(&facts.turn) == "Claude"
@@ -510,41 +610,44 @@ pub(crate) fn ended_at(job: &Job, n: &str, state: &str, pending: impl FnOnce() -
         return 0;
     }
     let first = |files: &[PathBuf]| files.iter().find_map(|p| mtime(p));
-    first(&[turn_file(job, n, "outcome"), job.turn(n, "ended")])
-        .or_else(|| pending().then(now))
-        .or_else(|| first(&[job.turn(n, "jsonl"), job.path(&format!("prompt.{n}"))]))
-        .unwrap_or(0)
+    first(&[
+        kept(job, n, Kept::Outcome),
+        job.turn_marker(n, TurnMarker::Ended),
+    ])
+    .or_else(|| pending().then(now))
+    .or_else(|| first(&[job.turn_file(n, TurnFile::Jsonl), job.prompt(n)]))
+    .unwrap_or(0)
 }
 
 /// What the stall watchdog's look reads of the latest turn; None before
 /// the first.
 fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
     let n = job.turns()?;
-    let prompt = job.path(&format!("prompt.{n}"));
+    let prompt = job.prompt(&n);
     let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
     Some(Facts {
         id: job.id.to_owned(),
         owned: Request::peek(job).is_ok_and(|r| r.owned),
-        unstick: job.path("unstick").exists(),
-        stopped: job.turn(&n, "stopped").exists(),
-        end: opt(job.turn(&n, "end")),
-        link: opt(job.path("link")),
+        unstick: job.marker(Marker::Unstick).exists(),
+        stopped: job.turn_marker(&n, TurnMarker::Stopped).exists(),
+        end: opt(job.turn_marker(&n, TurnMarker::End)),
+        link: opt(job.file(JobFile::Link)),
         queued: mtime(&prompt).unwrap_or(0),
         slot: if job.retry_pending(&n) {
             0
         } else {
-            mtime(&turn_file(job, &n, "slot")).unwrap_or(0)
+            mtime(&kept(job, &n, Kept::Slot)).unwrap_or(0)
         },
         ended: ended_at(job, &n, state, || job.end_pending()),
         // Its deadline as it stands, to the second (none without a
         // timeout): when it took its slot and its timeout, moved on by
         // any time it waited in line. And what it waits in line for now,
         // if anything.
-        deadline: read(&job.turn(&n, "deadline"))
+        deadline: read(&job.turn_marker(&n, TurnMarker::Deadline))
             .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|t| t.parse::<i64>().ok())
             .map_or(0, |t| t / 1_000_000_000),
-        wait: opt(job.turn(&n, "wait")).map(|w| {
+        wait: opt(job.turn_marker(&n, TurnMarker::Wait)).map(|w| {
             let line = w.lines().next().unwrap_or_default();
             let (since, what) = line.split_once('\t').unwrap_or((line, ""));
             (since.to_owned(), what.to_owned())
@@ -554,11 +657,8 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
             .map(|a| (a.target.clone(), a.since.clone()))
             .collect(),
         quota_reset: if state == "queued" {
-            let engine = read(&job.turn(&n, "engine"))
-                .and_then(|s| crate::engine::Engine::parse(&s).ok())
-                .unwrap_or(crate::engine::Engine::Claude);
             let since = mtime(&prompt).unwrap_or(0);
-            crate::github_quota::admission_reset(job.cfg, job, engine)
+            crate::github_quota::admission_reset(job.cfg, job)
                 .filter(|reset| *reset > since)
                 .map(|reset| (since, reset))
         } else if state == "running" {
@@ -566,13 +666,7 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
         } else {
             crate::github_quota::reset(job, &n)
         },
-        usage_reset: awaited
-            .iter()
-            .find(|a| a.target == USAGE_LIMIT)
-            .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?))),
-        spent: (read(&job.turn(&n, "engine")).as_deref() != Some("codex"))
-            .then(|| usage::kept(job.cfg))
-            .flatten(),
+        spent: usage::kept(job.cfg),
         turn: n,
         state: state.to_owned(),
     })

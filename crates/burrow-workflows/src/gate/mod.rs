@@ -34,13 +34,15 @@ mod legs;
 mod negative;
 mod outputs;
 mod slots;
+mod store;
 mod waiting;
 mod whole;
 
 /// What the stand-ins keep beside their log, `nix.log`, cleared before
 /// each run.
-const LOGS: [&str; 10] = [
+const LOGS: [&str; 11] = [
     "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried", ".shown", ".silent",
+    ".config",
 ];
 
 /// A case's runner: real nix for evaluation, in a store under its scratch
@@ -150,6 +152,9 @@ printf '%s\n' '{}'
   build)
     echo "$*" >> "$NIX_LOG"
     {real_nix} config show max-silent-time >> "$NIX_LOG.silent"
+    # Where it would substitute from, and whether a flake's config or an
+    # unsandboxed build could change that (store.rs).
+    {real_nix} config show --json | jq -c '{{substituters: .substituters.value, "accept-flake-config": .["accept-flake-config"].value, sandbox: .sandbox.value}}' >> "$NIX_LOG.config"
     if [ -n "$HEAVY_SLOT" ]; then
       echo "$*" >> "$NIX_LOG.slot"
       echo "$HEAVY_JOBS" > "$NIX_LOG.jobs"
@@ -473,7 +478,9 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
         crate::harness::yaml(
             "{TREE_SOURCE: '${{ inputs.gate-reuse }}', APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
              LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}', \
-             TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check'}"
+             TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check', \
+             BUILDS: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\", \
+             BUILDS_KEY: \"${{ inputs.install-nix && vars.BURROW_BUILDS_PUBLIC_KEY || '' }}\"}"
         )
     );
     assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);

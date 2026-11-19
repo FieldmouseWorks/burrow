@@ -43,7 +43,6 @@ in pkgs.testers.runNixOSTest {
       owners = [ "sam" ];
       authors = [ "sam" ];
       app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
-      reviewers.codex.enable = true;
       pipelineRepos = [ "sam/box" ];
     };
     burrow.ledger = {
@@ -68,7 +67,7 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     machine.wait_for_unit("multi-user.target")
     # No scheduler or inbox is available to perform the change.
-    machine.succeed('systemctl mask --runtime proj-retry-transfer.service proj-retry-barrier.service burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service autoland.service autoland@.service autoland-review.service burrow-update.service burrow-ledger.service burrow-ledger@.service')
+    machine.succeed('systemctl mask --runtime proj-retry-transfer.service proj-retry-barrier.service burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service autoland.service autoland@.service burrow-update.service burrow-ledger.service burrow-ledger@.service')
     # Boot can cancel queued control jobs; require the actual stopped state.
     stopped, output = machine.execute("systemctl stop 'proj-retry*' 'burrow-events.service' 'proj-inbox*' 'proj-watch*' 'autoland*' 'burrow-update*' 'burrow-ledger*'")
     if stopped:
@@ -97,7 +96,7 @@ in pkgs.testers.runNixOSTest {
     assert "pipeline-only" in machine.succeed("runuser -u dev -- proj status")
     machine.succeed("runuser -u dev -- proj usage back")
     machine.succeed("burrow-settings /etc/settings-tracked allows sam/code")
-    for unit in ["burrow-events", "proj-inbox", "proj-watch", "autoland", "autoland-review", "burrow-update", "burrow-ledger"]:
+    for unit in ["burrow-events", "proj-inbox", "proj-watch", "autoland", "burrow-update", "burrow-ledger"]:
         machine.fail(f"systemctl is-active {unit}.service")
   '';
 }

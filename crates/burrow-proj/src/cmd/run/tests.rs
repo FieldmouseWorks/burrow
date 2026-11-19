@@ -1,6 +1,6 @@
 use super::{
-    Command, Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer,
-    run, run_with_cgroup, since_time, start, start_job,
+    Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer, run,
+    run_with_cgroup, since_time, start, start_job,
 };
 
 #[test]
@@ -74,7 +74,7 @@ fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
         Some("claude-rc-scan.service"),
         Some("proj-inbox.service"),
     ] {
-        let mut child = Command::new(std::env::current_exe().unwrap());
+        let mut child = burrow_test::command(std::env::current_exe().unwrap());
         child
             .args([
                 "--exact",
@@ -83,8 +83,7 @@ fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
             ])
             .env(CHILD, unit.unwrap_or("shell"))
             .env_remove("INVOCATION_ID")
-            .env_remove("SYSTEMD_EXEC_PID")
-            .env_remove("PROJ_JOB");
+            .env_remove("SYSTEMD_EXEC_PID");
         if let Some(unit) = unit {
             child
                 .env("INVOCATION_ID", "0123456789abcdef0123456789abcdef")
@@ -322,6 +321,99 @@ fn a_key_a_job_has_is_refused() {
     assert!(start_job(&cfg, &new, "p", "task").is_err());
     let held = std::fs::read_link(tmp.path().join("jobs/.keys/j")).unwrap();
     assert!(held.to_str() != Some("p-2") && held.to_str().unwrap().starts_with("p-"));
+}
+
+/// `keyed`, but its systemctl says every unit is active: a job with a turn
+/// and no outcome is queued, at work.
+fn keyed_active(tmp: &std::path::Path) -> crate::config::Config {
+    let ctl = tmp.join("systemctl-active");
+    burrow_test::executable(
+        &ctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 0 ;; *LoadState*) echo loaded ;; esac\n",
+    );
+    let mut cfg = keyed(tmp, "not-found");
+    cfg.tools.systemctl = ctl;
+    cfg
+}
+
+// With --join, a key whose job is still at work (queued through a usage
+// hold, say) is that job's: the run says its id and starts nothing
+// (#1211). Without it, the same key is refused.
+#[test]
+fn a_run_joins_the_job_at_work_under_its_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = keyed_active(tmp.path());
+    std::fs::create_dir_all(tmp.path().join("projects/p")).unwrap();
+    hold(tmp.path(), "update/build-inputs/nixpkgs", "p-1", true);
+    let joining = New {
+        key: Some("update/build-inputs/nixpkgs".into()),
+        join: true,
+        ..New::default()
+    };
+    assert_eq!(start_job(&cfg, &joining, "p", "task").unwrap(), "p-1");
+    assert_eq!(start_job(&cfg, &joining, "p", "task").unwrap(), "p-1");
+    let jobs: Vec<_> = std::fs::read_dir(tmp.path().join("jobs"))
+        .unwrap()
+        .collect();
+    assert_eq!(jobs.len(), 2, "p-1 and .keys, no new job");
+    let refused = New {
+        join: false,
+        ..joining
+    };
+    assert_eq!(
+        start_job(&cfg, &refused, "p", "task")
+            .unwrap_err()
+            .say
+            .as_deref(),
+        Some("proj run: p-1 has the key update/build-inputs/nixpkgs")
+    );
+}
+
+// A key's job whose turn is over but that holds something open (an await)
+// is still at work, and joined; once it holds nothing, a run with --join
+// takes the key for a job of its own, and without --join it's refused.
+#[test]
+fn a_key_whose_job_ended_goes_to_the_next_run_that_joins() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = keyed(tmp.path(), "not-found");
+    std::fs::create_dir_all(tmp.path().join("projects/p")).unwrap();
+    hold(tmp.path(), "k", "p-1", true);
+    std::fs::write(tmp.path().join("jobs/p-1/1.outcome"), "done\n").unwrap();
+    // Its turn over, but awaiting a PR, which resumes it: still at work,
+    // and joined.
+    std::fs::write(tmp.path().join("jobs/p-1/await"), "o/r#5\t1800000000\t\n").unwrap();
+    let p1 = crate::job::Job::new(&cfg, "p-1");
+    assert!(p1.at_work().unwrap());
+    let joining = New {
+        key: Some("k".into()),
+        join: true,
+        ..New::default()
+    };
+    assert_eq!(start_job(&cfg, &joining, "p", "task").unwrap(), "p-1");
+    std::fs::remove_file(tmp.path().join("jobs/p-1/await")).unwrap();
+    assert!(!p1.at_work().unwrap());
+    let refused = New {
+        key: Some("k".into()),
+        ..New::default()
+    };
+    assert_eq!(start_job(&cfg, &refused, "p", "task").unwrap_err().code, 1);
+    // Its turn can't start here (no systemd-run), but the key is its.
+    let _ = start_job(&cfg, &joining, "p", "task");
+    let held = std::fs::read_link(tmp.path().join("jobs/.keys/k")).unwrap();
+    assert!(held.to_str() != Some("p-1") && held.to_str().unwrap().starts_with("p-"));
+}
+
+// A run --join with nothing to join by is refused before anything starts.
+#[test]
+fn join_needs_a_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = keyed(tmp.path(), "not-found");
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let fail = run_with_cgroup(&cfg, false, &args(&["--join", "p", "task"]), || {
+        Ok(String::new())
+    })
+    .unwrap_err();
+    assert_eq!(fail.code, 2);
 }
 
 #[test]

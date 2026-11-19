@@ -11,11 +11,10 @@ burrow-settings = { path = "../burrow-settings" }
 burrow-probe = { path = "../burrow-probe" }
 burrow-process = { path = "../burrow-process" }
 burrow-github = { path = "../burrow-github" }
-burrow-codex = { path = "../burrow-codex" }
 burrow-usage-reset = { path = "../burrow-usage-reset" }
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }
-jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 rustix = { version = "1.1.6", features = ["process", "fs", "net"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -31,7 +30,7 @@ burrow-test = { path = "../burrow-test" }
 gh-token = { path = "../gh-token" }
 # The zones a usage limit's reset is said in, for tests on a machine with no
 # tzdb (the Nix sandbox): a tzdb the system has still comes first.
-jiff = { version = "0.2.38", default-features = false, features = ["tzdb-bundle-always"] }
+jiff = { version = "1.0.0", default-features = false, features = ["tzdb-bundle-always"] }
 
 [[test]]
 name = "inbox-routing"

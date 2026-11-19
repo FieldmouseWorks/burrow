@@ -69,7 +69,7 @@ impl Leg<'_> {
 
     /// The leg's entries under the default branch: each commit's cache ids
     /// (a key can be saved more than once, for other paths or versions).
-    fn entries(&self, api: &mut dyn Api) -> Result<BTreeMap<String, Vec<u64>>, String> {
+    pub fn entries(&self, api: &mut dyn Api) -> Result<BTreeMap<String, Vec<u64>>, String> {
         let path = format!(
             "repos/{}/actions/caches?key={}&ref={}&per_page=100",
             self.repo,
@@ -135,8 +135,20 @@ impl Leg<'_> {
     /// there, which makes this push's save pointless.
     pub fn superseded(&self, api: &mut dyn Api) -> Result<Option<String>, String> {
         let entries = self.entries(api)?;
+        self.newer(api, &entries)
+    }
+
+    /// Of `entries` (as [`Leg::entries`] lists them), a newer commit's, by
+    /// key: what makes this push's save pointless, and so skipped, and what
+    /// a PR's leg merged onto this commit restores in its place
+    /// (burrow-flake-wait).
+    pub fn newer(
+        &self,
+        api: &mut dyn Api,
+        entries: &BTreeMap<String, Vec<u64>>,
+    ) -> Result<Option<String>, String> {
         Ok(self
-            .others(api, &entries)?
+            .others(api, entries)?
             .into_iter()
             .find(|(_, r)| *r == Relation::Newer)
             .map(|(sha, _)| format!("{}{sha}", self.prefix)))
