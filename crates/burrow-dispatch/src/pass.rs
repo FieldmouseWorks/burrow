@@ -341,6 +341,13 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             ),
         };
     }
+    for (repo, commit) in cfg.deploy.iter().flat_map(|d| &d.held) {
+        let _ = writeln!(
+            out,
+            "{repo}: held at {} by the flake's own rev, so its default branch isn't going live",
+            commit.get(..7).unwrap_or(commit)
+        );
+    }
     for (repo, why) in &snap.unknown {
         let _ = writeln!(out, "{repo}: not known to be live: {why}");
     }
@@ -792,7 +799,25 @@ mod tests {
         }
     }
 
-    // burrow's main on 2026-11-14 (#1108), replayed: flake's push runs for
+    // An input the flake holds at a commit: status says so, where a watched
+    // one says how far behind live it is, and no wait is kept for it.
+    #[test]
+    fn held_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let w = Fake::default();
+        let said = super::status(&cfg, &w, 1_794_656_000.0);
+        assert!(
+            said.contains(
+                "sam/pin: held at ddddddd by the flake's own rev, so its default branch isn't going live\n"
+            ),
+            "{said}"
+        );
+        run(&cfg, &w, 1_794_656_000.0).unwrap();
+        let (_, items) = watch::read(&dir.path().join("watch.json")).unwrap();
+        assert!(items.keys().all(|k| !k.contains("sam/pin")), "{items:?}");
+    }
+
     // 9c6ad02 and fceda93 both under way, the first stuck in a gate leg for
     // hours. The pass cancels the first for the second, and nothing else:
     // not the second, not code-scanning's runs (another workflow, the
