@@ -130,7 +130,7 @@ def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, 
         "has pushed since it was handed to you, so stop there, leaving nothing. "
         f"Fetch it (git fetch origin {branch}) and work in {WORKTREE}, made at exactly that commit "
         f"(git worktree add --detach DIR {head}); push from there with git push origin HEAD:refs/heads/{branch}. "
-        "For every unresolved review thread (the reviewers', which the steward posts as its GitHub App marked Codex, or anyone's): "
+        "For every unresolved review thread (Codex's, from its GitHub connector, or anyone's): "
         f"either fix it or answer it with why it's wrong or out of scope. {FINDINGS}{CLAIMS}"
         "A fix that belongs in another repo (one this PR pins, say) goes there, as a PR of its own; end your turn with "
         "`proj await` on it, and the steward leaves this PR to you meanwhile: proj resumes you once it changes, to bring "

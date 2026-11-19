@@ -231,8 +231,7 @@ pub fn offered(settings: &burrow_settings::Config, role: &str) -> Result<Offer, 
 /// an answer on another engine than the plugin names, a model or effort it
 /// didn't offer (`offer`, as it was described), or another model or effort
 /// than the flow chose. So the role's route for the repo is that engine,
-/// moves to no other, names an offered model at an offered effort, and is
-/// what the flow chose.
+/// names an offered model at an offered effort, and is what the flow chose.
 pub fn runnable(
     settings: &burrow_settings::Config,
     role: &str,
@@ -243,7 +242,7 @@ pub fn runnable(
     let settings = settings.role_view()?.in_force;
     let named = &offer.engine;
     let route = settings.route(role, Some(repo));
-    if route.engine != *named || route.over.is_some() {
+    if route.engine != *named {
         return Err(format!(
             "the {role} role can run in {repo} on another engine than {named}, which the plugin names itself by"
         ));

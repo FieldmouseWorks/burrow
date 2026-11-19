@@ -84,9 +84,8 @@
 //! proj done                   from inside a job: its work is finished
 //! ```
 //!
-//! Jobs run headless in their project: Claude under the managed settings,
-//! Codex in its sandbox (`engine::sandbox`) with its generated forbidden command rules. Neither
-//! asks mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
+//! Jobs run headless in their project, Claude under the managed settings,
+//! and never ask mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
 //! Everything a job said is kept in its folder in jobs ([`job`] has what's
 //! in it); what it builds goes in a scratch dir of its own, PROJ_SCRATCH,
 //! cleared once the job is over ([`scratch`]).
@@ -156,8 +155,6 @@
 //! With --app every turn runs in that App's env (modules/github.nix), its
 //! file from apps, so git and gh act as the App: the machine's own work, not
 //! the user's. A turn whose App is gone fails rather than run as the user.
-//! A Codex turn with no --app runs in the machine's App's env (machinery),
-//! or not at all: its sandbox keeps the user's logins out ([`turn::github_app`]).
 
 // Tests build a job's folder by hand, its markers included, through the
 // by-name door (Job::path, Job::turn) the rest of the crate can't use.
@@ -188,7 +185,6 @@ mod question;
 pub mod record;
 pub mod retry;
 pub mod scratch;
-pub mod select;
 pub mod settings;
 pub mod slot;
 pub mod snapshot;

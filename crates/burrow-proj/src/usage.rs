@@ -918,7 +918,7 @@ fn title(s: &Spent) -> String {
 fn body(cfg: &Config, s: &Spent) -> String {
     if s.owner {
         return format!(
-            "The owner paused Claude work until {}. Reason: {}. Running turns continue; Codex work remains eligible. Use `proj usage back` to release this pause early.",
+            "The owner paused Claude work until {}. Reason: {}. Running turns continue. Use `proj usage back` to release this pause early.",
             when(s.until),
             s.said
         );

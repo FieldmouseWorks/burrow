@@ -37,14 +37,14 @@ fn opt_in_and_pipeline_scope_gate_the_real_drain() {
         held.wake.values().any(|t| *t == until),
         "scope expiry books a pass with no eligible candidates"
     );
-    assert!(!b.log().contains("labels[]=codex"));
+    assert!(!b.log().contains("labels[]=claude"));
     b.pass()
         .note_ready("sam/box", std::slice::from_ref(&pipeline))
         .unwrap();
     on_github(&b, &pipeline);
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/8/labels -f labels[]=codex"),
+        b.log().contains("issues/8/labels -f labels[]=claude"),
         "{}",
         b.log()
     );

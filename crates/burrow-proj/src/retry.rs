@@ -2,7 +2,7 @@
 //!
 //! The deployment's barrier owns the original census lock. Older schedulers
 //! therefore cannot admit a retained retry while this event consumer moves
-//! its existing turn to the current executable. Running turns, Codex and the
+//! its existing turn to the current executable. Running turns and the
 //! emergency pool retain their own locks and continue normally.
 use std::collections::HashSet;
 use std::fs;
@@ -94,7 +94,7 @@ impl Checkpoint {
                 ));
             }
             Identity::capture(job, n).map_err(io::Error::other)?;
-            match census(job, n) {
+            match census(job) {
                 Ok(_census) => {
                     return crate::record::mark_turn(job, n, TurnMarker::RetryMigration)
                         .swap(&serde_json::to_string(&state)?);
@@ -156,17 +156,8 @@ impl Checkpoint {
     }
 }
 
-fn is_codex(job: &Job, n: &str) -> io::Result<bool> {
-    Ok(Identity::load(job, n)
-        .map_err(io::Error::other)?
-        .map_or_else(
-            || read(&job.turn_file(n, TurnFile::Engine)).as_deref() == Some("codex"),
-            |identity| identity.choice.engine == engine::Engine::Codex,
-        ))
-}
-
-fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
-    if crate::record::unstuck(job) || is_codex(job, n)? {
+fn census(job: &Job) -> io::Result<Option<fs::File>> {
+    if crate::record::unstuck(job) {
         return Ok(None);
     }
     let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
@@ -192,7 +183,6 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
             || crate::policy::parked(&job)
             || !job.retry_pending(&n)
             || crate::record::unstuck(&job)
-            || is_codex(&job, &n)?
         {
             continue;
         }
@@ -318,10 +308,10 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         };
         let Some(n) = job.turns() else { continue };
-        // Running turns keep their own locks and executable. Waiting Codex
-        // and emergency turns must transfer too: an old initial handover can
-        // itself be blocked on the fenced census. Their saved engine/flag
-        // sends the replacement straight back to its independent pool.
+        // Running turns keep their own locks and executable. Waiting
+        // emergency turns must transfer too: an old initial handover can
+        // itself be blocked on the fenced census. Their saved flag sends the
+        // replacement straight back to its independent pool.
         if crate::record::has_slot(&job, &n)
             || crate::record::has_outcome(&job, &n)
             || crate::record::stopped(&job, &n)
@@ -343,7 +333,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if Checkpoint::load(&job, &n)?.is_none() {
             let state = checkpoint(cfg, &job, &n, pid, first)?;
             Identity::capture_legacy(&job, &n).map_err(io::Error::other)?;
-            let _census = match census(&job, &n) {
+            let _census = match census(&job) {
                 Ok(held) => held,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     busy = true;

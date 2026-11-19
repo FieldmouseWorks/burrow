@@ -475,12 +475,8 @@ fn what_ran_must_be_what_the_plugin_offers_and_the_flow_chose() {
 fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
     let dir = tempfile::tempdir().unwrap();
     let roles = dir.path().join("overlay.roles.json");
-    // The settings as they're changed while a job judges: the role moved to
-    // another engine, a model or an effort newly offered.
-    let moved = json!({"routing": {"roles": {"judge": {"engine": "codex", "over": null}},
-        "models": {"judge codex": {"model": "c-model", "effort": "high"}}},
-        "offers": {"claude": {"models": ["a-model"], "efforts": ["high"]},
-            "codex": {"models": ["c-model"], "efforts": ["high"]}}, "migrated": 1});
+    // The settings as they're changed while a job judges: a model or an
+    // effort newly offered.
     let model = json!({"routing": {"models": {"judge claude": {"model": "b-model", "effort": "high"}}},
         "offers": {"claude": {"models": ["a-model", "b-model"], "efforts": ["high"]}}, "migrated": 1});
     let effort = json!({"routing": {"models": {"judge claude": {"model": "a-model", "effort": "low"}}},
@@ -509,7 +505,6 @@ fn what_ran_is_held_to_what_was_offered_when_the_request_came() {
         .unwrap()
         .effort = None;
     for (request, settings, answered) in [
-        (&unchosen, &moved, ran("codex", "c-model", "high")),
         (&unchosen, &model, ran("claude", "b-model", "high")),
         (&unchosen, &effort, ran("claude", "a-model", "low")),
         (&model_only, &effort, ran("claude", "a-model", "low")),

@@ -640,7 +640,8 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         "input=7 output=0 cache-read=0 cache-write=0 known-cost=$0.000000; partial tokens (output counts completed runs only); additional cost unavailable"
     ));
     assert!(answer.contains("claude five_hour: 100% HIT 100%"));
-    assert!(answer.contains("codex seven_day: 40%"));
+    // Only Claude's meter is read: another engine's old readings aren't.
+    assert!(!answer.contains("40%"), "{answer}");
     assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
     assert!(!answer.contains("99%"));
     assert!(!answer.contains("SECRET"));

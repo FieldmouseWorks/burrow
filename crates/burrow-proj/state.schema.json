@@ -63,8 +63,7 @@
     "Engine": {
       "type": "string",
       "enum": [
-        "claude",
-        "codex"
+        "claude"
       ]
     },
     "EngineMeter": {
@@ -557,11 +556,6 @@
           "description": "The one slot past `maxJobs` for jobs run --unstick.",
           "type": "string",
           "const": "unstick"
-        },
-        {
-          "description": "One of Codex's own pool.",
-          "type": "string",
-          "const": "codex"
         },
         {
           "description": "One of the drain's `drainJobs`: an issue it handed on, until that\nissue's record goes.",

@@ -25,13 +25,13 @@ fn what_the_guidance_said_before_fails() {
     );
     assert_eq!(
         found(
-            "Codex jobs have their own small\npool (`burrow.proj.codex.slots`, two by default), leaving"
+            "One project's jobs share a small\nslice (`burrow.proj.maxJobsPerProject`, two by default), leaving"
         ),
-        ["1: `proj.codex.slots` with a value"]
+        ["1: `proj.maxJobsPerProject` with a value"]
     );
     assert_eq!(
-        found("prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)"),
-        ["1: `proj.codex.slots` with a value"]
+        found("prove a mismatch fails. A project has its own share (`maxJobsPerProject`, two)"),
+        ["1: `proj.maxJobsPerProject` with a value"]
     );
     // One file keeps four options: naming it states where each is kept.
     assert_eq!(
@@ -64,7 +64,7 @@ fn naming_an_option_without_its_value_passes() {
         // A path that only starts like a live file's.
         "the `settings/overlay.roles.json-old` file",
         // A value in a sentence of its own.
-        "Set `proj.maxJobs` in the flake. Two of them are Codex's.",
+        "Set `proj.maxJobs` in the flake. Two of them are the drain's.",
     ] {
         assert_eq!(found(text), Vec::<String>::new(), "{text}");
     }
@@ -236,7 +236,7 @@ fn a_tree_is_every_markdown_file_but_build_output() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     for (path, text) in [
-        ("README.md", "pool (`codex.slots`, two)"),
+        ("README.md", "share (`maxJobsPerProject`, two)"),
         ("docs/a.md", "`usageTrickle` (default 2)"),
         ("docs/b.txt", "`usageTrickle` (default 2)"),
         (".git/c.md", "`usageTrickle` (default 2)"),
@@ -255,7 +255,7 @@ fn a_tree_is_every_markdown_file_but_build_output() {
     assert_eq!(
         got,
         [
-            "README.md:1: states `proj.codex.slots` with a value; link docs/settings-reference.md instead",
+            "README.md:1: states `proj.maxJobsPerProject` with a value; link docs/settings-reference.md instead",
             "docs/a.md:1: states `proj.usageTrickle` with a value; link docs/settings-reference.md instead",
         ]
     );
@@ -329,12 +329,10 @@ fn spaced(value: &serde_json::Value) -> String {
 }
 
 /// Every collection default, as JSON whitespace and Markdown escaping may
-/// spell it, is that option's value for every name it goes by; so is
-/// skipPaths' row copied out of the reference, its pipes escaped.
+/// spell it, is that option's value for every name it goes by.
 #[test]
 fn collection_defaults_are_found_however_spelled() {
     let facts = facts();
-    let reference = burrow_settings::reference::markdown();
     let mut collections = 0;
     for setting in SETTINGS {
         let Some(value) = setting
@@ -372,24 +370,8 @@ fn collection_defaults_are_found_however_spelled() {
         }
     }
     // settings.allowed, settings.repositoryOverrides, autoland.repos,
-    // autoland.reviewers.skipPaths, proj.roles, proj.models,
-    // proj.engineSetups at least.
-    assert!(collections >= 7, "{collections}");
-    // The reference's own row, its pipes escaped, copied out of it.
-    let row = reference
-        .lines()
-        .find(|l| l.starts_with("| `autoland.reviewers.skipPaths` |"))
-        .expect("skipPaths has a reference row");
-    assert!(row.contains("\\|"), "{row}");
-    for name in aliases("autoland.reviewers.skipPaths") {
-        let text = row.replacen("autoland.reviewers.skipPaths", &name, 1);
-        assert!(
-            check_text("a.md", &text, &facts)
-                .iter()
-                .any(|f| f.what == "`autoland.reviewers.skipPaths` with a value"),
-            "{text}"
-        );
-    }
+    // proj.roles, proj.models, proj.engineSetups at least.
+    assert!(collections >= 6, "{collections}");
 }
 
 /// `text` with every ASCII punctuation mark backslash-escaped, as Markdown
