@@ -23,6 +23,18 @@ inputs:
             '';
           };
 
+          authors = mkOption {
+            type = types.listOf (import ../lib/github-author.nix { inherit lib; });
+            default = [ ];
+            example = [ { login = "octocat"; id = 1; } ];
+            description = ''
+              GitHub accounts, with immutable numeric IDs, whose issues and
+              replies the machine acts on. The inbox, the engines door, the
+              probe, the undo door and the settings door all read this one list;
+              anyone else's text, including an edit, is ignored.
+            '';
+          };
+
           projectsDir = mkOption {
             type = types.str;
             default = "/data/dev/src";

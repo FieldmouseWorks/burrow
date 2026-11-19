@@ -71,10 +71,10 @@ pkgs.testers.runNixOSTest {
       # Its user manager runs without a login, as the probe's `rc` reads it.
       linger = true;
     };
+    burrow.authors = [ { login = "sam"; id = 1; } ];
     burrow.probe = {
       enable = true;
       repo = "sam/homelab";
-      authors = [ { login = "sam"; id = 1; } ];
       inherit gh;
       journal.units = [ "leaky.service" ];
     };

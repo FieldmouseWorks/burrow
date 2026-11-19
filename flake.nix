@@ -79,7 +79,7 @@
             (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; }; })
             (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
             (nixpkgs.lib.optionalAttrs (name == "dashboard") { burrow.dashboard = { host = "burrow.tail1234.ts.net"; owner = { id = 583231; login = "sam"; }; }; services.tailscale.enable = true; })
-            (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ { login = "sam"; id = 1; } ]; }; })
+            (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.authors = [ { login = "sam"; id = 1; } ]; burrow.probe = { repo = "sam/homelab"; }; })
             (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
             (nixpkgs.lib.optionalAttrs (name == "builds") { burrow.builds = { host = "example.org"; repos = [ "sam/homelab" ]; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; }; burrow.github = { machinery = "workers"; apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }; })

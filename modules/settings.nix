@@ -20,7 +20,8 @@ let
   '';
   door = pkgs.writeText "settings-door.json" (builtins.toJSON {
     inherit settings;
-    inherit (cfg.door) repo label authors;
+    inherit (cfg.door) repo label;
+    inherit (config.burrow) authors;
     state = "${stateDir}/settings-door";
   });
 in {
@@ -39,7 +40,6 @@ in {
       gh = lib.mkOption { type = lib.types.package; default = config.burrow.github.machineGh; internal = true; };
       repo = lib.mkOption { type = lib.types.str; default = ""; description = "Repository accepting settings requests."; };
       label = lib.mkOption { type = lib.types.str; default = "settings"; };
-      authors = lib.mkOption { type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; };
     };
   };
   config = lib.mkMerge [ {
@@ -47,7 +47,7 @@ in {
     environment.systemPackages = [ command ];
     systemd.tmpfiles.rules = [ "d ${stateDir}/settings 0755 ${user} - -" ];
   } (lib.mkIf cfg.door.enable {
-    assertions = [ { assertion = cfg.door.authors != [ ] && cfg.door.repo != ""; message = "The settings door requires a repository and authorized authors."; } ];
+    assertions = [ { assertion = config.burrow.authors != [ ] && cfg.door.repo != ""; message = "The settings door requires a repository and authorized authors (burrow.authors)."; } ];
     systemd.tmpfiles.rules = [ "d ${stateDir}/settings-door 0700 ${user} - -" ];
     # This timer is independent of the pipeline and its event dispatcher.
     systemd.timers.burrow-settings-door = {

@@ -18,13 +18,13 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.proj ];
     users.users.dev.isNormalUser = true;
     burrow.claude.package = pkgs.hello;
+    burrow.authors = [ { login = "sam"; id = 1; } ];
     burrow.proj = {
       enable = true;
       inherit gh;
       engines.door = {
         enable = true;
         repo = "sam/box";
-        authors = [ { login = "sam"; id = 1; } ];
       };
     };
     # Prove readable wake permissions even with a restrictive service umask.

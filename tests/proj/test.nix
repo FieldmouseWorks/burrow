@@ -38,6 +38,7 @@ pkgs.testers.runNixOSTest {
     ];
     burrow = {
       claude.package = claude;
+      authors = [ { login = "sam"; id = 1; } { login = "sam-steward[bot]"; id = 2; } ];
       # These fixture repositories explicitly opt into automated admission.
       settings.allowed = [ "o/web" "o/lead" "o/r" "o/b" "o/x" "o/d" "o/u" "o/c" "o/m" "o/.github" ];
       # The owner's notifier: what it's asked, a line each, in /tmp/notices.
@@ -66,7 +67,6 @@ pkgs.testers.runNixOSTest {
           # configuration. proj-planning runs this fixture with planning on.
           inherit planning;
           enable = true;
-          authors = [ { login = "sam"; id = 1; } { login = "sam-steward[bot]"; id = 2; } ];
         };
       };
       # The App the machine's own work acts as. Its socket isn't asked here:
