@@ -19,13 +19,7 @@ pub(super) fn issue(cfg: &Config, job: &Job) -> Option<(String, String)> {
     }
     // Legacy inbox records are also host-owned. Never trust job/link.
     let inbox = cfg.inbox.as_ref()?;
-    for entry in fs::read_dir(&inbox.state).ok()?.flatten() {
-        let dir = entry.path();
-        if read(&dir.join("job")).as_deref() == Some(job.id) {
-            return read(&dir.join("issue")).and_then(|s| crate::github::target(&s));
-        }
-    }
-    None
+    crate::inbox::record::job_issue(&inbox.state, job.id).and_then(|s| crate::github::target(&s))
 }
 
 /// A failed write stays pending and the watcher books a retry. Remember exactly

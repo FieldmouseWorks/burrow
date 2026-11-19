@@ -30,8 +30,9 @@ pub use files::{JobFile, TurnFile};
 pub(crate) use files::{Marker, TurnMarker};
 pub(crate) use marks::{
     Unread, await_checked, await_text, await_written, awaiting, checkpoint, deadline, end,
-    end_checked, end_said_at, ended_down, has_await, has_outcome, has_slot, left_open, mark,
-    mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped, transferring, unstuck,
+    end_checked, end_said_at, ended_down, ended_marked, has_await, has_outcome, has_slot,
+    left_open, mark, mark_turn, outcome_checked, outcome_said, slot, slot_taken, stopped,
+    transferring, unstuck,
 };
 
 /// Where a job stands.

@@ -2,6 +2,7 @@
 //! that nothing one repo does holds up the rest, against the stand-ins in
 //! [`super::sorting_tests`].
 
+use crate::inbox::record::files;
 use std::fs;
 
 use serde_json::{Value, json};
@@ -353,7 +354,7 @@ fn running_handed_references_are_not_drained() {
     // The lane's own record must not be the reason #7 is skipped.
     let lane = d.with_file_name("sam_box-100");
     fs::rename(&d, &lane).unwrap();
-    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    fs::write(lane.join(files::File::Issue), "sam/box#100\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
     let mut p = b.pass();
     assert_eq!(p.pick_ready(std::slice::from_ref(&seven)), None);
@@ -491,7 +492,7 @@ fn awaiting_handed_references_are_not_drained() {
     let d = b.record("lane");
     let lane = d.with_file_name("sam_box-100");
     fs::rename(d, &lane).unwrap();
-    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    fs::write(lane.join(files::File::Issue), "sam/box#100\n").unwrap();
     super::Pass::hand(&lane, "Deliver #7").unwrap();
     let job = b.cfg.jobs.join("lane");
     fs::write(job.join("1.end"), "await\n").unwrap();
@@ -565,8 +566,8 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     let state = b.cfg.inbox.as_ref().unwrap().state.clone();
     let drained = state.join("sam_box-8");
     fs::create_dir_all(&drained).unwrap();
-    fs::write(drained.join("drained"), "sam/box#8\n").unwrap();
-    fs::write(drained.join("job"), "s1\n").unwrap();
+    fs::write(drained.join(files::File::Drained), "sam/box#8\n").unwrap();
+    fs::write(drained.join(files::File::Job), "s1\n").unwrap();
     b.cfg.settings = Some(burrow_settings::Config {
         overlay: b.path("overlay.json"),
         allowed: vec!["sam/game".into(), "sam/burrow".into()],
@@ -605,10 +606,10 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         "{}",
         b.log()
     );
-    assert!(drained.join("job").exists());
-    assert!(sorting.join("job").exists());
+    assert!(drained.join(files::File::Job).exists());
+    assert!(sorting.join(files::File::Job).exists());
     // A paused handoff that never got a job reserves no capacity either.
-    fs::remove_file(drained.join("job")).unwrap();
+    fs::remove_file(drained.join(files::File::Job)).unwrap();
     assert!(!b.pass().record_uses_capacity(&drained));
     // Triage uses this predicate to budget atOnce before starting work.
     assert_eq!(
@@ -618,7 +619,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
             .count(),
         0
     );
-    assert!(sorting.join("job").exists());
+    assert!(sorting.join(files::File::Job).exists());
     assert!(!b.posted().contains("deferred verdict"));
 }
 
@@ -720,8 +721,8 @@ fn drain_counts_turns_instead_of_parked_jobs() {
                 .state
                 .join(format!("sam_box-{n}"));
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("drained"), format!("sam/box#{n}\n")).unwrap();
-            fs::write(dir.join("job"), &id).unwrap();
+            fs::write(dir.join(files::File::Drained), format!("sam/box#{n}\n")).unwrap();
+            fs::write(dir.join(files::File::Job), &id).unwrap();
             let job = crate::job::Job::new(&b.cfg, &id);
             fs::create_dir_all(&job.dir).unwrap();
             crate::policy::bind(
@@ -800,8 +801,8 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     let state = &b.cfg.inbox.as_ref().unwrap().state;
     let busy = state.join("sam_game-99");
     fs::create_dir_all(&busy).unwrap();
-    fs::write(busy.join("drained"), "sam/game#99\n").unwrap();
-    fs::write(busy.join("job"), "busy\n").unwrap();
+    fs::write(busy.join(files::File::Drained), "sam/game#99\n").unwrap();
+    fs::write(busy.join(files::File::Job), "busy\n").unwrap();
     let job = crate::job::Job::new(&b.cfg, "busy");
     fs::create_dir_all(&job.dir).unwrap();
     fs::write(job.path("turns"), "1").unwrap();

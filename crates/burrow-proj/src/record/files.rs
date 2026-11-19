@@ -6,8 +6,7 @@
 //! stream, its answers, what it runs as), named by [`JobFile`] and
 //! [`TurnFile`], which can't name a marker.
 //!
-//! [`Job::path`] and [`Job::turn`], which take any name, are the inbox's
-//! until #975 moves it onto the record, and its tests' and the other tests'
+//! [`Job::path`] and [`Job::turn`], which take any name, are the tests',
 //! for building a job's folder by hand: deprecated, so nothing else can
 //! use them while clippy's warnings are errors.
 
@@ -156,6 +155,8 @@ pub enum TurnFile {
     RetryWake,
     Spent,
     Split,
+    /// A task split that didn't hold, set aside.
+    SplitInvalid,
     Started,
     Stderr,
     Timeout,
@@ -199,6 +200,7 @@ impl TurnFile {
             TurnFile::RetryWake => "retry-wake",
             TurnFile::Spent => "spent",
             TurnFile::Split => "split",
+            TurnFile::SplitInvalid => "split-invalid",
             TurnFile::Started => "started",
             TurnFile::Stderr => "stderr",
             TurnFile::Timeout => "timeout",
@@ -314,7 +316,7 @@ impl Job<'_> {
         self.dir.join(name)
     }
 
-    /// Any file of the job's, by name. The inbox's until #975, and tests'.
+    /// Any file of the job's, by name: the tests'.
     #[deprecated(
         note = "a job's markers are the record's (crate::record); its data is Job::file's"
     )]
@@ -322,7 +324,7 @@ impl Job<'_> {
         self.dir.join(name)
     }
 
-    /// Turn N's file of any kind. The inbox's until #975, and tests'.
+    /// Turn N's file of any kind: the tests'.
     #[deprecated(
         note = "a turn's markers are the record's (crate::record); its data is Job::turn_file's"
     )]

@@ -1,12 +1,11 @@
 //! References in the brief of an inbox job belong to that job while it runs.
 
+use crate::inbox::record::files;
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::PathBuf;
 
 use super::{Pass, dirs};
 use crate::job::Job;
-use crate::{filled, read};
 
 impl Pass<'_> {
     /// Issue numbers handed to queued, running or awaiting inbox jobs in this repo.
@@ -14,7 +13,7 @@ impl Pass<'_> {
     pub(super) fn claimed(&self, repo: &str) -> BTreeSet<String> {
         let mut claimed = BTreeSet::new();
         for (d, _, _) in self.live(repo) {
-            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
+            let input = files::input(&d).unwrap_or_default();
             claimed.extend(references(repo, &input));
         }
         claimed
@@ -24,7 +23,7 @@ impl Pass<'_> {
     /// [`Pass::claimed`] counts it claimed by.
     pub(super) fn claimer(&self, repo: &str, n: &str) -> Option<String> {
         self.live(repo).into_iter().find_map(|(d, _, id)| {
-            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
+            let input = files::input(&d).unwrap_or_default();
             references(repo, &input).contains(n).then_some(id)
         })
     }
@@ -44,14 +43,14 @@ impl Pass<'_> {
     fn live(&self, repo: &str) -> Vec<(PathBuf, String, String)> {
         let mut live = vec![];
         for d in dirs(&self.inbox.state, "") {
-            let issue = read(&d.join("issue")).unwrap_or_default();
+            let issue = files::issue(&d).unwrap_or_default();
             let Some((of, n)) = issue.rsplit_once('#') else {
                 continue;
             };
             if !of.eq_ignore_ascii_case(repo) {
                 continue;
             }
-            let Some(id) = read(&d.join("job")) else {
+            let Some(id) = files::job(&d) else {
                 continue;
             };
             let job = Job::new(self.cfg, &id);
@@ -63,7 +62,7 @@ impl Pass<'_> {
             // the live await counts, as in the watcher; await.next is a
             // declaration that has not been published by the turn's end.
             if !matches!(state.as_str(), "queued" | "running" | "parked")
-                && !(state == "done" && filled(&job.path("await")))
+                && !(state == "done" && crate::record::awaiting(&job))
             {
                 continue;
             }

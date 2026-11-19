@@ -1,5 +1,6 @@
 //! A parent's plain task list is the sequencer's only memory.
 use super::{Pass, dirs, key, raw};
+use crate::inbox::record::files::{self, File};
 use crate::{
     github::{api, every},
     job::Job,
@@ -166,7 +167,7 @@ impl Pass<'_> {
 
     pub(super) fn approved_input(&self, repo: &str, n: &str, input: &str) -> bool {
         !self.has_task_list(Some(repo), n)
-            && fs::read_to_string(self.plan_dir(repo, n).join("input"))
+            && files::input(&self.plan_dir(repo, n))
                 .is_ok_and(|had| had == input && self.list_bound(repo, n, input).unwrap_or(false))
     }
     fn child_body(repo: &str, parent: &str, index: usize, task: &Task) -> String {
@@ -179,13 +180,7 @@ impl Pass<'_> {
     }
     /// Size a job once before it starts, not again for every PR reply.
     pub(super) fn started_issue_job(&self, repo: Option<&str>, n: &str) -> bool {
-        repo.is_some_and(|repo| {
-            self.inbox
-                .state
-                .join(format!("{}-{n}", key(repo)))
-                .join("job")
-                .exists()
-        })
+        repo.is_some_and(|repo| files::has_job(&files::worker(&self.inbox.state, &key(repo), n)))
     }
     pub(super) fn worker_split_pending(&self, repo: Option<&str>, n: &str) -> bool {
         self.started_issue_job(repo, n)
@@ -410,7 +405,7 @@ impl Pass<'_> {
     }
     fn same_source(&self, repo: &str, issue: &Value) -> Option<bool> {
         let n = raw(&issue["number"]);
-        let had = match fs::read_to_string(self.plan_dir(repo, &n).join("input")) {
+        let had = match files::input(&self.plan_dir(repo, &n)) {
             Ok(had) => had,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
             Err(_) => return None,
@@ -432,7 +427,7 @@ impl Pass<'_> {
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);
         fs::create_dir_all(&d)?;
-        swap(&d.join("input"), input)
+        files::mark(&d, File::Input).swap(input)
     }
     fn save_list(&self, repo: &str, n: &str, list: &List) -> bool {
         serde_json::to_string_pretty(list)
@@ -540,7 +535,7 @@ impl Pass<'_> {
                 Err(_) => return false,
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => List {
-                source: fs::read_to_string(d.join("input")).ok(),
+                source: files::input(&d).ok(),
                 revision: 0,
                 retained: vec![],
                 tasks: tasks.to_vec(),
@@ -662,7 +657,7 @@ impl Pass<'_> {
             // The parent already sized this exact generated child. Retain
             // that approval instead of paying a second planner to repeat it.
             let number = list.children[i].number.unwrap().to_string();
-            if self.plan_dir(repo, &number).join("input").exists() {
+            if files::has_input(&self.plan_dir(repo, &number)) {
                 continue;
             }
             let Some(child) = api(self.cfg, &format!("repos/{repo}/issues/{number}")) else {

@@ -212,6 +212,7 @@ use dirs::dirs;
 mod forget;
 use forget::{forget, lock_within};
 mod scope;
+use record::files::{self, File};
 use scope::told;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
@@ -554,12 +555,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// its `input`, the [`Pass::issue_text`] it was last given. A record
     /// without one (made before inputs were kept) wasn't handed it.
     pub(super) fn handed(d: &Path, now: &str) -> bool {
-        fs::read_to_string(d.join("input")).is_ok_and(|kept| kept == now)
+        files::input(d).is_ok_and(|kept| kept == now)
     }
 
     /// Kept in the job's record (`d`): what it's been handed of its issue now.
     pub(super) fn hand(d: &Path, input: &str) -> Result<(), Fail> {
-        fs::write(d.join("input"), input).map_err(|e| io_fail(&d.join("input"), e))
+        files::mark(d, File::Input).put(input)
     }
 
     /// Each job works in a worktree of its own, in its own scratch (proj's
@@ -779,8 +780,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// An issue passed over (its opener not one of the authors, or its text
     /// from outside them): said on the issue once, or tried again next pass.
     fn refuse(&mut self, repo: &str, n: &str, said: &str, d: &Path) -> Result<(), Fail> {
-        let refused = d.join("refused");
-        if refused.exists() {
+        if files::refused(d) {
             return Ok(());
         }
         if !self.post(repo, n, said) {
@@ -788,7 +788,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             return Ok(());
         }
         fs::create_dir_all(d).map_err(|e| io_fail(d, e))?;
-        fs::write(&refused, "").map_err(|e| io_fail(&refused, e))
+        files::mark(d, File::Refused).put("")
     }
 
     /// The wake-ups, in place of the ones the repos looked at had; who's out

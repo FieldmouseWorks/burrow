@@ -190,7 +190,7 @@ fn merges_release_all_locks_against_replies_expiry_and_triage_in_either_order() 
                 deadline(&cfg, id, crate::now() - 1);
                 let record = cfg.inbox.as_ref().unwrap().state.join(".triage").join(id);
                 fs::create_dir_all(&record).unwrap();
-                fs::write(record.join("job"), id).unwrap();
+                fs::write(record.join(crate::inbox::record::File::Job), id).unwrap();
             }
             merge(&cfg, "subject", &["a".into(), "m".into(), "z".into()]).unwrap();
             let job = Job::new(&cfg, busy);

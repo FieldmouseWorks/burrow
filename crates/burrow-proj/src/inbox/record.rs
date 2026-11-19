@@ -291,54 +291,11 @@ impl Record {
 
 /// The inbox's state files, which only this module and the inbox's own
 /// writers name: a reader asks the record.
-pub(super) mod files {
-    use std::path::{Path, PathBuf};
-
-    /// The issue's record folder (KEY-N in the inbox's state).
-    pub(in crate::inbox) fn worker(state: &Path, key: &str, n: &str) -> PathBuf {
-        state.join(format!("{key}-{n}"))
-    }
-    /// Its sorting record.
-    pub(in crate::inbox) fn sorting(state: &Path, key: &str, n: &str) -> PathBuf {
-        sorting_root(state).join(format!("{key}-{n}"))
-    }
-    /// The sorting records.
-    pub(in crate::inbox) fn sorting_root(state: &Path) -> PathBuf {
-        state.join(".triage")
-    }
-    /// Why it waits to be sorted, while it does.
-    pub(in crate::inbox) fn sorting_waits(state: &Path) -> PathBuf {
-        state.join(".triage-waiting")
-    }
-    /// Each repo's ready issues, as its last pass listed them.
-    pub(in crate::inbox) fn ready_lists(state: &Path) -> PathBuf {
-        state.join(".ready")
-    }
-    /// Since when GitHub has refused each repo.
-    pub(in crate::inbox) fn unreached(state: &Path) -> PathBuf {
-        state.join(".unreached")
-    }
-    /// The issues whose labels parked their job.
-    pub(in crate::inbox) fn parked(state: &Path, key: &str, n: &str) -> PathBuf {
-        parked_root(state).join(key.to_lowercase()).join(n)
-    }
-    /// Every repo's parked issues.
-    pub(in crate::inbox) fn parked_root(state: &Path) -> PathBuf {
-        state.join(".parked")
-    }
-    /// The records of the issue's retired jobs.
-    pub(in crate::inbox) fn retired(state: &Path, key: &str, n: &str) -> PathBuf {
-        retired_root(state).join(key.to_lowercase()).join(n)
-    }
-    /// Every repo's retired records.
-    pub(in crate::inbox) fn retired_root(state: &Path) -> PathBuf {
-        state.join(".retired")
-    }
-    /// The drain's mark while a ready issue waits for a slot.
-    pub(in crate::inbox) fn drain_waiting(state: &Path) -> PathBuf {
-        state.join(".drain-waiting")
-    }
-}
+pub(super) mod files;
+pub(crate) use files::{job_issue, undrain};
+// Tests outside the inbox build a record folder by hand too.
+#[cfg(test)]
+pub(crate) use files::File;
 
 mod why;
 pub(crate) use why::{issue_target, why};
@@ -368,7 +325,7 @@ impl<'p> Pass<'p> {
     /// answer retired reads as answered whether or not the pass's settling
     /// step has cleaned it up yet ([`crate::record::holds`]).
     pub(super) fn holds_sorting_slot(&self, d: &Path) -> bool {
-        read(&d.join("job")).is_some_and(|id| {
+        files::job(d).is_some_and(|id| {
             let job = Job::new(self.cfg, &id);
             // Serializes with new starts and question recovery. The running
             // turn itself publishes without this lock.
@@ -401,10 +358,10 @@ impl<'p> Pass<'p> {
     /// issue.
     pub(super) fn kept_jobs(&self) -> Vec<(String, String)> {
         let state = &self.inbox.state;
-        let job = |d: &Path| read(&d.join("job")).filter(|j| !j.is_empty());
+        let job = |d: &Path| files::job(d).filter(|j| !j.is_empty());
         let workers = dirs(state, "").into_iter().filter_map(|d| {
             let id = job(&d)?;
-            Some((read(&d.join("issue")).unwrap_or_default(), id))
+            Some((files::issue(&d).unwrap_or_default(), id))
         });
         let sorting = dirs(&files::sorting_root(state), "")
             .into_iter()
@@ -426,7 +383,7 @@ impl<'p> Pass<'p> {
             .into_iter()
             .filter(|d| self.holds_sorting_slot(d))
             .collect();
-        held.sort_by_key(|d| (mtime(&d.join("job")).unwrap_or(0), d.clone()));
+        held.sort_by_key(|d| (files::job_since(d).unwrap_or(0), d.clone()));
         held
     }
 }
@@ -451,7 +408,7 @@ impl Look<'_, '_> {
         }
         // Its job's record folder: the issue is that job's.
         let worker = files::worker(state, &k, n);
-        if let Some(id) = read(&worker.join("job")).filter(|j| !j.is_empty()) {
+        if let Some(id) = files::job(&worker).filter(|j| !j.is_empty()) {
             return self.working(repo, &name, &worker, &id, issue, paused);
         }
         // Closed, as GitHub says now: what the inbox keeps of it with no job
@@ -461,20 +418,20 @@ impl Look<'_, '_> {
         // and a reopened issue reads by what's kept again.
         let sorting = files::sorting(state, &k, n);
         if issue.is_some_and(|i| i["state"] == "closed")
-            && read(&sorting.join("job")).is_none_or(|j| j.is_empty())
+            && files::job(&sorting).is_none_or(|j| j.is_empty())
         {
             return Record::new(&name, Stage::Closed, "nothing: it's closed");
         }
-        if worker.join("drained").exists() {
+        if files::drained(&worker) {
             let r = Record::new(
                 &name,
                 Stage::Ready,
                 "the drain put its label on: its repo's next pass starts its job",
             )
-            .since(mtime(&worker.join("drained")));
+            .since(files::drained_since(&worker));
             return self.gated(r, repo, paused);
         }
-        if worker.join("refused").exists() {
+        if files::refused(&worker) {
             let why = issue
                 .and_then(|i| self.refused(repo, i))
                 .unwrap_or(Unseen::Refused);
@@ -483,7 +440,7 @@ impl Look<'_, '_> {
                 Stage::Unseen(why),
                 "nothing, until one of the authors opens an issue of their own for it",
             )
-            .since(mtime(&worker.join("refused")));
+            .since(files::refused_since(&worker));
         }
         // Its sorting record: a sorting job is reading it, or its verdict is
         // being carried out. One whose sorting ended without an answer gives
@@ -586,9 +543,9 @@ impl Look<'_, '_> {
             return r.waiting(Wait::Pass);
         }
         let jr = crate::record::derive(&job);
-        let number = |p: &Path| read(p).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
+        let number = |t: Option<String>| t.and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
         let turns = job.turns().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
-        let answered = number(&d.join("answered"));
+        let answered = number(files::answered(d));
         let closed = issue.is_some_and(|i| i["state"] == "closed");
         use crate::record::Stage as Turn;
         let ended = matches!(jr.stage, Turn::Ended(_));
@@ -606,7 +563,7 @@ impl Look<'_, '_> {
             Some(w @ (Wait::Answer(_) | Wait::Owner(_))) => {
                 if ended {
                     r.stage = Stage::Answered;
-                    r.since = mtime(&d.join("answered")).unwrap_or(r.since);
+                    r.since = files::answered_since(d).unwrap_or(r.since);
                 }
                 r.next = match w {
                     Wait::Owner(_) => "its job goes on once the owner answers".into(),
@@ -635,7 +592,7 @@ impl Look<'_, '_> {
             }
             None => {
                 r.stage = Stage::Answered;
-                r.since = mtime(&d.join("answered")).unwrap_or(r.since);
+                r.since = files::answered_since(d).unwrap_or(r.since);
                 r.next = match &jr.stage {
                     Turn::Ended(how) if how == "done" => {
                         "the inbox closes the issue, or an author's reply goes on with its job"
@@ -657,16 +614,16 @@ impl Look<'_, '_> {
         if !d.is_dir() {
             return None;
         }
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
+        let Some(id) = files::job(d).filter(|j| !j.is_empty()) else {
             let r = Record::new(
                 name,
                 Stage::Sorting,
                 "it's sorted again once it changes, or once another issue's verdict shows sorting works",
             )
-            .since(mtime(&d.join("failed")));
+            .since(files::failed_since(d));
             return Some(r);
         };
-        let mut r = Record::new(name, Stage::Sorting, "").since(mtime(&d.join("job")));
+        let mut r = Record::new(name, Stage::Sorting, "").since(files::job_since(d));
         r.job = Some(id.clone());
         let job = Job::new(self.pass.cfg, &id);
         let jr = job.dir.is_dir().then(|| crate::record::derive(&job));
@@ -687,7 +644,7 @@ impl Look<'_, '_> {
             r.overdue_at = jr.and_then(|jr| jr.overdue_at);
             return Some(r.waiting(w));
         }
-        if d.join("plan").is_file() || super::settle::settled(&job).is_some() {
+        if files::has_plan(d) || super::settle::settled(&job).is_some() {
             r.next = "the next pass that reaches GitHub carries out its verdict".into();
             return Some(r.waiting(Wait::Verdict));
         }

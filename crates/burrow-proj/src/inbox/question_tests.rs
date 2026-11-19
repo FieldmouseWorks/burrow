@@ -1,4 +1,5 @@
 use super::sorting_tests::{Box, issue};
+use crate::inbox::record::files;
 use crate::read;
 use serde_json::json;
 use std::fs;
@@ -13,7 +14,7 @@ fn unattended_question_is_labelled_and_one_way_timeout_keeps_issue_open_and_rele
     b.job_ending("j1", "done", Some("ask"), "Which release?");
     fs::write(b.cfg.jobs.join("j1/1.result"), "Which release?").unwrap();
     let d = b.record("j1");
-    fs::write(d.join("drained"), "sam/box#7\n").unwrap();
+    fs::write(d.join(files::File::Drained), "sam/box#7\n").unwrap();
     let job = crate::job::Job::new(&b.cfg, "j1");
     fs::write(
         crate::ask::host_path(&job, "question"),
@@ -53,8 +54,8 @@ fn unattended_question_is_labelled_and_one_way_timeout_keeps_issue_open_and_rele
             .iter()
             .any(|(_, _, text)| text.contains("Which release?"))
     );
-    assert!(!d.join("drained").exists());
-    assert!(d.join("job").exists());
+    assert!(!d.join(files::File::Drained).exists());
+    assert!(d.join(files::File::Job).exists());
 }
 
 #[test]
@@ -168,7 +169,7 @@ fn damaged_registry_keeps_sorting_questions_from_becoming_verdicts() {
         pass.verdicts("sam/box", &t, &[issue(7, "sam", &[])])
             .unwrap();
         assert!(
-            d.join("job").exists(),
+            d.join(files::File::Job).exists(),
             "question was retired: keyed {keyed}"
         );
         assert!(!crate::scratch::over(&job));
@@ -261,7 +262,10 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
     assert!(pending.exists());
-    assert!(d.join("job").exists(), "retain the human reply route");
+    assert!(
+        d.join(files::File::Job).exists(),
+        "retain the human reply route"
+    );
     assert!(!b.posted().contains("Sorted:"));
     assert!(b.posted().contains("No answer by"));
     // The same predicate used to budget sorting slots excludes this claim.
@@ -425,7 +429,7 @@ fn sorting_reply_is_consumed_once_despite_accepted_reconciliation_errors() {
         b.pass()
             .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
             .unwrap();
-        assert_eq!(read(&d.join("seen")).as_deref(), Some("19"));
+        assert_eq!(read(&d.join(files::File::Seen)).as_deref(), Some("19"));
         let job = crate::job::Job::new(&b.cfg, "s1");
         assert_eq!(job.turns().as_deref(), Some("2"));
         fs::remove_dir(blocked).unwrap();
@@ -434,6 +438,6 @@ fn sorting_reply_is_consumed_once_despite_accepted_reconciliation_errors() {
             .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
             .unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));
-        assert_eq!(read(&d.join("seen")).as_deref(), Some("19"));
+        assert_eq!(read(&d.join(files::File::Seen)).as_deref(), Some("19"));
     }
 }

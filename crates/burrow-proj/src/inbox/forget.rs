@@ -1,16 +1,17 @@
 //! Forgetting a repository under the inbox pass lock.
 
+use crate::inbox::record::files;
 use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use super::record::files;
 use super::{enrollment, key};
 use crate::config::Config;
 use crate::job::Job;
-use crate::{Fail, io_fail, read};
+use crate::record::JobFile;
+use crate::{Fail, io_fail};
 
 /// The lock, once whoever holds it lets go, if that's within `wait`.
 pub(super) fn lock_within(f: &File, wait: Duration) -> io::Result<bool> {
@@ -38,7 +39,7 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
     // A legacy worker stays terminal even after every record of the old
     // repository is forgotten. Sorting records carry no worker association.
     for d in enrollment::worker_records(state) {
-        let Some(issue) = read(&d.join("issue")) else {
+        let Some(issue) = files::issue(&d) else {
             continue;
         };
         let Some((of, n)) = issue.rsplit_once('#') else {
@@ -47,10 +48,12 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
         if !of.eq_ignore_ascii_case(repo) {
             continue;
         }
-        if let Some(id) = read(&d.join("job")) {
+        if let Some(id) = files::job(&d) {
             let job = Job::new(cfg, &id);
             if job.dir.is_dir() {
-                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let _held = job
+                    .lock()
+                    .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                 enrollment::remember(&job, of, n).map_err(|e| Fail::new(1, e))?;
             }
         }

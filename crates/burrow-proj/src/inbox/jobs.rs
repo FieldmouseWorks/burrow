@@ -2,6 +2,7 @@
 //! answer posted, a cut-off turn carried on, the job ended with its issue,
 //! and replies handed on.
 
+use crate::inbox::record::files::{self, File};
 use std::fs;
 use std::path::Path;
 
@@ -11,6 +12,7 @@ use super::{CUT_OFF, Pass, dirs, key, raw, say, seconds, trimmed};
 use crate::cmd::{halt, reply, reply_answer, unstick};
 use crate::github::api;
 use crate::job::Job;
+use crate::record::{JobFile, TurnFile};
 use crate::{Fail, filled, io_fail, now, read};
 
 impl Pass<'_> {
@@ -29,10 +31,10 @@ impl Pass<'_> {
             .collect();
         let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
-            let Some(mut id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
+            let Some(mut id) = files::job(&d).filter(|j| !j.is_empty()) else {
                 continue;
             };
-            let issue = read(&d.join("issue")).unwrap_or_default();
+            let issue = files::issue(&d).unwrap_or_default();
             let Some((of, n)) = issue.rsplit_once('#') else {
                 continue;
             };
@@ -66,15 +68,17 @@ impl Pass<'_> {
             if self.cfg.paused(repo) || crate::policy::parked(&job) {
                 continue;
             }
-            if d.join("unannounced").exists() {
+            if files::unannounced(&d) {
                 if self.post(repo, n, &format!("On it: `proj` job `{id}` in {p}.")) {
-                    let _ = fs::remove_file(d.join("unannounced"));
+                    let _ = files::mark(&d, File::Unannounced).remove();
                 } else {
                     self.miss(repo);
                 }
             }
             {
-                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let _held = job
+                    .lock()
+                    .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                 if let Err(e) = crate::question::recover(&job) {
                     eprintln!("proj question recovery: {e}");
                     self.retry(repo);
@@ -88,7 +92,9 @@ impl Pass<'_> {
                 .find(|i| raw(&i["number"]) == n)
                 .and_then(|i| self.machine_role(i))
             {
-                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let _held = job
+                    .lock()
+                    .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                 crate::job::Request::enroll(&job, role).map_err(|e| Fail::new(1, e))?;
             }
             // The state and the turn count, read together: a turn starts
@@ -96,7 +102,9 @@ impl Pass<'_> {
             // through it the count names the new turn while the state is
             // still the last one's.
             let (st, turns) = {
-                let _held = job.read_lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let _held = job
+                    .read_lock()
+                    .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                 let turns: i64 = job.turns().and_then(|t| t.parse().ok()).unwrap_or(0);
                 (job.state(), turns)
             };
@@ -107,7 +115,9 @@ impl Pass<'_> {
             // its issue may still be read.
             let split_pending = crate::planning::admit(&job).is_err();
             if !self.eligible(repo, observed) {
-                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let _held = job
+                    .lock()
+                    .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                 super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
                 if let Err(f) = halt(self.cfg, &job, false) {
                     say(f);
@@ -123,7 +133,7 @@ impl Pass<'_> {
             // _watch resumed before this pass still has the answer it gave
             // before posted.
             let last = if busy { turns - 1 } else { turns };
-            let mut k: i64 = read(&d.join("answered"))
+            let mut k: i64 = files::answered(&d)
                 .and_then(|a| a.parse().ok())
                 .unwrap_or(0);
             // The latest turn, cut off, carries on in its own conversation
@@ -141,8 +151,11 @@ impl Pass<'_> {
                     Ok(()) => {
                         revive = true;
                         rv = (Some(turns + 1), streak + 1);
-                        fs::write(d.join("revived"), format!("{} {}\n", turns + 1, streak + 1))
-                            .map_err(|e| io_fail(&d.join("revived"), e))?;
+                        files::mark(&d, File::Revived).put(format!(
+                            "{} {}\n",
+                            turns + 1,
+                            streak + 1
+                        ))?;
                     }
                     // Not cut off: its answer, or what it ended on, is posted.
                     Err(f) if f.code == 3 => say(f),
@@ -187,15 +200,20 @@ impl Pass<'_> {
                 && let Some(parent) = now_open
             {
                 {
-                    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    let _held = job
+                        .lock()
+                        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                     if job.turns().as_deref() != Some(&turns.to_string())
                         || matches!(job.state().as_str(), "queued" | "running")
                     {
                         self.retry(repo);
                         continue;
                     }
-                    fs::write(job.path("planning-hold"), "finishing the task split\n")
-                        .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
+                    fs::write(
+                        job.file(JobFile::PlanningHold),
+                        "finishing the task split\n",
+                    )
+                    .map_err(|e| io_fail(&job.file(JobFile::PlanningHold), e))?;
                 }
                 let Some(written) = self.written(repo, parent) else {
                     self.miss(repo);
@@ -206,7 +224,9 @@ impl Pass<'_> {
                     // Explicitly invalidate the proposal, preserving its data and
                     // all partial creation receipts. Normal reply delivery below
                     // will hand the updated verified task to the worker next pass.
-                    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    let _held = job
+                        .lock()
+                        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                     if job.turns().as_deref() != Some(&turns.to_string())
                         || matches!(job.state().as_str(), "queued" | "running")
                     {
@@ -214,16 +234,16 @@ impl Pass<'_> {
                         continue;
                     }
                     // Intent still bars admission if we crash before the rename.
-                    match fs::remove_file(job.path("planning-hold")) {
+                    match fs::remove_file(job.file(JobFile::PlanningHold)) {
                         Ok(()) => (),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                        Err(e) => return Err(io_fail(&job.path("planning-hold"), e)),
+                        Err(e) => return Err(io_fail(&job.file(JobFile::PlanningHold), e)),
                     }
                     fs::rename(
-                        job.turn(&split_turn, "split"),
-                        job.turn(&split_turn, "split-invalid"),
+                        job.turn_file(&split_turn, TurnFile::Split),
+                        job.turn_file(&split_turn, TurnFile::SplitInvalid),
                     )
-                    .map_err(|e| io_fail(&job.turn(&split_turn, "split"), e))?;
+                    .map_err(|e| io_fail(&job.turn_file(&split_turn, TurnFile::Split), e))?;
                     self.retry(repo);
                     continue;
                 }
@@ -231,7 +251,7 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 }
-                let tasks = read(&job.turn(&split_turn, "split"))
+                let tasks = read(&job.turn_file(&split_turn, TurnFile::Split))
                     .and_then(|text| crate::planning::parse(&text).ok());
                 if tasks.as_ref().is_none_or(|tasks| {
                     !self.prepare_plan(repo, n, &input, tasks)
@@ -275,9 +295,7 @@ impl Pass<'_> {
             // and the issue list can show an issue open for a few seconds
             // after it closed. So the issue is asked for again too, before
             // the reply is handed on.
-            let seen: i64 = read(&d.join("seen"))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
+            let seen: i64 = files::seen(&d).and_then(|s| s.parse().ok()).unwrap_or(0);
             let Some(written) = self.written(repo, listed_now) else {
                 self.miss(repo);
                 continue;
@@ -340,7 +358,7 @@ impl Pass<'_> {
                 && young.is_none()
                 && k >= turns
                 && st == "done"
-                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done");
+                && crate::record::end(&job, &turns.to_string()).as_deref() == Some("done");
             let closing = if completed
                 && (!self.lane(listed_now)
                     || n.parse()
@@ -354,7 +372,7 @@ impl Pass<'_> {
             // Stopped, with a conversation no turn continues again: no reply
             // is handed on, the issue hears why once, and no pass retries it.
             // One with no session is started over below, as ever.
-            let stopped = super::enrollment::stopped(&job) && filled(&job.path("session"));
+            let stopped = super::enrollment::stopped(&job) && filled(&job.file(JobFile::Session));
             if stopped && !closable {
                 self.tell_stopped(repo, n, &job, &d)?;
                 continue;
@@ -363,7 +381,9 @@ impl Pass<'_> {
             if closable
                 || !msg.is_empty()
                 || listed_changed
-                || job.turn(&turns.to_string(), "split-invalid").exists()
+                || job
+                    .turn_file(&turns.to_string(), TurnFile::SplitInvalid)
+                    .exists()
             {
                 // Decided on the issue as GitHub has it now, not as the list
                 // read before this pass started jobs had it.
@@ -392,18 +412,22 @@ impl Pass<'_> {
                 // and the job is handed the issue as it stands, replies and
                 // all, rather than the issue closed.
                 let changed = !Self::handed(&d, &self.issue_text(repo, &now_issue, &had))
-                    || job.turn(&turns.to_string(), "split-invalid").exists();
+                    || job
+                        .turn_file(&turns.to_string(), TurnFile::SplitInvalid)
+                        .exists();
                 // Closed with the job, and the job stopped, under the lock
                 // turns start under: a reply (proj reply, proj _watch) that
                 // started a turn since the look above leaves the issue open,
                 // and none starts between the close and the stop. Reopening
                 // it starts a job afresh from the issue as it stands.
                 if closable && !changed {
-                    let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    let held = job
+                        .lock()
+                        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                     let still: i64 = job.turns().and_then(|t| t.parse().ok()).unwrap_or(0);
                     if still == turns
                         && job.state() == "done"
-                        && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
+                        && crate::record::end(&job, &turns.to_string()).as_deref() == Some("done")
                     {
                         super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
                         let awaited = matches!(closing, super::plans::Closing::Awaited(_));
@@ -484,7 +508,7 @@ impl Pass<'_> {
                     // looked at, or its turn couldn't start: the reply waits
                     // for the next pass, in five minutes (a turn that did
                     // start kicks one sooner when it ends).
-                    if filled(&job.path("session")) {
+                    if filled(&job.file(JobFile::Session)) {
                         self.retry(repo);
                         continue;
                     }
@@ -494,7 +518,9 @@ impl Pass<'_> {
                     // its record so neither a legacy reply nor an old await
                     // can start it alongside the replacement.
                     {
-                        let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                        let _held = job
+                            .lock()
+                            .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
                         super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
                         if let Err(f) = halt(self.cfg, &job, false) {
                             say(f);
@@ -510,17 +536,14 @@ impl Pass<'_> {
                             continue;
                         }
                     };
-                    fs::write(d.join("job"), format!("{id}\n"))
-                        .map_err(|e| io_fail(&d.join("job"), e))?;
-                    fs::write(d.join("answered"), "0\n")
-                        .map_err(|e| io_fail(&d.join("answered"), e))?;
+                    files::mark(&d, File::Job).put(format!("{id}\n"))?;
+                    files::mark(&d, File::Answered).put("0\n")?;
                 }
                 if !msg.is_empty() {
                     Self::hand(&d, &whole)?;
                 }
             }
-            fs::write(d.join("seen"), format!("{newest}\n"))
-                .map_err(|e| io_fail(&d.join("seen"), e))?;
+            files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
         }
         Ok(())
     }
@@ -535,8 +558,7 @@ impl Pass<'_> {
         if super::enrollment::replaceable(self.inbox, job, repo, n) {
             return Ok(());
         }
-        let told = d.join("stopped-told");
-        if read(&told).as_deref() == Some(job.id) {
+        if files::stopped_told(d).as_deref() == Some(job.id) {
             return Ok(());
         }
         let said = format!(
@@ -547,14 +569,14 @@ impl Pass<'_> {
             self.miss(repo);
             return Ok(());
         }
-        fs::write(&told, format!("{}\n", job.id)).map_err(|e| io_fail(&told, e))
+        files::mark(d, File::StoppedTold).put(format!("{}\n", job.id))
     }
 }
 
 /// The turn the last carrying on of an issue's job started, and how many in a
 /// row led to it: its record's revived, "TURN STREAK".
 pub(super) fn revived(d: &Path) -> (Option<i64>, i64) {
-    let rv = read(&d.join("revived")).unwrap_or_default();
+    let rv = files::revived(d).unwrap_or_default();
     let (turn, streak) = rv.split_once(' ').unwrap_or((&rv, ""));
     (turn.parse().ok(), streak.parse().unwrap_or(0))
 }
