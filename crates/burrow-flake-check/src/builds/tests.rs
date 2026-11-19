@@ -23,10 +23,12 @@ impl Here {
     }
 
     /// A machine's own config: no substituter, no registry to fetch, and
-    /// no sandbox (a test's builder may already be in one).
+    /// no sandbox (a test's builder may already be in one). Substituting
+    /// stays on, as a runner's does: offline (a check's sandbox), nix turns
+    /// it off unless it's set.
     fn config(&self) -> String {
         format!(
-            "experimental-features = nix-command flakes\nstore = local?root={}\nsubstituters =\nflake-registry =\nsandbox = false",
+            "experimental-features = nix-command flakes\nstore = local?root={}\nsubstituters =\nsubstitute = true\nflake-registry =\nsandbox = false",
             self.join("root").display()
         )
     }
