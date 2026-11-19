@@ -584,12 +584,16 @@ jobs:
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         shell: bash
         run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
+      # The entry the wait named can be gone by now, pruned by a newer
+      # push's save (prune deletes what a newer commit's supersedes): this
+      # leg's newest is restored instead, as the first restore does.
       - id: kept-rewait
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kept
           key: ${{ steps.kept-wait.outputs.key }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
           fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       # With gate-reuse, Nix reads a commit of the tree alone, so the verdict

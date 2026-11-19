@@ -380,6 +380,15 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+    // The entry the wait named can be pruned by a newer push's save before
+    // it's restored; the restore then takes this leg's newest instead, as
+    // the first restore does, rather than failing the leg.
+    let rewait = &all[at("kept-rewait")];
+    assert_eq!(
+        rewait["with"]["restore-keys"],
+        all[at("kept-lookup")]["with"]["restore-keys"]
+    );
+    assert!(!rewait["with"]["restore-keys"].is_null());
 }
 
 /// The wait plans with Nix installed, so when the leg restored nothing the
