@@ -10,7 +10,7 @@ mod memory;
 mod system;
 #[cfg(test)]
 mod tests;
-mod usage;
+pub(crate) mod usage;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

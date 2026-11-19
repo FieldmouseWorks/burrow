@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-mod accounting;
+pub(crate) mod accounting;
 mod totals;
 use accounting::{Session, decode};
 use burrow_process::state_reads::Dir;
@@ -30,7 +30,24 @@ fn project(dir: &Dir) -> String {
         .unwrap_or("(unknown)")
         .into()
 }
-/// `totals` keeps the table alone; otherwise meter readings and each turn
+/// The API credit as it stands now, whatever the span: the meter proj's
+/// admission reads, with no credential in it.
+fn credit(m: &Machine) -> String {
+    let file = m.path(
+        &m.cfg
+            .state_dir
+            .join(burrow_settings::credit::FILE)
+            .to_string_lossy(),
+    );
+    let jobs = m.cfg.jobs.as_ref().map(|j| m.path(&j.to_string_lossy()));
+    let meter = match crate::credit::meter(&file, jobs.as_deref(), m.now) {
+        Ok(meter) => meter.text(),
+        Err(e) => format!("{} credit: no room ({e})\n", crate::credit::ENGINE),
+    };
+    format!("API credit at {}:\n{meter}", utc(m.now))
+}
+
+/// `totals` keeps the table and the API credit alone; otherwise meter readings and each turn
 /// follow it. Comment fitting preserves the table and budgets optional detail.
 pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<String, String> {
     let mut table = Totals::default();
@@ -123,7 +140,7 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                 let at = turn_time(&dir, n);
                 let engine = read(&dir, &format!("{n}.engine"));
                 let engine = if engine.is_empty() { "claude" } else { &engine };
-                let report = if engine == "claude" {
+                let report = if crate::credit::claude_stream(engine) {
                     Some(decode(
                         records(dir.file(Path::new(&format!("{n}.jsonl"))).ok()),
                         &mut sessions,
@@ -173,6 +190,7 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
         );
     }
     out += &table.show();
+    out += &credit(m);
     if only_totals {
         return Ok(out);
     }

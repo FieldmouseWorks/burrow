@@ -22,9 +22,28 @@ pub struct Report {
     /// Run identities allow aggregates to match missing costs to later recovery.
     pub missing: BTreeSet<String>,
     pub recovered: BTreeSet<String>,
+    /// The same, per host-marked invocation, in stream order.
+    pub invocations: Vec<Invocation>,
     identity: String,
 }
+/// What a turn's stream added from one host `burrow.run` marker to the next.
+/// Records before any marker (older streams have none) are one unmarked.
+#[derive(Default)]
+pub struct Invocation {
+    pub marked: bool,
+    /// The marker's time, when it says one.
+    pub at: Option<i64>,
+    pub cost: f64,
+    pub missing: BTreeSet<String>,
+    pub recovered: BTreeSet<String>,
+}
 impl Report {
+    fn invocation(&mut self) -> &mut Invocation {
+        if self.invocations.is_empty() {
+            self.invocations.push(Invocation::default());
+        }
+        self.invocations.last_mut().expect("one was just pushed")
+    }
     fn add(&mut self, tokens: [u64; 4]) {
         for (sum, value) in self.tokens.iter_mut().zip(tokens) {
             *sum += value;
@@ -72,6 +91,7 @@ fn partial(
 fn missing(session: &str, sessions: &mut BTreeMap<String, Session>, report: &mut Report) {
     let id = format!("{}:{}", report.identity, report.missing.len());
     report.missing.insert(id.clone());
+    report.invocation().missing.insert(id.clone());
     sessions.entry(session.into()).or_default().gaps.insert(id);
 }
 fn partial_tokens(run: &mut Run, report: &mut Report) {
@@ -103,6 +123,13 @@ pub fn decode(
             let boundary = kind == "burrow.run" || run.initialized || !run.messages.is_empty();
             if boundary && run.active {
                 partial(&mut run, &session, sessions, &mut report);
+            }
+            if kind == "burrow.run" {
+                report.invocations.push(Invocation {
+                    marked: true,
+                    at: v["at"].as_i64(),
+                    ..Invocation::default()
+                });
             }
             run.active = true;
             if kind == "system" {
@@ -141,10 +168,15 @@ pub fn decode(
                 && total >= previous.cost
                 && !(execution_crash && total == 0.0)
             {
-                report.cost += (total - previous.cost).max(0.0);
+                let cost = (total - previous.cost).max(0.0);
                 report.prior_gap |= !previous.gaps.is_empty();
-                report.recovered.append(&mut previous.gaps);
+                let gaps = std::mem::take(&mut previous.gaps);
                 previous.cost = total;
+                report.cost += cost;
+                report.recovered.extend(gaps.iter().cloned());
+                let invocation = report.invocation();
+                invocation.cost += cost;
+                invocation.recovered.extend(gaps);
             } else {
                 // Missing or zeroed crash fields and regressed counters never
                 // erase the last trustworthy cumulative total.

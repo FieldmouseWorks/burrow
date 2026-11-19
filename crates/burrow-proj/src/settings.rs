@@ -43,6 +43,18 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         overrides,
     ));
     readings.push(Reading::live("settings.pipelineUntil", file, until));
+    readings.push(match &cfg.settings {
+        Some(policy) => Reading::live(
+            "proj.apiCredit",
+            policy.credit_file(),
+            policy.credit()?.map(|credit| json!(credit)),
+        ),
+        None => Reading::live(
+            "proj.apiCredit",
+            cfg.jobs.join(".settings-unconfigured"),
+            None,
+        ),
+    });
     // Each role setting, from one version of them: the declared defaults
     // with what's set over them, or the default where nothing is.
     let view = cfg.role_view()?;

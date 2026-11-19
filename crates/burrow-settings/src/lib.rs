@@ -1,6 +1,7 @@
 //! The tracked admission policy plus one live overlay. Every decision reloads
 //! the overlay; an unreadable policy fails closed. No pipeline daemon is needed
 //! to change it. Other settings can join this document without another store.
+pub mod credit;
 pub mod door;
 mod live;
 pub use live::{path_exists, receipt_key};
@@ -162,6 +163,7 @@ pub fn valid_command(args: &[String]) -> bool {
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["land", target, head] => handoff(target).is_some() && commit(head),
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
+        ["credit", rest @ ..] => credit::valid(rest),
         _ => false,
     }
 }
@@ -299,6 +301,12 @@ impl Config {
             ["engines"] | ["engines", "list"] => return self.engines(),
             _ => {}
         }
+        if let ["credit", ..] = words.as_slice() {
+            let key = receipt
+                .map(|r| receipt_key(std::path::Path::new(r)))
+                .transpose()?;
+            return self.change_credit(args, actor, key.as_deref());
+        }
         if let ["role" | "model" | "offer" | "engines", ..] = words.as_slice() {
             let key = receipt
                 .map(|r| receipt_key(std::path::Path::new(r)))
@@ -367,8 +375,9 @@ impl Config {
                     ["back"] => state.pipeline_until = None,
                     _ => {
                         return Err(format!(
-                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | pipeline UNTIL | back\n{}",
-                            roles::USAGE
+                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | pipeline UNTIL | back\n{}\n{}",
+                            roles::USAGE,
+                            credit::USAGE
                         ));
                     }
                 }
