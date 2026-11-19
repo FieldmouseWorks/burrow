@@ -291,9 +291,15 @@ impl Rig {
     }
 }
 
+/// A `kind` request, carrying the describe snapshot a v5 request does.
 fn request(kind: &str, head: &str, tree: &str, checks: &[&str]) -> Value {
     json!({"contract": conary_core::plugin::CONTRACT, "kind": kind, "repo": REPO,
-        "head": head, "tree": tree, "checks": checks})
+        "head": head, "tree": tree, "checks": checks,
+        "execution": {"choice": null, "context": {"kind": "fresh"}},
+        "negotiated": {"by": {"engine": crate::plugin::ENGINE, "session": null},
+            "offers": {"models": [],
+                "capabilities": {"sandbox": "brings", "network": true, "devices": [], "mcp": false},
+                "meters": []}}})
 }
 
 /// What Conary's verifier says of `text`, published as `name`'s check run

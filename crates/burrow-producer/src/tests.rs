@@ -59,10 +59,16 @@ fn plugin(socket: &Path) -> Plugin {
     }
 }
 
-/// A job request for `repo`: the kind the tests' producers answer.
+/// A job request for `repo`: the kind the tests' producers answer, carrying
+/// the describe snapshot a v5 request does.
 fn job(repo: &str) -> Value {
     json!({"contract": conary_core::plugin::CONTRACT, "kind": "job", "repo": repo,
-        "workdir": "/", "prompt": "do it"})
+        "workdir": "/", "prompt": "do it",
+        "execution": {"choice": null, "context": {"kind": "fresh"}},
+        "negotiated": {"by": {"engine": "kit-test", "session": null},
+            "offers": {"models": [],
+                "capabilities": {"sandbox": "none", "network": false, "devices": [], "mcp": false},
+                "meters": []}}})
 }
 
 fn answer(summary: String) -> Response {

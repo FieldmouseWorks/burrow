@@ -1,7 +1,7 @@
 //! The runner, against a scripted job runner and the scripted GitHub,
 //! behind the kit's socket as the producer reaches it.
 use super::world::{World, read, world};
-use super::{AUTHOR, HEAD, PR, REPO, ask_with, config, judge_request};
+use super::{AUTHOR, HEAD, PR, REPO, ask_with, config, judge_request, negotiated};
 use crate::runner::Runner;
 use burrow_producer::jobs::{Jobs, Record as JobRecord, Turn};
 use burrow_producer::serve::{Controller, Server, Work};
@@ -155,6 +155,7 @@ fn a_judgment_whose_request_ends_stops_its_job_and_a_restart_stops_what_was_lost
         "contract": conary_core::plugin::CONTRACT,
         "execution": {"choice": {"engine": "claude", "model": "a-model", "effort": "high"},
             "context": {"kind": "fresh"}},
+        "negotiated": negotiated(),
         "kind": "judge", "repo": REPO, "pr": PR, "head": HEAD, "against": w.against(),
         "author": {"engine": "claude", "session": AUTHOR}, "reviewers": [],
         "why": ["asked"], "context": w.context(),

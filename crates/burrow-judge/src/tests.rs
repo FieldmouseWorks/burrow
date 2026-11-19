@@ -99,11 +99,22 @@ fn seal() -> SealKey {
     SealKey::from_hex(SEAL).unwrap()
 }
 
+/// The describe snapshot a v5 request carries: what the flow negotiated, so
+/// any model and effort a test's flow chooses.
+fn negotiated() -> Value {
+    json!({"by": {"engine": "claude", "session": null},
+        "offers": {"models": [{"id": "a-model", "efforts": ["high", "low"]},
+            {"id": "b-model", "efforts": ["high", "low"]}],
+            "capabilities": {"sandbox": "brings", "network": true, "devices": [], "mcp": false},
+            "meters": []}})
+}
+
 fn judge_request(w: &World, why: Vec<Trigger>) -> Request {
     serde_json::from_value(json!({
         "contract": conary_core::plugin::CONTRACT,
         "execution": {"choice": {"engine": "claude", "model": "a-model", "effort": "high"},
             "context": {"kind": "fresh"}},
+        "negotiated": negotiated(),
         "kind": "judge", "repo": REPO, "pr": PR, "head": HEAD, "against": w.against(),
         "author": {"engine": "claude", "session": AUTHOR},
         "reviewers": [{"engine": "codex", "session": REVIEWER}],

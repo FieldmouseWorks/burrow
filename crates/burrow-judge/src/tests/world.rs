@@ -271,12 +271,10 @@ impl flow::Read for World {
             checks_complete: true,
             rebase_removed: vec![],
             timeline_cut_at: None,
+            since: Default::default(),
         })
     }
     fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, String>, ApiError> {
-        unreachable!()
-    }
-    fn carries(&self, _: &str, _: &str, _: &str, _: &str) -> Result<bool, ApiError> {
         unreachable!()
     }
     fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {

@@ -49,6 +49,9 @@ let
         reviewers = lib.optional codex "codex";
         # Codex's GitHub connector posts the reviews.
         review_authors = [ "chatgpt-codex-connector[bot]" ];
+        # The flow's own account: review-settled, the conary/train status and
+        # its answers are read only from it.
+        flow_authors = [ stewardLogin ];
         verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
         # No job engine's commits go to a judge on their own: there are no
         # Codex jobs. One by none of the bots' addresses is someone editing a

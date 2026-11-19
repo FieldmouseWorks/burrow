@@ -286,7 +286,18 @@ fn problems() -> Value {
 fn fix(head: &str) -> Value {
     json!({"contract": conary_core::plugin::CONTRACT, "kind": "fix", "repo": REPO,
         "pr": 7, "head": head, "problems": problems(),
-        "execution": {"choice": null, "context": {"kind": "fresh"}}})
+        "execution": {"choice": null, "context": {"kind": "fresh"}},
+        "negotiated": negotiated()})
+}
+
+/// The describe snapshot a v5 request carries: what the flow negotiated, so
+/// any model and effort a test's flow chooses.
+fn negotiated() -> Value {
+    json!({"by": {"engine": "claude", "session": null},
+        "offers": {"models": [{"id": "a-model", "efforts": ["high", "low"]},
+            {"id": "b-model", "efforts": ["high", "low"]}],
+            "capabilities": {"sandbox": "brings", "network": true, "devices": [], "mcp": false},
+            "meters": []}})
 }
 
 fn answered(pushed: Option<&str>) -> Value {

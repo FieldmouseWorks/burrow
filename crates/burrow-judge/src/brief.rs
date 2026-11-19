@@ -47,6 +47,9 @@ fn reason(why: Trigger) -> &'static str {
         Trigger::MajorDependency => {
             "it's a major dependency update that isn't the dependency bot's"
         }
+        Trigger::Changed => {
+            "it was retargeted or its description edited after its head was pushed, so the review covers only the commit"
+        }
         Trigger::Started => "a judge was already owed on this head and base",
     }
 }

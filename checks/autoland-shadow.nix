@@ -57,7 +57,7 @@ let
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
-    settings = [ "batch_label" "bot_emails" "handoff_after" "hold_label" "hold_stall_after"
+    settings = [ "batch_label" "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
       "job_login" "job_timeout" "judge_engines" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_merge_after" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
@@ -104,6 +104,8 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e '.settings.settle_delay == 120 and .settings.reviewers == [] and .settings.proof_slots == 1
     and .settings.proofs == {gate: {Run: [.settings.proofs.gate.Run[0], "-c", "make check"]}, vm: {Build: "checks.x86_64-linux.vm"}}
     and .settings.review_authors == ["chatgpt-codex-connector[bot]"] and .settings.people == ["sam"]
+    and .settings.flow_authors == [.settings.verdict_authors[0]]
+    and (.settings.flow_authors[0] | endswith("[bot]"))
     and .settings.judge_engines == []
     and .settings.priority_labels == {first: "high"}
     and .settings.stall_after == {high: 1800, medium: 7200, low: 7200}
