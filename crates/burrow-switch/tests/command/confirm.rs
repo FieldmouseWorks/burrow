@@ -1,6 +1,8 @@
 use std::fs;
 
-use crate::machine::{CONFIRM, Machine, ok, refused, said};
+use burrow_test::said;
+
+use crate::machine::{CONFIRM, Machine, ok, refused};
 
 #[test]
 fn a_usage_or_nothing_pending_does_nothing() {

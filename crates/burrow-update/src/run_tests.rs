@@ -40,7 +40,7 @@ fn vm_tests(m: &Machine) -> usize {
 
 /// The prompts the fix jobs were given, each with its key's job file.
 fn jobs(m: &Machine) -> String {
-    m.kept("proj.log")
+    m.proj_log()
 }
 
 /// The flake.lock of the system that runs.
@@ -63,10 +63,7 @@ fn nothing_new_with_main_running_is_up_to_date() {
     let live: Value =
         serde_json::from_slice(&fs::read(m.cfg.state.join("live.json")).unwrap()).unwrap();
     assert_eq!(live, json!({"main": m.main(), "running": was}));
-    assert_eq!(
-        m.did("notices"),
-        "close not-on-main: box is back on main.\n"
-    );
+    assert_eq!(m.notices(), "close not-on-main: box is back on main.\n");
     assert!(!m.cfg.state.join("held-since").exists());
 }
 
@@ -120,7 +117,7 @@ fn a_bump_goes_live_healthy_and_onto_main() {
     assert_eq!(m.recorded("clean-vm").as_deref(), Some("1"));
     // Everything it had found wrong, settled.
     assert_eq!(
-        m.did("notices"),
+        m.notices(),
         "close not-on-main: box is back on main.
 close build-riding: box-update no longer rides its PR.
 close build-inputs: Cleared by a later run.
@@ -172,7 +169,7 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     assert!(!switched(&m));
     let since: i64 = m.recorded("held-since").unwrap().parse().unwrap();
     assert!((epoch() - since).abs() < 60);
-    assert_eq!(m.did("notices"), "");
+    assert_eq!(m.notices(), "");
     // Six hours on, the owner hears of it.
     fs::write(
         m.cfg.state.join("held-since"),
@@ -182,11 +179,11 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     assert_eq!(go(&m), 0);
     assert_eq!(said(&m), held);
     assert_eq!(
-        m.did("notices"),
+        m.notices(),
         "open not-on-main: box runs changes that aren't on main\n"
     );
     assert!(
-        m.did("notice-not-on-main")
+        m.notice_body("not-on-main")
             .contains(&format!("({hand}, revision {}-dirty)", sha('d')))
     );
     // Back on main (what it deployed), it's settled and goes on.
@@ -194,7 +191,7 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     assert_eq!(go(&m), 0);
     assert!(!m.cfg.state.join("held-since").exists());
     assert!(
-        m.did("notices")
+        m.notices()
             .contains("close not-on-main: box is back on main.\n")
     );
     assert_eq!(said(&m).0, "ok");
@@ -229,7 +226,7 @@ fn an_input_that_doesnt_build_is_held_back_and_the_rest_go() {
         "{job}"
     );
     assert!(m.cfg.state.join("jobs/build-inputs").exists());
-    assert!(!m.did("notices").contains("close build-inputs"));
+    assert!(!m.notices().contains("close build-inputs"));
 }
 
 #[test]
@@ -251,7 +248,7 @@ fn main_itself_not_building_is_mains_to_fix() {
         m.main()
     )));
     assert!(
-        m.did("notices")
+        m.notices()
             .ends_with("open build-main: main doesn't build\n")
     );
     // A day's memory: the bump's tree isn't built again, main is.
@@ -297,7 +294,7 @@ fn a_vm_test_the_updates_break_holds_them() {
     assert_eq!(go(&m), 1);
     assert_eq!(said(&m), failed);
     assert_eq!(vm_tests(&m), 3);
-    assert!(!m.did("notices").contains("open check-vm"), "not stuck yet");
+    assert!(!m.notices().contains("open check-vm"), "not stuck yet");
     // Stuck for a day, the owner hears of it.
     fs::write(
         m.cfg.state.join("since-check-vm"),
@@ -306,7 +303,7 @@ fn a_vm_test_the_updates_break_holds_them() {
     .unwrap();
     assert_eq!(go(&m), 1);
     assert!(
-        m.did("notices")
+        m.notices()
             .ends_with("open check-vm: Updates stuck: VM test vm fails\n")
     );
 }
@@ -324,19 +321,16 @@ fn a_flaky_vm_test_lets_the_update_through() {
     assert!(logs.join("flaky-vm.log").exists() && logs.join("check-vm.log").exists());
     assert!(!logs.join("check-vm.log.again").exists());
     assert_eq!(m.recorded("clean-vm").as_deref(), Some("0"));
-    assert!(
-        m.did("notices")
-            .contains("open flaky-vm: VM test vm is flaky\n")
-    );
+    assert!(m.notices().contains("open flaky-vm: VM test vm is flaky\n"));
     assert!(jobs(&m).contains("box-update: the VM test vm is flaky: on "));
     // Three runs in a row passing first time settle it.
     for (n, c) in [(1, 'd'), (2, 'e'), (3, 'f')] {
-        assert!(!m.did("notices").contains("close flaky-vm"), "after {n}");
+        assert!(!m.notices().contains("close flaky-vm"), "after {n}");
         m.upstream("nixpkgs", &sha(c));
         assert_eq!(go(&m), 0);
     }
     assert!(
-        m.did("notices").contains(
+        m.notices().contains(
             "close flaky-vm: The VM test vm has passed first time three runs in a row.\n"
         )
     );
@@ -386,12 +380,12 @@ fn a_vm_test_main_fails_too_holds_the_updates_unless_they_fix_something_serious(
         "a scan that failed isn't followed by another"
     );
     assert!(
-        m.did("notices")
+        m.notices()
             .contains("open untested: Security updates went live without a passing VM test\n")
     );
-    assert!(!m.did("notices").contains("close untested"));
+    assert!(!m.notices().contains("close untested"));
     assert!(
-        m.did("notice-untested")
+        m.notice_body("untested")
             .contains("in what box runs:\nCVE-1 openssl\nSo they")
     );
     assert_eq!(
@@ -463,14 +457,14 @@ fn unhealthy_after_the_switch_goes_straight_back() {
         "these regressed: nginx: inactive. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures {was} "
     )));
     assert!(
-        m.did("notices")
+        m.notices()
             .ends_with("open health: An update broke something and was rolled back\n")
     );
     // Healthy again, it goes through and settles.
     fs::remove_file(m.path("unhealthy")).unwrap();
     assert_eq!(go(&m), 0);
     assert!(
-        m.did("notices")
+        m.notices()
             .contains("close health: An update went through.\n")
     );
     assert!(!m.cfg.state.join("jobs/health").exists());
@@ -489,7 +483,7 @@ fn bad_proj_config_reverts_without_confirm_and_names_the_line_in_the_notice() {
     assert_eq!(m.running(), was);
     assert!(m.did("calls").ends_with("switch --abort\n"));
     assert!(!m.did("calls").lines().any(|line| line == "confirm"));
-    assert!(m.did("notice-health").contains(diagnostic));
+    assert!(m.notice_body("health").contains(diagnostic));
 }
 
 #[test]
@@ -554,7 +548,7 @@ fn a_new_claude_code_is_asked_to_answer_once_live() {
         m.kept("claude.log"),
         "-p Reply with the single word OK. --max-turns 1\n"
     );
-    assert_eq!(m.did("journal"), "");
+    assert_eq!(m.fake("journal"), "");
 
     // One that doesn't answer is noted, not reverted.
     fs::write(m.home("claude-mute"), "").unwrap();
@@ -562,8 +556,8 @@ fn a_new_claude_code_is_asked_to_answer_once_live() {
     assert_eq!(go(&m), 0);
     assert_eq!(said(&m).0, "ok");
     assert_eq!(
-        m.did("journal"),
-        "-t box-update -p warning: warning: the new Claude Code didn't answer a one-line prompt\n"
+        m.fake("journal"),
+        "-t box-update -p warning warning: the new Claude Code didn't answer a one-line prompt\n"
     );
 }
 

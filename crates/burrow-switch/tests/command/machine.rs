@@ -1,6 +1,8 @@
 //! A machine made of files: systems with their switch-to-configuration and
 //! inputs.json, what runs and the system profile, and stand-ins for what
 //! HOST-switch and HOST-confirm run, which keep how they were run in FAKE.
+//! The machine's own programs (sudo, systemctl, systemd-cat, runuser) are
+//! burrow_test's; the rest are the switch's own.
 //!
 //! The stand-ins act as much as the tests need: switch-to-configuration
 //! `test` makes its system the one that runs, systemd-run arms the revert's
@@ -14,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+use burrow_test::{chown, root, said};
+
 pub const SWITCH: &str = env!("CARGO_BIN_EXE_burrow-switch");
 pub const CONFIRM: &str = env!("CARGO_BIN_EXE_burrow-confirm");
 
@@ -21,13 +25,12 @@ pub const CONFIRM: &str = env!("CARGO_BIN_EXE_burrow-confirm");
 pub fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["sudo", "systemctl", "systemd-cat", "runuser"]);
         // The tests' own PATH for the stand-ins, whatever PATH they're
         // run with: theirs is the switch's business.
         let path = std::env::var("PATH").unwrap();
         for (name, text) in STAND_INS {
-            let file = bin.path().join(name);
-            burrow_test::executable(&file, text.replace("@PATH@", &path));
+            burrow_test::executable(bin.path().join(name), text.replace("@PATH@", &path));
         }
         // The PATH the config gives units and systemd-cat: cat, and
         // nothing else.
@@ -37,39 +40,17 @@ pub fn bin() -> &'static Path {
             .find(|c| c.exists())
             .unwrap();
         symlink(cat, bin.path().join("path/cat")).unwrap();
-        // For a run as nobody, too.
-        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()
 }
 
-const STAND_INS: [(&str, &str); 10] = [
-    (
-        "sudo",
-        // Never inside itself: a run it starts that starts it again would
-        // never end. Like sudo, it keeps none of the environment it was
-        // started with, but the tests' own and SERVICE_RESULT, which a
-        // unit gives the switch as root, where there's no sudo.
-        r#"#!/bin/sh
-given=$PATH PATH='@PATH@'
-[ -z "$IN_SUDO" ] || exit 9
-echo "$*" >>"$FAKE/sudo"
-[ "$1" = -- ] || exit 9
-shift
-exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
-"#,
-    ),
-    (
-        // The revert is activating (or FAKE/activating-as) for as many
-        // looks as FAKE/activating-for says (from when the timer's stopped,
-        // with FAKE/fires-on-stop), and FAKE/lands runs at the last of
-        // them, if there's one.
-        "systemctl",
-        r#"#!/bin/sh
-PATH='@PATH@'
-echo "$*" >>"$FAKE/systemctl"
-case "$*" in
+/// What systemctl answers in FAKE, sourced after its words are logged. The
+/// revert is activating (or FAKE/activating-as) for as many looks as
+/// FAKE/activating-for says (from when the timer's stopped, with
+/// FAKE/fires-on-stop), and FAKE/lands runs at the last of them, if there's
+/// one.
+const SYSTEMCTL_SAYS: &str = r#"case "$*" in
   "show -p ActiveState --value box-revert.service")
     n=$(cat "$FAKE/activating-for" 2>/dev/null || echo 0)
     if [ "$n" -gt 0 ]; then
@@ -86,8 +67,9 @@ case "$*" in
     [ -e "$FAKE/keeps-timer" ] || echo dead >"$FAKE/timer-state"
     [ ! -e "$FAKE/fires-on-stop" ] || mv "$FAKE/fires-on-stop" "$FAKE/activating-for" ;;
 esac
-"#,
-    ),
+"#;
+
+const STAND_INS: [(&str, &str); 6] = [
     (
         // A timer armed waits; what it's told to wait for, it runs, with
         // the PATH it's given or a bare one, as systemd does. FAKE/fail-run-
@@ -137,26 +119,6 @@ printf 'Original: %s\n      μs: %s\n   Human: %s\n' "$2" $((n * m)) "$2"
 "#,
     ),
     (
-        // As systemd-cat with no command: what it's given goes to the
-        // journal through cat, found on the PATH it's run with.
-        "systemd-cat",
-        r#"#!/bin/sh
-[ ! -e "$FAKE/fail-logger" ] || exit 1
-printf '%s ' "$*" >>"$FAKE/journal"
-exec cat >>"$FAKE/journal"
-"#,
-    ),
-    (
-        "runuser",
-        r#"#!/bin/sh
-PATH='@PATH@'
-echo "$*" >>"$FAKE/runuser"
-while [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-"#,
-    ),
-    (
         "nix",
         r#"#!/bin/sh
 PATH='@PATH@'
@@ -185,7 +147,8 @@ echo "$*" >>"$FAKE/box-boot"
     (
         // Every system's: which one it is is the dir it's in. `test` makes
         // it the one that runs, unless it hangs (the revert fires) or stays.
-        // FAKE/locked-NAME is how many tries it refuses as locked.
+        // FAKE/locked-NAME is how many tries it refuses as locked. FAKE_CURRENT
+        // is the link the running system is kept in (sudo keeps it).
         "switch-to-configuration",
         r#"#!/bin/sh
 PATH='@PATH@'
@@ -195,7 +158,7 @@ echo "$name $*" >>"$FAKE/switch-to-configuration"
 n=$(cat "$FAKE/locked-$name" 2>/dev/null || echo 0)
 if [ "$n" -gt 0 ]; then echo $((n - 1)) >"$FAKE/locked-$name"; exit 11; fi
 if [ -e "$FAKE/hang-$name" ]; then echo dead >"$FAKE/timer-state"; exit 1; fi
-[ "$1" != test ] || [ -e "$FAKE/stays-$name" ] || ln -sfn "$sys" "$CURRENT"
+[ "$1" != test ] || [ -e "$FAKE/stays-$name" ] || ln -sfn "$sys" "$FAKE_CURRENT"
 exit $(cat "$FAKE/exit-$name" 2>/dev/null || echo 0)
 "#,
     ),
@@ -204,10 +167,6 @@ exit $(cat "$FAKE/exit-$name" 2>/dev/null || echo 0)
 /// The PATH the config gives the revert's units and systemd-cat.
 pub fn unit_path() -> String {
     bin().join("path").display().to_string()
-}
-
-pub fn root() -> bool {
-    rustix::process::geteuid().is_root()
 }
 
 pub struct Machine {
@@ -228,6 +187,7 @@ impl Machine {
         for d in ["fake", "systems", "run", "flake"] {
             fs::create_dir_all(m.path(d)).unwrap();
         }
+        fs::write(m.path("fake/systemctl.says"), SYSTEMCTL_SAYS).unwrap();
         m.system("one", Some(100));
         m.system("two", Some(200));
         symlink(m.path("systems/one"), m.path("run/current-system")).unwrap();
@@ -319,7 +279,7 @@ impl Machine {
         c.arg(config)
             .args(words)
             .env("FAKE", self.path("fake"))
-            .env("CURRENT", self.path("run/current-system"))
+            .env("FAKE_CURRENT", self.path("run/current-system"))
             .env_remove("BURROW_CONFIRM_WITHIN")
             .env_remove("SERVICE_RESULT");
         if root() {
@@ -375,23 +335,6 @@ impl Machine {
         }
         m
     }
-}
-
-pub fn chown(path: &Path) {
-    std::os::unix::fs::lchown(path, Some(65534), Some(65534)).unwrap();
-    if path.is_dir() && !path.is_symlink() {
-        for entry in fs::read_dir(path).unwrap() {
-            chown(&entry.unwrap().path());
-        }
-    }
-}
-
-pub fn said(out: &Output) -> (Option<i32>, String, String) {
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
 }
 
 pub fn ok(out: &str) -> (Option<i32>, String, String) {

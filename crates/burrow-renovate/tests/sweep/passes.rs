@@ -185,18 +185,8 @@ fn sweeps_side_by_side_hand_each_head_to_one_job() {
         );
         assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     };
-    let jobs = |m: &Machine| {
-        fs::read_dir(m.path("fake"))
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("job-")
-            })
-            .count()
-    };
+    // The runs of proj so far, each one kept whether or not it starts.
+    let jobs = |m: &Machine| burrow_test::proj_jobs(&m.path("fake")).len();
     let until = |what: &Path| {
         let by = SystemTime::now() + Duration::from_secs(30);
         while !what.exists() {
@@ -207,7 +197,7 @@ fn sweeps_side_by_side_hand_each_head_to_one_job() {
     // A full sweep that has decided on PR 1 and is still reading PR 2, or
     // that is starting their job: a sweep of the repo (as another clone
     // spells it) waits for it, then finds them handed over.
-    for blocked in ["gh-blocked", "job-0"] {
+    for blocked in ["gh-blocked", "proj"] {
         let m = Machine::new();
         m.prs(&[red(1), pr(2)]);
         match blocked {
@@ -218,13 +208,13 @@ fn sweeps_side_by_side_hand_each_head_to_one_job() {
         until(&m.path("fake").join(blocked));
         let one = m.start(&["Sam/R"]);
         thread::sleep(Duration::from_millis(500));
-        assert_eq!(jobs(&m), usize::from(blocked == "job-0"));
+        assert_eq!(jobs(&m), usize::from(blocked == "proj"));
         m.set("gh-go", "");
         m.unset("proj-blocks");
         finish(full);
         finish(one);
         assert_eq!(jobs(&m), 1, "{blocked}");
-        let job = fs::read_to_string(m.path("fake/job-0")).unwrap();
+        let job = burrow_test::proj_jobs(&m.path("fake")).remove(0).join(" ");
         assert!(job.contains("#1 ") && job.contains("#2 "));
         // The job doesn't hold the lock: a job outliving its sweep holds
         // up no other.

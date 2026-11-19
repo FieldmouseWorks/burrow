@@ -2,7 +2,9 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::machine::{Machine, ok, queued, said};
+use burrow_test::said;
+
+use crate::machine::{Machine, ok, queued};
 
 #[test]
 fn a_trial_reboots_once_into_its_menu_entry() {

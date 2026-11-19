@@ -1,6 +1,10 @@
 //! A machine for the steps' tests: its clone of the flake at main, GitHub's
 //! copy beside it as a bare repo, HOST-update's state, and stand-ins for
-//! what the steps run as the machine's user.
+//! what the steps run as the machine's user and as root. The programs
+//! burrow_test owns (sudo, systemctl, runuser, box-notify, systemd-cat,
+//! proj) come from its shared set; each machine links them into its own
+//! `bin/`, so each keeps what it does in the machine's `fake/`, and answers
+//! from there (`runuser.says`, `systemctl.says`).
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -17,19 +21,48 @@ use crate::{Config, Train};
 /// The branch its PR comes from, in a train repo.
 pub const BRANCH: &str = "box-update";
 
-/// Shared stand-ins installed by burrow_test. What a run runs as the
-/// machine's user (through runuser, and so PATH) keeps what
-/// a test needs to see under the HOME it runs with, the test's own; what it
+/// runuser's checks of what it's asked to run as the machine's user: the
+/// `-u sam -- env HOME= XDG= PATH= PROGRAM...` a run's programs get, and,
+/// before a push from the clone WORK, the test's hook WORK.before-push when
+/// there is one (a hook that's to run once removes itself). The positional
+/// parameters are the ones runuser was run with.
+const RUNUSER_SAYS: &str = r#"[ "$1 $2 $3 $4" = "-u sam -- env" ] || exit 9
+case $7 in PATH=*) ;; *) exit 9 ;; esac
+if [ "$8 $9 ${11}" = "git -C push" ] && [ -e "${10}.before-push" ]; then
+  sh "${10}.before-push"
+fi
+"#;
+
+/// What systemctl says for `list-timers`: two timers, and the count.
+const TIMERS_SAYS: &str = r#"echo "NEXT                        LEFT LAST PASSED UNIT                          ACTIVATES"
+echo "Sun 2026-11-01 10:00:00 PST 5min -    -      burrow-events-catch-up.timer burrow-events-catch-up.service"
+echo "Mon 2026-11-02 03:00:00 PST 17h  -    -      box-boot-trial.timer         box-boot-trial.service"
+echo
+echo "2 timers listed."
+"#;
+
+/// Stand-ins for what a run runs, shared by every test (`bin`). What a run
+/// runs as the machine's user (through runuser, and so PATH) keeps what a
+/// test needs to see under the HOME it runs with, the test's own; what it
 /// runs as root, by path, is a link in the test's own bin (`Machine::tool`),
-/// and keeps it beside that bin, in the test's dir (T below).
+/// and keeps it beside that bin, in the test's dir (T below), in T/fake.
 ///
-/// As the user:
+/// burrow_test's own stand-ins, which keep what they're run with in T/fake:
 ///
-/// - runuser runs what it's given as it is, as the machine's user would,
-///   with the PATH it's given (these first, then the test's); before a push
-///   from the clone WORK it runs
-///   the test's hook, WORK.before-push, when there is one (a hook that's to
-///   run once removes itself).
+/// - runuser runs what it's given as the machine's user would, with the
+///   PATH it's given. Its checks, and the test's hook before a push from the
+///   clone WORK (WORK.before-push, when there is one; a hook that's to run
+///   once removes itself), are T/fake/runuser.says.
+/// - proj logs each run's words (`Machine::proj_log`), and says job-N for
+///   the Nth run, unless T/fake/fail-proj is there: then it fails.
+/// - box-notify logs each call (`Machine::notices`, `Machine::notice_body`).
+/// - systemd-cat keeps what it's given in T/fake/journal.
+/// - systemctl lists the two timers of T/fake/systemctl.says.
+/// - sudo runs what follows `--` with the environment sudo keeps, and keeps
+///   what it's run with in T/fake/sudo.
+///
+/// The test's own, as the machine's user (each logging to HOME):
+///
 /// - nix logs each call to HOME/nix.log, and fails as a failed build does
 ///   with HOME/nix-down there, or says nothing and goes with
 ///   HOME/nix-says-nothing there. A system it builds is made of flake.lock,
@@ -49,8 +82,6 @@ pub const BRANCH: &str = "box-update";
 ///   INPUT` locks INPUT to HOME/upstream-INPUT's commit, when there is one,
 ///   or fails, with HOME/unfetchable-INPUT there.
 /// - heavy takes a slot (HOME/nix.log says so) and runs what follows `--`.
-/// - proj logs each call to HOME/proj.log and says its job's id, unless
-///   HOME/proj-down is there: then it fails.
 /// - claude says its version, the claude-code.json of the system that runs
 ///   (T/current-system), and answers a prompt (logged in HOME/claude.log)
 ///   with OK, unless HOME/claude-mute is there.
@@ -63,35 +94,27 @@ pub const BRANCH: &str = "box-update";
 ///   T/confirm-fails there.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
 ///   that's there.
-/// - notify keeps what it opens and closes in T/notices, and each notice's
-///   body in T/notice-KEY.
 /// - vulnix reports, for a system, each line "COMMIT CVE PACKAGE SCORE" of
 ///   T/vulnix-db whose commit its flake.lock has; it says T/vulnix-says
 ///   instead when that's there, and fails with T/vulnix-down there.
 /// - curl fetches T/releases/PATH for downloads.example/claude/PATH.
 /// - install makes dirs, and copies files, without the owner it's given.
-/// - systemd-cat keeps what it's given in T/journal; systemctl lists two
-///   timers; boot says T/boot-status; sudo runs what follows `--`.
+/// - boot says T/boot-status.
 pub fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&[
+            "sudo",
+            "systemctl",
+            "runuser",
+            "box-notify",
+            "systemd-cat",
+            "proj",
+        ]);
         for (name, text) in [
             (
                 "nixos-version",
                 "#!/bin/sh\n[ \"$1\" = --configuration-revision ] || exit 9\ncat \"${0%/*}/../../revision\"\n",
-            ),
-            (
-                "runuser",
-                r#"#!/bin/sh
-[ "$1" = -u ] && [ "$2" = sam ] && [ "$3" = -- ] && [ "$4" = env ] || exit 9
-shift 3
-case $4 in PATH=*) ;; *) exit 9 ;; esac
-if [ "$5 $6 $8" = "git -C push" ] && [ -e "$7.before-push" ]; then
-  sh "$7.before-push"
-fi
-exec "$@"
-"#,
             ),
             (
                 "nix",
@@ -165,14 +188,6 @@ exec "$@"
 "#,
             ),
             (
-                "proj",
-                r#"#!/bin/sh
-printf '%s\n' "$*" >>"$HOME/proj.log"
-[ ! -e "$HOME/proj-down" ] || { echo "proj: no slot for it" >&2; exit 1; }
-echo "homelab-$(wc -l <"$HOME/proj.log" | tr -d ' ')"
-"#,
-            ),
-            (
                 "claude",
                 r#"#!/bin/sh
 case $1 in
@@ -228,17 +243,6 @@ esac
 "#,
             ),
             (
-                "notify",
-                r#"#!/bin/sh
-T=${0%/*}/..
-case $1 in
-  open) printf 'open %s: %s\n' "$2" "$3" >>"$T/notices"; printf '%s\n' "$4" >"$T/notice-$2" ;;
-  close) printf 'close %s: %s\n' "$2" "$3" >>"$T/notices" ;;
-  *) exit 9 ;;
-esac
-"#,
-            ),
-            (
                 "vulnix",
                 r#"#!/bin/sh
 T=${0%/*}/..
@@ -279,40 +283,11 @@ if [ "$1" = -d ]; then mkdir -p "$6"; else cp "$7" "$8"; fi
 "#,
             ),
             (
-                "systemd-cat",
-                r#"#!/bin/sh
-T=${0%/*}/..
-{ printf '%s: ' "$*"; cat; } >>"$T/journal"
-"#,
-            ),
-            (
-                "systemctl",
-                r#"#!/bin/sh
-T=${0%/*}/..
-printf 'systemctl %s\n' "$*" >>"$T/calls"
-echo "NEXT                        LEFT LAST PASSED UNIT                          ACTIVATES"
-echo "Sun 2026-11-01 10:00:00 PST 5min -    -      burrow-events-catch-up.timer burrow-events-catch-up.service"
-echo "Mon 2026-11-02 03:00:00 PST 17h  -    -      box-boot-trial.timer         box-boot-trial.service"
-echo
-echo "2 timers listed."
-"#,
-            ),
-            (
                 "boot",
                 r#"#!/bin/sh
 T=${0%/*}/..
 [ "$1" = status ] || exit 9
 cat "$T/boot-status" 2>/dev/null || echo "no trial queued"
-"#,
-            ),
-            (
-                "sudo",
-                r#"#!/bin/sh
-T=${0%/*}/..
-echo sudo >>"$T/calls"
-[ "$1" = -- ] || exit 9
-shift
-exec "$@"
 "#,
             ),
         ] {
@@ -367,6 +342,15 @@ impl Machine {
         fs::create_dir(d.join("state/jobs")).unwrap();
         fs::create_dir(d.join("bin")).unwrap();
         fs::create_dir(d.join("switch")).unwrap();
+        // Where the shared stand-ins keep what they did (FAKE, found beside
+        // each one's link in bin/), and what they answer.
+        let fake = d.join("fake");
+        fs::create_dir(&fake).unwrap();
+        fs::write(fake.join("runuser.says"), RUNUSER_SAYS).unwrap();
+        fs::write(fake.join("systemctl.says"), TIMERS_SAYS).unwrap();
+        // proj is found on the PATH a run gives its programs, which starts
+        // with this bin.
+        tool(&d, "proj", "proj");
         let cfg = Config {
             update: "box-update".into(),
             host: "box".into(),
@@ -375,9 +359,10 @@ impl Machine {
             user: "sam".into(),
             home: home.to_str().unwrap().into(),
             uid: 1000,
-            runuser: bin().join("runuser"),
+            runuser: tool(&d, "runuser", "runuser"),
             path: format!(
-                "{}:{}",
+                "{}:{}:{}",
+                d.join("bin").display(),
                 bin().display(),
                 std::env::var("PATH").unwrap_or_default()
             ),
@@ -405,7 +390,7 @@ impl Machine {
                 confirm: tool(&d, "confirm", "box-confirm"),
                 boot: None,
                 health: tool(&d, "health", "box-health"),
-                notify: tool(&d, "notify", "box-notify"),
+                notify: tool(&d, "box-notify", "box-notify"),
                 vulnix: tool(&d, "vulnix", "vulnix"),
                 curl: tool(&d, "curl", "curl"),
                 install: tool(&d, "install", "install"),
@@ -548,6 +533,66 @@ impl Machine {
     /// What a stand-in kept in HOME/`name`: nothing when it kept nothing.
     pub fn kept(&self, name: &str) -> String {
         fs::read_to_string(self.home(name)).unwrap_or_default()
+    }
+
+    /// What a burrow_test stand-in kept in T/fake/`name`: nothing when it
+    /// kept nothing.
+    pub fn fake(&self, name: &str) -> String {
+        fs::read_to_string(self.path("fake").join(name)).unwrap_or_default()
+    }
+
+    /// The proj runs so far, each a line of its words, as they were given.
+    pub fn proj_log(&self) -> String {
+        burrow_test::proj_jobs(&self.path("fake"))
+            .iter()
+            .map(|words| format!("{}\n", words.join(" ")))
+            .collect()
+    }
+
+    /// box-notify's calls, each as the text it logged (`open|KEY|TITLE|BODY`
+    /// or `close|KEY|WHY`, ended by a newline). A body can span lines, so a
+    /// call runs on until the next one starts.
+    fn notify_calls(&self) -> Vec<String> {
+        let mut calls: Vec<String> = Vec::new();
+        for line in self.fake("notify").split_inclusive('\n') {
+            if calls.is_empty() || line.starts_with("open|") || line.starts_with("close|") {
+                calls.push(String::new());
+            }
+            calls.last_mut().unwrap().push_str(line);
+        }
+        calls
+    }
+
+    /// The notices so far, a line each: `open KEY: TITLE` or `close KEY: WHY`.
+    pub fn notices(&self) -> String {
+        self.notify_calls()
+            .iter()
+            .map(|call| {
+                let call = call.strip_suffix('\n').unwrap_or(call.as_str());
+                let (verb, rest) = call.split_once('|').unwrap();
+                let (key, rest) = rest.split_once('|').unwrap();
+                match verb {
+                    "open" => format!("open {key}: {}\n", rest.split_once('|').unwrap().0),
+                    "close" => format!("close {key}: {rest}\n"),
+                    other => panic!("box-notify was asked to {other}"),
+                }
+            })
+            .collect()
+    }
+
+    /// The body KEY's notice was last opened with, ending in the newline it
+    /// was said with (as the notice file held it); nothing if it never opened.
+    pub fn notice_body(&self, key: &str) -> String {
+        self.notify_calls()
+            .iter()
+            .rev()
+            .find_map(|call| {
+                let (verb, rest) = call.split_once('|')?;
+                let (k, rest) = rest.split_once('|')?;
+                let (_, body) = rest.split_once('|')?;
+                (verb == "open" && k == key).then(|| body.to_string())
+            })
+            .unwrap_or_default()
     }
 }
 

@@ -12,22 +12,21 @@ use std::time::{Duration, Instant};
 
 use burrow_test::executable as script;
 
+/// What systemctl says, as the machine's `systemctl.says` in its FAKE: the
+/// units in FAILED (USER_FAILED for the user's manager), and the exit of the
+/// system's (SYSTEM_EXIT) or the user's (USER_EXIT).
+const SYSTEMCTL_SAYS: &str = r#"case "$*" in
+  --user*) printf '%s' "$USER_FAILED"; echo user-noise >&2; exit "${USER_EXIT:-0}" ;;
+  *) printf '%s' "$FAILED"; echo system-noise >&2; exit "${SYSTEM_EXIT:-0}" ;;
+esac
+"#;
+
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["systemctl"]);
         let b = bin.path();
-        script(
-            b.join("systemctl"),
-            r#"#!/bin/sh
-echo "$*" >>"$SYSTEMCTL_LOG"
-case "$*" in
-  --user*) printf '%s' "$USER_FAILED"; echo user-noise >&2; exit "${USER_EXIT:-0}" ;;
-  *) printf '%s' "$FAILED"; echo system-noise >&2; exit "${SYSTEM_EXIT:-0}" ;;
-esac
-"#,
-        );
         script(b.join("pass"), "#!/bin/sh\nexit 0\n");
         script(b.join("fail"), "#!/bin/sh\nexit 1\n");
         script(b.join("noisy"), "#!/bin/sh\necho out\necho err >&2\n");
@@ -80,6 +79,8 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         fs::create_dir(d.join("health.d")).unwrap();
+        fs::create_dir(d.join("fake")).unwrap();
+        fs::write(d.join("fake/systemctl.says"), SYSTEMCTL_SAYS).unwrap();
         for (name, stand_in) in checks {
             symlink(stand_ins().join(stand_in), d.join("health.d").join(name)).unwrap();
         }
@@ -107,7 +108,7 @@ impl Machine {
         let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
             .arg(self.path("config.json"))
             .args(args)
-            .env("SYSTEMCTL_LOG", self.path("systemctl.log"))
+            .env("FAKE", self.path("fake"))
             .env("COUNT", self.path("count"))
             .env("PIDS", self.path("pids"))
             .envs(env.iter().copied())
@@ -162,7 +163,7 @@ fn a_report_is_every_check_in_name_order_then_the_failed_units() {
         stdout(&ran),
         "check:dns ok\ncheck:github fail\ncheck:noisy ok\ncheck:stdin fail\ncheck:subdir fail\nunit:a.service fail\nunit:systemd-fsck@dev-disk-by\\x2duuid-1.service fail\nuser-unit:c.service fail\n"
     );
-    assert_eq!(m.read("systemctl.log"), SYSTEMCTL);
+    assert_eq!(m.read("fake/systemctl"), SYSTEMCTL);
     // The system's complaints are shown, the user's manager's aren't, and
     // the checks' own output goes nowhere.
     assert_eq!(stderr(&ran), "system-noise\n");
@@ -267,7 +268,7 @@ fn output_it_cant_write_fails_it() {
         let ran = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
             .arg(m.path("config.json"))
             .args(args)
-            .env("SYSTEMCTL_LOG", m.path("systemctl.log"))
+            .env("FAKE", m.path("fake"))
             .stdout(full())
             .output()
             .unwrap();
@@ -402,7 +403,7 @@ fn a_snapshot_it_cant_read_fails_the_compare() {
             missing.display()
         )
     );
-    assert_eq!(m.read("systemctl.log"), "");
+    assert_eq!(m.read("fake/systemctl"), "");
     // Nor one that isn't a report: half of one isn't taken as the whole.
     let torn = m.path("torn");
     fs::write(&torn, "check:dns ok\ncheck:web fa").unwrap();
@@ -415,7 +416,7 @@ fn a_snapshot_it_cant_read_fails_the_compare() {
             torn.display()
         )
     );
-    assert_eq!(m.read("systemctl.log"), "");
+    assert_eq!(m.read("fake/systemctl"), "");
 }
 
 #[test]
@@ -443,7 +444,7 @@ fn what_it_cant_run() {
         );
         assert_eq!(stdout(&ran), "", "{args:?}");
     }
-    assert_eq!(m.read("systemctl.log"), "");
+    assert_eq!(m.read("fake/systemctl"), "");
     let ran = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
         .output()
         .unwrap();
@@ -461,7 +462,7 @@ fn what_it_cant_run() {
     let ran = m.run(&[], &[]);
     assert_eq!(ran.status.code(), Some(2));
     assert!(stderr(&ran).contains("unknown field `timeout`"), "{ran:?}");
-    assert_eq!(m.read("systemctl.log"), "");
+    assert_eq!(m.read("fake/systemctl"), "");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! HOST-notify as its callers run it: the config file, and on PATH gh, id,
-//! runuser, chown and systemd-cat (here stand-ins that keep what they were
-//! asked).
+//! chown, runuser and systemd-cat (runuser and systemd-cat are burrow_test's,
+//! keeping what they were asked in FAKE).
 
 use std::fs;
 use std::path::Path;
@@ -25,25 +25,19 @@ case "$*" in
 esac
 "#;
 
-/// The stand-ins on PATH, cached for the test binary. Each records calls in the
-/// file its environment variable names; installation uses burrow_test.
+/// The stand-ins on PATH, cached for the test binary: runuser and systemd-cat
+/// from burrow_test, and gh, id and chown beside them.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["runuser", "systemd-cat"]);
         let b = bin.path();
         script(b.join("gh"), GH);
-        script(b.join("id"), "#!/bin/sh\n[ \"$1\" = -un ] && echo \"$WHO\"\n");
-        // runuser keeps what it was asked and runs the rest as the user.
         script(
-            b.join("runuser"),
-            "#!/bin/sh\necho \"$*\" >>\"$RUNUSER\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\n[ -n \"$STAYS\" ] || WHO=sam\nWHO=$WHO exec \"$@\"\n",
+            b.join("id"),
+            "#!/bin/sh\n[ \"$1\" = -un ] && echo \"$WHO\"\n",
         );
         script(b.join("chown"), "#!/bin/sh\necho \"$*\" >>\"$CHOWN\"\n");
-        script(
-            b.join("systemd-cat"),
-            "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$(cat)\" >>\"$JOURNAL\"\n",
-        );
         bin
     })
     .path()
@@ -58,6 +52,10 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         fs::create_dir(d.join("notices")).unwrap();
+        // What runuser does on this machine: it makes sam the user, which
+        // its says does by setting WHO (what `id -un` answers).
+        fs::create_dir(d.join("fake")).unwrap();
+        fs::write(d.join("fake/runuser.says"), "export WHO=sam\n").unwrap();
         let config = serde_json::json!({
             "name": "box-notify",
             "repo": repo,
@@ -76,10 +74,6 @@ impl Machine {
     }
 
     fn run(&self, who: &str, down: bool, args: &[&str]) -> Output {
-        self.run_with(who, down, &[], args)
-    }
-
-    fn run_with(&self, who: &str, down: bool, env: &[(&str, &str)], args: &[&str]) -> Output {
         let path = format!(
             "{}:{}",
             stand_ins().display(),
@@ -92,10 +86,8 @@ impl Machine {
             .env("WHO", who)
             .env("DOWN", if down { "1" } else { "" })
             .env("LOG", self.path("gh.log"))
-            .env("RUNUSER", self.path("runuser.log"))
             .env("CHOWN", self.path("chown.log"))
-            .env("JOURNAL", self.path("journal"))
-            .envs(env.iter().copied())
+            .env("FAKE", self.path("fake"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -130,9 +122,9 @@ fn a_notice_opens_is_pending_and_closes() {
             "api -i -X POST repos/sam/homelab/issues --input -",
         ],
         "journal: {}",
-        m.read("journal")
+        m.read("fake/journal")
     );
-    assert_eq!(m.read("runuser.log"), "");
+    assert_eq!(m.read("fake/runuser"), "");
     assert_eq!(
         m.run("sam", false, &["pending", "k1"]).status.code(),
         Some(0)
@@ -147,7 +139,7 @@ fn a_notice_opens_is_pending_and_closes() {
         m.run("sam", false, &["pending", "k1"]).status.code(),
         Some(1)
     );
-    assert_eq!(m.read("journal"), "");
+    assert_eq!(m.read("fake/journal"), "");
 }
 
 #[test]
@@ -157,7 +149,7 @@ fn anyone_else_runs_it_as_the_user() {
     assert!(ran.status.success(), "{ran:?}");
     let d = m.dir.path();
     assert_eq!(
-        m.read("runuser.log"),
+        m.read("fake/runuser"),
         format!(
             "-u sam -- env HOME={} BURROW_NOTIFY_AS_USER=1 {} {} open k1 Stuck It's stuck.\n",
             d.display(),
@@ -171,28 +163,25 @@ fn anyone_else_runs_it_as_the_user() {
     );
     assert_eq!(m.read("gh.log").lines().count(), 3);
     // Asking whether one's pending needs neither.
-    fs::remove_file(m.path("runuser.log")).unwrap();
+    fs::remove_file(m.path("fake/runuser")).unwrap();
     assert_eq!(
         m.run("root", false, &["pending", "k1"]).status.code(),
         Some(0)
     );
-    assert_eq!(m.read("runuser.log"), "");
+    assert_eq!(m.read("fake/runuser"), "");
 }
 
 #[test]
 fn a_runuser_that_leaves_it_someone_else_runs_it_once() {
     let m = Machine::new(Some("sam/homelab"));
-    let ran = m.run_with(
-        "root",
-        false,
-        &[("STAYS", "1")],
-        &["open", "k1", "Stuck", "It's stuck."],
-    );
+    // This runuser doesn't make anyone the user: it runs what it's given as is.
+    fs::remove_file(m.path("fake/runuser.says")).unwrap();
+    let ran = m.run("root", false, &["open", "k1", "Stuck", "It's stuck."]);
     assert!(ran.status.success(), "{ran:?}");
-    assert_eq!(m.read("runuser.log").lines().count(), 1);
+    assert_eq!(m.read("fake/runuser").lines().count(), 1);
     assert_eq!(
-        m.read("journal"),
-        "-t box-notify -p warning|box-notify open: runuser ran it as root, not sam\n"
+        m.read("fake/journal"),
+        "-t box-notify -p warning box-notify open: runuser ran it as root, not sam\n"
     );
     assert_eq!(m.read("gh.log"), "");
 }
@@ -202,9 +191,9 @@ fn a_notice_github_doesnt_get_goes_to_the_journal_and_fails_nothing() {
     let m = Machine::new(Some("sam/homelab"));
     let ran = m.run("sam", true, &["open", "k1", "Stuck", "It's stuck."]);
     assert!(ran.status.success(), "{ran:?}");
-    let journal = m.read("journal");
+    let journal = m.read("fake/journal");
     assert!(
-        journal.starts_with("-t box-notify -p warning|box-notify open k1: couldn't reach GitHub (GET repos/sam/homelab/issues?state=open&per_page=100: gh: HTTP 401: Bad credentials)"),
+        journal.starts_with("-t box-notify -p warning box-notify open k1: couldn't reach GitHub (GET repos/sam/homelab/issues?state=open&per_page=100: gh: HTTP 401: Bad credentials)"),
         "{journal}"
     );
     assert_eq!(
@@ -223,8 +212,8 @@ fn with_no_repo_it_only_writes_the_journal() {
     );
     assert!(m.run("sam", false, &["close", "k5"]).status.success());
     assert_eq!(
-        m.read("journal"),
-        "-t box-notify -p warning|box-notify open k5 Stuck It's stuck.\n-t box-notify -p notice|box-notify close k5 Cleared.\n"
+        m.read("fake/journal"),
+        "-t box-notify -p warning box-notify open k5 Stuck It's stuck.\n-t box-notify -p notice box-notify close k5 Cleared.\n"
     );
     assert_eq!(m.read("gh.log"), "");
 }
@@ -263,5 +252,5 @@ fn what_it_cant_run() {
     assert_eq!(ran.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&ran.stderr).contains("unknown field `labels`"));
     assert_eq!(m.read("gh.log"), "");
-    assert_eq!(m.read("runuser.log"), "");
+    assert_eq!(m.read("fake/runuser"), "");
 }
