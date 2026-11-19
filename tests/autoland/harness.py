@@ -151,9 +151,8 @@ os.chmod(f"{tmp}/upkeep-none", 0o755)
 # subcommand's exit code. With "token", it first runs its token command for
 # the repo, as cn does, and records what that did. Unless CN says otherwise,
 # `class` classes the files the PR at that head lists (TOUCHED, which mkpr
-# and run keep) by the policy's R2, docs, notDocs and hidden paths, as Conary
-# does (AGENTS.md, CLAUDE.md and .github/ are never docs; a hidden pattern
-# also hides a directory's files, the directory with a trailing slash), and
+# and run keep) by the policy's R2, docs and notDocs paths, as Conary does
+# (AGENTS.md, CLAUDE.md and .github/ are never docs), and
 # raises it by the PR's labels there, with the raises CN says the ledger
 # kept from before ("kept"), as Conary does: `r2` makes it R2, `review` asks
 # for a review round, and `raised` names them, sorted.
@@ -186,10 +185,8 @@ if sub == "class" and "class" not in do:
     pick = lambda key: [x for r in rules for x in r.get(key, [])]
     because = next((p for p in paths if any(re.search(x, p) for x in pick("r2"))), None)
     never = pick("notDocs") + [r"(^|/)AGENTS(\\.override)?\\.md$", r"(^|/)CLAUDE(\\.local)?\\.md$", r"^\\.github/"]
-    held = lambda p: [p] + [p[:i + 1] for i, c in enumerate(p) if c == "/"]
-    hidden = lambda p: any(re.search(x, h) for x in pick("hidden") for h in held(p))
     docs = bool(paths) and all(any(re.search(x, p) for x in pick("docs")) and not any(re.search(x, p) for x in never)
-                               and not hidden(p) for p in paths)
+                               for p in paths)
     because = because or ("labelled r2" if "r2" in raised else None)
     do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": docs,
                    "review": bool(because) or not docs or "review" in raised, "raised": raised}}
@@ -239,7 +236,7 @@ WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for
     ("review", "review"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
     ("proof", "machine checks"), ("releaseAge", "release age"), ("train", "train"), ("merge", "merge"),
     ("owner", "Sam"), ("base", "base branch"))}
-# The example machine's generated CONARY_POLICY, including hidden paths.
+# The example machine's generated CONARY_POLICY.
 POLICY = sys.argv[2]
 # dependabotEmail isn't Dependabot's real address, so a test that a
 # Dependabot commit is the bot's passes only on the address the config gives.

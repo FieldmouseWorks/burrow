@@ -11,6 +11,10 @@ from harness import POLICY, PR_DIFF, WROTE, G, S, merged, mkpr, run
 # .github/, and migrations (a deploy backs the data up before it migrates),
 # are settled and merged like anything else.
 R2 = json.load(open(POLICY))["r2"]
+# Its keys are the ones Conary's policy reads, which denies any other: no
+# `hidden`, since the reviewers read every path GitHub holds and Conary
+# drops the key (FieldmouseWorks/Conary#457).
+assert sorted(json.load(open(POLICY))) == ["docs", "live", "notDocs", "r2", "repos"], json.load(open(POLICY))
 for p in (".github/workflows/flake.yml", ".github/dependabot.yml", "server/migrations/0002_users.sql", "migrations/1.sql",
           "src/app.py"):
     assert not any(re.search(x, p) for x in R2), (p, R2)

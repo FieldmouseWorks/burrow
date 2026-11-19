@@ -31,11 +31,11 @@ class Looked(NamedTuple):
     changed: bool  # retargeted or edited after its push: clean isn't the reviewers' to settle alone
 
 
-def look(repo, pr, digest, line, age, after, tried, needed):
-    """The reviewers' part of the PR's step this pass. digest and line are
-    its listing; age how long its head has been still (since its push, as
-    near as GitHub says); after books its next pass, and tried strikes the
-    ask when the owner's door failed or clears it (step.py's); needed,
+def look(repo, pr, st, digest, line, age, after, tried, needed):
+    """The reviewers' part of the PR's step this pass. st is its state;
+    digest and line its listing; age how long its head has been still (since
+    its push, as near as GitHub says); after books its next pass, and tried
+    strikes the ask when the owner's door failed or clears it (step.py's); needed,
     whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     names = V.on(repo)
@@ -72,10 +72,16 @@ def look(repo, pr, digest, line, age, after, tried, needed):
             # when the owner's door asked, the ask went unanswered too.
             due = max(C.NOW - age + LOST * MIN, (at or 0) + ANSWERED * MIN)
             if C.NOW >= due:
-                x = f"no review of {pr['headRefOid'][:7]} after {int(age // MIN)} minutes"
+                # Since when, never for how long: the stuck issue knows an
+                # entry by its words, and a count of minutes made the same
+                # stall news on every pass (burrow#1228).
+                # The status sits on the head already, and its 140 characters
+                # must keep the ask's word, so it leaves the commit out.
+                since = f"since its push at {clock(st['seen'])}"
                 how = f"asked as the owner at {clock(at)}, unanswered" if at else f"not asked as the owner: {unasked}" if unasked else "not asked"
-                stuck.append(f"{V.NAMES[r]}: {x} ({how})")
-                digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, f"{x}; {how} (its usage, or the connector's setup)"))
+                stuck.append(f"{V.NAMES[r]}: no review {since} ({how})")
+                x = f"no review of {pr['headRefOid'][:7]} {since}; {how}"
+                digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, x + " (its usage, or the connector's setup)"))
             else:
                 after(due, 0)  # ends: listed for the owner
     # Retargeted or edited after its push, Codex's clean can't settle it: it

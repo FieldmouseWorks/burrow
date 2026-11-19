@@ -274,6 +274,7 @@ class Pass(Context, Jobs, Actions):
         looked = review_step.look(
             self.repo,
             self.pr,
+            self.st,
             self.digest,
             self.line,
             self.age,

@@ -81,7 +81,7 @@ DIGEST = [
     ("Outside contributions", "sam/r#1", "Outside contribution: Sam reviews and merges it"),
     ("Labelled needs-owner", "sam/r#2", ""),
     ("Judged yours to decide", "sam/r#7", "a Claude job judged it Sam's"),
-    ("Codex hasn't reviewed it", "sam/r#3", "no review of aaaaaaa after 130 minutes (its usage, or the connector's setup)"),
+    ("Codex hasn't reviewed it", "sam/r#3", "no review of aaaaaaa since its push at 6:47pm UTC (its usage, or the connector's setup)"),
     ("Couldn't merge", "sam/r#4", "GitHub keeps refusing the merge (journalctl -u autoland)"),
     ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
 ]
@@ -175,13 +175,13 @@ later(moved)
 assert said(9) == [], CALLS
 # A comment GitHub doesn't take is tried again, and once only.
 GH["fail"] = "comment"
-again = moved + [("Codex hasn't reviewed it", "sam/r#6", "no review of bbbbbbb after 125 minutes")]
+again = moved + [("Codex hasn't reviewed it", "sam/r#6", "no review of bbbbbbb since its push at 7:02pm UTC")]
 later(again)
-assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb after 125 minutes"], CALLS
+assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb since its push at 7:02pm UTC"], CALLS
 GH["fail"] = ""
 CALLS.clear()
 R.publish(again)
-assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb after 125 minutes"], CALLS
+assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb since its push at 7:02pm UTC"], CALLS
 later(again)
 assert said(9) == [], CALLS
 

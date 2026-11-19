@@ -61,7 +61,14 @@ assert OWNER_ASKS == [("sam/r", 5, head)] and asks() == [] and digest == [], (WR
 status, digest = run(mkpr(), 31 * 60)
 assert OWNER_ASKS == [] and asks() == [] and digest == [], (WROTE, digest)
 status, digest = run(mkpr(), 120 * 60)
-assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa after 120 minutes" in status, (status, digest)
+assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa since its push at " in digest[0][2], (status, digest)
+assert "Codex: no review since its push at " in status, status
+# The same stall only older is the same entry, known by the same words, so
+# the stuck issue gets no new comment and its job isn't resumed with it;
+# nor does the PR's status change (burrow#1228).
+later_status, later_digest = run(mkpr(), 127 * 60)
+assert later_digest == digest and [R.known_by(*d) for d in later_digest] == [R.known_by(*d) for d in digest], (digest, later_digest)
+assert later_status == status, (status, later_status)
 
 # Only the connector's own posts count: its markers from anyone else, or
 # from a user who took its name, and its word on another head, aren't its
