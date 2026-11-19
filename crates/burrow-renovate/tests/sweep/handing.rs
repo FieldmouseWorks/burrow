@@ -631,6 +631,35 @@ fn the_job_is_told_how_the_stewards_proofs_run_wherever_it_has_them() {
 }
 
 #[test]
+fn a_pr_the_steward_is_kept_off_goes_to_no_job_until_the_label_comes_off() {
+    // Held (hold) and waiting on the owner (needs-owner), red or a major,
+    // beside one that isn't: only that one is handed over.
+    let m = Machine::new();
+    let held = [
+        pr_with(1, &["hold"], "FAILURE"),
+        pr_with(2, &["major", "needs-owner"], "SUCCESS"),
+    ];
+    m.prs(&[held[0].clone(), held[1].clone(), red(3)]);
+    let p = m.pass();
+    let task = p.task();
+    assert!(task.contains("#3 \""), "{task}");
+    assert!(!task.contains("#1 \"") && !task.contains("#2 \""), "{task}");
+    assert_eq!(m.key(1, ""), "");
+    // Pass after pass while it stays held.
+    assert!(m.pass().jobs.is_empty());
+    // A major cleared ok in a repo no steward covers isn't listed for the
+    // owner to merge while it's held.
+    let v = m.verdict(2, "ok", "main", "me");
+    m.comments(2, &[v]);
+    assert_eq!(m.pass().majors().0, "close");
+    // The label off, and it's taken up.
+    m.prs(&[red(1), pr(2), red(3)]);
+    let p = m.pass();
+    assert!(p.task().contains("#1 \""), "{}", p.task());
+    assert_eq!(p.majors().0, "open");
+}
+
+#[test]
 fn a_pr_whose_job_is_still_at_work_goes_to_no_other() {
     // burrow#1194: CI finishing again on a major's head, or the job's own
     // push, while its job was at work brought a second job onto the branch.

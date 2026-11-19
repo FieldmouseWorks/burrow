@@ -6,7 +6,9 @@
 //! which fixes them on their branches so they can merge. Once per PR head,
 //! so a fix that's pushed gets a fresh look only if it's still stuck. The
 //! autoland steward's own status (`settled`) doesn't count as a check. With
-//! the machine's own App, it and its jobs act on GitHub as that App.
+//! the machine's own App, it and its jobs act on GitHub as that App. A PR
+//! the steward is kept off (`held`: its hold and owner labels) the sweep
+//! leaves alone too.
 //!
 //! The job's verdict on a major: ok when it can merge as it is, held when
 //! it shouldn't (its comment says why). The job ends that comment with a
@@ -42,11 +44,11 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, flock};
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{complain, say, trimmed};
 
+mod config;
 mod job;
 mod pr;
 mod request;
@@ -55,6 +57,7 @@ mod steward;
 mod task;
 mod wake;
 
+pub use config::{App, Config, Tools};
 use pr::{Pr, State};
 use request::{REQUEST, TITLE};
 use steward::Steward;
@@ -67,66 +70,6 @@ pub(crate) const HELD: &str = "major-held";
 const RUN_COMES: i64 = 3600;
 /// How long a security fix may stay open before it's a notice.
 const SECURITY_DAY: i64 = 86400;
-
-/// What modules/updates.nix tells renovate-sweep.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Config {
-    /// renovate-sweep, as the machine names it: how it says itself.
-    pub name: String,
-    /// Its own: what each PR was last handed over for (OWNER_REPO-N), its
-    /// refresh requests taken back (OWNER_REPO-N.released), and the key
-    /// major-seal seals verdicts with.
-    pub state: PathBuf,
-    /// Where the machine's projects are: each clone of a GitHub repo, a
-    /// project its job runs in.
-    pub projects: PathBuf,
-    /// Who decides a major that's held, as the task names them.
-    pub owner: String,
-    /// The autoland steward's own commit status, which isn't CI.
-    pub settled: String,
-    /// The repos the steward covers, as it last found them (its
-    /// repos.json): none without it.
-    pub covered: Option<PathBuf>,
-    /// The machine's own App, when the jobs act as it.
-    pub app: Option<App>,
-    /// Who Renovate comments as, as REST spells it: its own App's bot
-    /// (burrow.updates.renovate.app), which needn't be the jobs'. None:
-    /// Renovate runs as the user, whose gh login the sweep's is too.
-    pub renovate: Option<String>,
-    /// The longest a Renovate run goes on, in seconds: a refresh request
-    /// taken back waits that long before a job may push.
-    pub renovate_run: u64,
-    pub tools: Tools,
-}
-
-/// The App the jobs act on GitHub as.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct App {
-    /// As proj run --app names it.
-    pub name: String,
-    /// Its bot's login as GraphQL spells it: who the jobs post as.
-    pub bot: String,
-}
-
-/// What it runs, by path.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Tools {
-    /// gh, as the App when there's one.
-    pub gh: PathBuf,
-    pub git: PathBuf,
-    pub proj: PathBuf,
-    /// HOST-notify, which tells the owner.
-    pub notify: PathBuf,
-    /// major-seal, which seals the verdicts a job is handed, and checks one.
-    pub seal: PathBuf,
-    /// lock-wait (modules/autoland/lock_wait.py): when a lock file refresh that
-    /// lock-age refused for age only can go again, and how far the sweep
-    /// goes asking.
-    pub lock_wait: PathBuf,
-}
 
 impl Config {
     pub fn read(path: &Path) -> Result<Config, String> {
@@ -588,9 +531,16 @@ impl Sweep<'_> {
             }
         }
         let url = format!("https://github.com/{repo}/pull/{n}");
+        let on_hold = cfg.held.iter().any(|l| pr.labelled(l));
         if major && verdict == "held" {
             pass.held.push_str(&format!("- {title}: {url}\n"));
-        } else if major && verdict == "ok" && !self.info.covered && red == 0 && pending == 0 {
+        } else if major
+            && verdict == "ok"
+            && !on_hold
+            && !self.info.covered
+            && red == 0
+            && pending == 0
+        {
             // One with no CI at all is listed too, saying so: nothing else
             // would bring it to anyone.
             let note = if untested {
@@ -611,6 +561,13 @@ impl Sweep<'_> {
                 "its CI is green and it still hasn't merged"
             };
             pass.stuck.push_str(&format!("- {title}: {url} ({why})\n"));
+        }
+        // Held, as the steward has it: someone keeps it as it is (waiting
+        // on another PR, a deploy, the owner), so no job pushes to it and
+        // no refresh is asked for. Taking the label off is a PR event, which
+        // starts a pass that takes it up again.
+        if on_hold {
+            return Ok(None);
         }
         // A rebase! title has Renovate redo the branch on each of its runs,
         // each of whose pushes starts the next, until someone takes it off:
