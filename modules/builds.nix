@@ -27,6 +27,10 @@ let
   # Its own, so uploads parked on the store's lock never hold every check
   # off: each upload takes one of each in turn, never both at once.
   admitSocket = "/run/burrow-builds/admit.sock";
+  # A refused upload's body, which nginx reads and drops, buffering none:
+  # a run that sends all of it before it reads (burrow-keep) hears why,
+  # rather than nginx closing on it after the default 30s.
+  refusedBody = "lingering_time 5m;";
   path = lib.removeSuffix "/" cfg.path;
 
   # The directories above `dir` this config declares owned by a user other
@@ -298,6 +302,7 @@ in
             auth_request_set $burrow_builds_admit $upstream_status;
             auth_request_set $burrow_builds_refused $upstream_http_burrow_refused;
             error_page 401 403 500 = @burrow_builds_refused;
+            ${refusedBody}
             client_max_body_size ${cfg.maxUpload};
             proxy_request_buffering on;
             proxy_http_version 1.0;
@@ -326,6 +331,7 @@ in
         # away is; a 500 the door didn't give is nginx's own.
         "@burrow_builds_refused".extraConfig = ''
           default_type application/json;
+          ${refusedBody}
           if ($burrow_builds_admit = 401) { return 401 "$burrow_builds_refused\n"; }
           if ($burrow_builds_admit = 403) { return 403 "$burrow_builds_refused\n"; }
           if ($burrow_builds_admit = 500) { return 500 "$burrow_builds_refused\n"; }

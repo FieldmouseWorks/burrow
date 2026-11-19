@@ -49,6 +49,27 @@ let
         got += more
     print(got.split(b"\r\n")[0].decode())
   '';
+  # A client that sends its whole body before it reads, as burrow-keep
+  # does: a MiB a second for longer than nginx lingers by default. Its
+  # answer's status line, or a reset.
+  sendsAll = pkgs.writeText "sends-all.py" ''
+    import socket, sys, time
+    chunk, n = b"x" * (1 << 20), 36
+    s = socket.create_connection(("localhost", 80), timeout=60)
+    s.sendall(("POST /builds/upload HTTP/1.1\r\nHost: localhost\r\n"
+               + f"Authorization: Bearer {sys.argv[1]}\r\n"
+               + f"Content-Length: {n * len(chunk)}\r\n\r\n").encode())
+    for _ in range(n):
+        s.sendall(chunk)
+        time.sleep(1)
+    got = b""
+    while b"\r\n\r\n" not in got:
+        more = s.recv(65536)
+        if not more:
+            break
+        got += more
+    print(got.split(b"\r\n")[0].decode())
+  '';
   # Two small paths of the machine's own, with no references.
   one = pkgs.writeText "one" "built once\n";
   two = pkgs.writeText "two" "built twice\n";
@@ -169,6 +190,10 @@ pkgs.testers.runNixOSTest {
         assert got == "403", got
         machine.succeed("jq -e '.refused | test(\"its token expired\")' /tmp/answer")
 
+    with subtest("a refused run that sends its whole body first still hears why"):
+        got = machine.succeed(f"python3 ${sendsAll} '{forged}'").strip()
+        assert got.split(" ")[1] == "403", got
+
     with subtest("a token for another upload is refused once its manifest is read"):
         other = audience(json.dumps({"paths": [manifest("${two}")]}))
         got = upload("public", ["${one}"], aud=other)
@@ -206,6 +231,14 @@ pkgs.testers.runNixOSTest {
         assert got == "200", got
         answer = json.loads(machine.succeed("cat /tmp/answer"))
         assert answer["skipped"] == ["${one}"], answer
+
+    with subtest("with the check's door down, an upload is one to try again"):
+        machine.succeed("systemctl stop burrow-builds-admit.socket")
+        got = upload("public", ["${one}"])
+        assert got == "503", got + machine.succeed("cat /tmp/answer")
+        machine.succeed("jq -e '.refused | test(\"busy or down\")' /tmp/answer")
+        machine.succeed("systemctl start burrow-builds-admit.socket")
+        assert upload("public", ["${one}"]) == "200"
 
     # Last: it takes away what the subtests above write to.
     with subtest("with fetched/ gone, nginx starts and its other sites serve"):
