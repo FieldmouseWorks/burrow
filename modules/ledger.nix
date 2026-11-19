@@ -44,6 +44,24 @@ let
     && (s.environment.CONARY_DATA or null) != flowData) config.systemd.services);
   joined = lib.attrNames (lib.filterAttrs (n: u:
     n != controller && lib.elem controller (u.extraGroups or [ ])) config.users.users);
+  # Conary's files set by hand beside the ones burrow renders: a flow config
+  # other than a repo's rendered from the steward's settings (autoland's
+  # flowConfigs, autoland/shadow.nix) or a class policy other than
+  # burrow.ledger.policy's. cn reads either from its environment, so a copy
+  # in the machine's or a unit's would be a second copy of the settings,
+  # read by whichever cn found it first.
+  handWritten = let
+    rendered = {
+      CONARY_POLICY = p: p == cfg.env.CONARY_POLICY;
+      CONARY_FLOW_CONFIG = p: autoland ? flowConfigs && lib.hasPrefix "${autoland.flowConfigs}/" p;
+    };
+    units = kind: lib.mapAttrs' (n: s: lib.nameValuePair "systemd.${kind}.${n}.environment" s.environment);
+    scopes = {
+      "environment.variables" = config.environment.variables;
+      "environment.sessionVariables" = config.environment.sessionVariables;
+    } // units "services" config.systemd.services // units "user.services" config.systemd.user.services;
+    set = env: lib.filter (v: env ? ${v} && !rendered.${v} (toString env.${v})) (lib.attrNames rendered);
+  in lib.concatLists (lib.mapAttrsToList (where: env: map (v: "${where}.${v}") (set env)) scopes);
 
   # The passes' own state: when each repo's next pass is due, for
   # burrow-events ({"OWNER/REPO": epoch}).
@@ -556,6 +574,9 @@ in
       # on its state, flow.env) run as it, and no user is in its group.
       assertion = controller == null || (others == [ ] && joined == [ ]);
       message = "burrow.ledger.controllerUser: ${toString controller} is already someone else's: ${lib.concatStringsSep ", " (others ++ joined)} run as it or join its group, so a producer would trust them.";
+    } {
+      assertion = handWritten == [ ];
+      message = "burrow.ledger: ${lib.concatStringsSep ", " handWritten} set by hand. burrow renders Conary's files from its settings, each repo's flow config from the steward's (burrow.autoland, autoland/shadow.nix) and the class policy from burrow.ledger.policy: change those instead.";
     } {
       assertion = cfg.reviewers != [ ];
       message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";

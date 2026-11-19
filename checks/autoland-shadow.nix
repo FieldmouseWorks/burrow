@@ -10,8 +10,11 @@
 # found whatever their case, in seconds, trusting its authors and its bots
 # (the machinery's App only where there is one), with evidence only where
 # the repo has a train negative. The machine's cn loads each as it's built
-# (here the stand-in, which takes any).
-{ self, pkgs, nixpkgs, ... }:
+# (here the stand-in, which takes any), so each, and the machine's class
+# policy, is read here by Conary's own loaders (crates/burrow-flow-files),
+# which refuse a key Conary doesn't know or a value of the wrong type. A
+# flow config or policy set by hand beside the rendered ones is refused.
+{ self, pkgs, nixpkgs, system, ... }:
 let
   lib = nixpkgs.lib;
   base = machinery: (self.nixosConfigurations.example.extendModules {
@@ -87,9 +90,34 @@ let
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
+  # A flow config or policy beside burrow's, in the machine's environment or
+  # a unit's, fails the build; the rendered ones a unit carries don't.
+  refused = modules: map (a: a.message) (lib.filter (a: !a.assertion)
+    (self.nixosConfigurations.example.extendModules { inherit modules; }).config.assertions);
+  says = what: lib.any (m: lib.hasInfix what m && lib.hasInfix "set by hand" m);
+  handWritten = {
+    renderedPasses = !(lib.any (lib.hasInfix "set by hand") (map (a: a.message) (lib.filter (a: !a.assertion) machine.assertions)));
+    flowVariable = says "environment.variables.CONARY_FLOW_CONFIG"
+      (refused [{ environment.variables.CONARY_FLOW_CONFIG = "/etc/conary/flow.json"; }]);
+    flowUnit = says "systemd.services.autoland-shadow@.environment.CONARY_FLOW_CONFIG" (refused [{
+      burrow.autoland.shadow = [ "sam/plain" ];
+      systemd.services."autoland-shadow@".environment.CONARY_FLOW_CONFIG = "/etc/conary/flow.json";
+    }]);
+    # A unit handed a repo's rendered config, as the flow's own may be.
+    renderedFlowPasses = !(lib.any (lib.hasInfix "set by hand") (refused [({ config, ... }: {
+      burrow.autoland.shadow = [ "sam/plain" ];
+      systemd.services.conary-flow.environment.CONARY_FLOW_CONFIG = "${config.burrow.autoland.flowConfigs}/sam/plain.json";
+    })]));
+    policyUnit = says "systemd.services.conary-mine.environment.CONARY_POLICY"
+      (refused [{ systemd.services.conary-mine.environment.CONARY_POLICY = "/etc/conary/policy.json"; }]);
+  };
+  unrefused = lib.attrNames (lib.filterAttrs (_: ok: !ok) handWritten);
+  flowFiles = "${self.packages.${system}.burrow-flow-files}/bin/burrow-flow-files";
+  policy = machine.burrow.ledger.env.CONARY_POLICY;
 in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   fail() { echo "$*"; exit 1; }
   ${lib.concatMapStrings (w: "fail 'the shadow unit is wrong: ${w}'\n") wrong}
+  ${lib.concatMapStrings (w: "fail 'a Conary file set by hand beside the rendered ones is not refused: ${w}'\n") unrefused}
   [ "$(cd ${configs} && find . -type l -o -type f | sort | tr '\n' ' ')" = "./sam/homelab.json ./sam/plain.json " ] \
     || fail "configs aren't each shadowed repo's, lowercased: $(cd ${configs} && find . -type l -o -type f)"
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
@@ -115,5 +143,16 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
     || fail "with a machinery App, not the steward's authors and bots: $(jq -c .trusted_authors ${withApp.plain})"
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]"] and .settings.people == ["sam"]' ${noApp.plain} >/dev/null \
     || fail "without one, not the steward's authors and bots: $(jq -c .trusted_authors ${noApp.plain})"
+  # Conary's own types: the configs rendered, and the class policy.
+  ${flowFiles} flow ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
+  ${flowFiles} policy ${policy} || fail "Conary's Policy refuses the machine's class policy"
+  # And they refuse what the machine's cn would: a key Conary doesn't know,
+  # a value of the wrong type, a policy with a key it doesn't take.
+  jq '.settings.bogus = 1' ${withApp.homelab} > key.json
+  jq '.settings.rounds = "two"' ${withApp.homelab} > type.json
+  jq '. + {bogus: []}' ${policy} > policy.json
+  ! ${flowFiles} flow key.json || fail "a flow config with a key Conary doesn't know was taken"
+  ! ${flowFiles} flow type.json || fail "a flow config with a value of the wrong type was taken"
+  ! ${flowFiles} policy policy.json || fail "a policy with a key Conary doesn't know was taken"
   touch $out
 ''
