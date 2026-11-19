@@ -231,7 +231,9 @@ pub fn offered(settings: &burrow_settings::Config, role: &str) -> Result<Offer, 
 /// an answer on another engine than the plugin names, a model or effort it
 /// didn't offer (`offer`, as it was described), or another model or effort
 /// than the flow chose. So the role's route for the repo is that engine,
-/// names an offered model at an offered effort, and is what the flow chose.
+/// names an offered model at an offered effort, and, when the flow chose,
+/// is exactly what it chose: a model or effort the choice leaves out is one
+/// the tuning mustn't name either.
 pub fn runnable(
     settings: &burrow_settings::Config,
     role: &str,
@@ -253,14 +255,11 @@ pub fn runnable(
             "the {role} role in {repo} wouldn't run as the plugin offers, so its answer would be refused: {why}"
         ));
     }
+    // Exactly: [`ran_as`] holds what ran to the choice, so a choice that
+    // leaves out a model or effort the tuning names would only be refused
+    // once the job had run.
     if let Some(c) = choice
-        && (c.engine != *named
-            || c.model
-                .as_ref()
-                .is_some_and(|m| Some(m) != tuning.model.as_ref())
-            || c.effort
-                .as_ref()
-                .is_some_and(|e| Some(e) != tuning.effort.as_ref()))
+        && (c.engine != *named || c.model != tuning.model || c.effort != tuning.effort)
     {
         return Err(format!(
             "the flow chose {} {:?} {:?}, and the {role} role in {repo} runs {named} {:?} {:?}",

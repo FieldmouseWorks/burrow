@@ -534,11 +534,28 @@ fn a_fix_the_fixing_role_wouldnt_run_as_asked_starts_nothing() {
         f["execution"]["choice"] = json!({"engine": "claude", "model": model, "effort": effort});
         f
     };
+    let chose = |choice: Value| {
+        let mut f = fix(HEAD);
+        f["execution"]["choice"] = choice;
+        f
+    };
     let fine = json!({"models": {"fix claude": {"model": "a-model", "effort": "high"}}});
     for (routing, request, why) in [
         // The flow chose another model, or another effort.
         (fine.clone(), choice("b-model", "high"), "the flow chose"),
         (fine.clone(), choice("a-model", "low"), "the flow chose"),
+        // The flow chose the model alone, or the engine alone, and the role
+        // would run at an effort, or on a model: what ran would be refused.
+        (
+            fine.clone(),
+            chose(json!({"engine": "claude", "model": "a-model"})),
+            "the flow chose",
+        ),
+        (
+            fine.clone(),
+            chose(json!({"engine": "claude"})),
+            "the flow chose",
+        ),
         // The role names no model, so what ran couldn't be said.
         (json!({}), fix(HEAD), "names no model"),
     ] {
