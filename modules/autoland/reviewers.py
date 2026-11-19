@@ -41,4 +41,3 @@ def verdict(repo, pr):
         raise RuntimeError(out["why"])
     s = out["said"]
     return s["verdict"], s["at"], s["rounds"], s["changed"]
-
