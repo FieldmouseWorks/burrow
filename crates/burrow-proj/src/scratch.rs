@@ -15,7 +15,6 @@ use std::process::{self, Command, Stdio};
 
 use crate::config::Config;
 use crate::job::Job;
-use crate::{filled, read};
 
 /// Where job ID's scratch is.
 pub fn dir(cfg: &Config, id: &str) -> PathBuf {
@@ -40,13 +39,13 @@ pub fn over(job: &Job) -> bool {
     let Some(n) = job.turns().filter(|n| !n.is_empty()) else {
         return false;
     };
-    if job.turn(&n, "stopped").exists() {
+    if crate::record::stopped(job, &n) {
         return true;
     }
-    if filled(&job.path("await")) {
+    if crate::record::awaiting(job) {
         return false;
     }
-    read(&job.turn(&n, "end")).as_deref() == Some("done")
+    crate::record::end(job, &n).as_deref() == Some("done")
         || crate::job::Request::load(job).is_ok_and(|r| r.owned)
 }
 

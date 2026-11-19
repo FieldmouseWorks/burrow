@@ -12,12 +12,13 @@ burrow-github = { path = "../burrow-github" }
 burrow-producer = { path = "../burrow-producer" }
 burrow-settings = { path = "../burrow-settings" }
 # The plugin contract is Conary's, pinned with the kit's by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "eac5fc9df1c22fd9560e9fddc9e31ce52f119f27" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "292aa71ecde12e34c22761ab050abcfddb12bbf4" }
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 burrow-github = { path = "../burrow-github", features = ["fake"] }
+burrow-test = { path = "../burrow-test" }
 rustix = { version = "1.1.6", features = ["process"] }
 tempfile.workspace = true
 

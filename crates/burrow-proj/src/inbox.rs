@@ -26,8 +26,7 @@
 //! isn't left waiting. A person's issue is work they asked for, so its job
 //! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
-//! one. A Codex turn, whoever's issue it is, acts as an App all the same
-//! (`turn::github_app`).
+//! one (`turn::github_app`).
 //!
 //! Discovery uses REST; text is read with its edit history through GraphQL.
 
@@ -136,26 +135,7 @@ fn release_parked(cfg: &Config, pass: resumption::Permit) {
 
 /// Which issue is which job.
 fn status(cfg: &Config, inbox: &Inbox) {
-    for d in dirs(&inbox.state, "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let issue = read(&d.join("issue")).unwrap_or_default();
-        let st = Job::new(cfg, &id).state();
-        println!("{issue:<40} {st:<8} {id}");
-    }
-    for d in dirs(&inbox.state.join(".triage"), "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let name = d
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let issue = name
-            .rsplit_once('-')
-            .map(|(k, n)| format!("{}#{n} (sorting)", k.replacen('_', "/", 1)))
-            .unwrap_or(name);
+    for (issue, id) in record::observer(cfg, inbox).kept_jobs() {
         let st = Job::new(cfg, &id).state();
         println!("{issue:<40} {st:<8} {id}");
     }
@@ -495,7 +475,7 @@ impl Pass<'_> {
             .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
-    /// A Codex label takes precedence when an issue has both labels.
+    /// The engine its label selects; the first, by name, when it has more.
     fn engine(&self, issue: &Value) -> Option<crate::engine::Engine> {
         let labels = issue["labels"].as_array()?;
         self.inbox
@@ -507,7 +487,7 @@ impl Pass<'_> {
                     .any(|l| l["name"].as_str() == Some(name.as_str()))
             })
             .map(|(_, engine)| *engine)
-            .max_by_key(|e| *e == crate::engine::Engine::Codex)
+            .next()
     }
 
     /// Whether an issue's job waits in no line (proj run --unstick): it has
@@ -845,7 +825,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         // too, whatever pass it ran in), until a pass reaches it again in
         // full: a scoped success, or a pass that left the listing to a later
         // one, hasn't verified the failed work.
-        let gone = self.inbox.state.join(".unreached");
+        let gone = record::files::unreached(&self.inbox.state);
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
         for repo in &self.unreached {
             let f = gone.join(key(repo));
@@ -971,8 +951,9 @@ mod retirement;
 pub(crate) mod settle;
 mod written;
 
-pub(crate) use drain::{DRAIN_KICK, WAITING};
+pub(crate) use drain::DRAIN_KICK;
 mod planner_waits;
+pub(crate) mod record;
 mod sorting_questions;
 mod triage;
 mod write;
@@ -991,6 +972,8 @@ mod parking_tests;
 mod pass_release_tests;
 #[cfg(test)]
 mod question_tests;
+#[cfg(test)]
+mod record_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]

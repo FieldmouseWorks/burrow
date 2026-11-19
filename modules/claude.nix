@@ -9,7 +9,7 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
-  # The PreToolUse hook, Claude Code's here; Codex's is proj's.
+  # The PreToolUse hook, Claude Code's.
   guard = import ./claude/guard.nix { inherit inputs pkgs lib config; };
 
   # One rule per command, with and without sudo.

@@ -124,10 +124,13 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.j
             owner: Some("sam".into()),
             skip: vec!["probe".into()],
             at_once: 2,
-            drain: Some(Engine::Codex),
+            drain: Some(Engine::Claude),
             drain_jobs: 1,
         });
         fs::create_dir_all(&inbox.state).unwrap();
+        // The machine's jobs dir is there before any job: the line's census
+        // reads it.
+        fs::create_dir_all(&cfg.jobs).unwrap();
         Box { tmp, cfg }
     }
 
@@ -256,7 +259,7 @@ const CLOSE: &str = "-X PATCH repos/sam/box/issues/7 -f state=closed -f state_re
 fn a_finished_job_closes_its_issue() {
     let b = Box::new();
     b.job("j1", "done", "Fixed in #12.");
-    fs::write(b.cfg.jobs.join("j1/1.engine"), "codex").unwrap();
+    fs::write(b.cfg.jobs.join("j1/1.engine"), "claude").unwrap();
     let d = b.record("j1");
     let mut now = issue(7, "sam", &["claude"]);
     now["state"] = json!("open");
@@ -264,7 +267,7 @@ fn a_finished_job_closes_its_issue() {
     b.pass()
         .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
         .unwrap();
-    assert!(b.posted().contains("**Codex job**"), "{}", b.posted());
+    assert!(b.posted().contains("**Claude job**"), "{}", b.posted());
     assert!(b.posted().contains("Fixed in #12."), "{}", b.posted());
     assert!(b.log().contains(CLOSE), "{}", b.log());
     assert!(!d.exists());
@@ -358,7 +361,7 @@ fn what_counts_as_sorted() {
         (issue(1, "sam", &["later"]), true),
         (issue(1, "sam", &["tracker"]), true),
         (issue(1, "sam", &["needs-owner"]), true),
-        (issue(1, "sam", &["codex"]), true),
+        (issue(1, "sam", &["claude"]), true),
         (issue(1, "sam", &["stuck"]), true),
         (issue(1, "sam", &["probe"]), true),
         (issue(1, "player", &[]), true),
@@ -410,7 +413,7 @@ fn a_question_notice_is_never_handed_to_a_job() {
     fix["created_at"] = json!("2026-11-02T00:00:00Z");
     p.note_ready("sam/box", &[notice(1, &["updates", "ready"]), fix])
         .unwrap();
-    let next: Vec<String> = p.next_ready(&t).into_iter().map(|c| c.n).collect();
+    let next: Vec<String> = p.next_ready().into_iter().map(|c| c.n).collect();
     assert_eq!(next, ["2"]);
 }
 
@@ -423,7 +426,7 @@ fn input(b: &Box, n: u64) -> String {
 fn sorted_as(said: &str, still: Value) -> Box {
     let b = Box::new();
     b.job("s1", "done", said);
-    fs::write(b.cfg.jobs.join("s1/1.engine"), "codex").unwrap();
+    fs::write(b.cfg.jobs.join("s1/1.engine"), "claude").unwrap();
     let d = b
         .cfg
         .inbox
@@ -463,7 +466,7 @@ fn verdicts_are_carried_out() {
 
     let b = sorted_as("done\nmain has it since #9", issue(7, "sam", &[]));
     assert!(b.posted().contains("main has it since #9"));
-    assert!(b.posted().contains("**Codex job**"));
+    assert!(b.posted().contains("**Claude job**"));
     assert!(b.log().contains(CLOSE));
 
     let b = sorted_as("Hmm, hard to say.", issue(7, "sam", &[]));
@@ -538,12 +541,12 @@ fn verdicts_are_carried_out() {
 fn triage_settings_read() {
     let mut cfg = example();
     cfg["inbox"]["triage"] = json!({"ownerLabel": "needs-owner", "owner": null,
-        "skip": ["probe", "undo", "flaky"], "atOnce": 2, "drain": "codex", "drainJobs": 2});
+        "skip": ["probe", "undo", "flaky"], "atOnce": 2, "drain": "claude", "drainJobs": 2});
     let cfg: Config = serde_json::from_value(cfg).unwrap();
     let t = cfg.inbox.unwrap().triage.unwrap();
     assert_eq!(
         (t.drain, t.at_once, t.owner),
-        (Some(Engine::Codex), 2, None)
+        (Some(Engine::Claude), 2, None)
     );
     let mut off = example();
     off["inbox"]["triage"] = Value::Null;
@@ -945,11 +948,11 @@ fn the_machinery_apps_issues_are_sorted_and_ranked() {
     let mut ready = issue(2, "workers[bot]", &["ready"]);
     ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
     ready["created_at"] = json!("2026-11-01T00:00:00Z");
-    let ranked = p.pick_ready(&t, &[ready]);
+    let ranked = p.pick_ready(&[ready]);
     assert_eq!(ranked, Some(("sam/box".into(), "2".into())));
     let mut stranger = issue(3, "workers", &["ready"]);
     stranger["repository_url"] = json!("https://api.github.com/repos/sam/box");
-    assert_eq!(p.pick_ready(&t, &[stranger]), None);
+    assert_eq!(p.pick_ready(&[stranger]), None);
 }
 
 #[path = "sorting_slot_tests.rs"]

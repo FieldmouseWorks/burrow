@@ -30,39 +30,7 @@ let
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
-  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj;
-  hooks = pkgs.runCommand "proj-codex-git-hooks" { } ''
-    mkdir -p $out
-    ln -s ${package}/bin/burrow-proj-git-hook $out/commit-msg
-    ln -s ${package}/bin/burrow-proj-git-hook $out/pre-push
-  '';
-  codexHome = "${config.users.users.${user}.home}/.codex";
-  guard = import ./claude/guard.nix { inherit inputs pkgs lib config; };
-  policy = import ./claude/codex-rules.nix {
-    inherit lib;
-    patterns = (import ./claude/r2.nix) ++ config.burrow.claude.extraAsk;
-  };
-  rulesFile = pkgs.writeText "proj-codex.rules" policy.text;
-  instructions = pkgs.writeText "proj-AGENTS.md" (config.burrow.claude.machineMd + ''
-
-    Codex jobs run headless with network access, in a sandbox that writes only
-    the project, $PROJ_SCRATCH, the job's own dir, git's metadata and a /tmp of
-    the job's own, and reads nothing else but the machine's system paths, rustup's
-    toolchains and git's config: not home, the runtime dir (no systemctl --user or
-    systemd-run --user), other projects, or any server of the user's (tmux's, the
-    compile cache's), and not Codex's login or the user's own GitHub login: git and
-    gh reach GitHub as a GitHub App, through its token socket. The
-    sandbox's no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
-    them to the owner. The machine's guard checks every command and patch first:
-    what deletes or rewrites files gets an undo snapshot, or is refused without
-    one. Commits carry Engine: codex, and a Claude judge decides whether their PR
-    lands after the usual Codex review and checks; so the guard refuses what
-    would turn off your git hooks or write commits they don't see (revert,
-    cherry-pick, rebase, am, commit-tree and other plumbing, git aliases,
-    GitHub's API, gh pr merge): commit and merge instead, and leave merging
-    PRs to the steward. There are no TTY sessions: run each command whole.
-  '');
 
   # The flake's value of each option in burrow-settings' schema, for `proj
   # settings show`.
@@ -104,8 +72,6 @@ let
     machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inherit (config.burrow) mcpServers;
-    codexSlots = cfg.codex.slots;
-    codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
@@ -136,8 +102,6 @@ let
       } else null;
     } else null;
     tools = {
-      codex = "${cfg.codex.package}/bin/codex";
-      bwrap = "${pkgs.bubblewrap}/bin/bwrap";
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
       flock = "${pkgs.util-linux}/bin/flock";
@@ -176,7 +140,7 @@ let
   retryServices = {
     # Keep the original census locked across consumer restarts and deployments.
     # The sleeping process owns no job slots; running turns and the separate
-    # emergency/Codex pools continue. Only the current scheduler uses the new
+    # emergency pool continue. Only the current scheduler uses the new
     # census lock. Type=notify makes the lock, not process startup, readiness.
     proj-retry-barrier = {
       description = "Fence retained proj schedulers during deployment";
@@ -215,7 +179,6 @@ in
     (import ./common.nix inputs)
     { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
     (lib.mkRemovedOptionModule [ "burrow" "proj" "paused" ] "Use burrow.settings.allowed and settings pause OWNER/REPO; runtime pauses need no deploy.")
-    { key = "burrow/codex-login"; imports = [ (import ./codex-login.nix inputs) ]; }
     { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
@@ -229,16 +192,6 @@ in
 
   options.burrow.proj = {
     enable = lib.mkEnableOption "proj, background agent jobs in each project";
-    codex.package = lib.mkOption {
-      type = lib.types.package;
-      default = agents;
-      internal = true;
-    };
-    codex.slots = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 2;
-      description = "How many Codex jobs may run at once, in a pool of their own. Keep it small: the plan's PR reviewer comes first.";
-    };
     usage.paid = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -248,7 +201,7 @@ in
     meters = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "The engines' meters from usage-reset (claude.json, codex.json). Role overflow uses readings under an hour old; null disables it.";
+      description = "Claude's meter from usage-reset (claude.json), which proj reads for its usage hold; null disables it.";
     };
     jobsDir = lib.mkOption {
       type = lib.types.str;
@@ -271,8 +224,8 @@ in
       description = ''
         Maximum concurrent ordinary Claude turns while the queue from a usage
         hold drains after its reset. Running turns count towards this limit;
-        the usual priority and project limits still apply. Codex and the
-        emergency --unstick slot are independent. Once no pre-reset turn is
+        the usual priority and project limits still apply. The emergency
+        --unstick slot is independent. Once no pre-reset turn is
         queued, maxJobs applies again.
       '';
     };
@@ -425,7 +378,6 @@ in
         default = true;
         description = ''
           Plan inbox tasks on fresh planner-role sessions before implementation.
-          This role defaults to Codex; Claude requires an explicit small model.
           Large tasks become ordered child issues, with a durable parent
           checklist. Durable creation receipts admit generated children without
           adding their creator to inbox.authors.
@@ -437,9 +389,9 @@ in
         answers go back as comments and their replies there continue it
       '';
       labels = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.enum [ "claude" "codex" ]);
-        default = { claude = "claude"; codex = "codex"; };
-        description = "Issue labels and the engine each starts. Codex takes code with a checkable bar; Claude takes judgment and what the owner reads. Each label is created in each repo; Codex wins if an issue has both.";
+        type = lib.types.attrsOf (lib.types.enum [ "claude" ]);
+        default = { claude = "claude"; };
+        description = "Issue labels and the engine each starts. Each label is created in each repo.";
       };
       roles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
@@ -461,7 +413,6 @@ in
           `proj run --unstick`, in a slot of its own past maxJobs, so it never
           waits in the line it may be about. Put on an issue whose job is
           still waiting for its first turn, it starts that job over that way.
-          Codex jobs still stay within their own codex.slots cap.
         '';
       };
       authors = lib.mkOption {
@@ -477,7 +428,7 @@ in
       vm = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Run issue jobs in Claude agent sandboxes (proj run --vm). A Codex selection fails its turn.";
+        description = "Run issue jobs in Claude agent sandboxes (proj run --vm).";
       };
       outsideLabel = lib.mkOption {
         type = lib.types.str;
@@ -524,13 +475,13 @@ in
           description = "Sorting jobs at once, across every repo. Each waits in line behind work someone asked for.";
         };
         drain = lib.mkOption {
-          type = lib.types.nullOr (lib.types.enum [ "claude" "codex" ]);
+          type = lib.types.nullOr (lib.types.enum [ "claude" ]);
           default = null;
-          example = "codex";
+          example = "claude";
           description = ''
             Hand `ready` issues to this engine's inbox label whenever it has an
-            idle slot (Codex: one of codex.slots free; Claude: usage left, nobody
-            in line and a slot free beyond pipelineSlots), one a pass, the
+            idle slot (usage left, nobody in line and a slot free beyond
+            pipelineSlots), one a pass, the
             pipeline's repos first, then the oldest. Null hands none on.
           '';
         };
@@ -549,10 +500,10 @@ in
       message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
     } {
       assertion = !cfg.inbox.planning || !cfg.inbox.vm;
-      message = "burrow.proj.inbox.planning requires host Codex jobs; it cannot run inside an agent VM.";
+      message = "burrow.proj.inbox.planning runs its planner jobs on the host; it cannot run inside an agent VM.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
-    environment.systemPackages = [ proj config.burrow.claude.package agents ];
+    environment.systemPackages = [ proj config.burrow.claude.package ];
     environment.etc.${settingsFile}.text = builtins.toJSON (import ./settings/tracked.nix { inherit lib options; });
     burrow.updates.health.proj-config = ''
       if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
@@ -621,9 +572,6 @@ in
         ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
       };
     }) // retryServices;
-    # The guard is Codex's managed hook for the jobs, wherever proj runs.
-    burrow.tools.codex-guard = guard.codex;
-    environment.etc."codex/requirements.toml".source = guard.codexRequirements;
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
     users.users.${user}.linger = lib.mkDefault true;
@@ -658,12 +606,7 @@ in
         ExecStart = "${proj}/bin/proj _ended";
       };
     };
-    # Per-user instructions and policy follow the same options as Claude's.
     systemd.tmpfiles.rules = [
-      "d ${codexHome} 0700 ${user} ${config.users.users.${user}.group} -"
-      "d ${codexHome}/rules 0700 ${user} ${config.users.users.${user}.group} -"
-      "L+ ${codexHome}/AGENTS.md - - - - ${instructions}"
-      "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-questions 0700 ${user} ${config.users.users.${user}.group} -"
       # The change stream's subscriber sockets: the user's own readers bind here.
@@ -718,21 +661,11 @@ in
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
       Which engine, model and effort runs each role are settings: `proj settings
-      show` has them and their declared defaults, `proj settings role ROLE ENGINE
-      [over PCT ENGINE]`, `model ROLE ENGINE MODEL|- [EFFORT]` and `offer ENGINE
-      models|efforts ...` change them, and `proj engines save|use NAME|use back`
-      keeps named sets of them. A model or effort must be one its engine offers.
-      `ROLE@OWNER/REPO` beats the bare role in that repo, a named role beats `*`.
-      A role moves to its `over PCT ENGINE` when its own engine's fresh meter has
-      any window at PCT and no credits, or Claude is out of usage, and the other
-      engine's has room. The planner defaults to Codex and needs an explicit
-      small model to use Claude.
-      Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
-      `autoland-codex-login job`, separately from the reviewer's login. Codex
-      jobs cannot run in agent VMs. ${if machineApp == null
-        then "A Codex job reaches GitHub only as the App it's given (`--app`): its sandbox keeps your own logins out, so without one its turn fails at once."
-        else "A Codex job acts on GitHub as its `--app`, else as the App ${machineApp.slug}, never as you: its sandbox keeps your own logins out."}
-      The steward's judge always uses Claude.
+      show` has them and their declared defaults, `proj settings role ROLE ENGINE`,
+      `model ROLE ENGINE MODEL|- [EFFORT]` and `offer ENGINE models|efforts ...`
+      change them, and `proj engines save|use NAME|use back` keeps named sets of
+      them. A model or effort must be one its engine offers. `ROLE@OWNER/REPO`
+      beats the bare role in that repo, a named role beats `*`.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
@@ -844,7 +777,7 @@ in
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
-      them; a bot's acts as the App ${machineApp.slug}, as a Codex job does."}
+      them; a bot's acts as the App ${machineApp.slug}."}
       A job that ends `proj done` closes its issue; reopen it to pick the work back up.${lib.optionalString cfg.inbox.triage.enable "\nEvery other issue the authors open is sorted on its own (`ready`, `later`, `tracker`, `${cfg.inbox.triage.ownerLabel}`, or closed as a duplicate or done), so file what you find as an issue and leave it: you needn't label it.${lib.optionalString (cfg.inbox.triage.drain != null) " `ready` ones go to ${cfg.inbox.triage.drain} on idle slots."}"}
     '';
   })

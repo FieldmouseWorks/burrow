@@ -6,6 +6,7 @@
 //! such as the probe and `proj status`: a job may write those, and nothing
 //! proj runs it as follows them.
 use super::Job;
+use crate::record::JobFile;
 use crate::{engine::Engine, read};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -97,7 +98,7 @@ impl Request {
     fn unrecorded(job: &Job) -> Result<Self, String> {
         match crate::retry::Identity::legacy_files(job)? {
             Some(files) => Self::from(|key| files.get(key).cloned().flatten()),
-            None => Self::from(|key| read(&job.path(key))),
+            None => Self::from(|key| published(key).and_then(|f| read(&job.file(f)))),
         }
     }
 
@@ -202,19 +203,22 @@ impl Request {
 
     /// The published copy, put back as the record has it.
     pub fn publish(&self, job: &Job) -> io::Result<()> {
-        let files: BTreeMap<&str, Option<String>> = BTreeMap::from([
+        let files = [
             (
-                "project",
+                JobFile::Agent,
+                self.agent.as_ref().map(|a| format!("{a}\n")),
+            ),
+            (JobFile::App, self.app.as_ref().map(|a| format!("{a}\n"))),
+            (JobFile::Engine, self.engine.map(|e| e.name().to_owned())),
+            (JobFile::Owned, self.owned.then(String::new)),
+            (
+                JobFile::Project,
                 (!self.project.is_empty()).then(|| format!("{}\n", self.project)),
             ),
-            ("engine", self.engine.map(|e| e.name().to_owned())),
-            ("role", self.role.as_ref().map(|r| format!("{r}\n"))),
-            ("app", self.app.as_ref().map(|a| format!("{a}\n"))),
-            ("agent", self.agent.as_ref().map(|a| format!("{a}\n"))),
-            ("owned", self.owned.then(String::new)),
-        ]);
-        for (key, value) in files {
-            let path = job.path(key);
+            (JobFile::Role, self.role.as_ref().map(|r| format!("{r}\n"))),
+        ];
+        for (f, value) in files {
+            let path = job.file(f);
             if read(&path).as_deref() == value.as_deref().map(|v| v.trim_end_matches('\n')) {
                 continue;
             }
@@ -228,6 +232,20 @@ impl Request {
         }
         Ok(())
     }
+}
+
+/// The published copy's file for a request's KEY, as [`Request::from`]
+/// names them.
+fn published(key: &str) -> Option<JobFile> {
+    Some(match key {
+        "project" => JobFile::Project,
+        "engine" => JobFile::Engine,
+        "role" => JobFile::Role,
+        "app" => JobFile::App,
+        "agent" => JobFile::Agent,
+        "owned" => JobFile::Owned,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

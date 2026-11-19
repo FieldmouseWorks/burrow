@@ -1,15 +1,15 @@
 //! The inbox's part of the live snapshot ([`crate::snapshot`]): the ready
 //! issues in the drain's order, and the drain's and sorting's slots, each
-//! from the same records and ranking the passes act on. Only reads: no
-//! GitHub (an observing pass, [`Pass::observe`]), no question recovered.
+//! from the same records and ranking the passes act on ([`super::record`]).
+//! Only reads: no GitHub (an observing pass, [`Pass::observe`]), no
+//! question recovered.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use jiff::Timestamp;
 
+use super::Pass;
 use super::drain::Candidate;
-use super::{Pass, dirs};
 use crate::config::{Config, Triage};
 use crate::snapshot::{Holder, Ready, Slot, SlotKind, SlotState, held, job_slot};
 use crate::{mtime, read};
@@ -28,19 +28,7 @@ pub(crate) fn view(cfg: &Config, at: i64) -> View {
     let Some(t) = inbox.triage.as_ref() else {
         return View::default();
     };
-    let mut pass = Pass {
-        cfg,
-        inbox,
-        project: super::projects(cfg),
-        wake: BTreeMap::new(),
-        unreached: Vec::new(),
-        looked: Vec::new(),
-        observe: true,
-        scope: None,
-        drain_at: None,
-        skipped: Vec::new(),
-    };
-    pass.view(t, at)
+    super::record::observer(cfg, inbox).view(t, at)
 }
 
 impl Pass<'_> {
@@ -48,7 +36,7 @@ impl Pass<'_> {
         let mut view = View::default();
         if t.drain.is_some() {
             view.queue = self
-                .next_ready(t)
+                .next_ready()
                 .into_iter()
                 .map(|c| ready(c, at))
                 .collect();
@@ -56,11 +44,7 @@ impl Pass<'_> {
             view.slots
                 .extend(self.slots(SlotKind::Drain, t.drain_jobs, &records, "drained", at));
         }
-        let mut sorting: Vec<_> = dirs(&self.sorting_dir(), "")
-            .into_iter()
-            .filter(|d| self.holds_sorting_slot(d, false))
-            .collect();
-        sorting.sort_by_key(|d| (mtime(&d.join("job")).unwrap_or(0), d.clone()));
+        let sorting = self.sorting_holders();
         view.slots
             .extend(self.slots(SlotKind::Sorting, t.at_once, &sorting, "job", at));
         view

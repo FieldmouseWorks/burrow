@@ -13,7 +13,6 @@ use conary_github::flow::{self, Recipe};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::OsString;
-use std::path::Path;
 
 /// The check a producer's review, judgment or proof is published as.
 const JUDGMENT: &str = "conary/judgment";
@@ -67,6 +66,7 @@ impl sealed::Signs for Judgment {
             self.generation,
             self.verdict,
             self.provenance.as_ref(),
+            self.basis.as_ref(),
         );
         let log = flow::receipt_digest(&receipt);
         signer.sign(&self.target(), &self.tree, None, true, log)
@@ -111,16 +111,25 @@ pub struct Review {
 }
 
 /// A judgment the judge producer issued: signed as `conary/judgment` over
-/// `judgment_receipt_by(revision, generation, verdict, provenance)`.
+/// `judgment_receipt_by(revision, generation, verdict, provenance, basis)`.
+/// It holds all its sealed comment says, so a crash between the two is
+/// finished from it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judgment {
     pub repo: String,
+    /// The PR its sealed comment is on, and seals.
+    pub pr: u64,
     pub revision: flow::Revision,
     /// The head's tree.
     pub tree: String,
     pub generation: u64,
     pub verdict: Option<Verdict>,
     pub provenance: Option<Provenance>,
+    /// Why the flow asked, and the findings and answers it was judged on.
+    pub basis: Option<flow::Basis>,
+    /// The judge's own reasons, which its sealed comment says above the
+    /// seal.
+    pub reasons: String,
 }
 
 /// A proof's run, as the proof producer recorded its program's exit:
@@ -178,10 +187,6 @@ impl std::fmt::Debug for Signer {
             .finish_non_exhaustive()
     }
 }
-
-/// A file's POSIX access ACL, as the kernel keeps it in its extended
-/// attributes.
-const ACCESS_ACL: &str = "system.posix_acl_access";
 
 /// Whether anyone but root and `me` may read a file with `mode`, owned by
 /// `owner`, with the access ACL `acl` (its xattr, if it has one). systemd
@@ -255,48 +260,10 @@ impl Signer {
         producer: &str,
         credential: &str,
     ) -> Result<Self, String> {
-        use std::os::unix::fs::MetadataExt;
         if producer.trim().is_empty() || producer.trim() != producer {
             return Err(format!("{producer:?} isn't a producer's name"));
         }
-        let plain = !credential.is_empty()
-            && credential != "."
-            && credential != ".."
-            && !credential.contains('/');
-        if !plain {
-            return Err(format!(
-                "{credential:?} isn't a credential's name: a key comes only as a systemd credential"
-            ));
-        }
-        let dir = env("CREDENTIALS_DIRECTORY").ok_or(
-            "no $CREDENTIALS_DIRECTORY: a producer's key comes only as a systemd credential",
-        )?;
-        let dir = Path::new(&dir);
-        if !dir.is_absolute() {
-            return Err("$CREDENTIALS_DIRECTORY isn't an absolute path".into());
-        }
-        let path = dir.join(credential);
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{credential}: {e}"))?;
-        if !meta.is_file() {
-            return Err(format!("{credential} isn't a file"));
-        }
-        let mut buf = vec![0u8; 4096];
-        let acl = match rustix::fs::getxattr(&path, ACCESS_ACL, &mut buf[..]) {
-            Ok(n) => buf.get(..n),
-            Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => None,
-            Err(e) => return Err(format!("{credential}'s ACL: {e}")),
-        };
-        if others_may_read(
-            meta.mode(),
-            meta.uid(),
-            acl,
-            rustix::process::geteuid().as_raw(),
-        )? {
-            return Err(format!(
-                "{credential} can be read by others than its owner, so it isn't this producer's alone"
-            ));
-        }
-        let bytes = std::fs::read(&path).map_err(|e| format!("{credential}: {e}"))?;
+        let bytes = crate::credential::read_from(env, credential)?;
         let secret: [u8; 32] = bytes
             .try_into()
             .map_err(|_| format!("{credential} isn't a 32-byte Ed25519 secret"))?;

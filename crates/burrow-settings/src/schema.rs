@@ -134,30 +134,13 @@ const ROLES_OVERLAY: &str = "settings/overlay.roles.json";
 const REPOS: Kind = Kind::List(&Kind::Repo);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
-const ENGINE: Kind = Kind::OneOf(&["claude", "codex"]);
+const ENGINE: Kind = Kind::OneOf(&["claude"]);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
-const EFFORT: Kind = Kind::OneOf(&["low", "medium", "high", "xhigh"]);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
-const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
-    Field {
-        name: "pct",
-        kind: &Kind::Percent,
-    },
-    Field {
-        name: "engine",
-        kind: &ENGINE,
-    },
-]));
-const ROUTE: Kind = Kind::Record(&[
-    Field {
-        name: "engine",
-        kind: &ENGINE,
-    },
-    Field {
-        name: "over",
-        kind: &OVERFLOW,
-    },
-]);
+const ROUTE: Kind = Kind::Record(&[Field {
+    name: "engine",
+    kind: &ENGINE,
+}]);
 const ROLES: Kind = Kind::Map(&ROUTE);
 const TUNING: Kind = Kind::Record(&[
     Field {
@@ -311,13 +294,6 @@ pub static SETTINGS: &[Setting] = &[
         "The most slots one project's jobs hold at once.",
     ),
     flake(
-        "proj.codex.slots",
-        &SLOTS,
-        Is("2"),
-        "proj",
-        "How many Codex turns run at once, in a pool of their own.",
-    ),
-    flake(
         "proj.usageTrickle",
         &SLOTS,
         Is("2"),
@@ -466,44 +442,6 @@ pub static SETTINGS: &[Setting] = &[
         "autoland",
         "Per-repo overrides (OWNER/NAME) of the steward's rounds, waits and checks.",
     ),
-    // The reviewers.
-    flake(
-        "autoland.reviewers.codex.enable",
-        &Kind::Bool,
-        Is("false"),
-        "autoland-review",
-        "Whether Codex reviews every head.",
-    ),
-    flake(
-        "autoland.reviewers.codex.effort",
-        &EFFORT,
-        Is(r#""high""#),
-        "autoland-review",
-        "How hard Codex thinks on a review.",
-    ),
-    flake(
-        "autoland.reviewers.codex.parallel",
-        &Kind::Count { min: 1 },
-        Is("2"),
-        "autoland-review",
-        "The most Codex reviews at once.",
-    ),
-    flake(
-        "autoland.reviewers.timeoutMinutes",
-        &MINUTES,
-        Is("30"),
-        "autoland-review",
-        "How long one review may run before it's a failed try.",
-    ),
-    flake(
-        "autoland.reviewers.skipPaths",
-        &Kind::List(&Kind::Text),
-        Is(
-            r#"["(^|/)secrets?/", "(^|/)\\.sops\\.yaml$", "\\.sops\\.(ya?ml|json|env)$", "(^|/)\\.env(\\..*)?$", "\\.(pem|key|p12|pfx)$"]"#,
-        ),
-        "autoland-review",
-        "Path regexes left out of what the reviewers read.",
-    ),
     flake(
         "github.machinery",
         &MAYBE_TEXT,
@@ -525,21 +463,21 @@ pub static SETTINGS: &[Setting] = &[
     live(
         "proj.roles",
         &ROLES,
-        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        r#"{"*": {"engine": "claude"}}"#,
         ROLES_OVERLAY,
-        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
         &MODELS,
-        r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
+        r#"{"* claude": {"model": null, "effort": null}}"#,
         ROLES_OVERLAY,
         "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
     ),
     live(
         "proj.engineOffers",
         &OFFERS,
-        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "codex": {"models": [], "efforts": ["minimal", "low", "medium", "high", "xhigh"]}}"#,
+        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}}"#,
         ROLES_OVERLAY,
         "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
@@ -723,20 +661,16 @@ mod tests {
         assert!(HOLD.check(&json!({"until": -1})).is_err());
         assert!(REPOS.check(&json!(["sam/box"])).is_ok());
         assert!(REPOS.check(&json!(["sam"])).is_err());
-        assert!(DRAIN.check(&json!("codex")).is_ok());
+        assert!(DRAIN.check(&json!("claude")).is_ok());
         assert!(DRAIN.check(&json!("gemini")).is_err());
         assert!(SLOTS.check(&json!(0)).is_err());
         let err = MODELS
-            .check(&json!({"fix codex": {"model": "m", "effort": 3}}))
+            .check(&json!({"fix claude": {"model": "m", "effort": 3}}))
             .unwrap_err();
-        assert!(err.starts_with("fix codex: effort: "), "{err}");
-        assert!(
-            ROLES
-                .check(&json!({"fix": {"engine": "codex", "over": null}}))
-                .is_ok()
-        );
+        assert!(err.starts_with("fix claude: effort: "), "{err}");
+        assert!(ROLES.check(&json!({"fix": {"engine": "claude"}})).is_ok());
         let err = ROLES
-            .check(&json!({"fix": {"engine": "gemini", "over": null}}))
+            .check(&json!({"fix": {"engine": "gemini"}}))
             .unwrap_err();
         assert!(err.starts_with("fix: engine: "), "{err}");
     }

@@ -1,5 +1,9 @@
 //! A job sees no host configuration or history in its own view. Its normal
 //! CLI must still inspect and resume a different timed-out job on the host.
+// It builds a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn).
+#![allow(deprecated)]
+
 use burrow_proj::{config::Config, job::Job, probe::Bridge};
 use serde_json::json;
 use std::{
@@ -21,8 +25,8 @@ fn config(root: &Path) -> Config {
         "pipelineRepos":[], "leadRepos":[], "flake":p("projects/machine"),
         "deployed":env!("CARGO_BIN_EXE_burrow-proj"), "apps":{}, "notify":null,
         "meters":null,
-        "codexSlots":2, "codexHooks":p("hooks"), "inbox":null,
-        "tools":{"codex":"false", "bwrap":"false", "bash":"sh", "flock":"flock",
+        "inbox":null,
+        "tools":{"bash":"sh", "flock":"flock",
                  "gh":"false", "git":"git", "systemctl":p("systemctl"),
                  "systemdRun":p("systemd-run"), "timeout":"timeout"}
     });

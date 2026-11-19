@@ -368,6 +368,30 @@ fn a_committed_record_is_published_even_once_its_work_is_abandoned() {
 }
 
 #[test]
+fn a_result_published_on_its_own_must_be_committed_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = Records::open(&dir.path().join("records")).unwrap();
+    let signer = Signer::for_tests("kit", SECRET);
+    let mut api = github();
+    let mut record: Record<sign::Review> = records.begin(review().target()).unwrap();
+    records.keep(&mut record, review()).unwrap();
+    // Uncommitted, it could still be withdrawn: nothing goes out.
+    assert!(publish::publish(&mut api, &records, &signer, &mut record).is_err());
+    assert!(api.asked("POST").is_empty());
+    assert_eq!(record.end(), None);
+    records.commit(&mut record).unwrap();
+    let signed = publish::publish(&mut api, &records, &signer, &mut record).unwrap();
+    assert_eq!(signed.check(), "conary/review/codex");
+    assert_eq!(record.end(), Some(End::Published));
+    assert_eq!(conclusions(&api), ["success"]);
+    let text = api.asked("PATCH")[0].2.as_ref().unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(verify(&text, "success", "conary/review/codex", TREE, None).is_ok());
+}
+
+#[test]
 fn a_published_result_survives_a_crash_before_its_end_was_kept() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("records");
@@ -490,6 +514,7 @@ fn review() -> sign::Review {
 fn judgment() -> sign::Judgment {
     sign::Judgment {
         repo: REPO.into(),
+        pr: 5,
         revision: flow::Revision {
             head: HEAD.into(),
             base: "3333333333333333333333333333333333333333".into(),
@@ -499,6 +524,8 @@ fn judgment() -> sign::Judgment {
         generation: 4,
         verdict: Some(conary_core::plugin::Judgment::Pass),
         provenance: None,
+        basis: None,
+        reasons: "Sound.".into(),
     }
 }
 
@@ -577,6 +604,7 @@ fn signed_results_verify_through_conarys_verifier_and_nothing_else_does() {
         &judged.revision,
         4,
         judged.verdict,
+        None,
         None,
     ));
     assert_eq!(

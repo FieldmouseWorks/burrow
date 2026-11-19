@@ -27,7 +27,7 @@ fn ask(job: &Job, one_way: bool) {
 }
 fn quota(job: &Job) {
     fs::write(
-        job.path(PENDING),
+        job.file(crate::record::JobFile::GithubPending),
         serde_json::to_vec(&Pending {
             targets: vec!["sam/r#7".into()],
             retry_at: 1,

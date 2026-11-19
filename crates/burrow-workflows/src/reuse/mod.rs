@@ -118,6 +118,9 @@ fn push(git_ref: &str, legs: u64, reuse: bool, hit: V) -> Ctx {
         ("needs.lane.result", "skipped".into()),
         ("needs.lane.outputs.gate", V::Null),
         ("needs.reuse.outputs.hit", hit),
+        // No build store named: the steps are what they were without one
+        // (builds.rs).
+        ("vars.BURROW_BUILDS_URL", "".into()),
     ])
 }
 

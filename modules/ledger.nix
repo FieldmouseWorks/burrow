@@ -23,26 +23,6 @@ let
   inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
-  # What the steward's reviewers aren't shown (their skipPaths, the
-  # machine's and each repo's) is the policy's `hidden`, which Conary
-  # matches as their snapshot hides a path and never takes for
-  # documentation: a change to it gets a review round, whose snapshot names
-  # it for the judge. A Conary without `hidden` refuses the file, so the
-  # docs shortcut never runs on a matcher that would miss one. A repo's are
-  # added to its policy entry by name, as GitHub has it in any case, so a
-  # repo is never in the file twice.
-  skips = let
-    on = autoland.enable or false;
-    own = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
-    theirs = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) (if on then autoland.repos else { }));
-    add = repos: name: paths:
-      let hit = lib.findFirst (k: lib.toLower k == lib.toLower name) null (lib.attrNames repos); in
-      if hit == null then repos // { ${name} = { hidden = paths; }; }
-      else repos // { ${hit} = repos.${hit} // { hidden = paths; }; };
-  in {
-    machine = if on then autoland.reviewers.skipPaths else [ ];
-    repos = lib.foldlAttrs add own theirs;
-  };
   # The machine's runners started fresh for one job each, if it has them.
   fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
@@ -305,8 +285,7 @@ in
         changes are R2, which are documentation only, and which repos go
         live when they land, from the paths a change touches, renames and
         copies included. `cn class` reads it (CONARY_POLICY), and the
-        steward asks it for every PR it settles. The steward's reviewers'
-        skipPaths are never documentation: they go to Conary as `hidden`. The machine's R2 paths
+        steward asks it for every PR it settles. The machine's R2 paths
         default to CODEOWNERS (who signs off on what) and secrets. The rest
         of `.github/` isn't on it: the reviewers read workflow changes like
         any other, and the steward merges them once settled. Nor are
@@ -427,8 +406,9 @@ in
         CONARY_POLICY = "${pkgs.runCommand "conary-policy.json" {
           policy = builtins.toJSON {
             inherit (cfg.policy) r2 docs live notDocs;
-            hidden = skips.machine;
-            repos = skips.repos;
+            # The reviewers read every path on GitHub: no snapshot hides one.
+            hidden = [ ];
+            repos = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
           };
           passAsFile = [ "policy" ];
         } ''
@@ -653,8 +633,9 @@ in
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
       `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
       `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
-      `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
-      a comment, and the steward settles it like any other.
+      `undo --since RFC3339_TIME --repo OWNER/REPO`, then `--reason WHY`, which
+      the undo keeps for good (no secrets or prompt text). The undo's PR comes
+      back as a comment, and the steward settles it like any other.
     '');
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.

@@ -13,27 +13,14 @@
 //! The command is read as text, line by line, so one nested in quotes
 //! (`ssh host '…'`, `sh -c "…"`) counts the same as one typed bare.
 //!
-//! The same guard is Codex's managed PreToolUse hook for proj's Codex jobs
-//! (`--codex-user`, modules/claude/guard.nix). There no one is asked: the
-//! pinned Codex runs a command whose hook asks, so every question is a
-//! refusal, and it refuses what would hide a commit from the job's hooks
-//! (codex.rs). Codex's apply_patch, which deletes and replaces files with no
-//! command, gets the undo snapshot too. A job's Codex runs in a user
-//! namespace of proj's making, where zfs can't see the machine's datasets,
-//! so there the user's service manager takes the snapshot (undo.rs's
-//! [`Namespace`]).
 
 mod ansi_c;
-mod codex;
 pub mod config;
-mod curl;
 mod doors;
 mod push;
 mod shell;
 mod undo;
 mod walk;
-
-pub use undo::Namespace;
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -44,9 +31,8 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 
-/// The hook's input, as Claude Code or Codex sends it on stdin: a Bash
-/// command, or Codex's apply_patch with its patch as `command`. The rest of
-/// its fields are no business of the guard's.
+/// The hook's input, as Claude Code sends it on stdin: a Bash command. The
+/// rest of its fields are no business of the guard's.
 #[derive(Debug, Default, Deserialize)]
 pub struct Hook {
     pub tool_name: Option<String>,
@@ -62,13 +48,9 @@ pub struct Input {
 
 pub struct Guard<'a> {
     pub config: &'a Config,
-    /// Whether it guards a Codex job, which gets codex.rs's refusals too.
-    pub codex: bool,
     /// When the last undo snapshot was taken, as its mtime: one round per
     /// five seconds is plenty for a burst of commands.
     pub mark: PathBuf,
-    /// The user namespace it runs in, which decides how zfs is reached.
-    pub namespace: Namespace,
 }
 
 impl Guard<'_> {
@@ -76,8 +58,7 @@ impl Guard<'_> {
     /// question asks the owner first.
     #[must_use]
     pub fn check(&self, hook: &Hook, now: SystemTime) -> Option<String> {
-        let tool = hook.tool_name.as_deref();
-        if !matches!(tool, Some("Bash" | "apply_patch")) {
+        if hook.tool_name.as_deref() != Some("Bash") {
             return None;
         }
         let cmd = hook
@@ -88,26 +69,12 @@ impl Guard<'_> {
         let cwd = Path::new(hook.cwd.as_deref().filter(|c| !c.is_empty()).unwrap_or("."));
         let mut asks = Vec::new();
         // The undo first, so a command the owner lets through at a question
-        // has its snapshot too. A patch, Codex's own tool's or one a command
-        // hands Codex, is read for the files it deletes or replaces.
-        // Codex's own tool applies it where Codex runs; a command, wherever
-        // it's moved to, when that's known.
-        let destroys = if tool == Some("Bash") {
-            undo::patch_destroys(cmd, undo::patch_dir(cmd, cwd).as_deref()) || undo::destroys(cmd)
-        } else {
-            undo::patch_destroys(cmd, Some(cwd))
-        };
-        if !self.config.snapshot_datasets.is_empty() && destroys {
-            asks.extend(undo::snapshot(self.config, self.namespace, &self.mark, now));
+        // has its snapshot too.
+        if !self.config.snapshot_datasets.is_empty() && undo::destroys(cmd) {
+            asks.extend(undo::snapshot(self.config, &self.mark, now));
         }
-        // A patch is only files: what it says isn't run.
-        if tool == Some("Bash") {
-            asks.extend(push::asks(cmd, cwd, &self.config.git));
-            asks.extend(doors::asks(cmd));
-            if self.codex {
-                asks.extend(codex::refusals(cmd));
-            }
-        }
+        asks.extend(push::asks(cmd, cwd, &self.config.git));
+        asks.extend(doors::asks(cmd));
         asks.dedup();
         (!asks.is_empty()).then(|| asks.join(" "))
     }
@@ -121,19 +88,6 @@ pub fn ask(question: &str) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
             "permissionDecisionReason": question,
-        }
-    })
-}
-
-/// The hook's answer that refuses the command for `reason`: Codex's, whose
-/// job has no one to ask.
-#[must_use]
-pub fn deny(reason: &str) -> Value {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
         }
     })
 }

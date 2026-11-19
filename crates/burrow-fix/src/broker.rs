@@ -19,20 +19,19 @@
 //! A push that already happened stands; the next pass reads the head that
 //! moved.
 use crate::answers::Said;
-use crate::jobs::{Jobs, Record};
 use crate::{Config, brief};
 use burrow_github::{Api, call};
+use burrow_producer::jobs::{self, Jobs};
 use burrow_producer::serve::Work;
 use conary_core::plugin::{
-    Answer, Choice, Context, Executed, FixResult, Identity, Request, Response, Task, version,
+    Answer, Context, Executed, FixResult, Identity, Request, Response, Task, version,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A GitHub to ask, new for each look.
 pub type GitHub = Box<dyn Fn() -> Box<dyn Api> + Send + Sync>;
@@ -196,8 +195,11 @@ impl Broker {
         {
             return Err("a fix job starts fresh: it resumes no session".into());
         }
-        self.runnable(
+        jobs::runnable(
+            &self.cfg.settings,
+            &self.cfg.role,
             repo,
+            &jobs::offered(&self.cfg.settings, &self.cfg.role)?,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
         let held = self.hold(repo, *pr)?;
@@ -212,7 +214,7 @@ impl Broker {
             Ok(id) => id,
             Err(why) => return Err(self.ended(held, None, why)),
         };
-        let record = match self.wait(&id, work) {
+        let record = match jobs::wait(&*self.jobs, &id, work, self.look) {
             Ok(record) => record,
             Err(why) => return Err(self.ended(held, Some(&id), why)),
         };
@@ -289,47 +291,6 @@ impl Broker {
         })
     }
 
-    /// Whether a fix job in `repo` would run as the flow asks, before one
-    /// starts: proj runs it on the fixing role's route and tuning, and
-    /// Conary refuses an answer on another engine than the plugin names
-    /// (the role's route anywhere), a model it didn't offer, or another
-    /// model or effort than the flow chose. So the role's route for the
-    /// repo is that engine, moves to no other, names its model, and is
-    /// what the flow chose.
-    fn runnable(&self, repo: &str, choice: Option<&Choice>) -> Result<(), String> {
-        let role = &self.cfg.role;
-        let settings = self.cfg.settings.role_view()?.in_force;
-        let named = &settings.route(role, None).engine;
-        let route = settings.route(role, Some(repo));
-        if route.engine != *named || route.over.is_some() {
-            return Err(format!(
-                "the {role} role can run in {repo} on another engine than {named}, which the plugin names itself by"
-            ));
-        }
-        let tuning = settings.tuning(role, Some(repo), named);
-        let offers = settings.offers.get(named).cloned().unwrap_or_default();
-        if tuning.model.is_none() && !offers.models.is_empty() {
-            return Err(format!(
-                "the {role} role names no model on {named}, so its answer couldn't say what ran"
-            ));
-        }
-        if let Some(c) = choice
-            && (c.engine != *named
-                || c.model
-                    .as_ref()
-                    .is_some_and(|m| Some(m) != tuning.model.as_ref())
-                || c.effort
-                    .as_ref()
-                    .is_some_and(|e| Some(e) != tuning.effort.as_ref()))
-        {
-            return Err(format!(
-                "the flow chose {} {:?} {:?}, and the {role} role in {repo} runs {named} {:?} {:?}",
-                c.engine, c.model, c.effort, tuning.model, tuning.effort
-            ));
-        }
-        Ok(())
-    }
-
     /// Whether `pushed` is a new commit on top of `head`, the head the fix
     /// was handed: not that head itself, nor one that replaced it.
     fn pushed_on(&self, repo: &str, head: &str, pushed: &str) -> Result<(), String> {
@@ -390,41 +351,6 @@ impl Broker {
         match (got["head"]["sha"].as_str(), got["head"]["ref"].as_str()) {
             (Some(sha), Some(branch)) => Ok((sha.to_owned(), branch.to_owned())),
             _ => Err(format!("GitHub says no head of {repo}#{pr}")),
-        }
-    }
-
-    /// The job's record once its turn has ended done, or why it won't be:
-    /// the request ended first, the job went past its own deadline, or its
-    /// turn ended any other way.
-    fn wait(&self, id: &str, work: &Work) -> Result<Record, String> {
-        let mut look = Instant::now();
-        loop {
-            if work.abandoned() {
-                return Err("the request ended before its fix did".into());
-            }
-            if Instant::now() >= look {
-                let record = self.jobs.why(id)?;
-                if !record.live() {
-                    return if record.done() {
-                        Ok(record)
-                    } else {
-                        Err(format!(
-                            "the fix job {id} ended {}, not done: {:?}",
-                            record.stage, record.ends
-                        ))
-                    };
-                }
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs() as i64);
-                if let Some(due) = record.overdue_at
-                    && now > due
-                {
-                    return Err(format!("the fix job {id} is overdue"));
-                }
-                look = Instant::now() + self.look;
-            }
-            thread::sleep(self.look.min(Duration::from_millis(100)));
         }
     }
 }

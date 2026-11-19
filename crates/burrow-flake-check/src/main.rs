@@ -3,6 +3,7 @@
 //! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
+mod builds;
 mod gate;
 mod memory;
 mod negative;
@@ -184,6 +185,17 @@ fn system() -> Result<String> {
     }
     Ok(v)
 }
+/// The nix config every build the worker starts reads: a caller's first,
+/// then a build's silence limit, and, in a run that may write the build
+/// store, what keeps a flake's own config out of it (builds.rs).
+fn worker_config(caller: &str, writes: bool) -> String {
+    let mut c = format!("{caller}\nmax-silent-time = {SILENT_SECONDS}");
+    if writes {
+        c.push('\n');
+        c.push_str(builds::NIX_CONFIG);
+    }
+    c
+}
 fn main() {
     let mode = env::args().nth(1).unwrap_or_default();
     // A child performs the work so its stdout and stderr share one pipe, as
@@ -264,7 +276,7 @@ fn main() {
         // processes it runs, reads this; a caller's settings come first.
         .env(
             "NIX_CONFIG",
-            format!("{}\nmax-silent-time = {SILENT_SECONDS}", var("NIX_CONFIG")),
+            worker_config(&var("NIX_CONFIG"), builds::writes()),
         )
         .stdout(Stdio::piped())
         .spawn()?;
