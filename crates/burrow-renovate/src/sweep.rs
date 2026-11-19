@@ -6,7 +6,9 @@
 //! which fixes them on their branches so they can merge. Once per PR head,
 //! so a fix that's pushed gets a fresh look only if it's still stuck. The
 //! autoland steward's own status (`settled`) doesn't count as a check. With
-//! the machine's own App, it and its jobs act on GitHub as that App.
+//! the machine's own App, it and its jobs act on GitHub as that App. A PR
+//! the steward is kept off (`held`: its hold and owner labels) the sweep
+//! leaves alone too.
 //!
 //! The job's verdict on a major: ok when it can merge as it is, held when
 //! it shouldn't (its comment says why). The job ends that comment with a
@@ -96,6 +98,10 @@ pub struct Config {
     /// The longest a Renovate run goes on, in seconds: a refresh request
     /// taken back waits that long before a job may push.
     pub renovate_run: u64,
+    /// The labels that keep the steward off a PR (burrow.autoland.labels'
+    /// hold and owner): a PR with one is left alone, handed to no job and
+    /// asked of no Renovate run, until it comes off.
+    pub held: Vec<String>,
     pub tools: Tools,
 }
 
@@ -640,9 +646,16 @@ impl Sweep<'_> {
             }
         }
         let url = format!("https://github.com/{repo}/pull/{n}");
+        let on_hold = cfg.held.iter().any(|l| pr.labelled(l));
         if major && verdict == "held" {
             pass.held.push_str(&format!("- {title}: {url}\n"));
-        } else if major && verdict == "ok" && !self.info.covered && red == 0 && pending == 0 {
+        } else if major
+            && verdict == "ok"
+            && !on_hold
+            && !self.info.covered
+            && red == 0
+            && pending == 0
+        {
             // One with no CI at all is listed too, saying so: nothing else
             // would bring it to anyone.
             let note = if untested {
@@ -663,6 +676,13 @@ impl Sweep<'_> {
                 "its CI is green and it still hasn't merged"
             };
             pass.stuck.push_str(&format!("- {title}: {url} ({why})\n"));
+        }
+        // Held, as the steward has it: someone keeps it as it is (waiting
+        // on another PR, a deploy, the owner), so no job pushes to it and
+        // no refresh is asked for. Taking the label off is a PR event, which
+        // starts a pass that takes it up again.
+        if on_hold {
+            return Ok(None);
         }
         // A rebase! title has Renovate redo the branch on each of its runs,
         // each of whose pushes starts the next, until someone takes it off:

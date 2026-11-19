@@ -349,7 +349,7 @@ impl Machine {
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
             "renovate": self.renovate,
-            "renovateRun": 7200,
+            "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "seal": b.join("major-seal"),
                       "lockWait": b.join("lock-wait")},

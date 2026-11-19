@@ -329,6 +329,10 @@ let
     # when it runs as the user.
     renovate = if renovateApp == null then null else renovateApp.login;
     renovateRun = renovateRunFor;
+    # The labels that keep the steward off a PR, which keep the sweep off
+    # it too: none without the steward's module.
+    held = let a = config.burrow.autoland or { }; in
+      lib.optionals (a ? labels) [ a.labels.hold a.labels.owner ];
     tools = {
       gh = "${machineGh}/bin/gh";
       git = lib.getExe config.programs.git.package;

@@ -5,7 +5,7 @@ fn its_config_is_every_setting_and_only_those() {
     let config = serde_json::json!({
         "name": "renovate-sweep", "state": "/s/renovate-sweep", "projects": "/p", "owner": "Sam",
         "settled": "review-settled", "covered": "/s/autoland/repos.json",
-        "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200,
+        "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200, "held": ["hold", "needs-owner"],
         "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
                   "seal": "/b/major-seal", "lockWait": "/b/lock-wait"},
     });
