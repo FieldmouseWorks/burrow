@@ -145,6 +145,8 @@ pkgs.testers.runNixOSTest {
         assert got == "other site 200", got
         # The store still serves; only its fetch log is lost.
         machine.succeed("curl -fsS http://localhost/builds/nix-cache-info | grep -x 'StoreDir: /nix/store'")
+        # A NAR too, whose fetch log can't open now.
+        machine.succeed("curl -fsS -o /dev/null http://localhost/builds/nar/$(basename ${one} | cut -c1-32).nar")
         machine.succeed("systemctl is-active nginx.service")
   '';
 }
