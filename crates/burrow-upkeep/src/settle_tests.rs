@@ -847,8 +847,7 @@ fn an_old_baseline_gets_the_rules_it_lacks_and_keeps_the_owners_bypass() {
     };
     // One from before the train (made while it pushed directly: only the
     // first two rules, the owner bypassing always) has no required checks
-    // to add the train's to: it gets the rules it lacks, and keeps the
-    // owner's bypass as it was.
+    // to add the train's to: it gets the rules it lacks, bypass as it was.
     let old = ruleset(
         "baseline",
         json!([{"type": "deletion"}, {"type": "non_fast_forward"}]),
@@ -876,8 +875,7 @@ fn an_old_baseline_gets_the_rules_it_lacks_and_keeps_the_owners_bypass() {
         checks(&[("review-settled", 7), ("conary/train", 7)])
     );
     assert_eq!(sent[0]["bypass_actors"], owner_bypass("always"));
-    // The owner's bypass comes back with the train on, so the owner can
-    // still land a fix by hand when the pipeline is what's stuck.
+    // The owner's bypass comes back with the train on too.
     let rs = ruleset(
         "baseline",
         json!([required_rule(false, checks(&[("review-settled", 7), ("conary/train", 7)])), {"type": "deletion"}, {"type": "non_fast_forward"},
