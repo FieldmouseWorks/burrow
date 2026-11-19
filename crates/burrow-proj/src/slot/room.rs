@@ -35,7 +35,8 @@ pub fn seen_room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
     };
     match engine {
         Engine::Claude => {
-            let hold = usage::out(cfg);
+            // What the drain's `metered` would leave, released by nothing here.
+            let hold = usage::out_metered(cfg);
             let held = |sandboxed| hold.as_ref().is_some_and(|h| h.holds_run(sandboxed));
             !held(sandboxed)
                 && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
