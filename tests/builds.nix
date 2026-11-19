@@ -7,6 +7,9 @@
 # Conary's own tests hold `cn attest job` to the signer rule; the crate's
 # hold the door to cn's answer and the cache to its cap.
 #
+# The store is one location on one of nginx's hosts: with its fetched/
+# gone, nginx still starts and its other hosts still serve.
+#
 #   nix build .#checks.x86_64-linux.builds -L
 { self, pkgs }:
 let
@@ -50,6 +53,8 @@ pkgs.testers.runNixOSTest {
     nix.settings.experimental-features = [ "nix-command" ];
     environment.systemPackages = [ pkgs.curl pkgs.jq ];
     system.extraDependencies = [ one two three ];
+    # Another site on the same nginx, which the store mustn't take down.
+    services.nginx.virtualHosts."other.test".locations."/".return = "200 'other site'";
   };
 
   testScript = ''
@@ -129,5 +134,17 @@ pkgs.testers.runNixOSTest {
         assert got == "200", got
         answer = json.loads(machine.succeed("cat /tmp/answer"))
         assert answer["skipped"] == ["${one}"], answer
+
+    # Last: it takes away what the subtests above write to.
+    with subtest("with fetched/ gone, nginx starts and its other sites serve"):
+        machine.succeed("rm -rf /var/lib/burrow-builds/fetched")
+        machine.succeed("systemctl restart nginx.service")
+        machine.wait_for_unit("nginx.service")
+        machine.wait_for_open_port(80)
+        got = machine.succeed("curl -sS -w ' %{http_code}' -H 'Host: other.test' http://localhost/")
+        assert got == "other site 200", got
+        # The store still serves; only its fetch log is lost.
+        machine.succeed("curl -fsS http://localhost/builds/nix-cache-info | grep -x 'StoreDir: /nix/store'")
+        machine.succeed("systemctl is-active nginx.service")
   '';
 }
