@@ -131,9 +131,12 @@ import ./proj/test.nix { inherit self pkgs; } "proj-slots" ''
       # In line and looked at least once: its place is published, and the
       # look's note (.slots/.next) written since. Only q waits here, so that
       # note is its own. A kick sent before its slot is in /tmp/kicks by now.
+      # The place's time is proj's clock and the note's the filesystem's,
+      # coarser: a first look within a tick of it may not read as newer, so
+      # this gives it a second look (slot.rs LOOK_EVERY, 60s) to come.
       machine.wait_until_succeeds(
           f"e=$(ls /data/dev/jobs/.queue | grep -e '-{q}$') && test /data/dev/jobs/.slots/.next -nt \"/data/dev/jobs/.queue/$e\"",
-          timeout=60,
+          timeout=150,
       )
       assert state(q) == "queued" and kicks() == [], (state(q), kicks())
       proj(f"stop {a}")
