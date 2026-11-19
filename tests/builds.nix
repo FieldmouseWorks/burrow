@@ -94,6 +94,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("burrow-builds-init.service")
     machine.wait_for_unit("burrow-builds.socket")
     machine.wait_for_unit("nginx.service")
+    machine.wait_for_open_port(80)
 
     with subtest("the cache is served, its key and nginx's fetches aren't"):
         machine.succeed("curl -fsS http://localhost/builds/nix-cache-info | grep -x 'StoreDir: /nix/store'")
