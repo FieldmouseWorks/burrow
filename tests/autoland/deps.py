@@ -6,7 +6,8 @@ reviewed, and whose each one's threads and red CI are."""
 import json
 import time
 
-from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept, tmp
+from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, found, fresh_pr_state, head, judgment, merged, mkpr, run, said, \
+    summary, swept, tmp
 DEPENDABOT_EMAIL = S.CFG["dependabotEmail"]
 
 other = "c" * 40  # another head
@@ -419,6 +420,21 @@ for update in (
     assert not merged() and "state=success" not in status and "review" in status, status
     status, _ = run(clean(labels=("review",), **update), 1000)
     assert "state=success" in status, status
+
+# A reviewed update whose findings were all answered without a push: the
+# connector doesn't look again unasked, so once the settle delay is up a
+# judge reads the answers. Nothing lands it on them alone.
+for update in (
+    {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13},
+    {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 12},
+):
+    fresh_pr_state()
+    answered = mkpr(labels=("review",), reviews=[found()], comments=[summary(findings=True)], threads=[True], **update)
+    status, _ = run(answered, 700)
+    assert not merged() and JOBS == [] and "Findings answered" in status, status
+    status, _ = run(answered, 900)
+    assert not merged() and "state=success" not in status and len(JOBS) == 1, (status, JOBS)
+    assert "answered without a push" in JOBS[0] and "read each thread as well as the diff" in JOBS[0], JOBS
 
 # Removing the label doesn't remove Conary's persisted raise.
 from harness import cn

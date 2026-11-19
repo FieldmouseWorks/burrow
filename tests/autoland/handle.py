@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 
-from harness import (C, CI_GREEN, FAIL, HELD, JOBS, P, R, H, S, SINCE, STATES, T0, UPKEEP_RAN,
+from harness import (C, CI_GREEN, CODEX, STEWARD, FAIL, HELD, JOBS, P, R, H, S, SINCE, STATES, T0, UPKEEP_RAN,
                      WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
                      found, gh_stub, mkpr, pr_state, run, said, stand_in, summary, swept, tmp)
 
@@ -65,9 +65,9 @@ assert "no review of aaaaaaa after 30 minutes" in status and "a person's `@codex
 # The steward's own ask, as it posted them before (burrow#1216), with the
 # connector's answer to an App and the state it kept of asking: no review,
 # so nothing was asked. It's listed at QUIET, not an hour on.
-APP_ASK = [said("@codex review\n\nNo review of aaaaaaa came after its push.", who="steward"),
-           said("To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
-                who="chatgpt-codex-connector")]
+APP_ASK = [{**said("@codex review\n\nNo review of aaaaaaa came after its push."), "author": STEWARD},
+           {**said("To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors)."),
+            "author": CODEX, "databaseId": 3}]
 fresh_pr_state()
 run(mkpr(comments=APP_ASK), 0)
 C.save("pr-sam_r-5.json", {**C.load("pr-sam_r-5.json", {}), "asked": {"head": head, "at": C.NOW}})
