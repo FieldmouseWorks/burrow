@@ -4,9 +4,8 @@
 triage is disabled. In that case only enrolled, ready and tracker issues
 enter the planning queue; unrelated unlabelled issues remain untouched.
 Planning uses a new job on the `planner` role, independently of the
-implementation engine label. This role defaults to Codex. Its model and
-effort come from the role configuration; a Claude selection requires an
-explicit small model, so it cannot fall through to the Claude default.
+implementation engine label. Its model and effort come from the role
+configuration like any other role's, Claude's own where none is set.
 Host planning jobs are required;
 enabling planning with `inbox.vm` is rejected at configuration time.
 
@@ -65,7 +64,19 @@ OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
 pass lock. It refuses inside a job, a GitHub account outside
 `inbox.authors`, a repo that isn't one of the machine's projects and a PR
 that hasn't merged; the next pass advances the list and closes the child
-if it's still open.
+if it's still open. A child whose work went on in another issue hands
+its place to that issue: an author comments on the closed child with a
+line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
+newest comment with such a line counts, and only as `written` verifies it,
+every writer and editor an author. The successor must be an issue in one
+of the machine's projects, and not the parent or a child on the same list.
+The list then waits on it, its checklist saying "continued as" it, with no
+notice and nothing to record by hand, looking again hourly. The child is
+done when the successor is, by the same rules as a child, or when the
+successor is a PR, once it merges. A successor
+closed without that passes the place on to the one it names in turn; with
+none, one that's gone, or one that can't be followed, the child waits as a
+hand close does.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes

@@ -539,7 +539,7 @@ fn a_notice_file_that_cant_say_when_counts_as_never() {
     assert_eq!(b.github.issues[0].comments.len(), 1);
     assert_eq!(
         fs::read_to_string(b.cfg.dir.join("k8")).unwrap(),
-        format!("{}\n", NOW + 60)
+        format!("{} 1\n", NOW + 60)
     );
 }
 
@@ -784,4 +784,60 @@ fn changed_notice_facts_replace_the_open_issue_and_retry_failed_updates() {
     assert_eq!(m.github.issues[0].body, "until Monday");
     m.notify(&["close", "usage"], NOW + 5);
     assert!(!pending(&m.cfg, "usage"));
+}
+
+#[test]
+fn a_notice_closed_by_hand_waits_a_day_then_says_so() {
+    let mut b = machine(Some("sam/homelab"));
+    let ensure = |b: &mut Machine, now| {
+        b.notify(&["ensure", "q", "Answer needed", "Which one?"], now);
+    };
+    ensure(&mut b, NOW);
+    // Something closes it while the question stands, over and over.
+    let mut later = NOW;
+    for _ in 0..8 {
+        let open: Vec<usize> = (0..b.github.issues.len())
+            .filter(|i| b.github.issues[*i].open)
+            .collect();
+        for i in open {
+            b.github.issues[i].open = false;
+        }
+        for _ in 0..10 {
+            later += 600;
+            ensure(&mut b, later);
+        }
+    }
+    assert!(later < NOW + DAY);
+    assert_eq!(b.github.issues.len(), 1, "posted again within the day");
+    assert!(b.pending("q"));
+    // A day after the close was seen, it's back, saying why.
+    ensure(&mut b, NOW + 600 + DAY);
+    assert_eq!(b.github.issues.len(), 1);
+    ensure(&mut b, NOW + 601 + DAY);
+    assert_eq!(b.github.open_titles(), ["[q] Answer needed"]);
+    assert_eq!(
+        b.github.issues[1].body,
+        "Posted again: #1 was closed by hand, but this still stands. It closes by itself once it clears.\n\nWhich one?"
+    );
+    // Cleared, it closes; asked for again, it's posted at once.
+    b.close("q");
+    assert!(!b.pending("q"));
+    ensure(&mut b, NOW + 602 + DAY);
+    assert_eq!(b.github.open_titles(), ["[q] Answer needed"]);
+    assert_eq!(b.github.issues[2].body, "Which one?");
+}
+
+#[test]
+fn a_close_whose_answer_was_lost_is_not_taken_for_one_by_hand() {
+    let mut b = machine(Some("sam/homelab"));
+    b.open("k15", NOW);
+    b.github.fails.push("close");
+    b.close("k15");
+    assert!(b.pending("k15"));
+    // GitHub closed it after all.
+    b.github.issues[0].open = false;
+    b.github.fails.clear();
+    b.open("k15", NOW + 60);
+    assert_eq!(b.github.open_titles(), ["[k15] Stuck"]);
+    assert_eq!(b.github.issues[1].body, "It's stuck.");
 }

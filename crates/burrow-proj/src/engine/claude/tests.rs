@@ -74,3 +74,38 @@ fn structured_limit_names_override_billing_words() {
         assert!(!said.contains("https://"));
     }
 }
+
+/// The run every Claude job on remi ended on from 2026-11-16 11:54 UTC, its
+/// stream cut down to what's read: the login had expired.
+const LOGIN_ASSISTANT: &str = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"session_id":"c812a143","error":"authentication_failed","is_api_error_message":true}"#;
+const LOGIN_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":null,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"c812a143","total_cost_usd":0}"#;
+
+#[test]
+fn a_run_its_login_expired_under_is_refused_with_no_reset() {
+    let logged_out = Some((None, super::LOGGED_OUT.to_owned()));
+    let stream = format!("{ALLOWED}\n{LOGIN_ASSISTANT}\n{LOGIN_RESULT}\n");
+    assert_eq!(refused(&v(LOGIN_RESULT), &stream, NOW), logged_out);
+    // By its words alone, for a stream that doesn't keep the answer's record.
+    assert_eq!(refused(&v(LOGIN_RESULT), "", NOW), logged_out);
+    // By that record's mark alone, whatever Claude Code's words for it.
+    let words = "Invalid API key · Please run /login";
+    let marked = json!({"type": "assistant", "error": "authentication_failed",
+        "message": {"content": [{"type": "text", "text": words}]}});
+    let result = json!({"type": "result", "is_error": true, "result": words});
+    assert_eq!(refused(&result, &marked.to_string(), NOW), logged_out);
+    // Never a limit's hold: its words reach the owner as a login's.
+    assert_eq!(
+        super::normalize_refusal(super::LOGGED_OUT),
+        super::LOGGED_OUT
+    );
+    // An answer that talks of one isn't one, nor is an error that only
+    // follows one the run got past, nor another failure's record.
+    let answer = json!({"type": "result", "is_error": false,
+        "result": "Failed to authenticate: so I fixed the token's scope."});
+    assert_eq!(refused(&answer, LOGIN_ASSISTANT, NOW), None);
+    let later = json!({"type": "result", "is_error": true, "result": "API Error: 529 overloaded"});
+    assert_eq!(refused(&later, LOGIN_ASSISTANT, NOW), None);
+    let other = json!({"type": "assistant", "error": "server_error",
+        "message": {"content": [{"type": "text", "text": "API Error: 529 overloaded"}]}});
+    assert_eq!(refused(&later, &other.to_string(), NOW), None);
+}

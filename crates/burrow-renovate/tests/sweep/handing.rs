@@ -320,8 +320,8 @@ fn one_handed_over_before_verdicts_were_sealed_goes_once_more() {
     let p = m.pass();
     assert!(p.task().contains("#2 ") && p.majors().0 == "close");
     // And one handed over when its job sealed its verdict itself, with a
-    // token for major-seal its sandbox may not have let it read (a Codex
-    // job's didn't: Conary#271).
+    // token for major-seal its sandbox may not have let it read
+    // (Conary#271).
     let m = Machine::new();
     m.prs(&[pr(2)]);
     m.pass();
@@ -344,7 +344,7 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
     let task = p.task();
     // The sweep seals both verdicts on each major, as it hands it over: the
     // job runs nothing of the sweep's, whose state a sandboxed job can't
-    // read (a Codex job's couldn't: Conary#271), and has no seal for a head
+    // read (Conary#271), and has no seal for a head
     // or base it wasn't handed.
     let sealed = |n: u64, base: &str| {
         format!(

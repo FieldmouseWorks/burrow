@@ -2,7 +2,7 @@
 
 use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
@@ -14,46 +14,45 @@ pub(crate) mod claude;
 mod claude_limit;
 mod command;
 mod handoff;
-mod role;
-mod sandbox;
+mod machine;
 mod stream;
-pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
+pub use command::{LONG, NEXT, exec_claude, spawn};
 pub use handoff::first_prompt;
-pub(crate) use role::route;
 pub use stream::{
-    Said, answer, last_result, names_session, results, stream_names_session, stream_tail,
+    Said, answer, last_result, names_session, results, stream_names_session, stream_session,
+    stream_tail,
 };
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Deserialize,
-    Serialize,
-    schemars::JsonSchema,
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]
     Claude,
-    Codex,
+}
+
+/// What a job's record says when it names Codex, which proj no longer runs:
+/// the work is retired, never carried on another engine's model.
+pub const RETIRED: &str = "- this job ran on Codex, which is retired: label its issue `claude` to start it again on Claude";
+
+/// Read as [`Engine::parse`] does, so a record from a Codex turn (a request,
+/// an execution identity) fails its job with why, rather than run on Claude.
+impl<'de> Deserialize<'de> for Engine {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
 }
 impl Engine {
     pub fn name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
-            Self::Codex => "codex",
         }
     }
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "claude" => Ok(Self::Claude),
-            "codex" => Ok(Self::Codex),
+            "codex" => Err(RETIRED.trim_start_matches("- ").to_owned()),
             _ => Err(format!("unknown engine {s}")),
         }
     }
@@ -100,7 +99,7 @@ pub(crate) fn requested(
     resolve(cfg, role, repo.as_deref(), pinned)
 }
 
-/// Turn startup and drain admission share role scopes, overflow and pins.
+/// Turn startup and drain admission share role scopes and pins.
 /// The model and effort follow the engine it ends on.
 pub(crate) fn resolve(
     cfg: &Config,
@@ -111,7 +110,7 @@ pub(crate) fn resolve(
     // One version of the settings: the engine and its tuning can't come
     // from either side of an `engines use`.
     let settings = cfg.role_settings()?;
-    let mut engine = cfg.engine_in(&settings, role, repo)?;
+    let mut engine = Config::engine_in(&settings, role, repo)?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
@@ -121,12 +120,6 @@ pub(crate) fn resolve(
         model: tuning.model,
         effort: tuning.effort,
     };
-    if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
-        return Err(
-            "the planner role requires an explicit small model on Claude; its default is Codex"
-                .into(),
-        );
-    }
     Ok(choice)
 }
 
@@ -160,15 +153,6 @@ pub fn refused(
 ) -> Option<(Option<i64>, String)> {
     match engine {
         Engine::Claude => claude::refused(last, stream, now),
-        Engine::Codex => {
-            let said = last["result"].as_str().unwrap_or_default();
-            (is_error(last) && burrow_codex::spent(said)).then(|| {
-                (
-                    Some(now.saturating_add(burrow_codex::wait_for(said) as i64)),
-                    said.to_owned(),
-                )
-            })
-        }
     }
 }
 
@@ -189,35 +173,7 @@ pub fn refused_file(
                 .filter_map(|line| serde_json::from_str::<Value>(&line).ok()),
             now,
         ),
-        Engine::Codex => refused(engine, last, "", now),
     }
-}
-
-/// A failed process is a failure even if it emitted an earlier success.
-/// Codex can refuse login before JSON starts; only error output is examined.
-/// A status of None means the turn stopped it (quiet, deadline or a lingering
-/// answer): that stop belongs to the shared lifecycle, not an engine error.
-pub fn ended(
-    engine: Engine,
-    stream: &Path,
-    from: u64,
-    status: Option<i32>,
-    stderr: &str,
-) -> Option<Value> {
-    let last = last_result(stream, from);
-    if engine != Engine::Codex
-        || status.is_none_or(|s| s == 0)
-        || last.as_ref().is_some_and(is_error)
-    {
-        return last;
-    }
-    let status = status.expect("a process that ended itself");
-    let error = if stderr.trim().is_empty() {
-        format!("codex exited {status}")
-    } else {
-        stderr.trim().to_owned()
-    };
-    Some(json!({"type":"result", "is_error":true, "result":error, "errors":[error]}))
 }
 
 #[cfg(test)]
@@ -226,18 +182,13 @@ mod tests {
     use crate::config::tests::set;
 
     #[test]
-    fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
+    fn the_planner_runs_on_its_roles_settings_like_any_other() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        set(&mut cfg, tmp.path(), &[]);
         assert_eq!(
-            resolve(&cfg, "planner", None, None).unwrap().engine,
-            Engine::Codex
-        );
-        set(&mut cfg, tmp.path(), &["role planner claude"]);
-        assert!(
-            resolve(&cfg, "planner", None, None)
-                .unwrap_err()
-                .contains("explicit small model")
+            resolve(&cfg, "planner", None, None).unwrap(),
+            Choice::default()
         );
         set(
             &mut cfg,
@@ -361,84 +312,70 @@ for session in ('writer-session', 'reviewer-session'):
     }
 
     #[test]
-    fn a_judge_overflows_when_claudes_five_hour_window_is_short() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.meters = Some(dir.path().to_owned());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        for (engine, window, used) in [("claude", "five_hour", 96), ("codex", "300m", 10)] {
-            fs::write(
-                dir.path().join(format!("{engine}.json")),
-                json!({
-                    "windows": {window: {"used": used, "resets_at": now + 3600}},
-                    "credits": false,
-                    "read_at": now,
-                })
-                .to_string(),
-            )
-            .unwrap();
-        }
-        set(
-            &mut cfg,
-            dir.path(),
-            &[
-                "offer codex models selected",
-                "offer codex efforts high",
-                "role steward-judged claude over 95 codex",
-                "model steward-judged codex selected high",
-            ],
-        );
-        let chosen = resolve(&cfg, "steward-judged", None, None).unwrap();
-        assert_eq!(chosen.engine, Engine::Codex);
-        assert_eq!(chosen.model.as_deref(), Some("selected"));
-        assert_eq!(chosen.effort.as_deref(), Some("high"));
-        // The recorded choice identifies the engine and model that judged.
-        let recorded = serde_json::to_value(&chosen).unwrap();
-        assert_eq!(recorded["engine"], "codex");
-        assert_eq!(recorded["model"], "selected");
-        set(&mut cfg, dir.path(), &["role steward-judged claude"]);
-        assert_eq!(
-            resolve(&cfg, "steward-judged", None, None).unwrap().engine,
-            Engine::Claude
-        );
-    }
-    #[test]
     fn a_judge_follows_its_role_or_inbox_override() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        set(&mut cfg, dir.path(), &["role steward-judged codex"]);
-        let job = Job::new(&cfg, "judge");
-        fs::create_dir_all(&job.dir).unwrap();
-        fs::write(job.path("role"), "steward-judged").unwrap();
-        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
-        set(&mut cfg, dir.path(), &["role steward-judged claude"]);
-        let job = Job::new(&cfg, "judge");
-        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Claude);
-        // Pinned by its starter (an inbox label), not by a file it writes.
-        let mut request = crate::job::Request::load(&job).unwrap();
-        request.engine = Some(Engine::Codex);
-        request.save(&job).unwrap();
-        // Model and effort follow the engine the judge runs on.
         set(
             &mut cfg,
             dir.path(),
             &[
-                "offer codex models other",
                 "offer claude models chosen",
-                "model steward-judged codex other low",
                 "model steward-judged claude chosen max",
             ],
         );
         let job = Job::new(&cfg, "judge");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.path("role"), "steward-judged").unwrap();
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
             (c.engine, c.model.as_deref(), c.effort.as_deref()),
-            (Engine::Codex, Some("other"), Some("low"))
+            (Engine::Claude, Some("chosen"), Some("max"))
         );
+        // Pinned by its starter (an inbox label), not by a file it writes:
+        // its model and effort follow its role on the engine it's pinned to.
+        let mut request = crate::job::Request::load(&job).unwrap();
+        request.engine = Some(Engine::Claude);
+        request.save(&job).unwrap();
+        fs::write(job.path("engine"), "other").unwrap();
+        let job = Job::new(&cfg, "judge");
+        assert_eq!(choice(&cfg, &job).unwrap(), c);
+        // The recorded choice identifies the engine and model that judged.
+        let recorded = serde_json::to_value(&c).unwrap();
+        assert_eq!(recorded["engine"], "claude");
+        assert_eq!(recorded["model"], "chosen");
+    }
+
+    #[test]
+    fn a_job_whose_record_names_codex_is_retired_not_run_on_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        let job = Job::new(&cfg, "old");
+        fs::create_dir_all(&job.dir).unwrap();
+        crate::ask::ensure(&job).unwrap();
+        // Its protected request, as a proj that ran Codex recorded it.
+        fs::write(
+            crate::ask::host_path(&job, "request"),
+            r#"{"project":"p","engine":"codex","role":null,"app":null,"agent":null,"owned":false}"#,
+        )
+        .unwrap();
+        let err = choice(&cfg, &job).unwrap_err();
+        assert!(err.contains("Codex, which is retired"), "{err}");
+        // So is a turn's execution identity, which a retained retry restores.
+        fs::write(
+            crate::ask::host_path(&job, "request"),
+            r#"{"project":"p","engine":null,"role":null,"app":null,"agent":null,"owned":false}"#,
+        )
+        .unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(
+            job.turn_file("1", crate::record::TurnFile::Execution),
+            r#"{"choice":{"engine":"codex","model":"m","effort":null}}"#,
+        )
+        .unwrap();
+        let err = choice(&cfg, &job).unwrap_err();
+        assert!(err.contains("Codex, which is retired"), "{err}");
     }
 }
 
@@ -495,12 +432,10 @@ mod scoped_tests {
             &mut cfg,
             dir.path(),
             &[
-                "role steward-handed claude",
-                "role steward-handed@sam/code codex",
-                "role steward-judged@sam/code codex",
                 "offer claude models bare scoped",
                 "model steward-handed claude bare",
                 "model steward-handed@sam/code claude scoped",
+                "model steward-judged@sam/code claude scoped",
             ],
         );
         for (id, url) in [
@@ -510,11 +445,11 @@ mod scoped_tests {
         ] {
             git(&["remote", "set-url", "origin", url]);
             let job = started(&cfg, id, &project, "steward-handed", None);
-            assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
+            assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
         }
         let job = started(&cfg, "judged", &project, "steward-judged", None);
-        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
-        // A scoped role on Claude takes its repo's line.
+        assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
+        // A scoped role pinned to its engine takes its repo's line too.
         let job = started(
             &cfg,
             "pinned",

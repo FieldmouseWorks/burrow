@@ -10,7 +10,7 @@ use std::{env, fs};
 
 use burrow_events::handler::Config;
 use burrow_events::line::{DEBOUNCE, Line, Pass};
-use burrow_events::passes::{Systemctl, check_yields, refresh, serve};
+use burrow_events::passes::{Systemctl, Yields, check_yields, refresh, serve};
 use burrow_events::routes::{Handlers, Lines, delivery, kick};
 use burrow_events::{http, now, supervise};
 
@@ -75,8 +75,8 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
         let (n, h, l) = (name.clone(), handlers.clone(), lines.clone());
         let t = thread::Builder::new()
             .spawn(move || {
-                let first = h[&n].yield_to.as_ref().map(|f| &l[f]);
-                serve(&n, &h[&n], &l[&n], first, &Systemctl, false, || {
+                let yields = Yields::of(&h, &l, &n);
+                serve(&n, &h[&n], &l[&n], &yields, &Systemctl, false, || {
                     refresh(&h, &l)
                 })
             })

@@ -11,7 +11,9 @@ use crate::watch::Item;
 
 /// state.json: the stalls it's taking a step at a time, the sources with no
 /// watch file to read (since when), the stalls that have cleared whose
-/// owner's notice is still to close, and its own jobs to withdraw once no
+/// owner's notice is still to close, those that cleared with more time a job
+/// gave them still to run (`resting`: one back before it ends is the same
+/// stall, its time and job kept), and its own jobs to withdraw once no
 /// stall needs them, kept until proj has settled each (None in a state from
 /// before it kept them). And `limit`, until when a usage limit held its jobs
 /// in a state #428's watchdog wrote: handed to proj's own hold (`proj usage
@@ -22,6 +24,7 @@ pub struct State {
     pub stalls: BTreeMap<String, Stall>,
     pub missing: BTreeMap<String, f64>,
     pub closing: BTreeMap<String, Stall>,
+    pub resting: BTreeMap<String, Stall>,
     pub withdraw: Option<BTreeSet<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<f64>,

@@ -1,62 +1,26 @@
-//! Decode terminal answers without treating intermediate Codex messages as one.
+//! A turn's stream: the session it names and the answers it holds.
 
 use super::*;
 use crate::host_jobs::View;
+use crate::record::{JobFile, TurnFile};
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader};
 
-#[derive(Default)]
-struct Decoder {
-    message: String,
-    failed: Option<String>,
-}
-impl Decoder {
-    fn line(&mut self, line: &str) -> Option<Value> {
-        if let Some(v) = result_of(line) {
-            return Some(v);
-        }
-        let v: Value = serde_json::from_str(line).ok()?;
-        match v["type"].as_str()? {
-            "turn.started" => {
-                self.message.clear();
-                self.failed = None;
-                None
-            }
-            "item.completed" if v["item"]["type"] == "agent_message" => {
-                self.message = v["item"]["text"].as_str().unwrap_or_default().to_owned();
-                None
-            }
-            "error" | "turn.failed" => {
-                let error = v["message"]
-                    .as_str()
-                    .or(v["error"]["message"].as_str())
-                    .unwrap_or("codex turn failed")
-                    .to_owned();
-                self.failed = Some(error.clone());
-                Some(json!({"type":"result", "is_error":true, "result":error, "errors":[error]}))
-            }
-            "turn.completed" => Some(match &self.failed {
-                Some(error) => {
-                    json!({"type":"result", "is_error":true, "result":error, "errors":[error]})
-                }
-                None => json!({"type":"result", "is_error":false, "result":self.message}),
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// Both formats name a session before work starts; keep the first nonempty id.
+/// The engine names its session before work starts; keep the first nonempty id.
 fn session(line: &str) -> Option<(Engine, String)> {
     let v: Value = serde_json::from_str(line).ok()?;
-    [("session_id", Engine::Claude), ("thread_id", Engine::Codex)]
-        .into_iter()
-        .find_map(|(field, engine)| {
-            v[field]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| (engine, s.to_owned()))
-        })
+    v["session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| (Engine::Claude, s.to_owned()))
+}
+/// The session a turn's stream names, as its engine named it first.
+pub fn stream_session(stream: &Path) -> Option<String> {
+    lines(stream, 0)
+        .ok()?
+        .map_while(Result::ok)
+        .find_map(|l| session(&l))
+        .map(|(_, id)| id)
 }
 pub fn names_session(text: &str) -> bool {
     text.lines().any(|l| session(l).is_some())
@@ -78,11 +42,10 @@ pub fn answer(stream: &Path) -> String {
 /// Each non-empty result a turn's stream holds, in order: the pieces its
 /// answer is made of, kept apart for a view that redacts each on its own.
 pub fn results(stream: &Path) -> Vec<String> {
-    let mut decoder = Decoder::default();
     let mut results = Vec::new();
     if let Ok(lines) = lines(stream, 0) {
         for line in lines.map_while(Result::ok) {
-            if let Some(v) = decoder.line(&line)
+            if let Some(v) = result_of(&line)
                 && let Some(text) = v["result"].as_str().filter(|s| !s.is_empty())
             {
                 results.push(text.to_owned());
@@ -92,11 +55,10 @@ pub fn results(stream: &Path) -> Vec<String> {
     results
 }
 pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
-    let mut decoder = Decoder::default();
     lines(stream, from)
         .ok()?
         .map_while(Result::ok)
-        .filter_map(|line| decoder.line(&line))
+        .filter_map(|line| result_of(&line))
         .last()
 }
 
@@ -132,10 +94,10 @@ pub fn stream_tail(stream: &Path, view: View) -> String {
 /// Session storage is per engine; `session` remains the active session for job state.
 /// A Claude session made before engine routing has no engine marker.
 pub fn resume(job: &Job, engine: Engine) -> Option<String> {
-    read(&job.path(&format!("session.{}", engine.name())))
+    read(&job.file(JobFile::SessionOf(engine)))
         .or_else(|| {
-            (engine == Engine::Claude && !job.path("session.engine").exists())
-                .then(|| read(&job.path("session")))
+            (engine == Engine::Claude && !job.file(JobFile::SessionEngine).exists())
+                .then(|| read(&job.file(JobFile::Session)))
                 .flatten()
         })
         .filter(|s| !s.is_empty())
@@ -145,13 +107,12 @@ pub struct Said<'a> {
     job: &'a Job<'a>,
     file: Option<BufReader<File>>,
     partial: Vec<u8>,
-    decoder: Decoder,
     pub answered: bool,
     pub named: bool,
 }
 impl<'a> Said<'a> {
     pub fn new(job: &'a Job<'a>, n: &str, from: u64) -> Self {
-        let file = crate::state_reads::open(&job.turn(n, "jsonl"))
+        let file = crate::state_reads::open(&job.turn_file(n, TurnFile::Jsonl))
             .ok()
             .and_then(|mut f| {
                 f.seek(SeekFrom::Start(from)).ok()?;
@@ -161,7 +122,6 @@ impl<'a> Said<'a> {
             job,
             file,
             partial: Vec::new(),
-            decoder: Decoder::default(),
             answered: false,
             named: false,
         }
@@ -182,23 +142,25 @@ impl<'a> Said<'a> {
             if !self.named
                 && let Some((engine, id)) = session(&line)
             {
-                if !self.job.path("session.engine").exists()
-                    && let Some(previous) = read(&self.job.path("session"))
+                if !self.job.file(JobFile::SessionEngine).exists()
+                    && let Some(previous) = read(&self.job.file(JobFile::Session))
                 {
                     let _ = crate::state_reads::write(
-                        self.job.path("session.claude"),
+                        self.job.file(JobFile::SessionOf(Engine::Claude)),
                         format!("{previous}\n"),
                     );
                 }
                 let _ = crate::state_reads::write(
-                    self.job.path(&format!("session.{}", engine.name())),
+                    self.job.file(JobFile::SessionOf(engine)),
                     format!("{id}\n"),
                 );
-                let _ = crate::state_reads::write(self.job.path("session"), format!("{id}\n"));
-                let _ = crate::state_reads::write(self.job.path("session.engine"), engine.name());
+                let _ =
+                    crate::state_reads::write(self.job.file(JobFile::Session), format!("{id}\n"));
+                let _ =
+                    crate::state_reads::write(self.job.file(JobFile::SessionEngine), engine.name());
                 self.named = true;
             }
-            if self.decoder.line(&line).is_some() {
+            if result_of(&line).is_some() {
                 self.answered = true;
             }
             self.partial = whole;

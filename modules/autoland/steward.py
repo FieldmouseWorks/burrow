@@ -15,8 +15,8 @@ event reports):
      one's Claude jobs are stopped, its clones moved aside and what the
      steward kept about it forgotten: before anything else acts on it.
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing (step.py): queue a review of its head from each
-     reviewer (Codex, reviewers.py), post what they found, hand open
+     the next thing (step.py): read what Codex's GitHub connector said of
+     its head (reviewers.py), asking it again when a look is owed, hand open
      findings, red CI or a conflict with its base to a Claude job, build
      the checks only a machine of the owner's runs that are a build
      (proofBuilds, proofs.py), run those that are a command (proofRuns)
@@ -38,12 +38,12 @@ event reports):
 5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
 delivery (the App's own, for a repo just made), a Claude job's turn
-ending, a reviewer's answer coming back, or a wait the last pass booked
+ending, a review or comment on a PR, or a wait the last pass booked
 ending (common.wake). Its settings cost nothing unless they're due, so a
 repo is set up from the first event about it.
 
 Everything talks to GitHub as the steward's own GitHub App (common.py), so
-its statuses, merges and the reviewers' reviews are posted as the App, and
+its statuses, merges and comments are posted as the App, and
 nobody else's count as its word. Its Claude jobs work as the machine user.
 Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
 in config.stateDir: one JSON file per PR, one per repo.
@@ -56,9 +56,8 @@ for it (proofs.py): the steward builds a proof check that's only a build
 itself, with no Claude job. One that's only a command is crates/burrow-proof's
 to run, in a unit of its own.
 
-The reviews the passes queue are worked through by the reviewers' own
-service (crates/burrow-review, `autoland-review`), as a user of their own. A
-careful look takes an agent many minutes, so no pass waits for it.
+Codex reviews through its GitHub connector, on the owner's ChatGPT account:
+it reviews each push on its own, and a pass reads what it posted.
 
 In a repo with `train` on, a settled PR goes into its merge train instead of
 being merged, and a pass ends with a step of the train (train.py). `cn`, which
@@ -75,7 +74,7 @@ import common as C
 from batch import Batch
 import proofs as P
 import repos as R
-import reviewers as V
+import mirror as M
 import step
 import train as T
 import waits
@@ -111,7 +110,7 @@ def main():
         # Its derivations built, in its heavy slot (proofs.run).
         sys.exit(P.realise(sys.argv[2]))
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+        for d in ("", M.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -130,9 +129,11 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            # A queued unit must not spend its hard deadline waiting for the
-            # other handler. Requeue on the same line without touching files
-            # owned by the pass that has the lock.
+            # burrow-events starts no pass beside the other handler's
+            # (`yieldTo`), so this is only two that started at once. A
+            # queued unit must not spend its hard deadline waiting for the
+            # other: requeue on the same line, which waits that one out,
+            # without touching files owned by the pass that has the lock.
             endpoint = CFG["continuationKick"] if continuing else CFG["kick"]
             for repo in kick or [""]:
                 if C.poke(endpoint + (f"/{repo}" if repo else "")) is False:
@@ -162,22 +163,23 @@ def main():
 SEARCHED = [0]
 
 
-def failing(repo, why):
-    """What of burrow-upkeep's look failed: logged, and the stall watchdog
-    watches the repo."""
+def failing(repo, why, op):
+    """What of burrow-upkeep's look failed, in the repo's operation op:
+    logged, and the stall watchdog watches the repo."""
     log(f"{repo}: {why}")
-    waits.failed(repo)
+    waits.failed(repo, op=op)
     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
 
-def told(repo, out, mine):
-    """What a look of burrow-upkeep's says: what it lists goes in mine, the
-    pass it books is booked, and what failed is `failing`."""
+def told(repo, out, mine, op):
+    """What a look of burrow-upkeep's (the repo's operation op) says: what
+    it lists goes in mine, the pass it books is booked, and what failed is
+    `failing`."""
     mine.extend(tuple(x) for x in out["stuck"])
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
     for why in out["failed"]:
-        failing(repo, why)
+        failing(repo, why, op)
 
 
 def branches(repo, default, in_use, mine, full):
@@ -186,7 +188,7 @@ def branches(repo, default, in_use, mine, full):
     also tries again what GitHub said no to. It raises when it fails, as
     the repo's other steps do."""
     told(repo, C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []),
-                        input=json.dumps(sorted(in_use))), mine)
+                        input=json.dumps(sorted(in_use))), mine, "branches")
 
 
 def upkeep(repo, mine):
@@ -198,9 +200,9 @@ def upkeep(repo, mine):
     try:
         out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
     except Exception as e:
-        failing(repo, f"its upkeep: {e}")
+        failing(repo, f"its upkeep: {e}", "upkeep")
         return
-    told(repo, out, mine)
+    told(repo, out, mine, "upkeep")
     SEARCHED[0] += out["searched"]
     for j in out["jobs"]:
         try:
@@ -208,7 +210,7 @@ def upkeep(repo, mine):
         except C.JobPaused:
             continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
-            failing(repo, f"its {j['part']} job didn't start: {e}")
+            failing(repo, f"its {j['part']} job didn't start: {e}", "upkeep")
             mine.extend(tuple(x) for x in j["unstarted"])
             continue
         if not jid:
@@ -266,7 +268,6 @@ def run_pass(kick, continuing=False):
     if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
-    live = {}  # the repos whose PRs it read: their heads' snapshots
     covered = []
     seen = set()
     deferred = set()
@@ -289,10 +290,14 @@ def run_pass(kick, continuing=False):
                 R.restart(r, known, failed)
             except Exception as e:
                 log(f"{repo}: starting it over as new: {e}")
-                waits.failed(repo)
+                waits.failed(repo, op="restart")
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 batch.finish(repo)
                 continue
+            waits.passed(repo, "restart")
+            # The operation under way, whose failure the repo's wait is for:
+            # it ends with the first pass that runs that one again and passes.
+            op = "settings"
             try:
                 new = R.settle_repo(r, known)
                 if r["default"] is None:
@@ -314,8 +319,13 @@ def run_pass(kick, continuing=False):
                         failed[repo] = C.NOW
                 elif new and not CFG["baselineJobs"]:
                     known.add(repo)
+                waits.passed(repo, op)
+                op = "PRs"
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
+                if not DRY:
+                    # Handoffs whose PR has landed or closed are used up.
+                    C.spend_closed(repo, {pr["number"] for pr in prs}, C.NOW)
                 # The PRs labelled to go first in the proof line. One whose
                 # labels can't be read isn't, and fails in its own step below:
                 # one bad PR mustn't stop the rest.
@@ -332,28 +342,34 @@ def run_pass(kick, continuing=False):
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
-                snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
                 # own step below).
                 heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Preserve first-labelled priority, then finish unvisited
-                # PRs before revisiting changed ones from an earlier batch.
+                # Then every PR's look this round before any one's second
+                # (batch.due), first-labelled ahead within a round, then
+                # unvisited PRs before revisiting changed ones.
 
                 def order(pr):
                     n = pr["number"]
-                    return n not in held, n not in first, batch.visited(repo, pr), P.place(repo, n)
+                    return n not in held, not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
 
+                # Read and ready: each PR's own step fails on its own.
+                waits.passed(repo, op)
                 partial = False
-                for pr in sorted(pending, key=order):
+                left = list(pending)
+                while left:
                     if batch.expired():
                         partial = True
                         batch.left = True
                         break
+                    # Chosen one look at a time: a round can end partway
+                    # through the slice, and the next starts its order over.
+                    batch.turn(repo, pending)
+                    pr = left.pop(min(range(len(left)), key=lambda i: order(left[i])))
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
-                    snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
                     try:
@@ -366,20 +382,18 @@ def run_pass(kick, continuing=False):
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
-                # Swept only once it has every open PR's head: one whose look
-                # failed before then would have the sweep take what's theirs.
+                # A slice left part done goes on in the next batch, and its
+                # train steps only once every open PR was seen to.
                 if partial or batch.expired():
                     complete = False
                     batch.left = True
                     continue
-                # A partial traversal leaves all reviewer files alone. Once
-                # complete, include the snapshots carried from earlier batches
-                # before sweeping, just as a single complete pass does.
+                op = "train"
+                # Complete: the branches of the PRs seen to in earlier
+                # batches are in use too.
                 for pr in prs:
                     if pr not in pending:
                         in_use.update((pr["headRefName"], pr["baseRefName"]))
-                        snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
-                live[repo] = snaps
                 if why := batch.stopped(repo):
                     T.stop(repo, why)
                     # Receipts keep the train safe across batches; a fresh
@@ -393,6 +407,7 @@ def run_pass(kick, continuing=False):
                     # After its PRs, so the ones settled this pass are in it.
                     try:
                         T.step(repo)
+                        waits.passed(repo, op)
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
                         operations_complete = False
@@ -400,15 +415,20 @@ def run_pass(kick, continuing=False):
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
-                        waits.failed(repo)
+                        waits.failed(repo, op=op)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                else:
+                    waits.passed(repo, op)
+                op = "branches"
                 branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
+                waits.passed(repo, op)
             except Exception as e:
                 log(f"{repo}: {e}")
-                waits.failed(repo)
+                waits.failed(repo, op=op)
                 seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             upkeep(repo, mine)
+            waits.passed(repo, "upkeep")
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             if operations_complete:
@@ -456,12 +476,6 @@ def run_pass(kick, continuing=False):
         save("repos.json", coverage)
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
-    if not DRY:
-        for repo, snaps in live.items():
-            try:
-                V.sweep(repo, snaps)
-            except Exception as e:  # one repo's mustn't stop the rest, or the pass's end
-                log(f"{repo}: couldn't sweep what its reviewers left: {e}")
     if not complete:
         # Wake-ups are persisted before publishing GitHub issues: their
         # failure mustn't lose the remainder of this batch.

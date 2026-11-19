@@ -234,11 +234,11 @@ fn a_job_thats_over_is_answered_for_once() {
 #[test]
 fn comment_engine_comes_from_the_finished_turn() {
     for (engine, other, label, unsafe_field) in [
-        ("claude", "codex", "Claude", None),
-        ("codex", "claude", "Codex", None),
-        ("codex", "claude", "Claude", Some("turns")),
-        ("codex", "claude", "Claude", Some("2.engine")),
-        ("codex", "claude", "Claude", Some("traversal")),
+        ("claude", "gemini", "Claude", None),
+        ("gemini", "claude", "Unknown", None),
+        ("gemini", "claude", "Claude", Some("turns")),
+        ("gemini", "claude", "Claude", Some("2.engine")),
+        ("gemini", "claude", "Claude", Some("traversal")),
     ] {
         let jobs = tempfile::tempdir().unwrap();
         let dir = jobs.path().join("job-1");
@@ -253,11 +253,11 @@ fn comment_engine_comes_from_the_finished_turn() {
         }
         if let Some(field) = unsafe_field {
             if field == "traversal" {
-                std::fs::write(jobs.path().join("outside.engine"), "codex").unwrap();
+                std::fs::write(jobs.path().join("outside.engine"), "gemini").unwrap();
                 std::fs::write(dir.join("turns"), "../outside").unwrap();
             } else {
                 let outside = jobs.path().join("outside");
-                std::fs::write(&outside, if field == "turns" { "2" } else { "codex" }).unwrap();
+                std::fs::write(&outside, if field == "turns" { "2" } else { "gemini" }).unwrap();
                 std::fs::remove_file(dir.join(field)).unwrap();
                 std::os::unix::fs::symlink(&outside, dir.join(field)).unwrap();
             }

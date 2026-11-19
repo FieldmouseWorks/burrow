@@ -1,4 +1,5 @@
 //! Defaults and deadlines belong to the question, not to any one resume.
+use crate::record::{JobFile, Marker, TurnFile, TurnMarker};
 use crate::state_reads::write as swap;
 use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
@@ -129,10 +130,10 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     let state = |path: &std::path::Path| {
         crate::github_quota::state(path).map_err(|e| format!("{:?}", e.say))
     };
-    if state(&job.path("end.next"))?.is_some_and(|end| end != "ask") {
+    if state(&job.file(JobFile::EndNext))?.is_some_and(|end| end != "ask") {
         return Ok(None);
     }
-    let Some(text) = state(&job.path("ask.next"))? else {
+    let Some(text) = state(&job.file(JobFile::AskNext))? else {
         return Ok(None);
     };
     let pending: PendingRecommendation = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -145,7 +146,7 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
 /// The end marker commits the active declaration; only asks keep a pending
 /// recommendation. Recovery also checks the marker if cleanup was interrupted.
 pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
-    swap(job.path("end.next"), format!("{end}\n")).map_err(|e| e.to_string())?;
+    swap(job.file(JobFile::EndNext), format!("{end}\n")).map_err(|e| e.to_string())?;
     if end != "ask" {
         retire_pending(job)?;
     }
@@ -153,21 +154,21 @@ pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
 }
 
 pub(crate) fn retire_pending(job: &Job) -> Result<(), String> {
-    crate::state_reads::remove_durable(job.path("ask.next")).map_err(|e| e.to_string())
+    crate::state_reads::remove_durable(job.file(JobFile::AskNext)).map_err(|e| e.to_string())
 }
 
 /// Keep a superseding marker until the recommendation's absence is durable.
 /// If unlink or sync fails, recovery still sees the declaration that retired it.
 pub(crate) fn clear_declaration(job: &Job) -> Result<(), String> {
     retire_pending(job)?;
-    crate::state_reads::remove_durable(job.path("end.next")).map_err(|e| e.to_string())
+    crate::state_reads::remove_durable(job.file(JobFile::EndNext)).map_err(|e| e.to_string())
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
         return Err(USAGE.into());
     }
     swap(
-        job.path("ask.next"),
+        job.file(JobFile::AskNext),
         &serde_json::to_string(&PendingRecommendation {
             recommendation: recommendation.clone(),
             turn: job.turns().unwrap_or_default(),
@@ -203,7 +204,9 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             let text = job
                 .turns()
-                .and_then(|n| crate::state_reads::prefix(&job.turn(&n, "result"), 64000).ok())
+                .and_then(|n| {
+                    crate::state_reads::prefix(&job.turn_file(&n, TurnFile::Result), 64000).ok()
+                })
                 .map(|bytes| {
                     String::from_utf8_lossy(&bytes)
                         .trim_end_matches('\n')
@@ -318,24 +321,20 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             "No answer by {time}. The recommended answer was: {}\n\nThis action is one-way. I left the question open for the owner under the owner label and released the job's claim.\n",
             q.recommendation.default
         );
-        for (kind, value) in [
-            // Durable mark: this done is the timeout's, not the job's own.
-            ("timeout", "one-way\n"),
-            ("result", text.as_str()),
-            ("end", "done\n"),
-            ("outcome", "done\n"),
-        ] {
-            swap(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
+        // Durable mark: this done is the timeout's, not the job's own.
+        swap(job.turn_file(&ntext, TurnFile::Timeout), "one-way\n").map_err(|e| e.to_string())?;
+        swap(job.turn_file(&ntext, TurnFile::Result), text.as_str()).map_err(|e| e.to_string())?;
+        for m in [TurnMarker::End, TurnMarker::Outcome] {
+            crate::record::mark_turn(job, &ntext, m)
+                .write("done\n")
+                .map_err(|e| e.to_string())?;
         }
-        swap(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
+        swap(job.turn_file(&ntext, TurnFile::Jsonl), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
         job.set_turns(n).map_err(|e| e.to_string())?;
-        for path in [
-            host_path(job, "question"),
-            job.path("open-question"),
-            job.path("await"),
-        ] {
+        for path in [host_path(job, "question"), job.file(JobFile::OpenQuestion)] {
             let _ = fs::remove_file(path);
         }
+        let _ = crate::record::mark(job, Marker::Await).remove_file();
         drop(registry);
         if let Some(inbox) = &cfg.inbox {
             for entry in fs::read_dir(&inbox.state).into_iter().flatten().flatten() {
@@ -345,7 +344,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
                 }
             }
         }
-        let kicks = crate::turn::lines(&job.path("kick"));
+        let kicks = crate::turn::lines(&job.file(JobFile::Kick));
         crate::job::kick(cfg, kicks);
         crate::job::kick(cfg, vec!["autoland".into()]);
         crate::scratch::clear(cfg, job.id);
