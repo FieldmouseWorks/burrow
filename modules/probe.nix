@@ -2,7 +2,7 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `why OWNER/REPO#N`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
@@ -188,7 +188,6 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = probeWake;
-      environment.BURROW_DOOR_METER = config.burrow.github.doorMeter (config.burrow.github.appOf cfg.gh) cfg.repo;
       environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
@@ -208,7 +207,7 @@ in
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
-      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `why OWNER/REPO#N`, `deployed`,
       `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';

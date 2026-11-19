@@ -6,7 +6,7 @@
 //!                          watch file, and kick the watchdog when what's in
 //!                          it changed (the service, burrow-units.service)
 //! burrow-units watch       follow the journal, asking for a pass each time a
-//!                          unit fails or a program dumps core
+//!                          unit fails, recovers or a program dumps core
 //!                          (burrow-units-watch.service)
 //! burrow-units             ask for a pass
 //! burrow-units clear EXE.. mark those programs' crashes so far dealt with
@@ -37,19 +37,22 @@ use burrow_watchdog::now;
 use burrow_watchdog::watch::{File as Watch, read};
 
 /// The journal entries that start a pass: systemd's own (pid 1's) word that
-/// a service or socket failed, or that a start job failed (any unit); and
-/// systemd-coredump's that a program dumped core. A user's manager says
-/// the same of its own units, which aren't the machine's.
-const FOLLOW: [&str; 5] = [
-    "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c",
-    "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d",
+/// a service or socket failed, a start job failed, or a unit recovered;
+/// and systemd-coredump's that a program dumped core. A user's manager
+/// says the same of its own units, which aren't the machine's. Starting
+/// alone is no recovery: repeated failed starts must keep the same stall.
+const FOLLOW: [&str; 7] = [
+    "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c", // UNIT_FAILURE_RESULT
+    "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d", // UNIT_FAILED
+    "MESSAGE_ID=39f53479d3a045ac8e11786248231fbf", // UNIT_STARTED
+    "MESSAGE_ID=7ad2d189f7e94e70a38c781354912448", // UNIT_SUCCESS
     "_PID=1",
     "+",
     "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
 ];
-/// Units whose failures start no pass: its own, since a pass that keeps
-/// failing would otherwise ask for another for ever. The hourly catch-up
-/// still sees them failed.
+/// Units whose state changes start no pass: its own, since a pass's
+/// completion would otherwise ask for another for ever. The hourly
+/// catch-up still sees them failed.
 const OWN: [&str; 2] = ["burrow-units.service", "burrow-units-watch.service"];
 /// How long a burst of entries (a unit failing takes its dependents with
 /// it) is gathered into one ask.
@@ -210,7 +213,7 @@ fn gather(rx: &mpsc::Receiver<()>, within: Duration) {
 }
 
 /// Whether a journal entry (journalctl's JSON) asks for a pass: any but
-/// one about burrow-units' own units, the unit that failed (`UNIT`) or
+/// one about burrow-units' own units, the unit that changed (`UNIT`) or
 /// the one a program that dumped core ran in (`COREDUMP_UNIT`, a pass's
 /// own tools included).
 fn starts_a_pass(entry: &str) -> bool {
@@ -368,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn its_own_units_failing_start_no_pass() {
+    fn its_own_units_changing_state_start_no_pass() {
         assert!(starts_a_pass(
             r#"{"UNIT":"backup.service","MESSAGE_ID":"d9b373ed55a64feb8242e02dbe79a49c"}"#
         ));
@@ -383,6 +386,15 @@ mod tests {
         assert!(starts_a_pass("not json"));
         for own in OWN {
             assert!(!starts_a_pass(&format!(r#"{{"UNIT":"{own}"}}"#)), "{own}");
+            // Watching successful completions must not make each pass
+            // schedule another one when its own service finishes.
+            for id in [
+                "39f53479d3a045ac8e11786248231fbf",
+                "7ad2d189f7e94e70a38c781354912448",
+            ] {
+                let completed = format!(r#"{{"UNIT":"{own}","MESSAGE_ID":"{id}"}}"#);
+                assert!(!starts_a_pass(&completed), "{completed}");
+            }
             let dumped =
                 format!(r#"{{"COREDUMP_EXE":"/bin/coredumpctl","COREDUMP_UNIT":"{own}"}}"#);
             assert!(!starts_a_pass(&dumped), "{own}");

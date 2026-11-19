@@ -1,5 +1,6 @@
 //! Persist issues awaiting sorting admission or verdict application. Successful issue lists
 //! retire vanished issues; project discovery retires removed repositories.
+use super::record::files;
 use super::{Pass, key, raw};
 use crate::{Fail, io_fail, read};
 use serde_json::Value;
@@ -7,7 +8,7 @@ use std::{fs, path::PathBuf};
 
 impl Pass<'_> {
     fn planner_wait_records(&self) -> Vec<(String, String, PathBuf)> {
-        fs::read_dir(self.inbox.state.join(".triage-waiting"))
+        fs::read_dir(files::sorting_waits(&self.inbox.state))
             .into_iter()
             .flatten()
             .filter_map(|entry| {
@@ -50,7 +51,7 @@ impl Pass<'_> {
     /// sorting admission or verdict application: in the journal, and in `.triage-waiting/KEY-N` for the
     /// snapshot.
     pub(super) fn planner_wait(&self, repo: &str, n: &str, why: Option<&str>) {
-        let dir = self.inbox.state.join(".triage-waiting");
+        let dir = files::sorting_waits(&self.inbox.state);
         let repo_key = key(repo).to_lowercase();
         let f = dir.join(format!("{repo_key}-{n}"));
         let variants: Vec<_> = self

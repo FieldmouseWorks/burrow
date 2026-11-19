@@ -8,7 +8,7 @@
 //!   ranking), with the priority, pipeline repo and age that put each there.
 //! - **line**: every turn waiting in line for a slot ([`crate::slot`]).
 //! - **slots**: every slot proj knows of: the shared line's (`claude`), the
-//!   one `unstick` slot, Codex's pool, the drain's `drainJobs` and the
+//!   one `unstick` slot, the drain's `drainJobs` and the
 //!   sorting jobs' `atOnce`, and the machine's heavy slots. Each says what
 //!   holds it (job, repo, issue or PR, role, engine, model, effort), since
 //!   when, and how that holder stands: running, queued, parked on an await,
@@ -24,6 +24,7 @@
 //! Its JSON schema is generated from these types and checked in beside the
 //! crate (`state.schema.json`); a test fails when the two differ.
 
+use crate::record::{JobFile, TurnFile};
 use std::fs;
 
 use schemars::JsonSchema;
@@ -32,8 +33,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::host_jobs::View;
-use crate::job::{Job, awaits};
+use crate::job::Job;
 use crate::pick::demoted;
+use crate::record::Wait;
 use crate::turn::lines;
 use crate::{Fail, io_fail, mtime, now, read, usage};
 
@@ -109,8 +111,6 @@ pub enum SlotKind {
     Claude,
     /// The one slot past `maxJobs` for jobs run --unstick.
     Unstick,
-    /// One of Codex's own pool.
-    Codex,
     /// One of the drain's `drainJobs`: an issue it handed on, until that
     /// issue's record goes.
     Drain,
@@ -488,20 +488,15 @@ fn recent(cfg: &Config, limit: usize, view: View) -> Result<Vec<JobRow>, Fail> {
         .collect())
 }
 
-/// A job's row, from its own records alone.
+/// A job's row: its record ([`crate::record`]) printed, with what it runs
+/// as and its latest answer.
 pub(crate) fn row(job: &Job, view: View) -> JobRow {
-    let state = job.state();
+    // The parts of its record a row prints, derived as the record is.
     let n = job.turns().unwrap_or_default();
-    let waiting_in_line = if state == "running" {
-        lines(&job.turn(&n, "wait"))
-            .iter()
-            .map(|l| l.split('\t').nth(1).unwrap_or(l).to_owned())
-            .filter(|w| !w.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    let stage = crate::record::stage(job);
+    let waits = crate::record::stage_waits(job, &stage, &n);
+    let result =
+        crate::state_reads::bytes(&crate::record::result_file(job, &n)).unwrap_or_default();
     // A shortened credential may lose its closing delimiter. The bridge's
     // view redacts the complete answer first, while it still has its
     // logical boundaries.
@@ -515,22 +510,27 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
     }
     JobRow {
         id: job.id.to_owned(),
-        parked_for: if state == "parked" {
-            crate::policy::waits_for(job)
-        } else {
-            None
-        },
-        vm: lines(&job.path("agent")),
-        apps: lines(&job.path("app")),
+        parked_for: waits.iter().find_map(|w| match w {
+            Wait::Policy(what) => what.clone(),
+            _ => None,
+        }),
+        vm: lines(&job.file(JobFile::Agent)),
+        apps: lines(&job.file(JobFile::App)),
         demoted: demoted(job.cfg, &job.dir),
-        waiting_in_line,
-        awaits: awaits(&read(&job.path("await")).unwrap_or_default())
+        waiting_in_line: waits
+            .iter()
+            .filter_map(|w| match w {
+                Wait::Line { what, .. } => Some(what.clone()),
+                _ => None,
+            })
+            .collect(),
+        awaits: crate::record::awaited(job)
             .into_iter()
             .map(|a| a.target)
             .collect(),
-        ends: lines(&job.turn(&n, "end")),
+        ends: crate::record::ends(job, &n),
         answer: String::from_utf8_lossy(&result[..cut]).replace('\n', " "),
-        state,
+        state: stage.to_string(),
     }
 }
 
@@ -545,7 +545,8 @@ pub(crate) fn job_slot(
     at: i64,
 ) -> Slot {
     let job = Job::new(cfg, id);
-    let Some(facts) = job.facts() else {
+    let record = crate::record::derive(&job);
+    let Some(facts) = record.facts else {
         // Made, its first turn not written yet.
         return Slot {
             holder: Some(Holder {
@@ -556,11 +557,10 @@ pub(crate) fn job_slot(
             ..held(kind, name, SlotState::Starting, mtime(&job.dir), at)
         };
     };
-    let asked = job
-        .holds()
-        .unwrap_or_default()
+    let asked = record
+        .wait
         .iter()
-        .any(|h| h == "ask" || h == "owner");
+        .any(|w| matches!(w, Wait::Ask | Wait::Owner));
     let since_await = facts
         .awaits
         .iter()
@@ -577,13 +577,13 @@ pub(crate) fn job_slot(
     Slot {
         holder: Some(Holder {
             job: Some(id.to_owned()),
-            project: read(&job.path("project")).filter(|p| !p.is_empty()),
+            project: read(&job.file(JobFile::Project)).filter(|p| !p.is_empty()),
             issue: facts.link.clone().or(issue),
-            role: read(&job.path("role")).filter(|r| !r.is_empty()),
+            role: read(&job.file(JobFile::Role)).filter(|r| !r.is_empty()),
             class: None,
-            engine: read(&job.turn(n, "engine")).and_then(|e| Engine::parse(&e).ok()),
-            model: read(&job.turn(n, "model")).filter(|m| !m.is_empty()),
-            effort: read(&job.turn(n, "effort")).filter(|e| !e.is_empty()),
+            engine: read(&job.turn_file(n, TurnFile::Engine)).and_then(|e| Engine::parse(&e).ok()),
+            model: read(&job.turn_file(n, TurnFile::Model)).filter(|m| !m.is_empty()),
+            effort: read(&job.turn_file(n, TurnFile::Effort)).filter(|e| !e.is_empty()),
             awaits: facts.awaits.iter().map(|(t, _)| t.clone()).collect(),
         }),
         ..held(kind, name, state, since.filter(|s| *s > 0), at)
@@ -611,7 +611,7 @@ pub(crate) fn held(
 /// Latest engine and installation readings and their holds.
 fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
     use burrow_usage_reset::meter::{FRESH, Snapshot as Read, Span};
-    [Engine::Claude, Engine::Codex]
+    [Engine::Claude]
         .into_iter()
         .map(|engine| {
             let reading = cfg
@@ -671,20 +671,6 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
-/// The issues the inbox says wait for sorting, each with why.
-fn waiting(cfg: &Config) -> Vec<String> {
-    let Some(i) = cfg.inbox.as_ref() else {
-        return Vec::new();
-    };
-    let mut lines: Vec<String> = std::fs::read_dir(i.state.join(".triage-waiting"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| crate::read(&e.ok()?.path()))
-        .collect();
-    lines.sort();
-    lines
-}
-
 fn holds(cfg: &Config) -> Holds {
     Holds {
         paused: cfg.paused_repos(),
@@ -701,7 +687,7 @@ fn holds(cfg: &Config) -> Holds {
                 drain: t.drain,
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
-                waiting: waiting(cfg),
+                waiting: crate::inbox::record::sorting_waits(cfg),
             }),
     }
 }

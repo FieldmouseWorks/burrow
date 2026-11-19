@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{Config, Overrides};
 use crate::pass::Out;
-use crate::testing::{Hub, States, T, answer, config, limited, look};
+use crate::testing::{Hub, States, T, answer, config, look};
 use serde_json::json;
 
 const LABELS: [&str; 8] = [
@@ -761,7 +761,7 @@ fn the_baseline_requires_the_trains_status_exactly_while_its_train_is_on() {
         made["rules"][3]["parameters"]["required_status_checks"],
         both
     );
-    assert_eq!(made["bypass_actors"], json!([]));
+    assert_eq!(made["bypass_actors"], owner_bypass("pull_request"));
     let mut hub = github(&cfg);
     let rules = |required: Value| {
         json!([required_rule(false, required), {"type": "deletion"}, {"type": "non_fast_forward"},
@@ -773,12 +773,7 @@ fn the_baseline_requires_the_trains_status_exactly_while_its_train_is_on() {
         (on, both.clone(), None),
         (off, checks(&SETTLED), None),
     ] {
-        let bypass = if train.train {
-            json!([])
-        } else {
-            owner_bypass("pull_request")
-        };
-        let rs = ruleset("baseline", rules(had), bypass);
+        let rs = ruleset("baseline", rules(had), owner_bypass("pull_request"));
         hub.on("GET", "repos/sam/r/rulesets/1$", answer(200, rs.clone()));
         let mut jobs = States::new("running");
         let (_, ok) = look(&cfg, &mut hub, &mut jobs, 0.0, |p| {
@@ -833,7 +828,7 @@ fn the_baseline_requires_the_trains_status_exactly_while_its_train_is_on() {
 }
 
 #[test]
-fn an_old_baseline_gets_the_rules_it_lacks_and_its_bypass_follows_the_train() {
+fn an_old_baseline_gets_the_rules_it_lacks_and_keeps_the_owners_bypass() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = config(tmp.path());
     let off = cfg.settle.defaults;
@@ -852,7 +847,7 @@ fn an_old_baseline_gets_the_rules_it_lacks_and_its_bypass_follows_the_train() {
     };
     // One from before the train (made while it pushed directly: only the
     // first two rules, the owner bypassing always) has no required checks
-    // to add the train's to: it gets the rules it lacks, and no bypass.
+    // to add the train's to: it gets the rules it lacks, bypass as it was.
     let old = ruleset(
         "baseline",
         json!([{"type": "deletion"}, {"type": "non_fast_forward"}]),
@@ -879,8 +874,18 @@ fn an_old_baseline_gets_the_rules_it_lacks_and_its_bypass_follows_the_train() {
         sent[0]["rules"][3]["parameters"]["required_status_checks"],
         checks(&[("review-settled", 7), ("conary/train", 7)])
     );
-    assert_eq!(sent[0]["bypass_actors"], json!([]));
-    // Its bypass comes back with the train off.
+    assert_eq!(sent[0]["bypass_actors"], owner_bypass("always"));
+    // The owner's bypass comes back with the train on too.
+    let rs = ruleset(
+        "baseline",
+        json!([required_rule(false, checks(&[("review-settled", 7), ("conary/train", 7)])), {"type": "deletion"}, {"type": "non_fast_forward"},
+               {"type": "pull_request", "parameters": {}}]),
+        json!([]),
+    );
+    hub.on("GET", "repos/sam/r/rulesets/1$", answer(200, rs));
+    let sent = keep_one(&mut hub, on);
+    assert_eq!(sent[0]["bypass_actors"], owner_bypass("pull_request"));
+    // And with the train off.
     let rs = ruleset(
         "baseline",
         json!([required_rule(false, checks(&SETTLED)), {"type": "deletion"}, {"type": "non_fast_forward"},
@@ -950,9 +955,18 @@ fn github_not_saying_what_the_repo_is_fails_its_settings_and_keeps_its_labels() 
         (json!(LABELS), None)
     );
     // A rate limit is noted, for the pass.
-    hub.on("GET", "repos/sam/r$", limited(T + 60.0));
+    let limit = json!({"message": "API rate limit exceeded for installation"});
+    hub.on("GET", "repos/sam/r$", answer(403, limit));
+    hub.on(
+        "GET",
+        "rate_limit$",
+        answer(
+            200,
+            json!({"resources": {"core": {"remaining": 0, "reset": T + 60.0}}}),
+        ),
+    );
     let (_, out) = settle_at(&cfg, &mut hub, &public(), 60.0);
-    assert_eq!(out.until(), Some(T + 60.0));
+    assert_eq!(out.limited, Some(T + 60.0));
 }
 
 #[test]

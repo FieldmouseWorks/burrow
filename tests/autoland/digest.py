@@ -57,7 +57,7 @@ def fresh(enable=True, app=True, labels=None):
     LABELS.clear()
     fresh_pr_state()
     GH.update(fail="")
-    R.CFG["inbox"] = {"enable": enable, "labels": {"claude": "claude", "codex": "codex"} if labels is None else labels,
+    R.CFG["inbox"] = {"enable": enable, "labels": {"claude": "claude"} if labels is None else labels,
                       "unstickLabel": "unstick", "postingAccountId": 2,
                       "authors": [{"login":"sam","id":1}] + ([{"login":"steward[bot]","id":2}] if app else [])}
 
@@ -81,7 +81,7 @@ DIGEST = [
     ("Outside contributions", "sam/r#1", "Outside contribution: Sam reviews and merges it"),
     ("Labelled needs-owner", "sam/r#2", ""),
     ("Judged yours to decide", "sam/r#7", "a Claude job judged it Sam's"),
-    ("Rival couldn't review it", "sam/r#3", "rival exited 1 (journalctl -u autoland-review)"),
+    ("Codex hasn't reviewed it", "sam/r#3", "no review of aaaaaaa after 130 minutes (its usage, or the connector's setup)"),
     ("Couldn't merge", "sam/r#4", "GitHub keeps refusing the merge (journalctl -u autoland)"),
     ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
 ]
@@ -175,13 +175,13 @@ later(moved)
 assert said(9) == [], CALLS
 # A comment GitHub doesn't take is tried again, and once only.
 GH["fail"] = "comment"
-again = moved + [("A review couldn't be posted", "sam/r#6", "Rival, 3 tries")]
+again = moved + [("Codex hasn't reviewed it", "sam/r#6", "no review of bbbbbbb after 125 minutes")]
 later(again)
-assert said(9) == ["New:\n- A review couldn't be posted: sam/r#6: Rival, 3 tries"], CALLS
+assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb after 125 minutes"], CALLS
 GH["fail"] = ""
 CALLS.clear()
 R.publish(again)
-assert said(9) == ["New:\n- A review couldn't be posted: sam/r#6: Rival, 3 tries"], CALLS
+assert said(9) == ["New:\n- Codex hasn't reviewed it: sam/r#6: no review of bbbbbbb after 125 minutes"], CALLS
 later(again)
 assert said(9) == [], CALLS
 
@@ -231,9 +231,9 @@ R.log = log_kept
 R.CFG["notify"]["repo"] = "sam/notes"
 
 # Labels only enroll machine issues; the inbox's stuck role chooses the engine.
-fresh(labels={"codex": "codex"})
+fresh(labels={"claude": "claude"})
 R.publish(DIGEST)
-assert made("codex")["--label"] == ["codex", "unstick"], CALLS
+assert made("claude")["--label"] == ["claude", "unstick"], CALLS
 
 # No enrollment label leaves the work with the owner and retires the old issue.
 fresh(labels={})

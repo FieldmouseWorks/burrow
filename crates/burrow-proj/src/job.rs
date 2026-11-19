@@ -24,6 +24,12 @@
 //! `N.quiet` and `N.stopped` (what stopped it). And `await` (each PR or
 //! issue an ended turn awaits: TARGET, since, its fingerprint then, a tab
 //! apart), with the running turn's own in `await.next` and `end.next`.
+//!
+//! Where each of them is, [`crate::record`]'s alone says: the markers that
+//! say where it stands (its turns, slot, outcome, end, ended, stopped,
+//! deadline, wait, await, unstick and transfer) only through its facts and
+//! its write-only `Mark`, the rest by [`crate::record::JobFile`] and
+//! [`crate::record::TurnFile`].
 
 use std::fs::{self, File};
 use std::io;
@@ -38,9 +44,9 @@ pub(crate) use request::Request;
 mod locking_tests;
 
 use crate::config::Config;
-use crate::engine::last_result;
+use crate::record::{JobFile, TurnFile};
 use crate::waits::Facts;
-use crate::{filled, mtime, now, read, systemd, usage};
+use crate::{read, systemd};
 
 /// Numeric owner of a per-turn artifact, including temporary writes.
 pub(crate) fn turn_number(name: &str) -> Option<u64> {
@@ -83,24 +89,9 @@ impl<'a> Job<'a> {
         }
     }
 
-    pub fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
-    }
-
-    /// Turn N's file of this kind: N.slot, N.jsonl...
-    pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
-        let n = if valid_turn(n) { n } else { "invalid-turn" };
-        if (kind.starts_with("retry-") && kind != "retry-wake") || kind == "execution" {
-            crate::ask::host_path(self, &format!("{n}.{kind}"))
-        } else {
-            self.dir.join(format!("{n}.{kind}"))
-        }
-    }
-
     /// The engine recorded for this turn, including jobs that changed engines.
     pub fn engine_label(&self, n: &str) -> &'static str {
-        match read(&self.turn(n, "engine")).as_deref() {
-            Some("codex") => "Codex",
+        match read(&self.turn_file(n, TurnFile::Engine)).as_deref() {
             Some("claude") | None => "Claude",
             _ => "Unknown",
         }
@@ -109,9 +100,12 @@ impl<'a> Job<'a> {
     /// What turn N runs on, in its N.engine, N.model and N.effort: no model
     /// or effort file for the engine's own.
     pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) -> io::Result<()> {
-        crate::state_reads::write(self.turn(n, "engine"), choice.engine.name())?;
-        for (kind, said) in [("model", &choice.model), ("effort", &choice.effort)] {
-            let path = self.turn(n, kind);
+        crate::state_reads::write(self.turn_file(n, TurnFile::Engine), choice.engine.name())?;
+        for (kind, said) in [
+            (TurnFile::Model, &choice.model),
+            (TurnFile::Effort, &choice.effort),
+        ] {
+            let path = self.turn_file(n, kind);
             match said {
                 Some(v) => crate::state_reads::write(path, v)?,
                 None => match crate::state_reads::remove(path) {
@@ -121,17 +115,6 @@ impl<'a> Job<'a> {
             }
         }
         Ok(())
-    }
-
-    /// The latest turn's number, as written; None before the first.
-    pub fn turns(&self) -> Option<String> {
-        read(&self.path("turns")).filter(|n| valid_turn(n))
-    }
-
-    /// Swapped in whole, so a reader never finds it missing or half written.
-    pub fn set_turns(&self, n: u64) -> io::Result<()> {
-        crate::ask::ensure(self).map_err(io::Error::other)?;
-        crate::state_reads::write(self.path("turns"), format!("{n}\n"))
     }
 
     /// Before publishing another turn, remove every artifact beyond the last
@@ -148,7 +131,7 @@ impl<'a> Job<'a> {
         if future.is_empty() {
             return Ok(());
         }
-        let root = self.path(".unstarted");
+        let root = self.file(JobFile::Unstarted);
         fs::create_dir_all(&root)?;
         let attempt = tempfile::Builder::new()
             .prefix("attempt-")
@@ -210,144 +193,31 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// [`Job::read_lock`], unless a turn is starting or being stopped right
+    /// now: None then, without waiting.
+    pub(crate) fn try_read_lock(&self) -> io::Result<Option<JobLock>> {
+        let f = self.lock_file()?;
+        match f.try_lock_shared() {
+            Ok(()) => Ok(Some(JobLock(f))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     fn lock_file(&self) -> io::Result<File> {
-        crate::state_reads::append(&self.path("lock"))
+        crate::state_reads::append(&self.file(JobFile::Lock))
     }
 
-    /// Jobs from before each turn kept its own files have the last turn's
-    /// slot, outcome and answer unnumbered (a turn that ran across that
-    /// update writes them there too, once it ends). They're turn N's if
-    /// they're no older than its prompt; anything older is an earlier
-    /// turn's, and goes.
-    pub fn adopt(&self) {
-        let Some(n) = self.turns() else { return };
-        let prompt = mtime_of(&self.path(&format!("prompt.{n}")));
-        for f in ["slot", "outcome", "result"] {
-            let old = self.path(f);
-            let Some(t) = mtime_of(&old) else { continue };
-            let newer = prompt.is_some_and(|p| p > t);
-            // A turn still running the old code reads its outcome back once
-            // it has written it, so that one stays until it has ended.
-            if f == "outcome" && !newer && !systemd::gone(self.cfg, &self.unit()) {
-                continue;
-            }
-            let numbered = self.turn(&n, f);
-            if !numbered.exists() && !newer {
-                let _ = fs::rename(&old, &numbered);
-            } else {
-                let _ = fs::remove_file(&old);
-            }
-        }
-    }
-
-    /// What `proj state` says: queued while a transfer is pending, otherwise
-    /// queued or running while its unit is up (as
-    /// its latest turn has a slot or not), then how that turn ended, as it
-    /// wrote it, or failed when it wrote nothing.
-    pub(crate) fn retry_completed(&self, n: &str) -> bool {
-        filled(&self.turn(n, "outcome")) && !self.turn(n, "retry-startup-failed").exists()
-    }
-
-    pub(crate) fn retry_pending(&self, n: &str) -> bool {
-        self.turn(n, "retry-migration").exists()
-            && !self.turn(n, "stopped").exists()
-            && !self.retry_completed(n)
-    }
-
+    /// What `proj state` says: its record's stage, as [`crate::record`]
+    /// derives it.
     pub fn state(&self) -> String {
-        if crate::policy::parked(self) {
-            return "parked".into();
-        }
-        self.adopt();
-        let n = self.turns().unwrap_or_default();
-        if self.retry_pending(&n) {
-            return "queued".into();
-        }
-        if systemd::active(self.cfg, &self.unit()) {
-            if self.turn(&n, "slot").exists() {
-                "running".into()
-            } else {
-                "queued".into()
-            }
-        } else if filled(&self.turn(&n, "outcome")) {
-            read(&self.turn(&n, "outcome")).unwrap_or_default()
-        } else {
-            "failed".into()
-        }
-    }
-
-    /// Whether turn N, the latest, was cut off: its whole unit killed (by oomd,
-    /// as a rule), not stopped, with no answer or error but its session in its
-    /// stream, and not a sandbox's, whose VM may outlive it. Under the job's
-    /// lock.
-    pub fn cut_off(&self, n: &str) -> bool {
-        self.turns().as_deref() == Some(n)
-            && self.state() == "failed"
-            && !filled(&self.turn(n, "outcome"))
-            && !self.turn(n, "stopped").exists()
-            && Request::load(self).is_ok_and(|r| r.agent.is_none())
-            && crate::engine::stream_names_session(&self.turn(n, "jsonl"), 0)
-            && last_result(&self.turn(n, "jsonl"), 0).is_none()
-    }
-
-    /// How turn N ended, for its log: its outcome, or failed when it has
-    /// none and isn't going (its unit stopped, or killed with it, before it
-    /// wrote one), as `proj state` says. None while it's queued or running,
-    /// a second run included, or for an earlier turn from before turns kept
-    /// their outcomes (it has no slot either). Looked at under the lock
-    /// turns start under, so no turn starts halfway through and has its
-    /// state told as turn N's.
-    pub fn ended(&self, n: &str) -> Option<String> {
-        let lock = self.lock_file().ok()?;
-        lock.lock_shared().ok()?;
-        self.adopt();
-        if self.turns().as_deref() == Some(n) && self.retry_pending(n) {
-            None
-        } else if filled(&self.turn(n, "outcome")) {
-            read(&self.turn(n, "outcome"))
-        } else if self.turns().as_deref() == Some(n) {
-            (!systemd::active(self.cfg, &self.unit())).then(|| "failed".into())
-        } else if self.turn(n, "slot").exists() {
-            Some("failed".into())
-        } else {
-            None
-        }
+        crate::record::stage(self).to_string()
     }
 
     /// Whether the unit that ends its turns (`_ended`) is still to run, or
     /// running.
     pub fn end_pending(&self) -> bool {
         !systemd::show(self.cfg, &self.end_unit(), "Job").is_empty()
-    }
-
-    /// When a turn killed before it could write its outcome ended (what kills
-    /// its whole cgroup takes everything in it along), from outside that
-    /// cgroup: its `_ended`'s first act. Only `_ended` writes it, and a new turn
-    /// waits out the last one's `_ended` before it's written, so this is always
-    /// the turn that just ended, and no look at a turn being started can leave
-    /// it on a live one. Kept once written, so nothing moves it.
-    pub fn mark_ended(&self) {
-        let Some(n) = self.turns() else { return };
-        if !self.turn(&n, "outcome").exists() && !self.turn(&n, "ended").exists() {
-            let _ = crate::state_reads::write(self.turn(&n, "ended"), "");
-        }
-    }
-
-    /// When turn N ended, in seconds; 0 while it's going. When it wrote its
-    /// outcome, or when [`Job::mark_ended`] saw it had. A look that finds neither
-    /// is one in the moment before its `_ended` (now, which that then fixes), or
-    /// at a turn being started, or one whose `_ended` never ran (the machine went
-    /// down): its last write is all that's known, and looking again doesn't move
-    /// it.
-    fn ended_at(&self, n: &str, state: &str, pending: impl FnOnce() -> bool) -> i64 {
-        if matches!(state, "queued" | "running") {
-            return 0;
-        }
-        let first = |files: &[PathBuf]| files.iter().find_map(|p| mtime(p));
-        first(&[self.turn(n, "outcome"), self.turn(n, "ended")])
-            .or_else(|| pending().then(now))
-            .or_else(|| first(&[self.turn(n, "jsonl"), self.path(&format!("prompt.{n}"))]))
-            .unwrap_or(0)
     }
 
     /// How it stands and what it holds open, read together under
@@ -360,38 +230,8 @@ impl<'a> Job<'a> {
     pub fn lifecycle(&self) -> Result<(String, Vec<String>), String> {
         let _held = self
             .read_lock()
-            .map_err(|e| format!("{}: {e}", self.path("lock").display()))?;
-        let state = self.state();
-        let mut held = self.holds()?;
-        held.extend(self.limit_holds(&state));
-        Ok((state, held))
-    }
-
-    /// What a quota or usage limit holds a turn for, a line each, as
-    /// [`Job::lifecycle`] adds it to [`Job::holds`].
-    fn limit_holds(&self, state: &str) -> Vec<String> {
-        let mut held = Vec::new();
-        if let Some(facts) = self.facts() {
-            if let Some((_, reset)) = facts.quota_reset {
-                held.push(format!("quota GitHub {reset}"));
-            }
-            let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
-                (state == "queued")
-                    .then(|| facts.spent.map(|s| s.release()))
-                    .flatten()
-            });
-            if matches!(state, "queued" | "running")
-                && let Some(release) = usage::last_release(self.cfg)
-                && self.engine_label(&facts.turn) == "Claude"
-            {
-                held.push(format!("released Claude {release}"));
-            }
-            if let Some(reset) = reset {
-                let engine = self.engine_label(&facts.turn);
-                held.push(format!("usage {engine} {reset}"));
-            }
-        }
-        held
+            .map_err(|e| format!("{}: {e}", self.file(JobFile::Lock).display()))?;
+        crate::record::derive(self).lifecycle()
     }
 
     /// Keeps the latest turn's answers as it left them, beside what it held
@@ -404,152 +244,48 @@ impl<'a> Job<'a> {
     /// absent one.
     pub fn capture(&self) -> Result<(), String> {
         let Some(n) = self.turns() else { return Ok(()) };
-        if self.turn(&n, "captured").exists() {
+        if self.turn_file(&n, TurnFile::Captured).exists() {
             return Ok(());
         }
         let failed = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
-        match crate::state_reads::bytes(&self.path("answers.json")) {
+        match crate::state_reads::bytes(&self.file(JobFile::AnswersJson)) {
             Ok(text) => {
-                let mut held = self.holds()?;
-                held.extend(self.limit_holds(&self.state()));
-                let holds = self.turn(&n, "holds");
+                let (_, held) = crate::record::derive(self).lifecycle()?;
+                let holds = self.turn_file(&n, TurnFile::Holds);
                 crate::state_reads::write(&holds, held.join("\n"))
                     .map_err(|e| failed(&holds, &e))?;
-                let answers = self.turn(&n, "answers");
+                let answers = self.turn_file(&n, TurnFile::Answers);
                 crate::state_reads::write(&answers, text).map_err(|e| failed(&answers, &e))?;
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(failed(&self.path("answers.json"), &e)),
+            Err(e) => return Err(failed(&self.file(JobFile::AnswersJson), &e)),
         }
-        let done = self.turn(&n, "captured");
+        let done = self.turn_file(&n, TurnFile::Captured);
         crate::state_reads::write(&done, "").map_err(|e| failed(&done, &e))
     }
 
-    /// What it holds open, whatever its latest turn's outcome (a failed
-    /// resume leaves its question, and its deadline resumes it), a line
-    /// each: `ask` while its question waits for a person (their reply
-    /// resumes it, and so does a reversible one's deadline, with its
-    /// default: ask::expire), `owner` once a one-way one's deadline has
-    /// passed and it's left for the owner (only their reply resumes it), and
-    /// `await TARGET` for each PR or issue it awaits (proj-watch resumes it
-    /// once one changes). A job that holds anything is still at work. proj
-    /// stop clears all of it. An error when a record that would say can't be
-    /// read: only one that isn't there holds nothing. `retry` holds a committed
-    /// transfer open until it resumes or cancellation succeeds.
+    /// What it holds open, whatever its latest turn's outcome, a line each
+    /// as `proj lifecycle` prints them: its record's waits that a turn
+    /// holds open ([`crate::record::Wait::held`]). A job that holds anything
+    /// is still at work. An error when a record that would say can't be
+    /// read: only one that isn't there holds nothing.
     pub fn holds(&self) -> Result<Vec<String>, String> {
-        let text = |path: &Path| match crate::state_reads::bytes(path) {
-            Ok(b) => Ok(Some(
-                String::from_utf8_lossy(&b)
-                    .trim_end_matches('\n')
-                    .to_owned(),
-            )),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        };
-        let there = |path: &Path| {
-            path.try_exists()
-                .map_err(|e| format!("{}: {e}", path.display()))
-        };
-        let mut held = Vec::new();
-        if self.turns().is_some_and(|n| self.retry_pending(&n)) {
-            held.push("retry".into());
-        }
-        let asked = match text(&self.path("turns"))?.filter(|n| valid_turn(n)) {
-            Some(n) => {
-                !there(&self.turn(&n, "stopped"))?
-                    && text(&self.turn(&n, "end"))?.as_deref() == Some("ask")
-            }
-            None => false,
-        };
-        let question = text(&crate::ask::host_path(self, "question"))?.is_some();
-        if text(&crate::ask::host_path(self, "question-needs-owner"))?.is_some() {
-            held.push("owner".to_owned());
-        } else if asked || question {
-            held.push("ask".to_owned());
-        }
-        for a in awaits(&text(&self.path("await"))?.unwrap_or_default()) {
-            if !a.target.trim().is_empty() {
-                held.push(format!("await {}", a.target.trim()));
-            }
-        }
-        Ok(held)
+        Ok(crate::record::holds(self)?
+            .iter()
+            .filter_map(crate::record::Wait::line)
+            .collect())
     }
 
-    /// What the stall watchdog's look reads of the latest turn; None before
-    /// the first.
+    /// What the stall watchdog's look reads of the latest turn, as its
+    /// record has it; None before the first.
     pub fn facts(&self) -> Option<Facts> {
-        let n = self.turns()?;
-        let state = self.state();
-        let prompt = self.path(&format!("prompt.{n}"));
-        let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
-        Some(Facts {
-            id: self.id.to_owned(),
-            owned: Request::load(self).is_ok_and(|r| r.owned),
-            unstick: self.path("unstick").exists(),
-            stopped: self.turn(&n, "stopped").exists(),
-            end: opt(self.turn(&n, "end")),
-            link: opt(self.path("link")),
-            queued: mtime(&prompt).unwrap_or(0),
-            slot: if self.retry_pending(&n) {
-                0
-            } else {
-                mtime(&self.turn(&n, "slot")).unwrap_or(0)
-            },
-            ended: self.ended_at(&n, &state, || self.end_pending()),
-            // Its deadline as it stands, to the second (none without a
-            // timeout): when it took its slot and its timeout, moved on by
-            // any time it waited in line. And what it waits in line for now,
-            // if anything.
-            deadline: read(&self.turn(&n, "deadline"))
-                .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|t| t.parse::<i64>().ok())
-                .map_or(0, |t| t / 1_000_000_000),
-            wait: opt(self.turn(&n, "wait")).map(|w| {
-                let line = w.lines().next().unwrap_or_default();
-                let (since, what) = line.split_once('\t').unwrap_or((line, ""));
-                (since.to_owned(), what.to_owned())
-            }),
-            awaits: if filled(&self.path("await")) {
-                awaits(&read(&self.path("await")).unwrap_or_default())
-                    .into_iter()
-                    .map(|a| (a.target, a.since))
-                    .collect()
-            } else {
-                Vec::new()
-            },
-            quota_reset: if state == "queued" {
-                let engine = read(&self.turn(&n, "engine"))
-                    .and_then(|s| crate::engine::Engine::parse(&s).ok())
-                    .unwrap_or(crate::engine::Engine::Claude);
-                let since = mtime(&prompt).unwrap_or(0);
-                crate::github_quota::admission_hold(self.cfg, self, engine, since.max(0) as u64)
-                    .map(|hold| (since, hold.until as i64))
-            } else if state == "running" {
-                None
-            } else {
-                crate::github_quota::reset(self, &n)
-            },
-            usage_reset: read(&self.path("await")).and_then(|text| {
-                awaits(&text)
-                    .into_iter()
-                    .find(|a| a.target == USAGE_LIMIT)
-                    .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
-            }),
-            spent: (read(&self.turn(&n, "engine")).as_deref() != Some("codex"))
-                .then(|| usage::kept(self.cfg))
-                .flatten(),
-            turn: n,
-            state,
-        })
+        crate::record::derive(self).facts
     }
 }
 
-/// When a file last changed, to the nanosecond, if it's there.
-fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
-    fs::metadata(path).ok()?.modified().ok()
-}
-
-/// A usage refusal's await target. Its fields are SINCE and reset's epoch.
+/// An earlier proj's usage refusal's await target, which proj-watch moves
+/// into the machine's hold (usage.rs). Its fields are SINCE and reset's
+/// epoch.
 pub const USAGE_LIMIT: &str = "usage-limit";
 
 /// One line of a job's await: what it awaits (a PR or issue, OWNER/REPO#N
@@ -641,31 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_reports_the_engine_and_usage_reset() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut v = example();
-        v["jobs"] = tmp.path().to_str().unwrap().into();
-        let cfg: Config = serde_json::from_value(v).unwrap();
-        let job = Job::new(&cfg, "held");
-        fs::create_dir(&job.dir).unwrap();
-        job.set_turns(1).unwrap();
-        fs::write(job.turn("1", "outcome"), "failed").unwrap();
-        let reset = now() + 3600;
-        fs::write(job.path("await"), format!("usage-limit\t1000\t{reset}\n")).unwrap();
-        for (engine, label) in [("claude", "Claude"), ("codex", "Codex")] {
-            fs::write(job.turn("1", "engine"), engine).unwrap();
-            assert!(
-                job.lifecycle()
-                    .unwrap()
-                    .1
-                    .contains(&format!("usage {label} {reset}"))
-            );
-        }
-        fs::remove_file(job.path("await")).unwrap();
-        assert!(job.lifecycle().unwrap().1.is_empty());
-    }
-
-    #[test]
     fn queued_and_running_jobs_report_retained_early_release() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctl = tmp.path().join("systemctl");
@@ -754,14 +465,17 @@ mod tests {
         let starting = new("starting");
         assert_eq!(times(&starting).0, 1000);
         assert!(!starting.turn("1", "ended").exists());
-        assert_eq!(starting.ended_at("1", "running", || true), 0);
+        assert_eq!(
+            crate::record::ended_at(&starting, "1", "running", || true),
+            0
+        );
         assert!(!starting.turn("1", "ended").exists());
         starting.mark_ended();
         assert!(times(&starting).0 >= before);
 
         // A look just before its _ended gets no expired grace, and marks nothing.
         let window = new("window");
-        assert!(window.ended_at("1", "failed", || true) >= before);
+        assert!(crate::record::ended_at(&window, "1", "failed", || true) >= before);
         assert!(!window.turn("1", "ended").exists());
 
         // Its _ended never ran (the machine went down): its last write, however
@@ -808,7 +522,11 @@ mod tests {
         let going = new("going");
         set_mtime(&going.turn("1", "jsonl"), 2000);
         for how in ["queued", "running"] {
-            assert_eq!(going.ended_at("1", how, || true), 0, "{how}");
+            assert_eq!(
+                crate::record::ended_at(&going, "1", how, || true),
+                0,
+                "{how}"
+            );
         }
     }
 
