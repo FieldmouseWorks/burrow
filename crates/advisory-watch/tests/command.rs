@@ -67,6 +67,18 @@ echo noise >&2
 exit "$(cat "$d/osv-exit" 2>/dev/null || echo 0)"
 "#,
         );
+        // Prints the tree in the lockfile's directory's cargo-tree, and
+        // fails where there's none.
+        script(
+            b.join("cargo"),
+            r#"#!/bin/sh
+for m; do :; done
+echo "$(pwd) $*" >>"$FAKE/cargo"
+d=${m%/Cargo.toml}
+[ -e "$d/cargo-tree" ] || { echo "error: no" >&2; exit 101; }
+cat "$d/cargo-tree"
+"#,
+        );
         // Keeps each job's words and its task, and says its id.
         script(
             b.join("proj"),
@@ -153,7 +165,7 @@ fn kev_list(entries: &[(&str, &str, &str)]) -> String {
     serde_json::json!({ "catalogVersion": "1", "vulnerabilities": list }).to_string()
 }
 
-fn osv_list(found: &[(&str, &str)]) -> String {
+fn osv_list(lock: &Path, found: &[(&str, &str)]) -> String {
     let packages: Vec<_> = found
         .iter()
         .map(|(id, pkg)| {
@@ -161,8 +173,7 @@ fn osv_list(found: &[(&str, &str)]) -> String {
                 "groups": [{"ids": [id], "max_severity": "7.5"}]})
         })
         .collect();
-    serde_json::json!({"results": [{"source": {"path": "Cargo.lock"}, "packages": packages}]})
-        .to_string()
+    serde_json::json!({"results": [{"source": {"path": lock}, "packages": packages}]}).to_string()
 }
 
 struct Machine {
@@ -219,7 +230,8 @@ impl Machine {
             "checks": ["rehearsal"], "system": "x86_64-linux", "app": "box-bot", "kev": places,
             "tools": {
                 "sudo": b.join("sudo"), "runuser": b.join("runuser"), "nixStore": b.join("nix-store"),
-                "vulnix": b.join("vulnix"), "osvScanner": b.join("osv-scanner"), "proj": b.join("proj"),
+                "vulnix": b.join("vulnix"), "osvScanner": b.join("osv-scanner"), "cargo": b.join("cargo"),
+                "proj": b.join("proj"),
             },
         });
         fs::write(d.join("config.json"), config.to_string()).unwrap();
@@ -230,6 +242,14 @@ impl Machine {
         ]);
         m.set_osv("box", &[]);
         m.set_osv("app", &[("RUSTSEC-1", "rustls")]);
+        // What cargo builds in each: every crate the tests find.
+        for (p, crates) in [("app", "rustls v1.0\nidna v1.0"), ("box", "serde v1.0")] {
+            fs::write(
+                m.path(&format!("src/{p}/cargo-tree")),
+                format!("{p} v0.1.0\n{crates}\n"),
+            )
+            .unwrap();
+        }
         m.set_vulnix(r#"[{"pname": "exim", "name": "exim-4.98", "affected_by": ["CVE-9"], "cvssv3_basescore": {"CVE-9": 9.8}}]"#);
         m
     }
@@ -245,7 +265,7 @@ impl Machine {
     fn set_osv(&self, project: &str, found: &[(&str, &str)]) {
         fs::write(
             self.path(&format!("src/{project}/osv.json")),
-            osv_list(found),
+            osv_list(&self.path(&format!("src/{project}/Cargo.lock")), found),
         )
         .unwrap();
     }
@@ -358,9 +378,10 @@ fn a_first_pass_only_records_what_is_there() {
             src.display()
         )
     );
+    // app's Cargo.lock had a finding, so cargo was asked what it builds.
     assert_eq!(
         m.fake("runuser"),
-        "sam unset osv-scanner\nsam unset osv-scanner\n"
+        "sam unset osv-scanner\nsam unset cargo\nsam unset osv-scanner\n"
     );
     assert_eq!(m.kev.asked(), ["/first.json", "/second.json"]);
     // KEV's refusal at the first place isn't news when the second had it,
@@ -429,6 +450,88 @@ fn a_later_pass_hands_whats_new_to_each_projects_job() {
     // Nothing new, nothing handed over.
     m.pass();
     assert_eq!(m.jobs().len(), 2);
+}
+
+#[test]
+fn a_crate_in_a_cargo_lock_counts_only_when_cargo_builds_it() {
+    let m = Machine::new();
+    m.pass();
+    let app = m.path("src/app");
+    fs::write(
+        app.join("cargo-tree"),
+        format!(
+            "app v0.1.0 ({})\nrustls v1.0\n\nidna v1.0 (*)\n",
+            app.display()
+        ),
+    )
+    .unwrap();
+    m.set_osv(
+        "app",
+        &[
+            ("RUSTSEC-1", "rustls"),
+            ("RUSTSEC-2", "idna"),
+            ("RUSTSEC-4", "chrono"),
+        ],
+    );
+    m.pass();
+    let jobs = m.jobs();
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert!(
+        jobs[0].1.starts_with(
+            "advisory-watch found new vulnerabilities in this project's dependencies (osv-scanner):\n\
+             - RUSTSEC-2 in idna 1.0 (severity 7.5)\n\n"
+        ),
+        "{}",
+        jobs[0].1
+    );
+    // Not seen: a feature that turns it on later still gets it a job.
+    assert!(!m.seen().contains(&"osv:app:RUSTSEC-4:chrono".to_owned()));
+    // Once for the lockfile, as the user, from / (never reading the
+    // checkout's own cargo config), never changing it or fetching.
+    let lines: Vec<String> = m.fake("cargo").lines().map(str::to_owned).collect();
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!(
+            "/ tree --workspace --edges normal,build,dev --target all --all-features \
+             --prefix none --format {{p}} --locked --offline --quiet --manifest-path {}/Cargo.toml",
+            app.display()
+        )
+    );
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    // Nothing new: cargo isn't asked again for what's known, but chrono
+    // isn't known, so it still is.
+    m.pass();
+    assert_eq!(m.fake("cargo").lines().count(), 3);
+    assert_eq!(m.jobs().len(), 1);
+    // A feature turns chrono on: now it's a job.
+    fs::write(
+        app.join("cargo-tree"),
+        format!(
+            "app v0.1.0 ({})\nrustls v1.0\nidna v1.0\nchrono v1.0\n",
+            app.display()
+        ),
+    )
+    .unwrap();
+    m.pass();
+    let jobs = m.jobs();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert!(
+        jobs[1]
+            .1
+            .contains("- RUSTSEC-4 in chrono 1.0 (severity 7.5)\n"),
+        "{}",
+        jobs[1].1
+    );
+    // Cargo that can't say leaves every finding counting.
+    fs::remove_file(app.join("cargo-tree")).unwrap();
+    m.set_osv("app", &[("RUSTSEC-5", "unbuilt")]);
+    let out = m.pass();
+    assert_eq!(m.jobs().len(), 3);
+    assert!(
+        stderr(&out).contains("its findings all count"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]

@@ -49,6 +49,7 @@ use serde_json::Value;
 use crate::{complain, say, trimmed};
 
 mod config;
+mod job;
 mod pr;
 mod request;
 mod scan;
@@ -205,92 +206,39 @@ impl Config {
             pass.failed = true;
             return;
         }
-        // Each one's key is kept before its job starts, so a key that can't
-        // be kept hands nothing over pass after pass; a job that doesn't
-        // start gives them back to the next pass.
+        // Each one's key, and the handover's that names its job, is kept
+        // before its job starts, so a key that can't be kept hands nothing
+        // over pass after pass; a job that doesn't start gives them back to
+        // the next pass.
+        let handover = job::key(repo);
         let mut kept = Vec::new();
         let mut was = Vec::new();
         for h in handed {
-            let before = fs::read_to_string(&h.key).ok();
-            match write(&h.key, &format!("{}\n", h.want)) {
+            let files = [h.key.clone(), job::path(&h.key)];
+            let texts = [format!("{}\n", h.want), format!("{handover}\n")];
+            let before = files.clone().map(|f| fs::read_to_string(f).ok());
+            match files.iter().zip(&texts).try_for_each(|(f, t)| write(f, t)) {
                 Ok(()) => {
                     kept.push(h);
-                    was.push(before);
+                    was.push((files, before));
                 }
                 Err(Broke(why)) => {
                     complain(&format!("{}: {why}", self.name));
                     pass.failed = true;
+                    job::put_back(&self.name, &files, before);
                 }
             }
         }
         if kept.is_empty() {
             return;
         }
-        if let Err(Broke(why)) = self.hand(project, repo, &info, &kept) {
+        if let Err(Broke(why)) = self.hand(project, repo, &info, &kept, &handover) {
             complain(&format!("{}: {why}", self.name));
             pass.failed = true;
-            for (h, before) in kept.iter().zip(was) {
-                let back = match before {
-                    Some(text) => write(&h.key, &text),
-                    None => fs::remove_file(&h.key)
-                        .map_err(|e| Broke(format!("{}: {e}", h.key.display()))),
-                };
-                if let Err(Broke(why)) = back {
-                    complain(&format!("{}: {why}", self.name));
-                }
+            for (files, before) in was {
+                job::put_back(&self.name, &files, before);
             }
         }
-    }
-
-    /// `handed` to one Claude job in `project`.
-    fn hand(
-        &self,
-        project: &str,
-        repo: &str,
-        info: &steward::Repo,
-        handed: &[Handed],
-    ) -> Result<(), Broke> {
-        let mut seals = String::new();
-        for h in handed {
-            if let Some(m) = &h.major {
-                let [ok, held] = ["ok", "held"].map(|v| self.seal(repo, m, v));
-                seals.push_str(&format!(
-                    "- #{} on {} for {}: ok `{}`, held `{}`\n",
-                    m.n, m.sha, m.base, ok?, held?
-                ));
-            }
-        }
-        let todo: String = handed.iter().map(|h| h.line.as_str()).collect();
-        let task = task::task(
-            self,
-            repo,
-            todo.trim_end_matches('\n'),
-            &info.proofs,
-            seals.trim_end_matches('\n'),
-        );
-        let mut proj = Command::new(&self.tools.proj);
-        // The kind of work it is, which the machine may give a model of its own.
-        proj.args(["run", "--pipeline", "--role", "renovate-sweep"]);
-        if let Some(app) = &self.app {
-            proj.args(["--app", &app.name]);
-        }
-        let ran = proj
-            .args([project, &task])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .status();
-        let why = match ran {
-            Ok(s) if s.success() => {
-                say(&format!(
-                    "{repo}: {} PRs handed to one Claude job",
-                    todo.matches('\n').count()
-                ));
-                return Ok(());
-            }
-            Ok(s) => format!("{repo}: proj run: {s}"),
-            Err(e) => format!("{}: {e}", self.tools.proj.display()),
-        };
-        Err(Broke(why))
     }
 
     /// The marker major-seal seals verdict `v` on major `m` with, in `repo`.
@@ -562,7 +510,7 @@ impl Sweep<'_> {
         // CI its job was handed: CI that finishes again on the same head,
         // after a job reran it and left (as LoK-web#598's did) or turned up
         // after the job saw none, brings another job if there's still no
-        // verdict.
+        // verdict, once the one before has left (job.rs).
         if red > 0 {
             want.push_str(" red");
         } else if major {
@@ -628,6 +576,14 @@ impl Sweep<'_> {
         if let Some(rest) = title.strip_prefix(TITLE) {
             self.wake(now() + who.limits.pass);
             self.retitle(&n, rest.trim_start());
+            return Ok(None);
+        }
+        // The job it was handed to, still at work on it, gets no second
+        // beside it, whatever has changed since (its own push, CI finishing
+        // again): nor does anything here touch it under that job. Its
+        // turn's end brings this repo's pass again.
+        if let Some(id) = cfg.at_work(&key)? {
+            say(&format!("{repo}#{n}: its job {id} is still at work"));
             return Ok(None);
         }
         // A head whose refresh request was taken back for a job (below) has

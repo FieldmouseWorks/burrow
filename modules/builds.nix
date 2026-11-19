@@ -23,6 +23,22 @@ let
   socket = "/run/burrow-builds/door.sock";
   path = lib.removeSuffix "/" cfg.path;
 
+  # The directories above `dir` this config declares owned by a user other
+  # than root or the account: tmpfiles refuses the path through them. Only
+  # what it declares; a rule it can't read plainly is left out, never flagged.
+  owners = [ "-" "root" "0" account ];
+  above = p: let d = lib.removeSuffix "/" p; in d != "" && lib.hasPrefix "${d}/" cfg.dir;
+  ruleParents = lib.concatMap (r:
+    let f = lib.filter (x: x != "") (lib.splitString " " (lib.replaceStrings [ "\t" ] [ " " ] r));
+    in lib.optional (lib.length f >= 4 && !(lib.hasPrefix "#" (lib.head f))) { path = lib.elemAt f 1; user = lib.elemAt f 3; }
+  ) config.systemd.tmpfiles.rules;
+  settingParents = lib.concatMap (paths:
+    lib.concatLists (lib.mapAttrsToList (p: entries: map (e: { path = p; user = e.user or "-"; }) (lib.attrValues entries)) paths)
+  ) (lib.attrValues config.systemd.tmpfiles.settings);
+  homeParents = map (u: { path = u.home; user = u.name; })
+    (lib.filter (u: u.createHome) (lib.attrValues config.users.users));
+  unsafeParents = lib.filter (e: above e.path && !(lib.elem e.user owners)) (ruleParents ++ settingParents ++ homeParents);
+
   # What crates/burrow-builds reads (its door::Config).
   configFile = pkgs.writeText "burrow-builds.json" (builtins.toJSON {
     inherit (cfg) dir repos;
@@ -86,6 +102,13 @@ in
         The cache: its narinfos, NARs and public key, which nginx serves as
         they are. Persist it if / is ephemeral, or every run after a boot
         builds cold.
+
+        Every directory above it must be owned by root (or by burrow-builds):
+        systemd-tmpfiles won't make it, or its fetched/, through another
+        user's directory (an "unsafe path transition"), and without fetched/
+        the store keeps no record of what it served. Evaluation fails when
+        the machine's own config declares such a parent (a tmpfiles entry,
+        or a user's home it makes); one owned so on disk alone it can't see.
       '';
     };
 
@@ -138,6 +161,10 @@ in
       {
         assertion = app != null && builtins.elem account app.users;
         message = "burrow.builds reads GitHub as the machine's App: it needs burrow.github.machinery, with ${account} among its users.";
+      }
+      {
+        assertion = unsafeParents == [ ];
+        message = "burrow.builds.dir is ${cfg.dir}, under ${lib.concatMapStringsSep ", " (e: "${e.path} (declared owned by ${e.user})") unsafeParents}: systemd-tmpfiles won't make it through another user's directory. Put it where every parent is root's (the option's description says why).";
       }
     ];
 
@@ -238,7 +265,9 @@ in
         };
       };
     };
-    # nginx's own unit writes only where it's let.
-    systemd.services.nginx.serviceConfig.ReadWritePaths = [ "${cfg.dir}/fetched" ];
+    # nginx's own unit writes only where it's let. Optional (`-`): with
+    # fetched/ missing, systemd would refuse to start nginx and every site
+    # on it would go down; this way only the store's fetch log is lost.
+    systemd.services.nginx.serviceConfig.ReadWritePaths = [ "-${cfg.dir}/fetched" ];
   };
 }

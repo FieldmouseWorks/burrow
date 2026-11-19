@@ -2,8 +2,7 @@
 //! "No signing verb"). A producer's Ed25519 key comes only from its
 //! systemd credential, which only its own user can read: never from the
 //! environment, an argument or a path. It signs only the producer's own
-//! results, each from its durable [`Record`] ([`Review`], [`Judgment`],
-//! [`Proof`]), as Conary's service statement (`attest::service`), with
+//! results, each from its durable [`Record`] ([`Judgment`], [`Proof`]), as Conary's service statement (`attest::service`), with
 //! Conary's receipts as the log, and only as [`crate::publish`] publishes
 //! that record. Nothing public signs, and nothing takes a statement.
 use crate::records::{Record, Target};
@@ -14,11 +13,11 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::OsString;
 
-/// The check a producer's review, judgment or proof is published as.
+/// The check a producer's judgment is published as.
 const JUDGMENT: &str = "conary/judgment";
 
-/// A result a producer can publish signed: a [`Review`], a [`Judgment`] or
-/// a [`Proof`], and nothing else.
+/// A result a producer can publish signed: a [`Judgment`] or a [`Proof`],
+/// and nothing else.
 pub trait Signable: sealed::Signs + Serialize + DeserializeOwned + Clone {
     /// The check run it's published as.
     fn target(&self) -> Target;
@@ -29,23 +28,6 @@ mod sealed {
     /// can call it or add a kind of result.
     pub trait Signs {
         fn signed_by(&self, signer: &super::Signer) -> super::Signed;
-    }
-}
-
-impl Signable for Review {
-    fn target(&self) -> Target {
-        Target {
-            repo: self.repo.clone(),
-            head: self.head.clone(),
-            check: format!("conary/review/{}", self.role),
-        }
-    }
-}
-
-impl sealed::Signs for Review {
-    fn signed_by(&self, signer: &Signer) -> Signed {
-        let log = flow::receipt_digest(&flow::review_receipt(&self.head, &self.body));
-        signer.sign(&self.target(), &self.tree, None, true, log)
     }
 }
 
@@ -94,20 +76,6 @@ impl sealed::Signs for Proof {
             self.log.clone(),
         )
     }
-}
-
-/// A review the flow published, as the review producer recorded the look
-/// that found it: signed as `conary/review/ROLE` over
-/// `review_receipt(head, body)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Review {
-    pub repo: String,
-    pub role: String,
-    pub head: String,
-    /// The head's tree.
-    pub tree: String,
-    /// The published review's body, exactly.
-    pub body: String,
 }
 
 /// A judgment the judge producer issued: signed as `conary/judgment` over
@@ -167,8 +135,7 @@ impl Signed {
         &self.check
     }
     /// The check run's conclusion: a proof's failure fails it, and a
-    /// review or judgment is a success whatever it found, its receipt
-    /// carrying that.
+    /// judgment is a success whatever it found, its receipt carrying that.
     pub fn conclusion(&self) -> &'static str {
         if self.passed { "success" } else { "failure" }
     }

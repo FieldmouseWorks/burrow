@@ -466,8 +466,6 @@ in
     # boot on, logged in or not.
     users.users.${user}.linger = lib.mkDefault true;
 
-    systemd.tmpfiles.rules = [ "d ${projectsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
-
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ pkgs.tmux config.burrow.claude.package ];
 

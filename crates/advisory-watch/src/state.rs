@@ -74,6 +74,12 @@ impl State {
         &self.pending
     }
 
+    /// Whether a finding by `key` is seen or waiting already: what a pass
+    /// needn't look into again.
+    pub fn known(&self, key: &str) -> bool {
+        self.seen.contains(key) || self.pending.iter().any(|p| p.key == key)
+    }
+
     /// Takes in what `source` found. What's seen, or waiting already, is
     /// left out. The source's first pass records the rest as seen; any later
     /// pass has it wait for a job, and returns it.

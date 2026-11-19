@@ -190,6 +190,7 @@ let
       nixStore = "${config.nix.package}/bin/nix-store";
       vulnix = lib.getExe pkgs.vulnix;
       osvScanner = lib.getExe pkgs.osv-scanner;
+      cargo = "${pkgs.cargo}/bin/cargo";
       proj = "${tools.proj}/bin/proj";
     };
   });

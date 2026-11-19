@@ -55,6 +55,8 @@ pub struct Tools {
     pub nix_store: PathBuf,
     pub vulnix: PathBuf,
     pub osv_scanner: PathBuf,
+    /// cargo, which says which of a Cargo.lock's crates are built.
+    pub cargo: PathBuf,
     /// proj, which starts the jobs.
     pub proj: PathBuf,
 }
@@ -82,7 +84,8 @@ mod tests {
             "kev": ["https://example.org/kev.json"],
             "tools": {
                 "sudo": "/w/sudo", "runuser": "/b/runuser", "nixStore": "/b/nix-store",
-                "vulnix": "/b/vulnix", "osvScanner": "/b/osv-scanner", "proj": "/b/proj",
+                "vulnix": "/b/vulnix", "osvScanner": "/b/osv-scanner", "cargo": "/b/cargo",
+                "proj": "/b/proj",
             },
         });
         std::fs::write(&path, config.to_string()).unwrap();
