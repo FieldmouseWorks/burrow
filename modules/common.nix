@@ -152,6 +152,13 @@ inputs:
           };
         };
 
+        # The projects' folder, made here and nowhere else: Remote Control,
+        # proj and the steward all work in it, whichever of them are on. It's
+        # the user's, so a machine without that account (one that runs only
+        # burrow.ops, say) has no folder to make.
+        config.systemd.tmpfiles.rules = lib.optional (config.users.users ? ${config.burrow.user})
+          "d ${config.burrow.projectsDir} 0755 ${config.burrow.user} ${config.users.users.${config.burrow.user}.group} -";
+
         # tmux for the Claudes that run in one (Remote Control servers, the
         # usage watcher's Claude Code). Not tmux's usual build: that one moves
         # each pane into a scope of its own, which takes a server and its
