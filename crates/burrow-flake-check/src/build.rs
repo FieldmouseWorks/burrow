@@ -144,6 +144,39 @@ pub fn plan(targets: &[String]) -> Result<()> {
     fs::write(temp().join("cold.txt"), cold.join("\n"))?;
     Ok(())
 }
+/// What the store has of the checks the whole-flake fallback builds by
+/// attribute (gate::whole), as [`checks`] says it of derivations: their
+/// derivations, from `nix path-info --derivation`. Only in a run that names
+/// a store, and never failing.
+pub fn shadow_attributes(attributes: &[String]) {
+    if !super::builds::writes() || attributes.is_empty() {
+        return;
+    }
+    let mut args = vec!["path-info", "--derivation"];
+    args.extend(attributes.iter().map(String::as_str));
+    let mut c = cmd("nix", &super::gate::locked(&args));
+    c.stdin(Stdio::null());
+    let drvs = match output(c) {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        Ok(o) => {
+            println!(
+                "build store (shadow, nothing substituted): couldn't tell which derivations the checks are: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            println!(
+                "build store (shadow, nothing substituted): couldn't tell which derivations the checks are: {e}"
+            );
+            return;
+        }
+    };
+    super::builds::shadow(&announce_cold(&drvs));
+}
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     if targets.is_empty() {
         return Ok(true);

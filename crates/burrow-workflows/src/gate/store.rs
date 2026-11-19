@@ -9,8 +9,9 @@ use super::*;
 
 /// A cache with one output a check makes (a fixed output, which needs no
 /// signature), in a directory standing in for the build store, and a flake
-/// whose checks are that one and one no store has.
-fn store_and_flake(g: &Gate) -> (PathBuf, PathBuf) {
+/// whose checks are that one and one no store has, with `extra` beside its
+/// outputs.
+fn store_and_flake(g: &Gate, extra: &str) -> (PathBuf, PathBuf) {
     let file = g.s.join("fetched");
     write(&file, "built by an earlier run\n");
     let nix = |args: &[&str]| {
@@ -42,9 +43,10 @@ fn store_and_flake(g: &Gate) -> (PathBuf, PathBuf) {
     let fetched = format!(
         r#"derivation {{ name = "fetched"; inherit system; builder = "/bin/sh"; outputHashMode = "flat"; outputHashAlgo = "sha256"; outputHash = "{hash}"; }}"#
     );
-    let flake = g.flake(&format!(
-        r#"{{ checks.${{system}} = {{ fetched = {fetched}; cold = drv "cold"; }}; }}"#
-    ));
+    let flake = g.flake_with(
+        &format!(r#"{{ checks.${{system}} = {{ fetched = {fetched}; cold = drv "cold"; }}; }}"#),
+        extra,
+    );
     (cache, flake)
 }
 
@@ -56,7 +58,7 @@ fn configs(g: &Gate) -> Vec<String> {
 #[test]
 fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
     let g = Gate::new();
-    let (cache, flake) = store_and_flake(&g);
+    let (cache, flake) = store_and_flake(&g, "");
     let url = format!("file://{}", cache.display());
     // A runner whose own config would take a flake's.
     let runner = format!("{}\naccept-flake-config = true", g.nix_config);
@@ -75,7 +77,8 @@ fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
     assert!(
         ran.out.contains(
             "build store (shadow, nothing substituted): it has 1 of the 2 derivations this leg builds cold"
-        ) && ran.out.contains("builds-shadow {"),
+        ) && ran.out.contains("builds-shadow {")
+            && ran.out.contains("build store: no public key is named for it"),
         "{}",
         ran.out
     );
@@ -115,4 +118,44 @@ fn a_leg_says_what_the_store_has_and_takes_nothing_from_it() {
     for c in configs(&g) {
         assert!(c.contains(r#""accept-flake-config":true"#), "{c}");
     }
+}
+
+/// Without eval-apart, a flake with a nixConfig is built by attribute, by
+/// nix flake check or, with checks skipped, nix build: before it builds,
+/// that leg says what the store has of its checks too, the skipped ones
+/// left out.
+#[test]
+fn the_whole_flakes_fallback_says_what_the_store_has_too() {
+    let g = Gate::new();
+    let (cache, flake) = store_and_flake(&g, r#"nixConfig.bash-prompt = "x";"#);
+    let url = format!("file://{}", cache.display());
+    let shadow = |skip: &str| {
+        let ran = g.run(
+            &flake,
+            Run {
+                whole: true,
+                skip,
+                env: &[("BUILDS", &url), ("BUILDS_KEY", "")],
+                ..Run::default()
+            },
+        );
+        assert_eq!(ran.code, 0, "{}", ran.out);
+        ran.out
+            .lines()
+            .find_map(|l| l.strip_prefix("builds-shadow "))
+            .unwrap_or_else(|| panic!("no shadow: {}", ran.out))
+            .to_owned()
+    };
+    let all = shadow("");
+    assert!(
+        all.contains(r#""cold":2,"served":1,"#)
+            && all.contains(r#""served_names":["fetched"]"#)
+            && all.contains(r#""unserved_names":["cold"]"#),
+        "{all}"
+    );
+    let some = shadow("cold");
+    assert!(
+        some.contains(r#""cold":1,"served":1,"#) && some.contains(r#""unserved_names":[]"#),
+        "{some}"
+    );
 }

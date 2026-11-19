@@ -45,13 +45,19 @@ pub fn shadow(cold: &[String]) {
         temp: temp(),
         nix_config: None,
     };
-    let lines = match at.ask(cold) {
+    let mut lines = Vec::new();
+    if at.key.is_empty() {
+        lines.push(
+            "build store: no public key is named for it (BURROW_BUILDS_PUBLIC_KEY), so only what needs no signature counts".to_owned(),
+        );
+    }
+    lines.extend(match at.ask(cold) {
         Ok(r) => r.lines(),
         Err(e) => vec![format!(
             "build store (shadow, nothing substituted): couldn't tell what it has of {} cold derivations: {e}",
             cold.len()
         )],
-    };
+    });
     for l in &lines {
         println!("{l}");
     }
@@ -261,9 +267,10 @@ impl Store {
             }
         }
         // What its key doesn't sign, a store that trusts only that key wouldn't
-        // take: it doesn't count.
+        // take: it doesn't count. With no key named, a store trusts none, so
+        // only what needs no signature (a content-addressed path) counts.
         let mut untrusted = 0;
-        if !key.is_empty() && !has.is_empty() {
+        if !has.is_empty() {
             let mut args = vec![
                 "store",
                 "verify",

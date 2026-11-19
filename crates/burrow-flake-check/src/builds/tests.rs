@@ -156,14 +156,10 @@ fn a_run_with_no_store_has_the_config_it_had() {
     assert!(crate::worker_config("a = b", true).ends_with(NIX_CONFIG));
 }
 
-/// What the store has of the cold derivations, as a store that trusts only
-/// its key would take them: one it holds (a fixed output, which needs no
-/// signature), one it holds unsigned (which doesn't count), and one it
-/// hasn't; how long fetching takes, timed; and the kept builds' restore
-/// beside it. The report's last line is JSON.
-#[test]
-fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
-    let h = Here::new();
+/// Three cold derivations, by name: one whose output the cache holds (a
+/// fixed output, which needs no signature), one whose output it holds
+/// unsigned, and one it hasn't; and the unsigned one's output.
+fn three(h: &Here) -> ([String; 3], String) {
     let (hash, _) = h.cached("x", "built elsewhere\n");
     let served = h.drv(&fixed("x", &hash));
     let unsigned = h.drv(&built("unsigned"));
@@ -184,6 +180,18 @@ fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
         ),
     )
     .unwrap();
+    ([served, unsigned, missing], out)
+}
+
+/// What the store has of the cold derivations, as a store that trusts only
+/// its key would take them: one it holds (a fixed output, which needs no
+/// signature), one it holds unsigned (which doesn't count), and one it
+/// hasn't; how long fetching takes, timed; and the kept builds' restore
+/// beside it. The report's last line is JSON.
+#[test]
+fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
+    let h = Here::new();
+    let ([served, unsigned, missing], out) = three(&h);
     let (sk, pk) = (h.join("sk"), h.join("pk"));
     h.ok(
         "nix-store",
@@ -232,6 +240,24 @@ fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
     );
     // Nothing went into the run's own store.
     assert!(!h.join(&format!("root/nix/store/{out}")).exists());
+}
+
+/// With no public key named, a store trusts no signature: what it holds
+/// unsigned doesn't count, and what needs none (a fixed output) does.
+#[test]
+fn with_no_key_named_only_what_needs_no_signature_counts() {
+    let h = Here::new();
+    let (cold, _) = three(&h);
+    let store = Store {
+        url: format!("file://{}", h.join("cache").display()),
+        key: String::new(),
+        temp: h.dir.clone(),
+        nix_config: Some(h.config()),
+    };
+    let r = store.ask(&cold).unwrap();
+    assert_eq!(r.served, ["x"]);
+    assert_eq!(r.unserved, ["missing", "unsigned"]);
+    assert_eq!(r.untrusted, 1);
 }
 
 /// A store that isn't there is said, never a failure: the leg builds as
