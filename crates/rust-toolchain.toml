@@ -2,6 +2,6 @@
 # (the flake reads it), and the house fixtures in tests/house, which link to
 # it. Renovate keeps it on the latest stable; change it here only.
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
