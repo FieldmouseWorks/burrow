@@ -15,8 +15,8 @@
 //! PR major-ok or major-held for people to see. The sweep seals both verdicts
 //! on the head and base it hands a major over on (major-seal) and puts the
 //! markers in the task, as the steward gives a judge its seals: the job runs
-//! nothing of the sweep's, whose state its sandbox needn't see (a Codex
-//! job's doesn't), and can seal no head it wasn't handed. A verdict counts only for the
+//! nothing of the sweep's, whose state its sandbox needn't see, and can
+//! seal no head it wasn't handed. A verdict counts only for the
 //! head and base it names, only from our own login and only with its seal,
 //! so a job still finishing on an older head, a push since, a PR retargeted
 //! since, someone else's comment or another job quoting a marker can't

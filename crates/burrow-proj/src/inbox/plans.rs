@@ -8,7 +8,14 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, path::PathBuf};
+mod place;
+pub(super) use place::Place;
+
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct Child {
@@ -24,6 +31,10 @@ struct Child {
     /// Closed with no merged PR tied to it: the list waits, and has said so.
     #[serde(default)]
     waits: bool,
+    /// Closed as continued in this issue, `OWNER/REPO#N`, which the list
+    /// waits on instead.
+    #[serde(default)]
+    continued: Option<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Retained {
@@ -47,6 +58,17 @@ impl List {
     fn next(&self) -> Option<usize> {
         self.children.iter().position(|c| c.merged_pr.is_none())
     }
+    /// The parent and its children, as `OWNER/REPO#N`: none of them is a
+    /// child's successor.
+    fn refs(&self, repo: &str, parent: &str) -> Vec<String> {
+        std::iter::once(format!("{repo}#{parent}"))
+            .chain(
+                self.children
+                    .iter()
+                    .filter_map(|c| c.number.map(|n| format!("{repo}#{n}"))),
+            )
+            .collect()
+    }
     fn checklist(&self, repo: &str, parent: &str) -> String {
         let mut text = format!(
             "Task list for {repo}#{parent}. Each implementation child is one fresh session and one PR.\n"
@@ -56,10 +78,11 @@ impl List {
             let number = child
                 .number
                 .map_or("(creating)".into(), |n| format!("#{n}"));
-            let pr = child
-                .merged_pr
-                .as_ref()
-                .map_or(String::new(), |pr| format!(" — {pr}"));
+            let pr = match (&child.merged_pr, &child.continued) {
+                (Some(pr), _) => format!(" — {pr}"),
+                (None, Some(to)) => format!(" — continued as {to}"),
+                (None, None) => String::new(),
+            };
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
         }
         if let Some(child) = self.next().map(|i| &self.children[i])
@@ -67,7 +90,7 @@ impl List {
             && let Some(n) = child.number
         {
             text.push_str(&format!(
-                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`."
+                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
             ));
         }
         text
@@ -242,10 +265,18 @@ impl Pass<'_> {
         self.child_admissible_at(repo, n, 0)
     }
     fn child_admissible_at(&mut self, repo: &str, n: &str, depth: usize) -> bool {
-        if depth >= 64 {
+        if !self.inbox.planning {
+            return true;
+        }
+        // What the lists alone hold it on, its ancestors' included: the
+        // same reading its record gives ([`Pass::plan_hold`]).
+        if depth >= 64 || self.plan_hold(repo, n).is_some() {
             return false;
         }
-        if !self.inbox.planning {
+        // An observing pass asks GitHub nothing: the child's place rests
+        // on its plan's order alone. The drain asks about the one it
+        // picks, its parents included, before it hands it on.
+        if self.observe {
             return true;
         }
         for d in self.plan_dirs(repo) {
@@ -255,18 +286,17 @@ impl Pass<'_> {
             let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
                 return false;
             };
-            for old in &list.retained {
-                if list
-                    .children
-                    .iter()
-                    .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
-                {
-                    break;
-                }
-                if old.child.number.map(|v| v.to_string()).as_deref() == Some(n) {
-                    return false;
-                }
-                if old.child.attempted && old.child.number.is_none() && !self.observe {
+            if !list
+                .children
+                .iter()
+                .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
+            {
+                // A replanned child opened without its number recorded: its
+                // marker on GitHub says whether N is it.
+                for old in &list.retained {
+                    if !(old.child.attempted && old.child.number.is_none()) {
+                        continue;
+                    }
                     let Some(issues) = every(
                         self.cfg,
                         &format!("repos/{repo}/issues?state=all&per_page=100"),
@@ -285,34 +315,15 @@ impl Pass<'_> {
                         return false;
                     }
                 }
-            }
-            let Some(index) = list
-                .children
-                .iter()
-                .position(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
-            else {
                 continue;
-            };
+            }
             let Some(parent) = d
                 .file_name()
                 .and_then(|s| s.to_str())
-                .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
+                .and_then(|s| s.rsplit_once('-').map(|(_, n)| n.to_owned()))
             else {
                 return false;
             };
-            if self.claimed(repo).contains(parent) {
-                return false;
-            }
-            // An observing pass asks GitHub nothing: the child's place rests
-            // on its plan's order alone. The drain asks about the one it
-            // picks, its parents included, before it hands it on.
-            if self.observe {
-                if list.next() != Some(index) || !self.child_admissible_at(repo, parent, depth + 1)
-                {
-                    return false;
-                }
-                continue;
-            }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{parent}")) else {
                 self.miss(repo);
                 return false;
@@ -320,8 +331,7 @@ impl Pass<'_> {
             if !self.eligible(repo, &issue)
                 || issue["state"] != "open"
                 || !self.verified_source(repo, &issue).unwrap_or(false)
-                || list.next() != Some(index)
-                || !self.child_admissible_at(repo, parent, depth + 1)
+                || !self.child_admissible_at(repo, &parent, depth + 1)
             {
                 return false;
             }
@@ -706,137 +716,240 @@ impl Pass<'_> {
             let Some((_, n)) = name.rsplit_once('-') else {
                 continue;
             };
-            let Some(parent) = all
-                .iter()
-                .find(|i| raw(&i["number"]) == n && self.eligible(repo, i))
-            else {
+            // Closed, or outside this pass's scope: nothing to say of it.
+            let Some(parent) = all.iter().find(|i| raw(&i["number"]) == n) else {
                 continue;
             };
-            let Ok(bytes) = fs::read(d.join("tasks.json")) else {
-                continue;
-            };
-            let Ok(mut list) = serde_json::from_slice::<List>(&bytes) else {
-                self.retry(repo);
-                continue;
-            };
-            if list.tasks.is_empty() || self.claimed(repo).contains(n) {
-                continue;
+            let hold = self.sequence_one(repo, n, &d, parent);
+            self.say_hold(repo, n, &d, hold);
+        }
+    }
+
+    /// Moves parent N's list on by one step where it can, and says what, if
+    /// anything, holds it.
+    fn sequence_one(&mut self, repo: &str, n: &str, d: &Path, parent: &Value) -> Hold {
+        if !self.eligible(repo, parent) {
+            return Hold::Yes("its parent isn't one the inbox may read".into());
+        }
+        let bytes = match fs::read(d.join("tasks.json")) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Hold::No,
+            Err(e) => return Hold::Yes(format!("its tasks.json can't be read: {e}")),
+        };
+        let Ok(mut list) = serde_json::from_slice::<List>(&bytes) else {
+            self.retry(repo);
+            return Hold::Yes("its tasks.json doesn't parse".into());
+        };
+        if list.tasks.is_empty() {
+            return Hold::No;
+        }
+        // Only the parent's own job holds its list (mid-split, say): a job
+        // whose brief merely mentions the parent doesn't own it.
+        if let Some(id) = self.owner(repo, n) {
+            return Hold::Yes(format!("its own job {id} is still live"));
+        }
+        let Some(same) = self.verified_source(repo, parent) else {
+            return Hold::Unknown;
+        };
+        if !same {
+            let stale = d.join("stale-notice");
+            if !stale.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
+                let _ = fs::write(stale, "paused\n");
             }
-            let Some(same) = self.verified_source(repo, parent) else {
-                continue;
+            return Hold::Yes("the parent changed after its split".into());
+        }
+        if !self.render_list(repo, n, &mut list) {
+            self.miss(repo);
+            return Hold::Unknown;
+        }
+        if let Some(at) = list.children.iter().position(|c| c.number.is_none()) {
+            return Hold::Yes(format!("task {} has no child issue yet", at + 1));
+        }
+        let Some(index) = list.next() else {
+            self.reconcile_notice(repo, n, None);
+            if !self.close(repo, n, "completed") {
+                self.miss(repo);
+                return Hold::Unknown;
+            }
+            return Hold::No;
+        };
+        let child = list.children[index].number.unwrap();
+        // Moved on, or replanned, past the child a notice was about.
+        if self.notice_owed(repo, n).is_some_and(|on| on != child) {
+            self.reconcile_notice(repo, n, None);
+        }
+        let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{child}")) else {
+            self.miss(repo);
+            return Hold::Unknown;
+        };
+        if !self.eligible(repo, &issue) {
+            return Hold::Yes(format!(
+                "its next child #{child} isn't one the inbox may read"
+            ));
+        }
+        // Apply inherited repair scheduling even when a previous pass already
+        // offered this child, or it was reused with an engine label.
+        if issue["state"] == "open"
+            && self.lane(parent)
+            && !self.lane(&issue)
+            && !self.add_label(repo, &child.to_string(), &self.inbox.unstick_label)
+        {
+            self.miss(repo);
+            return Hold::Unknown;
+        }
+        let mut advanced = false;
+        let mut sure = true;
+        // A child is done when a merged PR is tied to it, whatever its
+        // issue's state: an open one recorded so is closed with it.
+        let landed = if issue["state"] == "closed" {
+            let Some(landed) = self.landed_child(repo, child, Some(&issue)) else {
+                self.miss(repo);
+                return Hold::Unknown;
             };
-            if !same {
-                let stale = d.join("stale-notice");
-                if !stale.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
-                    let _ = fs::write(stale, "paused\n");
+            match landed {
+                Some(pr) => Some(pr),
+                None => match self.successor(repo, &issue, &list.refs(repo, n)) {
+                    Successor::Landed(pr) => Some(pr),
+                    Successor::None => None,
+                    Successor::Unknown => {
+                        self.miss(repo);
+                        return Hold::Unknown;
+                    }
+                    // Its place is the successor's: no notice, nothing to
+                    // record by hand.
+                    Successor::Open(to) => {
+                        let at = &mut list.children[index];
+                        if at.continued.as_ref() != Some(&to) || at.waits {
+                            at.continued = Some(to.clone());
+                            at.waits = false;
+                            if !self.save_list(repo, n, &list) {
+                                self.retry(repo);
+                                return Hold::Unknown;
+                            }
+                        }
+                        if !self.render_list(repo, n, &mut list) {
+                            self.miss(repo);
+                        }
+                        self.reconcile_notice(repo, n, None);
+                        return Hold::Yes(format!(
+                            "its next child #{child} continues as {to}, which hasn't landed"
+                        ));
+                    }
+                },
+            }
+        } else {
+            // Reopened: its own work again, whatever it was continued as.
+            if list.children[index].continued.take().is_some()
+                && !(self.save_list(repo, n, &list) && self.render_list(repo, n, &mut list))
+            {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
+            self.recorded_landing(repo, child)
+        };
+        if let Some(pr) = landed {
+            if issue["state"] == "open" && !self.close(repo, &child.to_string(), "completed") {
+                self.miss(repo);
+                return Hold::Unknown;
+            }
+            list.children[index].merged_pr = Some(pr);
+            list.children[index].waits = false;
+            list.children[index].continued = None;
+            if !self.save_list(repo, n, &list) {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
+            advanced = true;
+        } else if issue["state"] == "closed" {
+            // Closed by hand: a no-op, said once on the checklist, and to
+            // the owner until the list moves on, never left in silence.
+            let at = &mut list.children[index];
+            if !at.waits || at.continued.is_some() {
+                at.waits = true;
+                at.continued = None;
+                if !self.save_list(repo, n, &list) {
+                    self.retry(repo);
+                    return Hold::Unknown;
                 }
-                continue;
             }
             if !self.render_list(repo, n, &mut list) {
                 self.miss(repo);
-                continue;
             }
-            if list.children.iter().any(|c| c.number.is_none()) {
-                continue;
-            }
-            let Some(index) = list.next() else {
-                self.reconcile_notice(repo, n, None);
-                if !self.close(repo, n, "completed") {
-                    self.miss(repo);
-                }
-                continue;
-            };
-            let child = list.children[index].number.unwrap();
-            // Moved on, or replanned, past the child a notice was about.
-            if self.notice_owed(repo, n).is_some_and(|on| on != child) {
-                self.reconcile_notice(repo, n, None);
-            }
-            let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{child}")) else {
-                self.miss(repo);
-                continue;
-            };
-            if !self.eligible(repo, &issue) {
-                continue;
-            }
-            // Apply inherited repair scheduling even when a previous pass already
-            // offered this child, or it was reused with an engine label.
-            if issue["state"] == "open"
-                && self.lane(parent)
-                && !self.lane(&issue)
-                && !self.add_label(repo, &child.to_string(), &self.inbox.unstick_label)
+            self.reconcile_notice(repo, n, Some(child));
+            return Hold::Yes(format!(
+                "its next child #{child} was closed with no merged PR"
+            ));
+        } else if !list.children[index].offered
+            && self.engine(&issue).is_none()
+            && !self.has_task_list(Some(repo), &child.to_string())
+        {
+            if !self.add_label(repo, &child.to_string(), "ready")
+                || !self.remove_label(repo, &child.to_string(), "later")
             {
                 self.miss(repo);
-                continue;
-            }
-            let mut advanced = false;
-            // A child is done when a merged PR is tied to it, whatever its
-            // issue's state: an open one recorded so is closed with it.
-            let landed = if issue["state"] == "closed" {
-                let Some(landed) = self.landed_child(repo, child, Some(&issue)) else {
-                    self.miss(repo);
-                    continue;
-                };
-                landed
+                sure = false;
             } else {
-                self.recorded_landing(repo, child)
-            };
-            if let Some(pr) = landed {
-                if issue["state"] == "open" && !self.close(repo, &child.to_string(), "completed") {
-                    self.miss(repo);
-                    continue;
-                }
-                list.children[index].merged_pr = Some(pr);
-                list.children[index].waits = false;
+                list.children[index].offered = true;
                 if !self.save_list(repo, n, &list) {
                     self.retry(repo);
-                    continue;
+                    sure = false;
                 }
-                advanced = true;
-            } else if issue["state"] == "closed" {
-                // Closed by hand: a no-op, said once on the checklist, and to
-                // the owner until the list moves on, never left in silence.
-                if !list.children[index].waits {
-                    list.children[index].waits = true;
-                    if !self.save_list(repo, n, &list) {
-                        self.retry(repo);
-                        continue;
-                    }
-                }
-                if !self.render_list(repo, n, &mut list) {
-                    self.miss(repo);
-                }
-                self.reconcile_notice(repo, n, Some(child));
-                continue;
-            } else if !list.children[index].offered
-                && self.engine(&issue).is_none()
-                && !self.has_task_list(Some(repo), &child.to_string())
-            {
-                if !self.add_label(repo, &child.to_string(), "ready")
-                    || !self.remove_label(repo, &child.to_string(), "later")
-                {
-                    self.miss(repo);
-                } else {
-                    list.children[index].offered = true;
-                    if !self.save_list(repo, n, &list) {
-                        self.retry(repo);
+            }
+        }
+        self.reconcile_notice(repo, n, None);
+        if advanced {
+            if self.render_list(repo, n, &mut list) {
+                // Next pass admits the next child from the persisted list.
+                self.book(repo, crate::now());
+            } else {
+                self.miss(repo);
+                sure = false;
+            }
+        }
+        if sure { Hold::No } else { Hold::Unknown }
+    }
+
+    /// Says in the journal, once per change, why parent N's list didn't
+    /// move, and keeps it as the plan's `held`; and once when it moves again.
+    /// A pass that couldn't tell (GitHub unreachable, a write to retry)
+    /// leaves the last word as it was: the miss is said on its own.
+    fn say_hold(&self, repo: &str, n: &str, d: &Path, hold: Hold) {
+        let f = d.join("held");
+        match hold {
+            Hold::Unknown => {}
+            Hold::Yes(why) => {
+                if crate::read(&f).as_deref() != Some(why.as_str()) {
+                    eprintln!("proj-inbox: {repo}#{n}'s task list waits: {why}");
+                    if let Err(e) = swap(&f, &why) {
+                        eprintln!("proj-inbox: couldn't keep {}: {e}", f.display());
                     }
                 }
             }
-            self.reconcile_notice(repo, n, None);
-            if advanced {
-                if self.render_list(repo, n, &mut list) {
-                    // Next pass admits the next child from the persisted list.
-                    self.book(repo, crate::now());
-                } else {
-                    self.miss(repo);
+            Hold::No => {
+                if f.exists() {
+                    eprintln!("proj-inbox: {repo}#{n}'s task list moves again");
+                    if let Err(e) = fs::remove_file(&f) {
+                        eprintln!("proj-inbox: couldn't remove {}: {e}", f.display());
+                    }
                 }
             }
         }
     }
 }
 
+/// What a pass found holding a task list.
+enum Hold {
+    /// Nothing: it moved, or waits only on its next child's own work.
+    No,
+    /// This, said once in the journal.
+    Yes(String),
+    /// The pass couldn't tell; it's looked at again soon.
+    Unknown,
+}
+
 #[path = "landed.rs"]
 mod landed;
+use landed::Successor;
 pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
 
 #[cfg(test)]

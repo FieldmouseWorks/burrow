@@ -423,11 +423,12 @@ impl Hooks<'_> {
     }
 
     /// What a look at one repo said back, in the word's: a rate limit's
-    /// reset, and what wouldn't save.
+    /// reset, the latest of every look's, and what wouldn't save.
     fn noted(&mut self, out: Out) {
-        if self.out.limited.is_none() {
-            self.out.limited = out.limited;
-        }
+        self.out.limited = match (self.out.limited, out.limited) {
+            (Some(was), Some(at)) => Some(was.max(at)),
+            (was, at) => was.or(at),
+        };
         self.out.failed.extend(out.failed);
     }
 }

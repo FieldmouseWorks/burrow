@@ -1,6 +1,7 @@
 //! Durable recovery of waits lost before policy holds existed. Selection
 //! uses a saved policy generation; publication always uses current job facts.
 use super::*;
+use crate::record::JobFile;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -227,20 +228,6 @@ fn adoptable(
     (found, complete)
 }
 
-/// A file's text through the confined reader, None when it isn't there; an
-/// error for any other failure, a link or special file included.
-fn present(path: &Path) -> io::Result<Option<String>> {
-    match crate::state_reads::bytes(path) {
-        Ok(b) => Ok(Some(
-            String::from_utf8_lossy(&b)
-                .trim_end_matches('\n')
-                .to_owned(),
-        )),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
 /// A job the policy denies, not parked (a park holds itself), with a wait
 /// it keeps from the watchdog that [`live`] doesn't see: a turn that ended
 /// other than done, or done without saying what comes next. Its own files
@@ -252,15 +239,8 @@ fn unheld(
     policies: &[Option<burrow_settings::Snapshot>],
 ) -> io::Result<bool> {
     let job = Job::new(cfg, id);
-    let Some(n) = present(&job.path("turns"))?.filter(|n| crate::job::valid_turn(n)) else {
-        return Ok(false);
-    };
-    let outcome = present(&job.turn(&n, "outcome"))?;
-    let end = present(&job.turn(&n, "end"))?;
-    let open = outcome.as_deref() != Some("done") || end.as_deref() == Some("undeclared");
-    Ok(open
-        && !job.turn(&n, "stopped").try_exists()?
-        && !job.path("owned").try_exists()?
+    Ok(crate::record::left_open(&job)?
+        && !job.file(JobFile::Owned).try_exists()?
         && !crate::policy::path(&job, "park").try_exists()?
         && policies.iter().any(|policy| {
             crate::policy::denied_by(&job, |repo| {

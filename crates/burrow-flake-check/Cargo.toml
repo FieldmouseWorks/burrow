@@ -8,6 +8,7 @@ default-run = "burrow-flake-check"
 
 [dependencies]
 burrow-github = { path = "../burrow-github" }
+jiff.workspace = true
 serde_json.workspace = true
 
 [lints]

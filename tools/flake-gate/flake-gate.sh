@@ -62,12 +62,17 @@ inputs=$(yq -o=json '.on.workflow_call.inputs // {}' "$workflow")
 # the input's default, or its type's (false, 0, empty), each as a string;
 # and TOOLS, where the gate's files are. The one exception is the legs CI
 # splits the gate across: here it runs whole, as one leg (legs 1, leg 1).
+# The build store's Actions variables, which the gate reads on a runner with
+# a store of its own (`inputs.install-nix && vars.NAME || ''`), a desk has
+# none of: empty, as on GitHub with them unset, so the gate reports nothing
+# of a store and builds as it always does.
 # Anything else this can't mirror, so it stops rather than run a different
 # gate.
 env=$(jq -c --argjson with "$with" --argjson inputs "$inputs" --arg tools "$tools" '
   .[0].env // {} | to_entries | map(
     [.value | capture("^[$][{][{] *(?<c>inputs|matrix)[.](?<i>[A-Za-z0-9_-]+) *[}][}]$")?][0] as $m
     | if .key == "TOOLS" then {key, value: $tools}
+      elif .value | test("^[$][{][{] *inputs[.]install-nix && vars[.][A-Za-z0-9_]+ [|][|] '"''"' *[}][}]$") then {key, value: ""}
       elif $m == null then error("env \(.key) is \(.value | tojson), not one input")
       elif $m.c == "matrix" then
         if $m.i == "leg" then {key, value: "1"} else error("env \(.key) is matrix.\($m.i), not the leg") end

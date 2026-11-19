@@ -19,6 +19,21 @@ fn job() -> Value {
     workflow(".github/workflows/flake-check.yml")["jobs"]["check"].clone()
 }
 
+/// The check job's step that makes the kept builds' directory, the one
+/// that restores them, and the one that installs Nix, which names them.
+fn restoring(all: &[Value]) -> (&Value, &Value, &Value) {
+    let find = |f: &dyn Fn(&Value) -> bool| all.iter().find(|s| f(s)).unwrap();
+    (
+        find(&|s| s["run"] == "mkdir -p \"$RUNNER_TEMP/kept\""),
+        find(&|s| s["id"] == "kept-restore"),
+        find(&|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))
+        }),
+    )
+}
+
 fn ctx(pairs: &[(&str, V)]) -> Ctx {
     pairs
         .iter()
@@ -32,7 +47,7 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
-    let (made, restore, install) = (&all[2], &all[4], &all[5]);
+    let (made, restore, install) = restoring(all);
     for (keep, nix) in [(true, true), (true, false), (false, true)] {
         let c = ctx(&[
             ("inputs.keep-builds", keep.into()),
@@ -225,7 +240,7 @@ fn a_negative_restores_every_legs_kept_builds() {
     let all = steps(neg);
     let gate = job();
     let gate_all = steps(&gate);
-    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[4], &gate_all[5]);
+    let (gate_made, gate_restore, gate_install) = restoring(gate_all);
     let uses = |s: &Value, action: &str| s["uses"].as_str().is_some_and(|u| u.starts_with(action));
     let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
     let restores: Vec<&Value> = all
@@ -365,6 +380,60 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+}
+
+/// The wait plans with Nix installed, so when the leg restored nothing the
+/// root daemon has made the empty kept cache's nar/ and log/ its own, and
+/// the second restore couldn't extract into them: tar's "Cannot open:
+/// Permission denied" failed the leg (#1087's leg 1). Right before that
+/// restore, on the same condition, the runner's user takes the directory
+/// back.
+#[test]
+fn a_pr_leg_takes_the_kept_cache_back_from_the_daemon_before_restoring_again() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert_eq!(at("kept-reclaim") + 1, at("kept-rewait"));
+    assert!(at("kept-wait") < at("kept-reclaim"));
+    let reclaim = &all[at("kept-reclaim")];
+    assert_eq!(reclaim["if"], all[at("kept-rewait")]["if"]);
+
+    // Run with a sudo that only says what it was asked to do.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let said = dir.path().join("said");
+    let sudo = bin.join("sudo");
+    burrow_test::executable(
+        &sudo,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", said.display()),
+    );
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-euo", "pipefail", "-c", script(reclaim)])
+        .env("RUNNER_TEMP", dir.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+    let out = crate::harness::output(cmd);
+    assert!(out.status.success(), "{out:?}");
+    let id = |flag: &str| {
+        let o = crate::harness::output({
+            let mut c = std::process::Command::new("id");
+            c.arg(flag);
+            c
+        });
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(
+        std::fs::read_to_string(&said).unwrap(),
+        format!(
+            "chown\n-R\n{}:{}\n{}/kept\n",
+            id("-u"),
+            id("-g"),
+            dir.path().display()
+        )
+    );
 }
 
 /// A PR's exact key is the one its base's push saved under: the merge

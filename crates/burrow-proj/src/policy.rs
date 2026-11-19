@@ -1,5 +1,6 @@
 //! Durable repository identity and vacating. A pause is a parked job, never a
 //! stop: its brief, session, scratch, question and awaits remain its own.
+use crate::record::{JobFile, TurnFile};
 use crate::{config::Config, job::Job, now, read, swap, systemd};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -152,6 +153,16 @@ pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
 }
 
+/// Whether policy may still run the job's last turn again: a restoration
+/// released but not yet accepted by its `_exec` (`restoring`), which
+/// reconciliation relaunches under the same turn number, or rolls back to the
+/// parked turn, if it fails or dies first; or a park waiting for release.
+/// `restoring` is read before `park`: the unlocked rename from one to the other
+/// is then never missed, and the rename back runs under the job's lock.
+pub(crate) fn pending(job: &Job) -> bool {
+    path(job, "restoring").exists() || parked(job)
+}
+
 /// What a parked job waits for, if its park says.
 pub(crate) fn waits_for(job: &Job) -> Option<String> {
     let bytes = fs::read(path(job, "park")).ok()?;
@@ -194,14 +205,13 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
     }
     let order = order
         .or_else(|| read(&path(job, "order")))
-        .or_else(|| read(&job.turn(&turn, "queue-order")))
+        .or_else(|| read(&job.turn_file(&turn, TurnFile::QueueOrder)))
         .or_else(|| retry.map(|checkpoint| checkpoint.queue().0.to_owned()))
         .unwrap_or_else(|| {
             format!(
                 "{}-{}-{}",
                 if first { 1 } else { 2 },
-                crate::mtime_nanos(&job.path(&format!("prompt.{turn}")))
-                    .unwrap_or_else(crate::now_nanos),
+                crate::mtime_nanos(&job.prompt(&turn)).unwrap_or_else(crate::now_nanos),
                 job.id
             )
         });
@@ -299,8 +309,13 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
         systemd::up(cfg, "proj-*.service").ok_or("could not list the job units that are up")?;
     let mut errors = Vec::new();
     for id in ids {
+        let job = Job::new(cfg, &id);
+        let was = parked(&job);
         if let Err(error) = reconcile_job(cfg, &id, release_generation, &up) {
             errors.push(format!("{id}: {error}"));
+        }
+        if parked(&job) != was {
+            crate::record::noted(&job, "the policy's pass");
         }
     }
     if let Err(error) = crate::policy_proofs::reconcile(cfg) {
@@ -393,9 +408,9 @@ fn reconcile_job(
                 return Ok(());
             }
             let state = job.state();
-            let first = job
-                .turns()
-                .is_some_and(|n| read(&job.turn(&n, "priority")).as_deref() == Some("first"));
+            let first = job.turns().is_some_and(|n| {
+                read(&job.turn_file(&n, TurnFile::Priority)).as_deref() == Some("first")
+            });
             mark(&job, &state, first, Some(DENIED))?;
         } else if let Some(held) = job.try_lock().map_err(|e| e.to_string())? {
             // A stop or a turn start holding it is changing the park; the
@@ -477,12 +492,12 @@ fn reconcile_job(
                 .ok_or_else(|| format!("could not restore queued {id}"))
         } else if rec.state == "running" {
             let note = "The owner paused this repository and stopped the whole turn. Its worktrees and history were kept. Resume where you left off; inspect completed work before repeating any command.";
-            let prompt = if crate::filled(&job.path("session")) {
+            let prompt = if crate::filled(&job.file(JobFile::Session)) {
                 note.to_owned()
             } else {
                 format!(
                     "{}\n\n{note}",
-                    read(&job.path(&format!("prompt.{}", rec.turn))).unwrap_or_default()
+                    read(&job.prompt(&rec.turn)).unwrap_or_default()
                 )
             };
             crate::turn::start_admitted(cfg, id, &prompt, rec.first, &capacity)
@@ -539,7 +554,7 @@ pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
     let at = now();
     let elapsed = at.saturating_sub(rec.at);
     crate::ask::restore(job, rec.at, at)?;
-    if let Some(text) = read(&job.path("await")) {
+    if let Some(text) = crate::record::await_text(job) {
         let shifted: String = crate::job::awaits(&text)
             .into_iter()
             .map(|mut a| {
@@ -549,7 +564,9 @@ pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
                 a.line()
             })
             .collect();
-        swap(&job.path("await"), &shifted).map_err(|e| e.to_string())?;
+        crate::record::mark(job, crate::record::Marker::Await)
+            .swap(&shifted)
+            .map_err(|e| e.to_string())?;
     }
     rec.at = at;
     Ok(())

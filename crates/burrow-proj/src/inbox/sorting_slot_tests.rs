@@ -95,7 +95,7 @@ fn terminal_sorters_release_capacity_without_requiring_an_outcome() {
             _ => (),
         }
         let d = record(&b, "sam/game", 3, "s1");
-        assert!(!b.pass().sorting_slot(&d), "{terminal}");
+        assert!(!b.pass().holds_sorting_slot(&d), "{terminal}");
         decisions(&b, false);
     }
 }

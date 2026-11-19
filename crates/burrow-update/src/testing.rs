@@ -62,7 +62,7 @@ pub const BRANCH: &str = "box-update";
 ///   T/switch-rc's code when there is one; confirm fails with
 ///   T/confirm-fails there.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
-///   that's there.
+///   that's there, or healthy, then T/excused when that's there.
 /// - notify keeps what it opens and closes in T/notices, and each notice's
 ///   body in T/notice-KEY.
 /// - vulnix reports, for a system, each line "COMMIT CVE PACKAGE SCORE" of
@@ -222,7 +222,8 @@ case $1 in
   snapshot) [ ! -e "$T/snapshot-fails" ] && echo healthy >"$2" ;;
   compare)
     [ -e "$2" ] || exit 9
-    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; } ;;
+    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; }
+    echo healthy; [ ! -e "$T/excused" ] || cat "$T/excused" ;;
   *) exit 9 ;;
 esac
 "#,

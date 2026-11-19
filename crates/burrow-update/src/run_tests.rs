@@ -173,6 +173,8 @@ fn a_box_running_changes_that_arent_on_main_holds() {
     let since: i64 = m.recorded("held-since").unwrap().parse().unwrap();
     assert!((epoch() - since).abs() < 60);
     assert_eq!(m.did("notices"), "");
+    // Its status says when the owner hears of it, for burrow-dispatch.
+    assert_eq!(m.status()["offMain"], serde_json::json!(since + 6 * 3600));
     // Six hours on, the owner hears of it.
     fs::write(
         m.cfg.state.join("held-since"),
@@ -198,6 +200,7 @@ fn a_box_running_changes_that_arent_on_main_holds() {
             .contains("close not-on-main: box is back on main.\n")
     );
     assert_eq!(said(&m).0, "ok");
+    assert_eq!(m.status().get("offMain"), None);
 }
 
 #[test]
@@ -476,6 +479,24 @@ fn unhealthy_after_the_switch_goes_straight_back() {
     assert!(!m.cfg.state.join("jobs/health").exists());
     let log = fs::read_to_string(m.cfg.state.join("logs/switch.log")).unwrap();
     assert_eq!(log.matches("switching to").count(), 1, "this run's: {log}");
+}
+
+#[test]
+fn what_a_failing_check_explains_is_noted_not_reverted() {
+    // Claude Code logged out before the switch: HOST-health doesn't count
+    // the servers that can't start again against it, and says so.
+    let m = machine();
+    m.upstream("nixpkgs", &sha('c'));
+    let excused = "claude-rc@web.service failed, but not counted: check:claude-login is failing, and it can't pass without that";
+    fs::write(m.path("excused"), format!("{excused}\n")).unwrap();
+    assert_eq!(go(&m), 0);
+    assert_eq!(said(&m).0, "ok");
+    assert!(m.did("calls").ends_with("confirm\n"));
+    assert_eq!(
+        m.did("journal"),
+        format!("-t box-update -p warning: not the switch's doing: {excused}\n")
+    );
+    assert!(!m.cfg.state.join("jobs/health").exists());
 }
 
 #[test]

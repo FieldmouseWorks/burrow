@@ -1,6 +1,7 @@
 //! A run of a turn, watched until it's over: its answer cutting it short,
 //! its deadline, its stream gone quiet, and its wait in line ([`Clock`]).
 
+use crate::record::{TurnFile, TurnMarker};
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::thread::sleep;
@@ -8,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
 
-use super::{deadline, touch};
+use super::touch;
 use crate::config::Config;
 use crate::engine::Said;
 use crate::job::Job;
+use crate::record::deadline;
 use crate::waits::{rewatch_later, waiting};
 use crate::{mtime_nanos, now_nanos};
 
@@ -112,17 +114,19 @@ impl Clock {
             && let Some(d) = dl
         {
             let moved = d + now - self.last;
-            let _ = crate::state_reads::write(job.turn(n, "deadline"), format!("{moved}\n"));
+            let _ =
+                crate::record::mark_turn(job, n, TurnMarker::Deadline).write(format!("{moved}\n"));
             dl = Some(moved);
         }
         self.last = now;
         if w != self.was {
             match &w {
                 Some(w) => {
-                    let _ = crate::state_reads::write(job.turn(n, "wait"), format!("{w}\n"));
+                    let _ =
+                        crate::record::mark_turn(job, n, TurnMarker::Wait).write(format!("{w}\n"));
                 }
                 None => {
-                    let _ = crate::state_reads::remove(job.turn(n, "wait"));
+                    let _ = crate::record::mark_turn(job, n, TurnMarker::Wait).remove();
                 }
             }
             self.was = w.clone();
@@ -131,14 +135,14 @@ impl Clock {
         if let Some(d) = dl
             && now >= d
         {
-            touch(&job.turn(n, "late"));
+            touch(&job.turn_file(n, TurnFile::Late));
             stop(pid);
             self.finish(run);
             return;
         }
-        let stream = mtime_nanos(&job.turn(n, "jsonl")).unwrap_or(0);
+        let stream = mtime_nanos(&job.turn_file(n, TurnFile::Jsonl)).unwrap_or(0);
         if gone_quiet(now, stream, run.quiet) {
-            touch(&job.turn(n, "quiet"));
+            touch(&job.turn_file(n, TurnFile::Quiet));
             stop(pid);
             self.finish(run);
             return;
@@ -160,7 +164,7 @@ impl Clock {
         }
         self.done = true;
         if self.was.take().is_some() {
-            let _ = crate::state_reads::remove(run.job.turn(run.n, "wait"));
+            let _ = crate::record::mark_turn(run.job, run.n, TurnMarker::Wait).remove();
             rewatch_later(run.cfg, run.job.id);
         }
     }

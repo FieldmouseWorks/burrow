@@ -46,12 +46,20 @@ let
   lock = lib.importJSON (flakeInputs.self.outPath + "/flake.lock");
   lockedRepo = import ../lib/locked-repo.nix { inherit lib; };
   same = a: b: a != null && lib.toLower a == lib.toLower b;
-  runningOf = repo: let
-    roots = lib.filterAttrs (_: lib.isString) lock.nodes.${lock.root}.inputs;
-    named = lib.attrNames (lib.filterAttrs (_: node: same (lockedRepo (lock.nodes.${node}.locked or { })) repo) roots);
-  in if named == [ ] then null else flakeInputs.${lib.head named}.rev or null;
+  roots = lib.filterAttrs (_: lib.isString) lock.nodes.${lock.root}.inputs;
+  # The flake's input that is the repo, by the name the flake gives it.
+  inputOf = repo: lib.findFirst (name: same (lockedRepo (lock.nodes.${roots.${name}}.locked or { })) repo) null (lib.attrNames roots);
+  runningOf = repo: let name = inputOf repo; in if name == null then null else flakeInputs.${name}.rev or null;
+  # One the flake itself holds at a commit (its input names a `rev`, as the
+  # lock's `original` keeps it): HOST-update's bump leaves it there, so what
+  # its default branch has since isn't on its way live, and no run of
+  # HOST-update could bring it. It's held until the flake lets go, which
+  # `status` says; it isn't a wait.
+  heldOf = repo: (lock.nodes.${roots.${inputOf repo}}.original or { }) ? rev;
   own = lib.findFirst (same config.burrow.updates.repo) null config.burrow.updates.watch;
-  pinned = lib.filter (r: !same config.burrow.updates.repo r && runningOf r != null) config.burrow.updates.watch;
+  locked = lib.filter (r: !same config.burrow.updates.repo r && runningOf r != null) config.burrow.updates.watch;
+  held = lib.filter heldOf locked;
+  pinned = lib.subtractLists held locked;
   watched = lib.optional (own != null) own ++ pinned;
   deploying = updates && flakeInputs ? self;
 
@@ -159,6 +167,7 @@ in
           inherit own;
           live = "${config.burrow.stateDir}/live.json";
           running = lib.genAttrs pinned runningOf;
+          held = lib.genAttrs held runningOf;
           after = cfg.deploy.afterMinutes * 60;
           run = cfg.deploy.runMinutes * 60;
           ride = cfg.deploy.rideMinutes * 60;
@@ -278,8 +287,9 @@ in
 
       `burrow-dispatch` restarts an Actions runner (${lib.concatStringsSep ", " (lib.attrNames cfg.runners)}) that sits idle
       with jobs queued for it, at most twice in six hours; cancels a push run on a default branch that hasn't
-      started once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
+      finished, started or not, once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
       The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
+      An input the flake holds at a `rev` isn't on its way live: status names it as held, and nothing waits on it.
     '' + lib.optionalString cfg.fresh.enable ''
       For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,
       `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), keeps ${toString cfg.fresh.idle}

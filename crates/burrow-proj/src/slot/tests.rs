@@ -128,10 +128,7 @@ fn child() {
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if matches!(
-        what.as_str(),
-        "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
-    ) {
+    if matches!(what.as_str(), "hand-over" | "stay" | "paused-hand-over") {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         burrow_test::executable(
@@ -152,33 +149,21 @@ esac
         if what.starts_with("paused-") {
             cfg.settings.as_mut().unwrap().allowed.clear();
             fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
-            let engine = if what == "paused-codex-hand-over" {
-                crate::engine::Engine::Codex
-            } else {
-                crate::engine::Engine::Claude
-            };
-            super::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap_err();
+            super::take_engine(
+                &cfg,
+                &id,
+                "1",
+                Class::Normal,
+                true,
+                crate::engine::Engine::Claude,
+            )
+            .unwrap_err();
         } else if what == "hand-over" {
             take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
         } else {
             held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
             publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
         }
-    }
-    if what == "codex" {
-        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
-        held = Some(
-            super::take_engine(
-                &cfg,
-                &id,
-                "1",
-                Class::Normal,
-                false,
-                crate::engine::Engine::Codex,
-            )
-            .unwrap(),
-        );
-        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     if what == "soon" {
         cfg.max_wait = 4;
@@ -937,8 +922,6 @@ mod reset;
 mod usage;
 
 mod admission;
-
-mod codex;
 
 mod github;
 

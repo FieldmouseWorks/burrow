@@ -12,6 +12,7 @@ use super::{arg, put};
 use crate::config::Config;
 use crate::job::Job;
 use crate::pick::demoted;
+use crate::record::JobFile;
 use crate::systemd;
 use crate::turn::start;
 use crate::{Fail, filled, io_fail, now, read};
@@ -114,7 +115,9 @@ fn find_held(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
         Err(e) => return Err(io_fail(&path, e)),
     };
     let job = Job::new(cfg, &id);
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     if job.turns().is_some() {
         return Ok(Some(id));
     }
@@ -348,6 +351,16 @@ fn run_with_cgroup(
 
 /// A new job in the project, its first turn started with the task: its id.
 pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String, Fail> {
+    // A repo, OWNER/NAME, is its own clone among the projects (no folder's
+    // name has a slash): what a starter that knows the repo alone names.
+    let folder;
+    let p = if p.contains('/') {
+        folder = crate::inbox::project_of(cfg, p)
+            .ok_or_else(|| Fail::new(1, format!("no project is a clone of {p}")))?;
+        folder.as_str()
+    } else {
+        p
+    };
     let project = format!("{}/{p}", cfg.projects.display());
     if !fs::metadata(&project).is_ok_and(|m| m.is_dir()) {
         return Err(Fail::new(1, format!("no such project: {project}")));
@@ -393,16 +406,17 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let job = Job::new(cfg, &id);
     // Held until its first turn has started or failed to, so what finds it
     // by its key never judges it halfway (find).
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     if let Some(k) = &new.key
         && let Err(e) = take_key(cfg, k, &id)
     {
         let _ = fs::remove_dir_all(&job.dir);
         return Err(e);
     }
-    let write = |name: &str, text: &str| {
-        fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
-    };
+    let write =
+        |f: JobFile, text: &str| fs::write(job.file(f), text).map_err(|e| io_fail(&job.file(f), e));
     // What every turn of it runs as, kept where the job can't write it.
     let mut request = crate::job::Request {
         project: project.clone(),
@@ -414,7 +428,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     };
     request.save(&job).map_err(|e| Fail::new(1, e))?;
     if new.inbox_issue {
-        write("inbox-issue", "true\n")?;
+        write(JobFile::InboxIssue, "true\n")?;
     }
     let parent = std::env::var("PROJ_JOB").ok().filter(|s| !s.is_empty());
     // A launch from inside a job inherits that job's automation: only a
@@ -430,11 +444,11 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             .map_err(|e| Fail::new(1, e))?,
     };
     if let Some(kind) = &new.usage_kind {
-        write("usage-kind", kind)?;
+        write(JobFile::UsageKind, kind)?;
     }
     let starter = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     write(
-        "starter",
+        JobFile::Starter,
         parent
             .as_deref()
             .or_else(|| {
@@ -447,7 +461,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     )?;
     if !new.kicks.is_empty() {
         write(
-            "kick",
+            JobFile::Kick,
             &new.kicks
                 .iter()
                 .map(|k| format!("{k}\n"))
@@ -455,31 +469,33 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         )?;
     }
     if let Some(t) = &new.limit {
-        write("timeout", &format!("{t}\n"))?;
+        write(JobFile::Timeout, &format!("{t}\n"))?;
     }
     if let Some(t) = &new.idle {
-        write("idle", &format!("{t}\n"))?;
+        write(JobFile::Idle, &format!("{t}\n"))?;
     }
     // Work on the pipeline holds the pipeline's slots only in its own
     // repos' projects (pick::class), and says so when it won't.
     if new.pipeline {
-        write("pipeline", "")?;
+        write(JobFile::Pipeline, "")?;
         if let Some(why) = demoted(cfg, &job.dir) {
             eprintln!("proj: {id} {why}");
         }
     }
     if new.unstick {
-        write("unstick", "")?;
+        let unstick = crate::record::mark(&job, crate::record::Marker::Unstick);
+        unstick.put("").map_err(|e| unstick.fail(e))?;
     }
     crate::ask::initialize(&job, new.link.as_deref()).map_err(|e| Fail::new(1, e))?;
     if let Some(l) = &new.link {
-        write("link", &format!("{l}\n"))?;
+        write(JobFile::Link, &format!("{l}\n"))?;
     }
     if let Some(t) = &new.since {
-        write("since", &format!("{t}\n"))?;
+        write(JobFile::Since, &format!("{t}\n"))?;
     }
     if new.vm {
-        let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;
+        let out = File::create(job.file(JobFile::Agent))
+            .map_err(|e| io_fail(&job.file(JobFile::Agent), e))?;
         let s = Command::new("agent")
             .args(["new", p])
             .stdout(out)
@@ -488,14 +504,14 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         if !s.success() {
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
-        request.agent = read(&job.path("agent")).filter(|a| !a.is_empty());
+        request.agent = read(&job.file(JobFile::Agent)).filter(|a| !a.is_empty());
         request.save(&job).map_err(|e| Fail::new(1, e))?;
     }
     let given = if let Some(source) = &new.task_source {
-        write("task-source", source)?;
+        write(JobFile::TaskSource, source)?;
         task.replace(
             "@PROJ_TASK_SOURCE@",
-            &job.path("task-source").to_string_lossy(),
+            &job.file(JobFile::TaskSource).to_string_lossy(),
         )
     } else {
         task.to_owned()
@@ -569,7 +585,9 @@ fn deliver(
     first: bool,
 ) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     crate::question::recover(&job).map_err(|e| Fail::new(1, e))?;
     if crate::question::acceptance_pending(&job).map_err(|e| Fail::new(1, e))? {
         return Ok(());
@@ -595,7 +613,7 @@ fn resume_one(
 ) -> Result<Sharing, Fail> {
     let job = Job::new(cfg, id);
     let no = if cutoff.is_some() { 3 } else { 1 };
-    if !filled(&job.path("session")) {
+    if !filled(&job.file(JobFile::Session)) {
         return Err(Fail::new(
             no,
             format!("{id} has no session to continue (yet)"),
@@ -603,7 +621,9 @@ fn resume_one(
     }
     // A job's turns start one at a time, and a look by proj-watch writes
     // back a wait only under the same lock.
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     crate::question::recover(&job).map_err(|e| Fail::new(no, e))?;
     let st = job.state();
     crate::planning::admit(&job).map_err(|e| Fail::new(no, e))?;

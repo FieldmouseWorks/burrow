@@ -2,6 +2,7 @@
 //! subject, ordering and effective policy. Job locks precede the registry;
 //! multi-job operations only try locks, never wait while holding another.
 use super::{Question, host_path};
+use crate::record::TurnFile;
 use crate::{config::Config, job::Job, read, swap};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -86,7 +87,7 @@ fn legacy_due(job: &Job) -> i64 {
     // completion. Prefer that over reconstructing it with today's timeout.
     let latest = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
     for n in (1..=latest).rev() {
-        if let Some(result) = read(&job.turn(&n.to_string(), "result"))
+        if let Some(result) = read(&job.turn_file(&n.to_string(), TurnFile::Result))
             && let Some(time) = result
                 .strip_prefix("No answer by ")
                 .and_then(|s| s.split_once(". The recommended answer was:").map(|p| p.0))
