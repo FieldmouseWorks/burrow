@@ -73,7 +73,7 @@ exit "$(cat "$d/osv-exit" 2>/dev/null || echo 0)"
             b.join("cargo"),
             r#"#!/bin/sh
 for m; do :; done
-echo "$*" >>"$FAKE/cargo"
+echo "$(pwd) $*" >>"$FAKE/cargo"
 d=${m%/Cargo.toml}
 [ -e "$d/cargo-tree" ] || { echo "error: no" >&2; exit 101; }
 cat "$d/cargo-tree"
@@ -486,12 +486,13 @@ fn a_crate_in_a_cargo_lock_counts_only_when_cargo_builds_it() {
     );
     // Not seen: a feature that turns it on later still gets it a job.
     assert!(!m.seen().contains(&"osv:app:RUSTSEC-4:chrono".to_owned()));
-    // Once for the lockfile, as the user, never changing it or fetching.
+    // Once for the lockfile, as the user, from / (never reading the
+    // checkout's own cargo config), never changing it or fetching.
     let lines: Vec<String> = m.fake("cargo").lines().map(str::to_owned).collect();
     assert_eq!(
         lines.last().unwrap(),
         &format!(
-            "tree --workspace --edges normal,build,dev --target all --all-features \
+            "/ tree --workspace --edges normal,build,dev --target all --all-features \
              --prefix none --format {{p}} --locked --offline --quiet --manifest-path {}/Cargo.toml",
             app.display()
         )

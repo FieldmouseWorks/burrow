@@ -266,13 +266,13 @@ fn built(cfg: &Config, osv: &Osv, p: &str, st: &State) -> Vec<Finding> {
 /// and then every finding in it counts.
 fn cargo_tree(cfg: &Config, lock: &Path) -> Option<BTreeSet<(String, String)>> {
     let manifest = lock.with_file_name("Cargo.toml");
-    let mut c = as_user(cfg, &cfg.tools.cargo);
-    // In the lockfile's directory, so cargo reads the project's own config
-    // (vendored sources, say) as it does in a build there.
-    if let Some(dir) = lock.parent() {
-        c.current_dir(dir);
-    }
-    let out = c
+    // From /, never the checkout: cargo reads the .cargo/config.toml of
+    // where it runs, and runs the rustc that names (`build.rustc`) even for
+    // `tree`. The scan reaches every directory in a checkout, so that's
+    // code no one looked at. A project's own sources (vendored, say) are
+    // then unknown, and cargo failing leaves every finding counting.
+    let out = as_user(cfg, &cfg.tools.cargo)
+        .current_dir("/")
         .args(["tree", "--workspace", "--edges", "normal,build,dev"])
         .args(["--target", "all", "--all-features"])
         .args(["--prefix", "none", "--format", "{p}"])
