@@ -346,6 +346,19 @@ in
       '';
     };
 
+    reviewAuthors = mkOption {
+      type = types.listOf (types.strMatching ".+[[]bot]");
+      default = [ "chatgpt-codex-connector[bot]" ];
+      description = ''
+        Logins whose posts on a PR are the reviewer's word (Codex's GitHub
+        connector's bot): the ledger records each as an unattested `review`
+        result, and the flow counts them (review_authors). A GitHub App's
+        bot each, as `reviewers` are. Needs a `cn` that reads
+        CONARY_REVIEW_AUTHORS (FieldmouseWorks/Conary#462); an older one
+        ignores it and records none.
+      '';
+    };
+
     ownContexts = mkOption {
       type = types.listOf types.str;
       default = lib.optional (autoland.enable or false) autoland.context;
@@ -412,6 +425,8 @@ in
         # The steward's word (its status, its reviewers' reviews) is only
         # what its App posted.
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
+        # The reviewer's own word, recorded unattested.
+        CONARY_REVIEW_AUTHORS = lib.concatStringsSep "," cfg.reviewAuthors;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
         # Whose attestations count: a train's gate and a PR's negative.

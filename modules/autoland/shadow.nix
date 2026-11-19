@@ -47,8 +47,8 @@ let
         proof_timeout = minutes cfg.proofTimeoutMinutes;
         job_timeout = minutes cfg.jobTimeoutMinutes;
         reviewers = lib.optional codex "codex";
-        # Codex's GitHub connector posts the reviews.
-        review_authors = [ "chatgpt-codex-connector[bot]" ];
+        # Codex's GitHub connector posts the reviews: the ledger's own list.
+        review_authors = ledger.reviewAuthors;
         # The flow's own account: review-settled, the conary/train status and
         # its answers are read only from it.
         flow_authors = [ stewardLogin ];
