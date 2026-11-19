@@ -1,8 +1,7 @@
 //! The steward's bare clone of each repo, which only it reads, and git as
-//! the steward runs it. Refs are fetched into it from GitHub: what the
-//! reviewers' snapshots are taken from (snapshot.rs), and what a proof's
-//! builds and a merge's effect are worked out from (proofs.py, prs.py
-//! `onto`).
+//! the steward runs it. Refs are fetched into it from GitHub: what a
+//! proof's builds and a merge's effect are worked out from (proofs.py,
+//! prs.py `onto`).
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
@@ -118,7 +117,7 @@ fn failed(what: &str, out: &Output) -> String {
 /// Where the repo's mirror is, in the steward's state.
 pub fn path(state: &Path, repo: &str) -> PathBuf {
     state
-        .join("review/git")
+        .join("git")
         .join(format!("{}.git", repo.replace('/', "__")))
 }
 

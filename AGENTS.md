@@ -7,6 +7,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   undo, inbox jobs, Remote Control) and how a chat thread uses them.
 - [docs/repo-baseline.md](docs/repo-baseline.md): the steward, the PR flow and
   what every repo is held to.
+- [docs/gate-design.md](docs/gate-design.md): the CI gate's design (one build
+  store, one plan a run, the line with Conary) and its stages.
 - [docs/house-style.md](docs/house-style.md): what every repo shares (the
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
@@ -40,6 +42,10 @@ they're more specific.
   [settings reference](https://github.com/FieldmouseWorks/burrow/blob/main/docs/settings-reference.md)
   rather than restate a value or where one is kept.
 - Before you edit, say what done looks like and how it will be checked.
+- Keep your context small: every step re-sends all you've read, and a
+  long wait makes it pay again. Read the lines you need (`rg -n`, ranges,
+  a diff's stat then its hunks), not whole files or logs; cap command
+  output; hand broad searches to a subagent; don't re-read what you have.
 - Report only the checks you ran and what they said. Skipped, unavailable
   or "should pass" is never a pass. Keep local and CI results apart.
 - A new check comes with proof that it fails on the bug it's for.
@@ -149,9 +155,8 @@ For every reviewer, the steward's included. Flag as P1:
 - the steward merging what it shouldn't: a head whose own change its
   reviewers didn't check, or a head CI didn't check, a one-way path, or a
   PR with open threads
-- a review agent that reaches more than its snapshot: a GitHub token, a
-  secrets path (`reviewers.skipPaths`), the PR's own copy of its review
-  rules, or its own key in what gets posted
+- a secret a reviewer could read: anything committed outside sops's
+  encryption (Codex's GitHub connector reads every path GitHub holds)
 - `HOST-update` going live or confirming without the VM tests and health
   checks passing first, or pushing to main anything but what went live or
   that rebased onto a moved main and built (the push's own run tests the

@@ -145,8 +145,7 @@ inputs:
             type = types.lines;
             default = "";
             description = ''
-              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude and
-              the job user's .codex/AGENTS.md for Codex when proj is on.
+              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude.
               burrow's modules fill in their sections at lib.mkOrder 600 to 1400;
               put an intro in lib.mkBefore (500) and an ending in lib.mkAfter (1500).
             '';

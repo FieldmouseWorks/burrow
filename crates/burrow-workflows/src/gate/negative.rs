@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{Gate, LOGS, lines};
-use crate::expr::{V, value};
+use crate::expr::{V, condition, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
 /// Which new tests count as having passed on the old code: those a check
@@ -249,7 +249,27 @@ impl Repo {
 fn every_pr_gets_one_from_the_workflows_own_files() {
     let wf = workflow(".github/workflows/flake-check.yml");
     let job = &wf["jobs"]["negative"];
-    assert_eq!(job["if"], "github.event_name == 'pull_request'");
+    // Every PR, unless its caller turns it off in a call whose negative
+    // doesn't count (burrow's flake.yml, train.rs); on by default.
+    let input = &wf["on"]["workflow_call"]["inputs"]["negative"];
+    assert_eq!(input["type"], "boolean");
+    assert_eq!(input["default"], true);
+    let cond = text(&job["if"]);
+    for (event, on, runs) in [
+        ("pull_request", true, true),
+        ("pull_request", false, false),
+        ("push", true, false),
+        ("push", false, false),
+    ] {
+        let ctx = [
+            ("github.event_name", V::from(event)),
+            ("inputs.negative", V::from(on)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        assert_eq!(condition(cond, &ctx), runs, "{event}, negative {on}");
+    }
     assert_eq!(job["permissions"]["id-token"], "write");
     // On the runner's runner, or the one the caller names for it.
     for (negative, runner) in [("", "remi"), ("fresh-remi", "fresh-remi")] {

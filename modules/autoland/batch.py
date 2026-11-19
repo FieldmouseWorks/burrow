@@ -143,6 +143,22 @@ class Batch:
         key = str(pr["number"])
         return st.get("visits", {}).get(key, 1) if key in st.get("done", {}) else 0
 
+    def due(self, repo, pr):
+        """Whether PR hasn't had its look this round. A kicked pass starts
+        every PR over (pending), so without rounds the ones it puts first
+        would take each slice again and the rest wait for good: each open
+        PR gets a look before any gets its second."""
+        return self.visited(repo, pr) <= self.state["repos"].get(repo.lower(), {}).get("round", 0)
+
+    def turn(self, repo, pending):
+        """Starts the next round once each pending PR has had its look in
+        this one. The pass calls it before every visit, so the round ends
+        where its last look did: a look past it, later in the same slice,
+        counts in the next round rather than making its PR due again."""
+        st = self.state["repos"].get(repo.lower())
+        if st and pending and not any(self.due(repo, pr) for pr in pending):
+            st["round"] = st.get("sequence", 1)
+
     def stopped(self, repo):
         return next(iter(self.state["repos"].get(repo.lower(), {}).get("stops", {}).values()), None)
 
@@ -166,11 +182,17 @@ class Batch:
         st["wake"] = C.WAKE.get(repo)
         self.advanced = True
 
-    def finish(self, repo):
+    def finish(self, repo, seen=True):
+        """The repo is done with for this traversal. Its PR cursor goes too,
+        unless the look failed before it had seen them all (not seen): the
+        look that retries it then goes on with the PRs no slice has visited,
+        where one starting over left the last of a long list without a look
+        for as long as the read failed now and then."""
         self.advanced = True
         self.done.add(repo.lower())
         repo = repo.lower()
-        self.state["repos"].pop(repo, None)
+        if seen:
+            self.state["repos"].pop(repo, None)
         self.state["retry"].pop(repo, None)
         self.state["owed"] = [r for r in self.state["owed"] if r != repo]
         if self.traversal_full and repo not in self.state["finished"]:

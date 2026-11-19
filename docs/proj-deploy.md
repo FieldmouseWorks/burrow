@@ -21,8 +21,8 @@ time could omit same-second waiters. New releases retain exact nanoseconds.
 lifetime. It stays running across package changes, so restarting the transfer
 consumer never reopens admission to retained pre-trickle binaries. Current
 schedulers serialize on `.slots/.admission-lock`; they still census the same
-physical slot files, including existing holders. Emergency and Codex pools
-have their own slot files and do not pass through the barrier.
+physical slot files, including existing holders. The emergency pool has
+its own slot files and does not pass through the barrier.
 
 `proj-retry-transfer` scans at startup and watches job and queue events. A
 waiting old turn is checkpointed before its transient unit stops, then starts

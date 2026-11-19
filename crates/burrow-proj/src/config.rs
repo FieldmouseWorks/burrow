@@ -92,8 +92,8 @@ pub struct Config {
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
     /// The machine's own GitHub App (burrow.github.machinery), one of
-    /// `apps`: what a bot's issue's job, and every Codex turn with no App
-    /// of its own, acts as ([`crate::turn::github_app`]). None for none.
+    /// `apps`: what a bot's issue's job acts as
+    /// ([`crate::turn::github_app`]). None for none.
     pub machinery: Option<String>,
     /// Identity of cfg.tools.gh, independently of the engine's selected App.
     #[serde(default)]
@@ -121,13 +121,9 @@ pub struct Config {
     /// /etc, not a store path: those values may run proj themselves.
     #[serde(default)]
     pub tracked_settings: Option<PathBuf>,
-    /// The engines' meters (claude.json, codex.json), written by
-    /// usage-reset; absent disables overflow.
+    /// The engines' meters (claude.json), written by usage-reset.
     pub meters: Option<PathBuf>,
-    /// Codex's own pool, and the immutable hooks dir it gives git.
-    pub codex_slots: usize,
-    pub codex_hooks: PathBuf,
-    /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
+    /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).
     #[serde(default)]
@@ -167,9 +163,6 @@ pub struct McpServer {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
-    pub codex: PathBuf,
-    /// Starts a Codex job's Codex over the job's own /tmp.
-    pub bwrap: PathBuf,
     pub bash: PathBuf,
     pub flock: PathBuf,
     pub gh: PathBuf,
@@ -187,7 +180,7 @@ pub struct Inbox {
     pub planning: bool,
     /// What it keeps of each issue it has a job for, a folder an issue.
     pub state: PathBuf,
-    /// Each label selects its engine; Codex wins when both are present.
+    /// Each label selects its engine.
     pub labels: BTreeMap<String, Engine>,
     /// Machine issue labels mapped to routing roles.
     #[serde(default)]
@@ -207,6 +200,8 @@ pub struct Inbox {
     pub host: String,
     /// Where it books its next look at each repo.
     pub wake: PathBuf,
+    /// Where it books the drain's own pass (`proj-inbox drain`).
+    pub drain_wake: PathBuf,
     /// The label on an issue carrying text from outside the authors, whoever
     /// filed it: never a job, never sorted or handed on. "" is none.
     #[serde(default)]
@@ -356,25 +351,18 @@ impl Config {
         Ok(self.role_view()?.in_force)
     }
 
-    /// The engine a turn of ROLE in REPO runs on: the closest role key's,
-    /// or the engine it moves to when that one is short by its meter.
+    /// The engine a turn of ROLE in REPO runs on: the closest role key's.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
-        self.engine_in(&self.role_settings()?, role, repo)
+        Self::engine_in(&self.role_settings()?, role, repo)
     }
 
     /// The same, from settings already read.
     pub(crate) fn engine_in(
-        &self,
         settings: &burrow_settings::roles::InForce,
         role: &str,
         repo: Option<&str>,
     ) -> Result<Engine, String> {
-        crate::engine::route(
-            settings.route(role, repo),
-            self.meters.as_deref(),
-            crate::usage::out(self).is_some(),
-            crate::now(),
-        )
+        Engine::parse(&settings.route(role, repo).engine)
     }
 
     /// Validate the turn-start configuration without starting a job: the
@@ -446,11 +434,11 @@ pub(crate) mod tests {
             "apps": {"workers": "/run/workers.env"},
             "machinery": "workers",
             "notify": "/bin/notify",
-            "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
-            "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
+            "meters": null,
+            "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude"}, "unstickLabel": "stuck",
                       "authors": [burrow_github::fake::author("sam")], "vm": false, "host": "box",
-                      "wake": "/var/lib/burrow/proj-inbox/wake.json"},
-            "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
+                      "wake": "/var/lib/burrow/proj-inbox/wake.json", "drainWake": "/var/lib/burrow/proj-inbox/drain-wake.json"},
+            "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
     }
@@ -483,7 +471,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Sets each `ROLE ENGINE [over PCT ENGINE]` line of TEXT as a route,
+    /// Sets each `ROLE ENGINE` line of TEXT as a route,
     /// through the door, as [`set`] does.
     pub(crate) fn routes(cfg: &mut Config, dir: &std::path::Path, text: &str) {
         let lines: Vec<String> = text
@@ -503,7 +491,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.check_config().unwrap(); // Nothing set: the declared defaults.
-        set(&mut cfg, dir.path(), &["role unused codex over 80 claude"]);
+        set(&mut cfg, dir.path(), &["role unused claude"]);
         crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
         // An overlay a hand edit broke fails it, naming why.
         let overlay = &cfg.settings.as_ref().unwrap().roles_file();
@@ -559,26 +547,18 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         assert_eq!(cfg.engine("routine", None).unwrap(), Engine::Claude);
-        assert_eq!(cfg.engine("planner", None).unwrap(), Engine::Codex);
-        set(
-            &mut cfg,
-            dir.path(),
-            &[
-                "role routine codex",
-                "role work@Sam/Code codex",
-                "role work claude over 80 codex",
-            ],
-        );
-        assert_eq!(cfg.engine("routine", None).unwrap(), Engine::Codex);
-        assert_eq!(cfg.engine("missing", None).unwrap(), Engine::Claude);
-        assert_eq!(cfg.engine("work", Some("sAM/cODE")).unwrap(), Engine::Codex);
-        for repo in [Some("sam/other"), Some("other/code"), None] {
-            assert_eq!(cfg.engine("work", repo).unwrap(), Engine::Claude);
-        }
+        assert_eq!(cfg.engine("planner", None).unwrap(), Engine::Claude);
+        set(&mut cfg, dir.path(), &["role work@Sam/Code claude"]);
         assert_eq!(
-            cfg.engine("missing", Some("sam/code")).unwrap(),
+            cfg.engine("work", Some("sAM/cODE")).unwrap(),
             Engine::Claude
         );
+        // A hand edit naming an engine the machine doesn't run fails the turn.
+        let overlay = &cfg.settings.as_ref().unwrap().roles_file();
+        let mut edited: Value = serde_json::from_slice(&std::fs::read(overlay).unwrap()).unwrap();
+        edited["routing"]["roles"]["work@sam/code"] = json!({"engine": "codex"});
+        std::fs::write(overlay, edited.to_string()).unwrap();
+        assert!(cfg.engine("work", Some("sam/code")).is_err());
     }
 
     // The module's config reads whole; a field the binary doesn't know, or
@@ -605,9 +585,9 @@ pub(crate) mod tests {
         assert_eq!(
             cfg.inbox
                 .as_ref()
-                .and_then(|i| i.labels.get("codex"))
+                .and_then(|i| i.labels.get("claude"))
                 .copied(),
-            Some(Engine::Codex)
+            Some(Engine::Claude)
         );
         let mut off = example();
         off["inbox"] = Value::Null;

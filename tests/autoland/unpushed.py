@@ -167,7 +167,11 @@ run(open_thread, 0)
 run(open_thread, 31 * 60)
 github(theirs, [("sam", theirs)])
 run(clean(sha=theirs, threads=[False]), 35 * 60)
-assert STOPPED == ["job-1"] and pr_state()["answering"] == {} and writes() == [], (STOPPED, pr_state(), writes())
+assert STOPPED == ["job-1"] and writes() == [], (STOPPED, writes())
+# It's kept, retiring, until proj says it's over: the next pass drops it.
+assert pr_state()["answering"]["job-1"]["retiring"], pr_state()
+run(clean(sha=theirs, threads=[False]), 36 * 60)
+assert pr_state()["answering"] == {} and STOPPED == ["job-1"], (STOPPED, pr_state())
 # Its own push isn't someone else's: it carries on, and so does one GitHub's
 # record can't place yet, which is looked for again a few minutes on.
 for pushes in ([("workers[bot]", pushed)], []):
@@ -200,7 +204,7 @@ run(open_thread, 0)
 run(open_thread, 31 * 60)
 STATES["job-1"] = "queued"
 run(clean(sha=theirs, threads=[False]), 35 * 60)
-assert STOPPED == ["job-1"] and pr_state()["answering"] == {}, (STOPPED, pr_state())
+assert STOPPED == ["job-1"] and pr_state()["answering"]["job-1"]["retiring"], (STOPPED, pr_state())
 # One proj won't stop is stopping.py's to try again, a strike each pass it
 # still can't, as a new head's jobs are, until it goes.
 fresh()
@@ -213,10 +217,16 @@ moved_on = clean(sha=theirs, threads=[False])
 for i, at in enumerate((35, 37, 40)):
     run(moved_on, at * 60)
     assert pr_state()["stopping"] == ["job-1"] and pr_state()["strikes"] == {"stop": i + 1}, (i, pr_state())
-    assert pr_state()["answering"] == {} and STOPPED == [], pr_state()
+    assert pr_state()["answering"]["job-1"]["retiring"] and STOPPED == [], pr_state()
 UNSTOPPABLE.clear()
 run(moved_on, 45 * 60)
-assert STOPPED == ["job-1"] and "stopping" not in pr_state() and "stop" not in pr_state()["strikes"], pr_state()
+# Stopped, but kept (retiring) until claims reads proj saying so: the next pass.
+assert pr_state()["answering"]["job-1"]["retiring"], pr_state()
+run(moved_on, 46 * 60)
+assert pr_state()["answering"] == {}, pr_state()
+# (claims names it too, while its view of proj is a pass behind: stopping a
+# stopped job again is no harm.)
+assert set(STOPPED) == {"job-1"} and "stopping" not in pr_state() and "stop" not in pr_state()["strikes"], pr_state()
 print("answers of a moved PR: ok")
 
 fresh()

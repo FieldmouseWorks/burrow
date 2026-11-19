@@ -19,6 +19,21 @@ fn job() -> Value {
     workflow(".github/workflows/flake-check.yml")["jobs"]["check"].clone()
 }
 
+/// The check job's step that makes the kept builds' directory, the one
+/// that restores them, and the one that installs Nix, which names them.
+fn restoring(all: &[Value]) -> (&Value, &Value, &Value) {
+    let find = |f: &dyn Fn(&Value) -> bool| all.iter().find(|s| f(s)).unwrap();
+    (
+        find(&|s| s["run"] == "mkdir -p \"$RUNNER_TEMP/kept\""),
+        find(&|s| s["id"] == "kept-restore"),
+        find(&|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))
+        }),
+    )
+}
+
 fn ctx(pairs: &[(&str, V)]) -> Ctx {
     pairs
         .iter()
@@ -32,12 +47,14 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
-    let (made, restore, install) = (&all[2], &all[4], &all[5]);
+    let (made, restore, install) = restoring(all);
     for (keep, nix) in [(true, true), (true, false), (false, true)] {
         let c = ctx(&[
             ("inputs.keep-builds", keep.into()),
             ("inputs.install-nix", nix.into()),
             ("github.event_name", "push".into()),
+            // No gate-reuse hit: on one, nothing is restored (reuse.rs).
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         assert_eq!(condition(text(&made["if"]), &c), keep && nix, "{made:?}");
         assert_eq!(value(text(&restore["if"]), &c).truthy(), keep && nix);
@@ -57,6 +74,7 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             ("inputs.install-nix", true.into()),
             ("github.event_name", event.into()),
             ("github.repository", "FieldmouseWorks/burrow".into()),
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         if event == "pull_request" {
             c.insert(
@@ -85,7 +103,10 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         "{key}"
     );
     assert!(uses(install, "cachix/install-nix-action@"), "{install:?}");
-    assert_eq!(install["if"], "inputs.install-nix");
+    assert_eq!(
+        install["if"],
+        "inputs.install-nix && needs.reuse.outputs.hit != 'true'"
+    );
     for (keep, said) in [
         (
             true,
@@ -146,7 +167,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     );
     assert!(repo_file("crates/burrow-keep/src/main.rs").is_file());
     assert!(
-        save["if"] == "${{ !cancelled() && steps.keep.outcome == 'success' }}"
+        save["if"]
+            == "${{ !cancelled() && steps.keep.outcome == 'success' && steps.keep-newer.outputs.superseded != 'true' }}"
             && save["continue-on-error"] == true,
         "{save:?}"
     );
@@ -178,9 +200,11 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         ("workflow_dispatch", main, "success", false, false),
     ] {
         for (step, id) in [(keep, "keep-tool"), (save, "keep")] {
+            // keep-newer said nothing: no newer commit's entry, or it failed.
             let c = ctx(&[
                 ("cancelled()", cancelled.into()),
                 (&format!("steps.{id}.outcome"), "success".into()),
+                ("steps.keep-newer.outputs.superseded", "".into()),
             ]);
             assert_eq!(value(text(&step["if"]), &c).truthy(), !cancelled);
         }
@@ -216,7 +240,7 @@ fn a_negative_restores_every_legs_kept_builds() {
     let all = steps(neg);
     let gate = job();
     let gate_all = steps(&gate);
-    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[4], &gate_all[5]);
+    let (gate_made, gate_restore, gate_install) = restoring(gate_all);
     let uses = |s: &Value, action: &str| s["uses"].as_str().is_some_and(|u| u.starts_with(action));
     let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
     let restores: Vec<&Value> = all
@@ -358,6 +382,60 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("push", "", "")));
 }
 
+/// The wait plans with Nix installed, so when the leg restored nothing the
+/// root daemon has made the empty kept cache's nar/ and log/ its own, and
+/// the second restore couldn't extract into them: tar's "Cannot open:
+/// Permission denied" failed the leg (#1087's leg 1). Right before that
+/// restore, on the same condition, the runner's user takes the directory
+/// back.
+#[test]
+fn a_pr_leg_takes_the_kept_cache_back_from_the_daemon_before_restoring_again() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert_eq!(at("kept-reclaim") + 1, at("kept-rewait"));
+    assert!(at("kept-wait") < at("kept-reclaim"));
+    let reclaim = &all[at("kept-reclaim")];
+    assert_eq!(reclaim["if"], all[at("kept-rewait")]["if"]);
+
+    // Run with a sudo that only says what it was asked to do.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let said = dir.path().join("said");
+    let sudo = bin.join("sudo");
+    burrow_test::executable(
+        &sudo,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", said.display()),
+    );
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-euo", "pipefail", "-c", script(reclaim)])
+        .env("RUNNER_TEMP", dir.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+    let out = crate::harness::output(cmd);
+    assert!(out.status.success(), "{out:?}");
+    let id = |flag: &str| {
+        let o = crate::harness::output({
+            let mut c = std::process::Command::new("id");
+            c.arg(flag);
+            c
+        });
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(
+        std::fs::read_to_string(&said).unwrap(),
+        format!(
+            "chown\n-R\n{}:{}\n{}/kept\n",
+            id("-u"),
+            id("-g"),
+            dir.path().display()
+        )
+    );
+}
+
 /// A PR's exact key is the one its base's push saved under: the merge
 /// step's tip, never GitHub's merge commit (github.sha), which no run saves
 /// under. Keyed on that, a PR never hit exactly, so the wait's guard on an
@@ -415,7 +493,7 @@ fn a_prs_exact_key_is_its_bases_push_save() {
 }
 
 #[test]
-fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
+fn the_waiters_and_pruners_token_has_actions_access_through_every_local_caller() {
     let check = job();
     assert!(
         check.get("permissions").is_none(),
@@ -437,8 +515,15 @@ fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
                 .as_str()
                 .is_some_and(|u| u.contains("/flake-check.yml"))
             {
+                // burrow's own push to main prunes the kept builds (#1011),
+                // and its other calls grant what that one does.
+                let actions = if path.starts_with(".github/") {
+                    "write"
+                } else {
+                    "read"
+                };
                 for (scope, level) in [
-                    ("actions", "read"),
+                    ("actions", actions),
                     ("contents", "read"),
                     ("id-token", "write"),
                     ("attestations", "write"),
@@ -447,5 +532,78 @@ fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
                 }
             }
         }
+    }
+}
+
+/// One entry a leg (#1011): a push to the default branch's leg checks for a
+/// newer commit's entry before its save, and saves only without one; once
+/// its save is listed it deletes what its commit supersedes, with
+/// burrow-keep-prune (whose tests say which), built by the keep step, and
+/// the caller's token. Either failing is a degradation, not a red gate.
+#[test]
+fn a_leg_skips_a_superseded_save_and_prunes_what_its_own_supersedes() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert!(at("keep") < at("keep-newer") && at("keep-newer") < at("keep-save"));
+    assert!(at("saved-lookup") < at("keep-prune"));
+    let (newer, save, prune) = (
+        step(&job, "keep-newer"),
+        step(&job, "keep-save"),
+        step(&job, "keep-prune"),
+    );
+    let kept_key = text(&save["with"]["key"]).trim_end_matches("${{ github.sha }}");
+    for (s, mode) in [(newer, "before"), (prune, "after")] {
+        assert_eq!(s["continue-on-error"], true, "{s:?}");
+        assert_eq!(s["shell"], "bash");
+        assert_eq!(script(s), format!("\"$PRUNE\" {mode}"));
+        assert_eq!(s["env"]["GH_TOKEN"], "${{ github.token }}");
+        assert_eq!(s["env"]["KEPT_KEY"], kept_key);
+        assert_eq!(
+            s["env"]["DEFAULT_BRANCH"],
+            "${{ github.event.repository.default_branch }}"
+        );
+        // The binary the keep step's cargo build left in its target dir.
+        let keep = step(&job, "keep");
+        assert_eq!(
+            s["env"]["PRUNE"],
+            format!(
+                "{}/release/burrow-keep-prune",
+                text(&keep["env"]["CARGO_TARGET_DIR"])
+            )
+        );
+    }
+    assert!(repo_file("crates/burrow-keep/src/bin/burrow-keep-prune.rs").is_file());
+    // Saved unless a newer commit's entry was there, or the run cancelled.
+    for (cancelled, kept, superseded, saves) in [
+        (false, "success", "", true),
+        (false, "success", "true", false),
+        (false, "failure", "", false),
+        (true, "success", "", false),
+    ] {
+        let c = ctx(&[
+            ("cancelled()", cancelled.into()),
+            ("steps.keep.outcome", kept.into()),
+            ("steps.keep-newer.outputs.superseded", superseded.into()),
+        ]);
+        assert_eq!(value(text(&save["if"]), &c).truthy(), saves, "{c:?}");
+        assert_eq!(
+            value(text(&newer["if"]), &c).truthy(),
+            !cancelled && kept == "success"
+        );
+    }
+    // Pruned only once this push's own entry exists: never its
+    // predecessor without a successor.
+    for (cancelled, hit, prunes) in [
+        (false, "true", true),
+        (false, "false", false),
+        (false, "", false),
+        (true, "true", false),
+    ] {
+        let c = ctx(&[
+            ("cancelled()", cancelled.into()),
+            ("steps.saved-lookup.outputs.cache-hit", hit.into()),
+        ]);
+        assert_eq!(value(text(&prune["if"]), &c).truthy(), prunes, "{c:?}");
     }
 }

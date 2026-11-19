@@ -124,18 +124,11 @@ fn child() {
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
-    if what == "codex-pool-release" {
-        pools::release_codex_pool();
-        return;
-    }
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if matches!(
-        what.as_str(),
-        "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
-    ) {
+    if matches!(what.as_str(), "hand-over" | "stay" | "paused-hand-over") {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         burrow_test::executable(
@@ -145,7 +138,7 @@ fn child() {
 case $1 in
   _handover_format) echo 1 ;;
   _retry_format) echo 4 ;;
-  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
+  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/.handed" && mv "{jobs}/$2/.handed" "{jobs}/$2/handed" ;;
 esac
 "#
             ),
@@ -156,33 +149,21 @@ esac
         if what.starts_with("paused-") {
             cfg.settings.as_mut().unwrap().allowed.clear();
             fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
-            let engine = if what == "paused-codex-hand-over" {
-                crate::engine::Engine::Codex
-            } else {
-                crate::engine::Engine::Claude
-            };
-            super::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap_err();
-        } else if what == "hand-over" {
-            take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
-        } else {
-            held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
-            fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
-        }
-    }
-    if what == "codex" {
-        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
-        held = Some(
             super::take_engine(
                 &cfg,
                 &id,
                 "1",
                 Class::Normal,
-                false,
-                crate::engine::Engine::Codex,
+                true,
+                crate::engine::Engine::Claude,
             )
-            .unwrap(),
-        );
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+            .unwrap_err();
+        } else if what == "hand-over" {
+            take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
+        } else {
+            held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
+            publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
+        }
     }
     if what == "soon" {
         cfg.max_wait = 4;
@@ -207,10 +188,18 @@ esac
                     .success()
             );
         }
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     let _ = std::io::stdin().read(&mut [0]);
     drop(held);
+}
+
+/// Writes what the child tells the test as a whole file or none: a temp file
+/// renamed into place, so a test that sees `path` exist never reads it empty.
+fn publish(path: &Path, content: &str) {
+    let tmp = path.with_file_name(format!(".{}", path.file_name().unwrap().to_string_lossy()));
+    fs::write(&tmp, content).unwrap();
+    fs::rename(&tmp, path).unwrap();
 }
 
 fn until(what: &str, mut done: impl FnMut() -> bool) {
@@ -933,10 +922,6 @@ mod reset;
 mod usage;
 
 mod admission;
-
-mod codex;
-
-mod pools;
 
 mod github;
 
