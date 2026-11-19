@@ -8,6 +8,7 @@ from typing import NamedTuple
 import common as C
 import reviewers as V
 from common import MIN, repo_cfg
+from step_context import clock
 
 # A push the connector hasn't begun on after this long gets asked for once,
 # and after LOST the owner hears of it: it reviews each push within minutes
@@ -63,7 +64,10 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
             else:
                 after(C.NOW - age, QUIET)  # ends: asked once, then listed
             if age >= LOST * MIN:
-                x = f"no review of {pr['headRefOid'][:7]} after {int(age // MIN)} minutes"
+                # Since when, never for how long: the stuck issue knows an
+                # entry by its words, and a count of minutes made the same
+                # stall news on every pass (burrow#1228).
+                x = f"no review of {pr['headRefOid'][:7]} since its push at {clock(st['seen'])}"
                 stuck.append(f"{V.NAMES[r]}: {x}")
                 digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, x + " (its usage, or the connector's setup)"))
             else:
