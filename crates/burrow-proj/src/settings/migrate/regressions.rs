@@ -2,13 +2,22 @@ use super::*;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
+/// Whether setup two is the one in force: only it routes work in sam/two.
+fn on_two(cfg: &burrow_settings::Config) -> bool {
+    cfg.roles().unwrap().roles.contains_key("work@sam/two")
+}
+
 fn rig(dir: &Path, predecessor: &str, applied: bool) -> (burrow_settings::Config, PathBuf) {
     fs::create_dir_all(dir.join("roles.d")).unwrap();
     fs::write(dir.join("roles.d/one"), "work claude\n").unwrap();
-    fs::write(dir.join("roles.d/two"), "work codex\n").unwrap();
+    fs::write(
+        dir.join("roles.d/two"),
+        "work claude\nwork@sam/two claude\n",
+    )
+    .unwrap();
     fs::write(
         dir.join("models"),
-        "work claude tiny low\nwork codex - ultra\n",
+        "work claude tiny low\nwork@sam/two claude - xhigh\n",
     )
     .unwrap();
     let before = match predecessor {
@@ -17,7 +26,7 @@ fn rig(dir: &Path, predecessor: &str, applied: bool) -> (burrow_settings::Config
             Some("one")
         }
         "plain" => {
-            fs::write(dir.join("roles"), "work claude\nfix@Sam/Box codex\n").unwrap();
+            fs::write(dir.join("roles"), "work claude\nfix@Sam/Box claude\n").unwrap();
             None
         }
         _ => None,
@@ -62,7 +71,7 @@ fn recovery_preserves_named_plain_and_absent_predecessors_at_both_boundaries() {
             let dir = d.path();
             let (cfg, receipt) = rig(dir, predecessor, applied);
             run(&cfg, dir).unwrap();
-            assert_eq!(cfg.roles().unwrap().route("work", None).engine, "codex");
+            assert!(on_two(&cfg));
             let say = |line: &str| {
                 cfg.command(
                     &line
@@ -77,17 +86,20 @@ fn recovery_preserves_named_plain_and_absent_predecessors_at_both_boundaries() {
             } else {
                 say("engines use back").unwrap();
                 let roles = cfg.roles().unwrap();
-                assert_eq!(roles.route("work", None).engine, "claude");
+                assert!(!roles.roles.contains_key("work@sam/two"));
                 assert_eq!(
                     roles.tuning("work", None, "claude").model.as_deref(),
                     Some("tiny")
                 );
                 assert_eq!(
-                    roles.tuning("work", None, "codex").effort.as_deref(),
-                    Some("ultra")
+                    roles
+                        .tuning("work", Some("sam/two"), "claude")
+                        .effort
+                        .as_deref(),
+                    Some("xhigh")
                 );
                 if predecessor == "plain" {
-                    assert_eq!(roles.route("fix", Some("sam/box")).engine, "codex");
+                    assert!(roles.roles.contains_key("fix@sam/box"));
                 }
             }
             // The old generation can recover without executing this request
@@ -132,7 +144,7 @@ fn failed_publication_cannot_acknowledge_and_retry_keeps_the_original_result() {
         fs::remove_file(&receipt).unwrap();
         fs::remove_file(dir.join("roles.operation")).unwrap();
         cfg.command(
-            &["role".into(), "work".into(), "claude".into()],
+            &["role".into(), "work@sam/two".into(), "unset".into()],
             "intervening",
         )
         .unwrap();
@@ -147,7 +159,7 @@ fn failed_publication_cannot_acknowledge_and_retry_keeps_the_original_result() {
             .unwrap(),
             said
         );
-        assert_eq!(cfg.roles().unwrap().route("work", None).engine, "claude");
+        assert!(!on_two(&cfg));
     }
 }
 
@@ -164,10 +176,7 @@ fn receipt_failure_keeps_the_journal_and_the_plain_predecessor() {
     run(&cfg, dir).unwrap();
     cfg.command(&["engines".into(), "use".into(), "back".into()], "test")
         .unwrap();
-    assert_eq!(
-        cfg.roles().unwrap().route("fix", Some("sam/box")).engine,
-        "codex"
-    );
+    assert!(cfg.roles().unwrap().roles.contains_key("fix@sam/box"));
 }
 
 #[test]
@@ -381,7 +390,7 @@ fn recovering_a_switch_to_the_active_setup_preserves_the_existing_back_pointer()
         let back = cfg.command(&["engines".into(), "use".into(), "back".into()], "test");
         if previous {
             back.unwrap();
-            assert_eq!(cfg.roles().unwrap().route("work", None).engine, "codex");
+            assert!(on_two(&cfg));
         } else {
             assert_eq!(back.unwrap_err(), "no previous setup");
         }
@@ -404,7 +413,7 @@ fn a_completed_legacy_request_does_not_undo_an_intervening_legacy_switch() {
     symlink(dir.join("roles.d/one"), dir.join("roles")).unwrap();
     fs::write(dir.join("roles.previous"), "two\n").unwrap();
     run(&cfg, dir).unwrap();
-    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "claude");
+    assert!(!on_two(&cfg));
     assert_eq!(
         cfg.request(
             &receipt,
@@ -414,5 +423,5 @@ fn a_completed_legacy_request_does_not_undo_an_intervening_legacy_switch() {
         .unwrap(),
         said
     );
-    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "claude");
+    assert!(!on_two(&cfg));
 }

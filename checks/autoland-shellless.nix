@@ -1,5 +1,4 @@
-# The steward on a machine without /bin/sh: its sandbox's store still
-# builds.
+# The steward on a machine without /bin/sh still builds.
 { self, nixpkgs, cnStandIn, ... }:
 let
   machine = nixpkgs.lib.nixosSystem {
@@ -7,7 +6,7 @@ let
       self.nixosModules.autoland
       ../examples/machine.nix
       ({ lib, pkgs, ... }: {
-        burrow.autoland = { enable = true; owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; };
+        burrow.autoland = { enable = true; owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; };
         # The steward needs the ledger; a stand-in for Conary's `cn`.
         burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; };
         burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; };

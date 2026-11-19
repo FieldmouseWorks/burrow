@@ -61,6 +61,18 @@ pub fn output(
     until: Instant,
     max: usize,
 ) -> Result<Output, String> {
+    output_unless(command, input, until, max, &|| false)
+}
+
+/// [`output`], stopped the same way, process group and all, as soon as
+/// `stop` says so: the work it was for was abandoned.
+pub fn output_unless(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    until: Instant,
+    max: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Output, String> {
     if Instant::now() >= until {
         return Err("command exceeded its time limit".into());
     }
@@ -91,6 +103,9 @@ pub fn output(
         loop {
             if Instant::now() >= until {
                 return Err("command exceeded its time limit".into());
+            }
+            if stop() {
+                return Err("command was stopped".into());
             }
             if let Some(pipe) = &mut stdin {
                 if !input.is_empty() {
@@ -167,6 +182,38 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("time limit"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_stop_kills_the_whole_group_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; wait", pid.display()),
+        ]);
+        let started = Instant::now();
+        // Stopped once the pid is written whole, not when the redirect
+        // makes the file.
+        let stop = || std::fs::read_to_string(&pid).is_ok_and(|p| p.ends_with('\n'));
+        let out = output_unless(
+            &mut command,
+            None,
+            Instant::now() + Duration::from_secs(60),
+            1024,
+            &stop,
+        );
+        assert_eq!(out.unwrap_err(), "command was stopped");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        let child = std::fs::read_to_string(&pid).unwrap();
+        // The group's sleep was killed with it; give its parent's reaping a
+        // moment, since init reaps an orphan.
+        let gone = (0..200).any(|_| {
+            sleep(Duration::from_millis(10));
+            !std::path::Path::new(&format!("/proc/{}", child.trim())).exists()
+        });
+        assert!(gone, "the group's other process is gone");
     }
 
     #[test]

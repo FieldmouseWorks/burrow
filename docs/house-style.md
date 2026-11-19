@@ -92,8 +92,9 @@ Every repo with code gets a `flake.nix` from the template
   main, so a repo's candidates and negatives call it from there, never from
   their own tree. burrow's own `flake.yml` does that in a second call,
   `train`, at `@main`, for its candidates (its whole gate, legs and all) and
-  its PRs to main (their negative, pr-gate off), while `check` keeps every
-  PR's own gate until the train lands burrow's PRs: the train's configuration
+  its PRs to main (their only negative, pr-gate off), while `check` keeps every
+  PR's own gate until the train lands burrow's PRs, and its negative on a PR
+  to any other base: the train's configuration
   names `train / check` and `train / negative`
   ([train.rs](../crates/burrow-workflows/src/train.rs) holds which run takes
   which call). Both callers route the train call using exact branch names in

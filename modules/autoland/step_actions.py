@@ -327,7 +327,11 @@ class Actions:
         have room for it (one started again too), or a build has nothing
         new to build; a build in line builds what it's built from first,
         outside the line (proofs.prebuild); with nothing to build at all,
-        none: the verdicts are taken from the store (proofs.py)."""
+        none: the verdicts are taken from the store (proofs.py). A PR
+        handed to the steward in a paused repo has its proofs paused with
+        the repo: it lands only on what was proved already."""
+        if C.paused(self.repo):
+            raise C.JobPaused(f"{self.repo}: proofs paused")
         builds = [c for c in self.ci_names if c in self.rc["proofBuilds"]]
         runs = [] if builds else [c for c in self.ci_names if c in self.rc["proofRuns"]]
         beside = [c for c in self.ci_names if c not in self.machine]  # CI still running
@@ -470,11 +474,11 @@ class Actions:
             return
         if ahead is not None:
             if ahead != P.FREE:
-                P.wait(self.repo, self.n)
                 self.settle(
                     "pending",
                     f"Settled; waiting its turn to {'build' if builds else 'run'} {names} ({ahead} ahead)"[:140],
                     stage=S.PROOF_SLOT,
+                    turn=True,
                 )
                 return
             free = True

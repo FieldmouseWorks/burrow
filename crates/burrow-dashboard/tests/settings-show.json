@@ -37,29 +37,6 @@
           }
         }
       },
-      "autoland.reviewers.codex.effort": {
-        "origin": "default",
-        "value": "high"
-      },
-      "autoland.reviewers.codex.enable": {
-        "origin": "flake",
-        "value": true
-      },
-      "autoland.reviewers.codex.parallel": {
-        "origin": "default",
-        "value": 2
-      },
-      "autoland.reviewers.skipPaths": {
-        "origin": "default",
-        "value": [
-          "(^|/)secrets?/",
-          "(^|/)\\.env(\\..*)?$"
-        ]
-      },
-      "autoland.reviewers.timeoutMinutes": {
-        "origin": "default",
-        "value": 30
-      },
       "autoland.rounds": {
         "origin": "default",
         "value": 5
@@ -79,10 +56,6 @@
       "autoland.trainStallAfterMinutes": {
         "origin": "default",
         "value": 240
-      },
-      "proj.codex.slots": {
-        "origin": "default",
-        "value": 2
       },
       "proj.engineSetups": {
         "origin": "default",
@@ -123,8 +96,8 @@
         "file": "/config/proj/roles",
         "origin": "live",
         "value": {
-          "planner@Example/project": "codex",
-          "review": "codex"
+          "planner@Example/project": "claude",
+          "review": "claude"
         }
       },
       "proj.usage.paid": {
@@ -380,152 +353,6 @@
             "x-change": "deploy",
             "x-owner": "autoland"
           },
-          "autoland.reviewers.codex.effort": {
-            "additionalProperties": false,
-            "description": "How hard Codex thinks on a review.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": "high",
-                "enum": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "autoland-review"
-          },
-          "autoland.reviewers.codex.enable": {
-            "additionalProperties": false,
-            "description": "Whether Codex reviews every head.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": false,
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "autoland-review"
-          },
-          "autoland.reviewers.codex.parallel": {
-            "additionalProperties": false,
-            "description": "The most Codex reviews at once.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": 2,
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "autoland-review"
-          },
-          "autoland.reviewers.skipPaths": {
-            "additionalProperties": false,
-            "description": "Path regexes left out of what the reviewers read.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": [
-                  "(^|/)secrets?/",
-                  "(^|/)\\.sops\\.yaml$",
-                  "\\.sops\\.(ya?ml|json|env)$",
-                  "(^|/)\\.env(\\..*)?$",
-                  "\\.(pem|key|p12|pfx)$"
-                ],
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "autoland-review"
-          },
-          "autoland.reviewers.timeoutMinutes": {
-            "additionalProperties": false,
-            "description": "How long one review may run before it's a failed try.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": 30,
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "autoland-review"
-          },
           "autoland.rounds": {
             "additionalProperties": false,
             "description": "Review rounds with findings before the reviewers stop and a judge decides.",
@@ -661,33 +488,6 @@
             "x-change": "deploy",
             "x-owner": "autoland"
           },
-          "proj.codex.slots": {
-            "additionalProperties": false,
-            "description": "How many Codex turns run at once, in a pool of their own.",
-            "properties": {
-              "file": {
-                "type": "string"
-              },
-              "origin": {
-                "enum": [
-                  "default",
-                  "flake"
-                ]
-              },
-              "value": {
-                "default": 2,
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "value",
-              "origin"
-            ],
-            "type": "object",
-            "x-change": "deploy",
-            "x-owner": "proj"
-          },
           "proj.engineSetups": {
             "additionalProperties": false,
             "description": "Saved engine setups (proj engines save/use), each a whole roles file, and the one in force.",
@@ -790,8 +590,7 @@
                   },
                   {
                     "enum": [
-                      "claude",
-                      "codex"
+                      "claude"
                     ]
                   }
                 ],
@@ -1204,7 +1003,6 @@
           "proj.maxJobs",
           "proj.pipelineSlots",
           "proj.maxJobsPerProject",
-          "proj.codex.slots",
           "proj.usageTrickle",
           "proj.usage.paid",
           "settings.allowed",
@@ -1226,11 +1024,6 @@
           "autoland.proofTimeoutMinutes",
           "autoland.baselinePerPass",
           "autoland.repos",
-          "autoland.reviewers.codex.enable",
-          "autoland.reviewers.codex.effort",
-          "autoland.reviewers.codex.parallel",
-          "autoland.reviewers.timeoutMinutes",
-          "autoland.reviewers.skipPaths",
           "proj.roles",
           "proj.models",
           "proj.engineSetups",

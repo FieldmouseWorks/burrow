@@ -29,6 +29,24 @@ fn pending_transfer_keeps_its_place_in_the_line() {
 }
 
 #[test]
+fn a_pass_puts_no_lock_back_into_a_job_folder_being_removed() {
+    let r = rig();
+    // Halfway through `rm -rf`: its lock already gone, a turn's files not
+    // yet, and the removal's own deletes are what woke the pass.
+    let job = Job::new(&r.cfg, "going");
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("turns"), "1\n").unwrap();
+    fs::write(job.turn("1", "outcome"), "done\n").unwrap();
+    pass(&r.cfg).unwrap();
+    assert!(!job.path("lock").exists());
+    fs::remove_file(job.path("turns")).unwrap();
+    fs::remove_file(job.turn("1", "outcome")).unwrap();
+    fs::remove_dir(&job.dir).unwrap();
+    // A folder gone between the listing and the look is no failure either.
+    pass(&r.cfg).unwrap();
+}
+
+#[test]
 fn busy_job_lock_is_reported_for_retry_and_a_stopped_checkpoint_is_not_launched() {
     let r = rig();
     let job = Job::new(&r.cfg, "p");

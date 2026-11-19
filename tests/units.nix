@@ -1,10 +1,10 @@
 # burrow-units, for real: its watcher follows the journal and asks for a
-# pass each time a unit fails or a program dumps core, touching no unit's
-# own OnFailure= (a service whose failure isolates a target still loads).
+# pass each time a unit fails, recovers or a program dumps core, touching no
+# unit's own OnFailure= (a service whose failure isolates a target still loads).
 # A unit that fails, and a program that dumps core, whoever ran it, land in
 # its watch file and kick the watchdog (a stand-in here, noting each kick);
-# a unit that runs again leaves it once burrow-units is asked to look
-# again, and a crash once it's cleared, until the next. Only the service
+# a unit that runs again leaves it without a manual scan, and a crash
+# once it's cleared, until the next. Only the service
 # passes (a pass that can't read the whole journal is refused), so a clear
 # by a user who can't keeps everyone else's crashes. What an item says, and when it's due, are
 # crates/burrow-units' tests.
@@ -139,9 +139,10 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"grep -qF '\"{bash}\"' {watch_file}", timeout=120)
         assert "crashed (last:" in watch()[bash]["what"], watch()
 
-    with subtest("a unit that runs again leaves it once it's asked to look again"):
+    with subtest("a unit that recovers leaves without a manual pass"):
+        before = kicks()
         machine.succeed("touch /run/broken-fixed && systemctl start broken.service")
-        machine.succeed("su - dev -c burrow-units")
         machine.wait_until_succeeds(f"! grep -q unit:broken.service {watch_file}", timeout=60)
+        machine.wait_until_succeeds(f"[ $(wc -l </var/lib/watchdog-kicks/kicks) -gt {before} ]", timeout=60)
   '';
 }

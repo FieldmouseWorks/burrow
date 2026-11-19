@@ -6,6 +6,43 @@ fn git(top: &Path, args: &[&str]) -> Command {
     c.args(args);
     c
 }
+/// The branch HEAD names, if it names one.
+fn head_reference(top: &Path) -> Result<String> {
+    let reference = output(git(top, &["symbolic-ref", "-q", "HEAD"]))?;
+    Ok(if reference.status.success() {
+        text_output(reference.stdout)?
+    } else {
+        String::new()
+    })
+}
+/// What a checkout's relative submodule URLs resolve against, as git
+/// resolves them: its branch's remote's URL, or origin's, or with neither
+/// the checkout itself; and whether its config says so.
+pub fn submodule_base(top: &Path) -> Result<(String, bool)> {
+    let reference = head_reference(top)?;
+    let remote = output(git(
+        top,
+        &[
+            "config",
+            &format!(
+                "branch.{}.remote",
+                reference.trim_start_matches("refs/heads/")
+            ),
+        ],
+    ))?;
+    let remote = text_output(remote.stdout)?;
+    let remote = if remote.is_empty() { "origin" } else { &remote };
+    for key in [
+        format!("remote.{remote}.url"),
+        "remote.origin.url".to_owned(),
+    ] {
+        let url = output(git(top, &["config", &key]))?;
+        if url.status.success() {
+            return Ok((text_output(url.stdout)?, true));
+        }
+    }
+    Ok((s(top).to_owned(), false))
+}
 pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
     let common = string(git(
         top,
@@ -42,31 +79,8 @@ pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
         "git",
         &["config", "-f", s(&config), "core.bare", "false"],
     ))?;
-    let reference = output(git(top, &["symbolic-ref", "-q", "HEAD"]))?;
-    let reference = if reference.status.success() {
-        text_output(reference.stdout)?
-    } else {
-        String::new()
-    };
-    let remote = output(git(
-        top,
-        &[
-            "config",
-            &format!(
-                "branch.{}.remote",
-                reference.trim_start_matches("refs/heads/")
-            ),
-        ],
-    ))?;
-    let remote = text_output(remote.stdout)?;
-    let remote = if remote.is_empty() { "origin" } else { &remote };
-    if !output(git(top, &["config", &format!("remote.{remote}.url")]))?
-        .status
-        .success()
-        && !output(git(top, &["config", "remote.origin.url"]))?
-            .status
-            .success()
-    {
+    let reference = head_reference(top)?;
+    if !submodule_base(top)?.1 {
         checked(cmd(
             "git",
             &["config", "-f", s(&config), "remote.origin.url", s(top)],
