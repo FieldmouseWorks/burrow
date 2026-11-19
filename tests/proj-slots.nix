@@ -128,7 +128,13 @@ import ./proj/test.nix { inherit self pkgs; } "proj-slots" ''
           machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
       machine.succeed("truncate -s 0 /tmp/kicks")
       q = proj('run --kick autoland/o/s web "sleep 600"')
-      time.sleep(5)
+      # In line and looked at least once: its place is published, and the
+      # look's note (.slots/.next) written since. Only q waits here, so that
+      # note is its own. A kick sent before its slot is in /tmp/kicks by now.
+      machine.wait_until_succeeds(
+          f"e=$(ls /data/dev/jobs/.queue | grep -e '-{q}$') && test /data/dev/jobs/.slots/.next -nt \"/data/dev/jobs/.queue/$e\"",
+          timeout=60,
+      )
       assert state(q) == "queued" and kicks() == [], (state(q), kicks())
       proj(f"stop {a}")
       machine.wait_until_succeeds("grep -x /kick/autoland/o/s /tmp/kicks", timeout=60)

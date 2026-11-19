@@ -145,10 +145,10 @@ pkgs.testers.runNixOSTest {
 
     def kicks():
         # proj's own. The watchdog's are looked at apart: proj kicks it at
-        # every change. And the watchdog's kick of its units source isn't
-        # proj's: a unit this machine fails (burrow-settings-reconcile) is a
-        # stall of its own, and on a slow runner its deadline can pass while
-        # a test is still counting proj's kicks.
+        # every change. /kick/units is burrow-units-watch's, never proj's: it
+        # asks for a pass each time pid 1 says a unit started or finished,
+        # which here is burrow-settings-reconcile's timer every half minute
+        # or so, and so lands in whatever window a test counts proj's kicks.
         return [k for k in machine.succeed("cat /tmp/kicks").split() if k not in ("/kick/watchdog", "/kick/units")]
 
     def waits(until=None, timeout=30):
