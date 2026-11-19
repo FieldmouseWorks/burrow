@@ -10,6 +10,9 @@ for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
 builds start. A negative evaluation failure must repeat in a private local
 store without substituters, with the comparison tree evaluating afterwards.
+That store gets each input that can be fetched, one by one, so an unrelated
+host's outage can't decide the PR (#1212); a second try that reaches for an
+input it wasn't given can't tell.
 
 ## Delivery and caller cost
 

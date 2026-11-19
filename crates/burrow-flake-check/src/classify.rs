@@ -25,13 +25,16 @@ pub fn own(code: i32, log: &[u8], first: bool) -> Result<()> {
         )));
     }
     // Invalid individual JSON lines are ignored, just as nix's text diagnostics
-    // are. Only an actual structured, located error can count.
+    // are. Only an actual structured, located error can count. On the second
+    // try, a realise (102) counts as a fetch: it reached for a path its store
+    // wasn't given, an input the first try couldn't fetch, say, whose error
+    // is the fetch's.
     let log = quote(&String::from_utf8_lossy(log));
     let why = jq(
         log.as_bytes(),
         &format!(
             r#"[split("\n")[] | select(startswith("@nix ")) | .[5:] | fromjson?] as $log | first(
-      ([$log[] | select({} and .action == "start" and (.type | IN(100,101,105,108,109,110,111,112))) | .text]
+      ([$log[] | select({} and .action == "start" and (.type | IN(100,101,102,105,108,109,110,111,112))) | if .text == "" then "a path its store hadn't" else .text end]
         | select(length > 0) | "it built or fetched on the way (\(join("; ")))"),
       ([$log[] | select(.action == "msg" and .level == 0)
         | select(.file != null or (.msg | gsub("\u001b\\[[0-9;]*m"; "") | test("\\bat [^\n]+:[0-9]+:[0-9]+")))]
