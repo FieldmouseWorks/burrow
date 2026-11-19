@@ -56,6 +56,7 @@ impl Box {
     fn over(&self, files: &[&str]) -> bool {
         let job = Job::new(&self.cfg, "j");
         let _ = fs::remove_dir_all(&job.dir);
+        let _ = fs::remove_dir_all(crate::ask::host_path(&job, ""));
         fs::create_dir_all(&job.dir).unwrap();
         for f in files {
             match f.split_once(' ') {

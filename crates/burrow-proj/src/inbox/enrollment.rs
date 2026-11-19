@@ -28,11 +28,7 @@ pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str
 /// A stopped issue is excluded from automatic admission until an explicit
 /// engine enrollment is observed. `ready` alone cannot undo the owner's park.
 fn parking_path(inbox: &Inbox, repo: &str, n: &str) -> std::path::PathBuf {
-    inbox
-        .state
-        .join(".parked")
-        .join(key(repo).to_lowercase())
-        .join(n)
+    super::record::files::parked(&inbox.state, &key(repo), n)
 }
 pub(super) fn mark_parked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
     let _held = lock(inbox, repo, n)?;
@@ -64,6 +60,22 @@ fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     fs::write(path, "").map_err(|e| e.to_string())
 }
+/// Whether the job's latest turn was stopped: no turn of it starts again.
+pub(super) fn stopped(job: &Job) -> bool {
+    job.turns()
+        .is_some_and(|n| job.turn(&n, "stopped").exists())
+}
+
+/// A stopped worker its issue's labels parked, which the issue's next
+/// enrollment replaces with a fresh one. One stopped by hand (`proj stop`)
+/// on an issue still enrolled isn't: its issue is told so once instead
+/// (jobs.rs).
+pub(super) fn replaceable(inbox: &Inbox, job: &Job, repo: &str, n: &str) -> bool {
+    stopped(job)
+        && (crate::ask::host_path(job, "inbox-parked").exists()
+            || parking_path(inbox, repo, n).exists())
+}
+
 pub(super) fn automatic_parked(inbox: &Inbox, repo: &str, issue: &Value) -> bool {
     parking_path(inbox, repo, &raw(&issue["number"])).exists()
         || issue["labels"].as_array().is_none_or(|labels| {
@@ -155,10 +167,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
     let Some((repo, n)) = source(job)? else {
         return Ok(Admission::Ready);
     };
-    if job
-        .turns()
-        .is_some_and(|n| job.turn(&n, "stopped").exists())
-    {
+    if stopped(job) {
         return Ok(Admission::Stopped(format!(
             "proj: {} is stopped; relabelling starts a fresh job",
             job.id
@@ -254,12 +263,7 @@ impl Pass<'_> {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
         }
-        let root = self
-            .inbox
-            .state
-            .join(".retired")
-            .join(key(repo).to_lowercase())
-            .join(n);
+        let root = super::record::files::retired(&self.inbox.state, &key(repo), n);
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let retired = root.join(id);
         fs::rename(d, &retired).map_err(|e| io_fail(&retired, e))?;
@@ -285,32 +289,18 @@ impl Pass<'_> {
                     continue;
                 }
             }
-            let retiring = self
-                .inbox
-                .state
-                .join(".retired")
-                .join(key(repo).to_lowercase())
-                .join(&n);
+            let retiring = super::record::files::retired(&self.inbox.state, &key(repo), &n);
             if dirs(&retiring, "").iter().any(|d| {
                 read(&d.join("job")).is_some_and(|id| {
                     let job = Job::new(self.cfg, &id);
-                    job.dir.is_dir()
-                        && !job
-                            .turns()
-                            .is_some_and(|n| job.turn(&n, "stopped").exists())
+                    job.dir.is_dir() && !stopped(&job)
                 })
             }) {
                 self.retry(repo);
                 continue;
             }
             if let Some(id) = read(&d.join("job")) {
-                let job = Job::new(self.cfg, &id);
-                if (!crate::ask::host_path(&job, "inbox-parked").exists()
-                    && !parking_path(self.inbox, repo, &n).exists())
-                    || !job
-                        .turns()
-                        .is_some_and(|n| job.turn(&n, "stopped").exists())
-                {
+                if !replaceable(self.inbox, &Job::new(self.cfg, &id), repo, &n) {
                     continue;
                 }
                 self.retire_record(repo, &n, &id, &d)?;

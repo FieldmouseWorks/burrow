@@ -6,7 +6,26 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::record::{JobFile, TurnFile, TurnMarker};
 use crate::{job::Job, read, swap};
+
+/// What a job's question notice is keyed by: the notifier titles its issue
+/// `[proj-question-JOB-TURN] …`.
+const NOTICE: &str = "proj-question-";
+
+/// The notifier's key for the question job `id` asked at `turn`.
+fn notice_key(id: &str, turn: &str) -> String {
+    format!("{NOTICE}{id}-{turn}")
+}
+
+/// Whether an issue is one of these questions' notices. Only a person
+/// answers one (`proj reply` from a job is an update, not an answer), so
+/// nothing hands one to a job: the inbox neither sorts it nor drains it.
+pub(crate) fn is_notice(issue: &serde_json::Value) -> bool {
+    issue["title"]
+        .as_str()
+        .is_some_and(|t| t.strip_prefix('[').is_some_and(|t| t.starts_with(NOTICE)))
+}
 
 const OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask --default \"TEXT\" [--one-way]` again with the same recommendation without restating the question if it still needs an answer.";
 
@@ -169,12 +188,16 @@ pub(crate) fn recover(job: &Job) -> Result<(), String> {
                     save_receipt(&path, &r)?;
                 }
             }
+            let outcome = crate::record::mark_turn(job, &n.to_string(), TurnMarker::Outcome);
             if r.applied
-                && !job.turn(&n.to_string(), "stopped").exists()
-                && read_state(&job.turn(&n.to_string(), "outcome"))?.is_none()
+                && !crate::record::stopped(job, &n.to_string())
+                && crate::record::outcome_checked(job, &n.to_string())
+                    .map_err(|e| e.to_string())?
+                    .map(|b| String::from_utf8(b).map_err(|e| format!("{outcome}: {e}")))
+                    .transpose()?
+                    .is_none()
             {
-                crate::state_reads::write(job.turn(&n.to_string(), "outcome"), "failed\n")
-                    .map_err(|e| e.to_string())?;
+                outcome.write("failed\n").map_err(|e| e.to_string())?;
             }
         }
     }
@@ -265,16 +288,16 @@ impl Resume {
         if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
         }
-        let path = job.path("open-question");
+        let path = job.file(JobFile::OpenQuestion);
         let before = read_state(&path)?;
-        let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
+        let end = job.turns().and_then(|n| crate::record::end(job, &n));
         let asking = !answered
             && (crate::ask::load(job)?.is_some()
                 || (end.as_deref() != Some("done")
                     && (before.is_some() || end.as_deref() == Some("ask"))));
         // Validate existing authority before publishing any intent. Leave it
         // untouched until acceptance, so abrupt process death needs no undo.
-        read_state(&job.path("question-answered-through"))?;
+        read_state(&job.file(JobFile::QuestionAnsweredThrough))?;
         for name in METADATA {
             read_state(&crate::ask::host_path(job, name))?;
         }
@@ -394,9 +417,9 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
         return false;
     }
     let Some(n) = job.turns() else { return false };
-    if job.path("open-question").exists()
-        || (!job.turn(&n, "stopped").exists()
-            && read(&job.turn(&n, "end")).as_deref() == Some("ask"))
+    if job.file(JobFile::OpenQuestion).exists()
+        || (!crate::record::stopped(job, &n)
+            && crate::record::end(job, &n).as_deref() == Some("ask"))
     {
         return true;
     }
@@ -405,7 +428,7 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
         entries.iter().any(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             name.strip_suffix(".question")
-                .is_some_and(|t| !job.turn(t, "question-closed").exists())
+                .is_some_and(|t| !job.turn_file(t, TurnFile::QuestionClosed).exists())
         })
     })
 }
@@ -423,7 +446,7 @@ fn lapse(
     end: Option<&str>,
     pending_owner: bool,
 ) -> Result<bool, String> {
-    let marker = job.turn(n, "question-lapsed");
+    let marker = job.turn_file(n, TurnFile::QuestionLapsed);
     if marker.exists() {
         return Ok(true);
     }
@@ -436,8 +459,7 @@ fn lapse(
     {
         return Ok(false);
     }
-    let old = fs::metadata(job.turn(n, "end"))
-        .and_then(|m| m.modified())
+    let old = crate::record::end_said_at(job, n)
         .ok()
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age.as_secs() >= cfg.ask_timeout);
@@ -462,10 +484,10 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     // one. Later replies belong to a new conversation.
     let ended = (asked..=latest).find(|t| {
         let t = t.to_string();
-        job.turn(&t, "stopped").exists()
-            || job.turn(&t, "question-lapsed").exists()
-            || (read(&job.turn(&t, "end")).as_deref() == Some("done")
-                && !job.turn(&t, "timeout").exists())
+        crate::record::stopped(job, &t)
+            || job.turn_file(&t, TurnFile::QuestionLapsed).exists()
+            || (crate::record::end(job, &t).as_deref() == Some("done")
+                && !job.turn_file(&t, TurnFile::Timeout).exists())
     });
     let last = ended.unwrap_or(u64::MAX);
     let answer = crate::ask::host_path(job, "")
@@ -501,10 +523,14 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
         }
         Some(_) => "Closed: the question was answered.".into(),
         None => match ended {
-            Some(t) if job.turn(&t.to_string(), "stopped").exists() => {
+            Some(t) if crate::record::stopped(job, &t.to_string()) => {
                 "Closed: the job was stopped.".into()
             }
-            Some(t) if job.turn(&t.to_string(), "question-lapsed").exists() => {
+            Some(t)
+                if job
+                    .turn_file(&t.to_string(), TurnFile::QuestionLapsed)
+                    .exists() =>
+            {
                 "Closed: the question went unanswered past its timeout and the job is over.".into()
             }
             Some(_) => "Closed: the job ended.".into(),
@@ -522,7 +548,7 @@ struct NoticeBody {
 
 impl NoticeBody {
     fn original(job: &Job, turn: &str) -> Self {
-        let mut body = crate::engine::answer(&job.turn(turn, "jsonl"));
+        let mut body = crate::engine::answer(&job.turn_file(turn, TurnFile::Jsonl));
         // Keep argv below Linux's per-argument limit, on a UTF-8 boundary.
         if body.len() > 32_000 {
             let mut at = 32_000;
@@ -566,8 +592,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let latest = n
         .parse::<u64>()
         .map_err(|e| format!("invalid committed turn {n}: {e}"))?;
-    let stopped = job.turn(&n, "stopped").exists();
-    let end = read(&job.turn(&n, "end"));
+    let stopped = crate::record::stopped(job, &n);
+    let end = crate::record::end(job, &n);
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,
     // while its original question still needs the owner's decision.
@@ -577,8 +603,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     // posted: the leader's names this job and its answer resumes it too. Hiding
     // is not closing, so the notice comes back if this job takes the lead.
     let leader = crate::ask::follows(job)?;
-    let marker = read(&job.path("open-question"));
-    let answered = read_state(&job.path("question-answered-through"))?
+    let marker = read(&job.file(JobFile::OpenQuestion));
+    let answered = read_state(&job.file(JobFile::QuestionAnsweredThrough))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
         .unwrap_or(0);
     let entries = committed_entries(job, latest)?;
@@ -586,8 +612,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         .iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
-            (read(&e.path()).as_deref() == Some("ask")).then_some(t)
+            let stem = name.strip_suffix(".end")?;
+            let t = stem.parse::<u64>().ok()?;
+            (crate::record::end(job, stem).as_deref() == Some("ask")).then_some(t)
         })
         .max()
         .unwrap_or(0);
@@ -595,11 +622,13 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         .iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
+            let stem = name.strip_suffix(".end")?;
+            let t = stem.parse::<u64>().ok()?;
             // Ignore the timeout's synthetic completion, even after an
             // abandoned human resume publishes a newer failed turn. Earlier
             // completed conversations still bound the outstanding question.
-            (read(&e.path()).as_deref() == Some("done") && (!pending_owner || t < last_ask))
+            (crate::record::end(job, stem).as_deref() == Some("done")
+                && (!pending_owner || t < last_ask))
                 .then_some(t)
         })
         .max()
@@ -652,26 +681,26 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                     .iter()
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
-                        let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
-                        (t > boundary && read(&e.path()).as_deref() == Some("ask")).then_some(t)
+                        let stem = name.strip_suffix(".end")?;
+                        let t = stem.parse::<u64>().ok()?;
+                        (t > boundary && crate::record::end(job, stem).as_deref() == Some("ask"))
+                            .then_some(t)
                     })
                     .min()
                     .map(|t| t.to_string())
             })
     };
     let active = source.clone();
-    if let Some(source) =
-        source.filter(|t| job.turn(t, "ended").exists() || job.turn(t, "outcome").exists())
-    {
+    if let Some(source) = source.filter(|t| crate::record::ended_down(job, t)) {
         // Keep the body before the marker: either write can fail and the next
         // pass reconstructs the same operation, with the same idempotency key.
-        let path = job.turn(&source, "question");
+        let path = job.turn_file(&source, TurnFile::Question);
         if !path.exists() {
             // The policy paragraph is not kept: each send renders the
             // effective one (below), which joins, merges and shifts change.
             NoticeBody::original(job, &source).write(&path)?;
         }
-        crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
+        crate::state_reads::write(job.file(JobFile::OpenQuestion), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
     }
     // The open question's current policy (a released one's included) and
@@ -687,13 +716,13 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         let Some(turn) = name.strip_suffix(".question") else {
             continue;
         };
-        let closing = job.turn(turn, "question-close");
-        let closed = job.turn(turn, "question-closed");
+        let closing = job.turn_file(turn, TurnFile::QuestionClose);
+        let closed = job.turn_file(turn, TurnFile::QuestionClosed);
         if closed.exists() {
             continue;
         }
-        let key = format!("proj-question-{}-{turn}", job.id);
-        let hidden = job.turn(turn, "question-hidden");
+        let key = notice_key(job.id, turn);
+        let hidden = job.turn_file(turn, TurnFile::QuestionHidden);
         let outstanding = !finished && active.as_deref() == Some(turn);
         if outstanding && let Some(leader) = &leader {
             if read(&hidden).as_deref() == Some("closed") {

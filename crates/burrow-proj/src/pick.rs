@@ -361,7 +361,9 @@ pub fn pipeline_project(cfg: &Config, path: &str) -> bool {
     flake_project(cfg, path) || listed(&github_repo(cfg, path), &cfg.pipeline_repos)
 }
 
-/// The project a job runs in, as its dir has it; "" when it can't be read.
+/// The project a job runs in, as its dir's published copy has it, for
+/// scheduling; "" when it can't be read. What it runs as reads the
+/// protected request ([`crate::job::Request`]).
 pub fn project(dir: &Path) -> String {
     read(&dir.join("project")).unwrap_or_default()
 }

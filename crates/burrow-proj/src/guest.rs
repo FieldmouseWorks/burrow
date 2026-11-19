@@ -1,5 +1,6 @@
 //! A guest declares intent only. The host owns job state and GitHub access.
 
+use crate::record::JobFile;
 use crate::{config::Config, github::target, job::Job};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -71,8 +72,7 @@ pub(crate) fn path(job: &Job, n: &str) -> String {
 
 /// Read only data through agent sh; never execute a guest's declaration.
 pub(crate) fn collect(cfg: &Config, job: &Job, n: &str, agent: &str) -> Result<(), String> {
-    let remaining = crate::read(&job.turn(n, "deadline"))
-        .and_then(|s| s.parse::<i64>().ok())
+    let remaining = crate::record::deadline(job, n)
         .map(|d| Duration::from_nanos(d.saturating_sub(crate::now_nanos()).max(0) as u64))
         .unwrap_or(COLLECTION_TIME);
     collect_with(cfg, job, n, agent, "agent", remaining)
@@ -128,7 +128,7 @@ fn register(cfg: &Config, job: &Job, bytes: &[u8], until: Instant) -> Result<(),
                         .ok_or(crate::ask::USAGE)?,
                 )?;
             }
-            let _ = fs::remove_file(job.path("await.next"));
+            let _ = fs::remove_file(job.file(JobFile::AwaitNext));
             crate::ask::declare(job, &declaration.end)
         }
         "await" if !declaration.targets.is_empty() => {
@@ -165,6 +165,9 @@ mod tests {
     fn registration_fixture(script: &str) -> (tempfile::TempDir, Config) {
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");
+        // A stand-in killed by a short budget before its first line runs
+        // never records its pid: none started that could still be alive.
+        fs::write(d.path().join("pids"), "").unwrap();
         burrow_test::executable(
             &gh,
             format!(
@@ -212,7 +215,7 @@ mod tests {
             let identity = crate::read(&crate::ask::host_path(&job, "question-id"));
             let deadline = crate::ask::load(&job).unwrap().map(|q| q.due);
             fs::write(
-                job.path(crate::github_quota::PENDING),
+                job.file(crate::record::JobFile::GithubPending),
                 serde_json::to_vec(&crate::github_quota::Pending {
                     targets: vec!["o/r#1".into()],
                     retry_at: 1,
@@ -310,7 +313,7 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
         )
         .unwrap();
-        assert!(job.path(crate::github_quota::PENDING).exists());
+        assert!(job.file(crate::record::JobFile::GithubPending).exists());
         let meters = crate::github_quota::meters(&cfg);
         assert_eq!(meters.len(), 1);
         assert_eq!(meters[0].app, "host");

@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-from harness import ALREADY, CI_GREEN, FAIL, JOBS, STATES, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, \
-    mkpr, pr_state, run, stand_in, tmp, worker
+from harness import ALREADY, CI_GREEN, FAIL, JOBS, STATES, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, \
+    mkpr, pr_state, run, stand_in, tmp
 
 import harness
 import proofs as P
@@ -55,12 +55,6 @@ def mended():
     harness.REFUSAL = REFUSAL
 
 
-def reviewed():
-    run(mkpr(), 0)
-    run(mkpr(), 600)
-    worker()
-
-
 def judging():
     """A judge at work on the PR's head, which it's pushed over next pass."""
     C.job = lambda *a, **k: "judge-on-a"
@@ -76,9 +70,10 @@ CASES = {
     "mergeable": {"pr": {**clean(), "mergeStateStatus": "UNKNOWN"}, "mended": clean()},
     "job": {"pr": clean(files=["secrets/1.yaml"]), "fail": lambda: setattr(C, "job", lambda *a, **k: None),
             "mend": lambda: setattr(C, "job", real_job)},
-    "post": {"pr": mkpr(), "setup": reviewed, "fail": lambda: STUB.update(post=C.Unavailable("GitHub's down")),
-             "mend": lambda: STUB.update(post=None), "said": "GitHub's down",
-             "again": lambda: STUB.update(post=C.Unavailable("GitHub's still down")) or "GitHub's still down"},
+    # Asking Codex for a review of a head pushed an hour before, which it
+    # hasn't reviewed.
+    "ask": {"pr": mkpr(suites=[{"createdAt": "2026-10-23T23:00:00Z", "conclusion": None, "workflowRun": None}]),
+            "fail": lambda: FAIL.append("/issues/5/comments"), "mend": FAIL.clear, "said": "GitHub refused the comment"},
     "stop": {"pr": clean(files=["secrets/1.yaml"], sha="b" * 40), "setup": judging,
              "fail": lambda: UNSTOPPABLE.add("judge-on-a"), "mend": UNSTOPPABLE.clear},
     # What its merge would change, which git can't say; and a PR that adds
@@ -214,13 +209,6 @@ for i in range(9):
 assert pr_state()["strikes"] == {"mergeable": 9} and C.WAKE["sam/r"] == T + 700 + 8 * 4000 + 3600 + 1, (pr_state(), C.WAKE)
 a_pass({**clean(sha="b" * 40), "mergeStateStatus": "UNKNOWN"}, 40000)
 assert pr_state()["strikes"] == {"mergeable": 1}, pr_state()
-# Two reviews it couldn't post in one pass are that pass's one failure.
-fresh_pr_state()
-reviewed()
-STUB["post"] = C.Unavailable("GitHub's down")
-a_pass(mkpr(), 700)
-STUB["post"] = None
-assert pr_state()["strikes"] == {"post": 1}, pr_state()
 print("strikes: ok")
 
 # Every wake-up a pass books says what ends the wait it's on (a strike, a

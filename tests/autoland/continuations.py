@@ -12,10 +12,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+# burrow-brief (argv[2]), which the steward's tasks read their policy text
+# from as they're imported.
+BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
+                        str(Path(__file__).resolve().parents[2] / 'crates/target/debug/burrow-brief'))
 with tempfile.TemporaryDirectory() as tmp:
     state = Path(tmp) / 'state'
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(
+    cfg.write_text(json.dumps(dict(brief=[BRIEF], owner='Sam',
         context='test', stateDir=str(state), snapDir=str(Path(tmp) / 'trees'),
         conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {}}, kick='http://events/kick/autoland',
@@ -59,7 +63,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S.T, 'begin', lambda repo: S.T.STOPPED.pop(repo, None)),
                 (S.T, 'on', lambda *a: True), (S.T, 'step', lambda *a: None),
                 (S.step, 'handle', handle), (S, 'branches', lambda *a, **k: None),
-                (S, 'upkeep', lambda *a: None), (S.V, 'sweep', lambda *a: None),
+                (S, 'upkeep', lambda *a: None),
                 (C, 'taken', lambda *a: None), (C, 'poke', lambda *a: None),
                 (C, 'coverage', lambda rs, done: {'repos': {r['repo']: {'covered': r in done} for r in rs}}),
             ):
@@ -90,12 +94,16 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert (state / 'watch.json').exists(), (kick, name)
     print('slow preparation makes durable progress: passed')
 
-    # A normal full pass consumes repository events in Line.take. Finished
-    # and unvisited repos, including expired retries, must get ordinary work
-    # requests back, separate from the internal continuation line.
+    # A full pass over new work that yields keeps the wake-ups of the repos
+    # it didn't reach, and its rest goes to the continuation line. The
+    # repos its traversal finished before the new work came, with a wake-up
+    # or not, and the ones whose receipts the continuation would keep, owe a
+    # pass of their own. One the traversal hasn't entered gets its look from
+    # the traversal, and burrow-events keeps each repo's own requests beside
+    # the full pass (its line.rs), so none is booked for it.
     with fixture() as (clock, handled, facts, repos, prs, info):
-        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arb']
-        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
+        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'adrbc']
+        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a', 'sam/d'], 'repos': {}})
         C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
         original = S.step.handle
 
@@ -106,10 +114,11 @@ with tempfile.TemporaryDirectory() as tmp:
         with patch.object(S.step, 'handle', long):
             S.run_pass(None)
         wakes = C.load('wake.json', {})
-        assert wakes['sam/a'] > C.NOW and wakes['sam/b'] > C.NOW, wakes
+        assert all(wakes[f'sam/{n}'] > C.NOW for n in 'adrb'), wakes
+        assert 'sam/c' not in wakes, wakes
         assert '' not in wakes, wakes
         assert '' in C.load('continue.json', {}), C.load('continue.json', {})
-    print('full passes preserve skipped event and deadline obligations: passed')
+    print('a yielding full pass books finished and carried repos, not unentered ones: passed')
 
     # Local completions/availability, lifecycle/held answers and sibling PR
     # changes all arrive on the ordinary line. Invalidate decisions on that
@@ -186,10 +195,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # An old repository failure is retained while its operation is deferred;
     # a failed retry preserves its original deadline, and success clears it.
-    for operation in ('train', 'train unavailable', 'branches', 'upkeep'):
+    # A wait from before its operations were noted (no ops) is kept so too.
+    for operation, ops in (('train', ['train']), ('train unavailable', ['train']), ('branches', ['branches']),
+                           ('upkeep', ['upkeep']), ('train', None)):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
                        phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+            if ops:
+                old['ops'] = ops
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             original = S.step.handle
 
@@ -205,7 +218,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 if operation == 'train unavailable':
                     raise C.Unavailable('temporarily unavailable')
                 if operation == 'upkeep':
-                    S.failing('sam/r', 'its upkeep failed')
+                    S.failing('sam/r', 'its upkeep failed', 'upkeep')
                 else:
                     raise RuntimeError('still failing')
 
@@ -215,10 +228,54 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             current = C.load('watch.json', {})['items']['sam/r']
             assert current['since'] == 10 and current['due'] == 7210, (operation, current)
+            # A traversal that ends with it failing again says what fails.
+            assert current['ops'] == ['train' if operation.startswith('train') else operation], current
             C.NOW += 600
             S.run_pass(['sam/r'])
             assert 'sam/r' not in C.load('watch.json', {})['items'], operation
     print('deferred operation failures keep their original watchdog clocks: passed')
+
+    # The repo's wait is for the operation that failed, not its traversal: a
+    # read of its PRs fails once, and the next slice that reads them ends the
+    # wait though it yields with PRs left and the train and branches not
+    # reached; one that failed after the PRs stays until it's run again.
+    for after in (None, 'train'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            prs[:] = [pr(n) for n in range(1, 5)]
+
+            def unread(*args):
+                raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+
+            def broken(*args):
+                raise RuntimeError('still failing')
+
+            with patch.object(S, 'open_prs', unread):
+                S.run_pass(None)
+            current = C.load('watch.json', {})['items']['sam/r']
+            assert current['phase'] == W.FAILS and current['ops'] == ['PRs'], current
+            if after:
+                C.NOW += 600
+                with patch.object(S.T, 'step', broken):
+                    S.run_pass(['sam/r'])
+                current = C.load('watch.json', {})['items']['sam/r']
+                assert current['since'] == 1000 and current['ops'] == ['train'], current
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            handled.clear()
+            C.NOW += 600
+            with patch.object(S.step, 'handle', long):
+                S.run_pass(None)
+            assert 0 < len(handled) < len(prs), handled
+            items = C.load('watch.json', {})['items']
+            if after:
+                assert items['sam/r']['since'] == 1000 and items['sam/r']['ops'] == ['train'], items
+            else:
+                assert 'sam/r' not in items, items
+    print("a repo's wait ends with the operation that failed passing: passed")
 
     # Exhausting the work slice on the final PR still defers repository
     # operations; the continuation can run them without repeating the PR.

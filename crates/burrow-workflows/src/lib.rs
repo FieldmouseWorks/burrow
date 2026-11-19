@@ -13,6 +13,7 @@
 #![cfg(test)]
 
 mod attestation;
+mod builds;
 mod commit_signatures;
 mod degradations;
 mod expr;
@@ -21,6 +22,7 @@ mod harness;
 mod keep_builds;
 mod lane;
 mod pr_base;
+mod reuse;
 mod train;
 
 mod test_executables;

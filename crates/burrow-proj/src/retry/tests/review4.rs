@@ -46,7 +46,7 @@ fn capture_saves_the_choice_startup_runs_not_a_second_resolution() {
     let resolved = engine::choice(&r.cfg, &job).unwrap();
     assert_eq!(resolved.engine, engine::Engine::Claude);
     let ran = engine::Choice {
-        engine: engine::Engine::Codex,
+        engine: engine::Engine::Claude,
         model: Some("m".into()),
         effort: Some("high".into()),
     };
@@ -160,7 +160,7 @@ fn only_the_exact_legacy_handover_shell_is_a_parent() {
 
 #[test]
 fn initial_and_retained_waiters_keep_identity_when_rollback_ignores_protected_state() {
-    for mode in ["new", "new-codex", "new-unstick"] {
+    for mode in ["new", "new-unstick"] {
         for retained in [false, true] {
             let mut r = rig();
             let old = r.tmp.path().join("unaware");
@@ -184,11 +184,7 @@ fn initial_and_retained_waiters_keep_identity_when_rollback_ignores_protected_st
             }
             fs::remove_file(job.turn("1", "execution")).unwrap();
             let choice = engine::Choice {
-                engine: if mode.ends_with("codex") {
-                    engine::Engine::Codex
-                } else {
-                    engine::Engine::Claude
-                },
+                engine: engine::Engine::Claude,
                 model: Some("saved-choice".into()),
                 effort: Some("high".into()),
             };

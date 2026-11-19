@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import proofs as P
 import waits
-from harness import C, CI_GREEN, FAIL, JOBS, REAL, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+from harness import C, CI_GREEN, FAIL, JOBS, REAL, STATES, STOPPED, S, UNSTOPPABLE, M, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -202,7 +202,7 @@ P.begin("sam/r", {1, 2})
 line(1)
 line(2)
 line(2, 800)
-mirror = f"{tmp}/state/{V.GIT}/sam__r.git"
+mirror = f"{tmp}/state/{M.GIT}/sam__r.git"
 assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
                     "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
                     "--no-update-lock-file",

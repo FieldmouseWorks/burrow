@@ -1,5 +1,5 @@
-# A real user manager, both engine pools, an inherited heavy lock and native
-# proof fences. Only engine/GitHub replies are fixtures.
+# A real user manager, a job slot and the unstick slot, an inherited heavy
+# lock and native proof fences. Only engine/GitHub replies are fixtures.
 { self, pkgs }:
 let
   inherit (import ./proj/stand-ins.nix { inherit pkgs; filterLabels = true; }) gh;
@@ -7,18 +7,9 @@ let
     prompt=$(cat)
     case $prompt in *$'\n## This turn, asked\n'*) prompt=''${prompt##*$'\n## This turn, asked\n\n'} ;; esac
     id="session-$PROJ_JOB"
-    if [ ${name} = codex ]; then
-      printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
-    else
-      printf '{"type":"system","session_id":"%s"}\n' "$id"
-    fi
+    printf '{"type":"system","session_id":"%s"}\n' "$id"
     finish() {
-      if [ ${name} = codex ]; then
-        printf '{"type":"item.completed","item":{"type":"agent_message","text":"continued"}}\n'
-        printf '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}\n'
-      else
-        printf '{"type":"result","session_id":"%s","result":"continued","is_error":false}\n' "$id"
-      fi
+      printf '{"type":"result","session_id":"%s","result":"continued","is_error":false}\n' "$id"
     }
     case " $* " in *" --resume "*|*" resume "*) echo resumed >"$PWD/resumed-$PROJ_JOB"; finish; exit 0 ;; esac
     case "$prompt" in
@@ -48,8 +39,7 @@ in pkgs.testers.runNixOSTest {
         enable=true;
         inherit gh;
         maxJobs=1; pipelineSlots=0; maxJobsPerProject=10; minFreeMemory=0;
-        codex = { slots=1; package=engine "codex"; };
-        inbox = { enable=true; planning=false; authors=[ { login = "sam"; id = 1; } ]; triage = { enable=true; drain="codex"; drainJobs=1; }; };
+        inbox = { enable=true; planning=false; authors=[ { login = "sam"; id = 1; } ]; triage = { enable=true; drain="claude"; drainJobs=1; }; };
       };
     };
     environment.systemPackages = [ pkgs.git pkgs.jq self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof ];
@@ -59,7 +49,6 @@ in pkgs.testers.runNixOSTest {
       "d /data/proof-checkout 0755 dev dev -"
       "d /data/proof-trees 0755 dev dev -"
       "d /var/lib/burrow/autoland/builds 0755 dev dev -"
-      "d /home/dev/.codex 0700 dev dev -"
     ];
     environment.etc."test-proof-tools".text = builtins.toJSON {
       bash="${pkgs.bash}/bin/bash"; git="${config.programs.git.package}/bin/git"; heavy="${config.burrow.tools.heavy}/bin/heavy";
@@ -132,8 +121,8 @@ in pkgs.testers.runNixOSTest {
     queued=dev("proj run --first "+opts+"ib hold")
     eventually(queued,"queued")
     queued_turn=machine.succeed("cat /data/dev/jobs/"+queued+"/turns")
-    dev("proj settings role coding codex")
-    code=dev("proj run --role coding "+baseopts+"ib hold")
+    # The other slot it can run in beside the one that's taken.
+    code=dev("proj run --unstick --role coding "+baseopts+"ib hold")
     eventually(code,"running")
     for j in [run,code]: machine.wait_until_succeeds("test -s /data/dev/jobs/"+j+"/session")
     sessions={j:machine.succeed("cat /data/dev/jobs/"+j+"/session") for j in [run,code]}
@@ -172,7 +161,7 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("touch /tmp/gh/calls; chmod a+rw /tmp/gh/calls")
     dev("proj-inbox o/web")
     machine.succeed("grep -F 'POST repos/o/web/issues/30/labels' /tmp/gh/calls")
-    issue["labels"].append({"name":"codex"}); data("repos/o/web/issues",[issue]); data("repos/o/web/issues/30",issue)
+    issue["labels"].append({"name":"claude"}); data("repos/o/web/issues",[issue]); data("repos/o/web/issues/30",issue)
     dev("proj-inbox o/web")
     fresh=machine.succeed("cat /var/lib/burrow/proj-inbox/o_web-30/job").strip()
     eventually(fresh,"done")

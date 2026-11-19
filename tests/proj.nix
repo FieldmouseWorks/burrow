@@ -63,8 +63,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       assert "ended without an answer" in out and "refused" in out, out
 
   with subtest("a job's role runs it at the model and effort the settings give it, and only then"):
-      for change in ("offer claude models chosen", "offer codex models other", "role quick claude",
-                     "model quick claude chosen medium", "model quick codex other low"):
+      for change in ("offer claude models chosen", "role quick claude", "model quick claude chosen medium"):
           machine.succeed(f"su - dev -c 'proj settings {change}'")
       # The door refuses a model its engine doesn't offer.
       machine.fail("su - dev -c 'proj settings model quick claude unoffered'")
@@ -77,7 +76,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
       assert "--model" not in args and "--effort" not in args, args
-      for change in ("model quick claude unset", "model quick codex unset", "role quick unset"):
+      for change in ("model quick claude unset", "role quick unset"):
           machine.succeed(f"su - dev -c 'proj settings {change}'")
 
   with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
@@ -290,11 +289,19 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       machine.fail("su - dev -c 'proj run --app ../workers web showenv'")
       machine.fail("su - dev -c 'proj run --vm --app workers web showenv'")
       machine.fail(f"su - dev -c 'proj reply --app workers {e} showenv'")
-      # One whose App has gone fails its turn rather than run as the user.
+      # The App is its starter's: one the job writes into its own files
+      # changes nothing, and the published copy is put back.
       machine.succeed(f"echo gone >/data/dev/jobs/{e}/app")
       proj(f"reply {e} showenv")
-      machine.wait_until_succeeds(f"grep -q 'no GitHub App gone' /data/dev/jobs/{e}/3.outcome", timeout=120)
-      assert not machine.succeed(f"cat /data/dev/jobs/{e}/3.jsonl 2>/dev/null || true").strip()
+      machine.wait_until_succeeds(f"grep -x done /data/dev/jobs/{e}/3.outcome", timeout=120)
+      acts_as_workers(e)
+      machine.succeed(f"grep -x workers /data/dev/jobs/{e}/app")
+      # One whose App has gone fails its turn rather than run as the user.
+      machine.succeed("mv /etc/gh-token/workers.env /tmp/workers.env")
+      proj(f"reply {e} showenv")
+      machine.wait_until_succeeds(f"grep -q 'no GitHub App workers' /data/dev/jobs/{e}/4.outcome", timeout=120)
+      assert not machine.succeed(f"cat /data/dev/jobs/{e}/4.jsonl 2>/dev/null || true").strip()
+      machine.succeed("mv /tmp/workers.env /etc/gh-token/workers.env")
       # One whose App goes while it waits for a slot starts as the App all
       # the same, never as the user: its env was read before it waited.
       a = proj('run web "sleep 600"')

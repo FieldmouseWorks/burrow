@@ -122,7 +122,8 @@ impl Help {
     /// Its flags, from the FLAGS sections:
     /// `  -b, --body text   The comment body text` takes a value,
     /// `  -R, --repo strings   Filter on repository` a list of them, and
-    /// `  -w, --web         Open the web browser` nothing. A section's heading
+    /// `  -w, --web         Open the web browser` nothing, as does
+    /// `  -w, --web[=true|false]   Open the web browser`. A section's heading
     /// is a line that isn't indented.
     fn read_sections(&mut self, help: &str) {
         let mut in_flags = false;
@@ -144,10 +145,15 @@ impl Help {
             let Some(long) = long.strip_prefix("--") else {
                 continue;
             };
-            let (name, takes) = match long.split_once(' ') {
-                Some((name, "strings")) => (name, Takes::List),
-                Some((name, _type)) => (name, Takes::One),
-                None => (long, Takes::Nothing),
+            let (name, kind) = long.split_at(long.find([' ', '[']).unwrap_or(long.len()));
+            // A flag with a value for when it's given bare (`[=...]`: gh
+            // 2.104 prints every boolean so) takes only `=value`, as pflag
+            // reads it, never the next argument.
+            let takes = match kind.trim_start() {
+                k if k.contains("[=") => Takes::Nothing,
+                "" => Takes::Nothing,
+                "strings" => Takes::List,
+                _ => Takes::One,
             };
             if let Some(c) = short {
                 self.short.insert(c, name.to_owned());
@@ -374,7 +380,8 @@ fn slots(usage: &str) -> Vec<Slot> {
 
 #[cfg(test)]
 pub mod fake {
-    //! gh's help, in gh 2.103.2's layout, for the commands the tests call.
+    //! gh's help, in gh 2.103.2's layout (2.104's for the top's booleans),
+    //! for the commands the tests call.
 
     use super::*;
 
@@ -384,7 +391,8 @@ pub mod fake {
             "",
             &[],
             "<command> <subcommand> [flags]",
-            "  --help      Show help for command\n  --version   Show gh version\n",
+            // gh 2.104's layout for booleans.
+            "  --help[=true|false]      Show help for command\n  --version[=true|false]   Show gh version\n",
         ),
         (
             "pr",
@@ -612,6 +620,30 @@ mod tests {
         let h = Help::of("USAGE\n  gh x\n\nFLAGS\n  -a, --aa x   y\n\n  -b, --bb x   y\n\nEXAMPLES\n  -c, --cc x   y\n", &[]).unwrap();
         assert_eq!(h.long.len(), 2);
         assert!(h.long.contains_key("aa") && h.long.contains_key("bb"));
+        // gh 2.104's `gh run view`: booleans print their bare value.
+        let h = Help::of(
+            "USAGE\n  gh run view [<run-id>] [flags]\n\nFLAGS\n  -a, --attempt uint               The attempt number\n      --exit-status[=true|false]   Exit with non-zero status\n      --log-failed[=true|false]    View the log for any failed steps\n  -v, --verbose[=true|false]       Show job steps\n      --opt string[=\"x\"]          Optional\n\nINHERITED FLAGS\n      --help[=true|false]        Show help for command\n  -R, --repo [HOST/]OWNER/REPO   Select another repository\n",
+            &[],
+        )
+        .unwrap();
+        for (name, takes) in [
+            ("attempt", Takes::One),
+            ("exit-status", Takes::Nothing),
+            ("log-failed", Takes::Nothing),
+            ("verbose", Takes::Nothing),
+            ("opt", Takes::Nothing),
+            ("help", Takes::Nothing),
+            ("repo", Takes::One),
+        ] {
+            assert_eq!(h.long.get(name), Some(&takes), "{name}");
+        }
+        assert_eq!(h.short.get(&'v').map(String::as_str), Some("verbose"));
+        let args: Vec<String> = ["5", "--log-failed", "-v", "--help=true", "-R", "sam/r"]
+            .map(str::to_owned)
+            .into();
+        let call = h.parse(&args).unwrap();
+        assert_eq!(call.values, [("repo".to_owned(), "sam/r".to_owned())]);
+        assert_eq!(call.args.len(), 1);
         // gh printed nothing, or no usage: refused.
         assert!(Help::of("", &[]).is_err());
         assert!(Help::of("Some topic.\n", &[]).is_err());
