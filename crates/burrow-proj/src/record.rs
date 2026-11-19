@@ -231,6 +231,22 @@ impl Record {
         ))
     }
 
+    /// Whether it's still at work: parked, queued or running, or its turn
+    /// over but holding something open that resumes it ([`Wait::held`]: a
+    /// transfer, a question, an await) or a usage hold still to reset, as
+    /// the steward reads one. A spent limit, or a release, holds nothing.
+    /// An error when what it waits on couldn't be read.
+    pub fn at_work(&self, now: i64) -> Result<bool, String> {
+        if let Some(e) = &self.unread {
+            return Err(e.clone());
+        }
+        Ok(!matches!(self.stage, Stage::Ended(_))
+            || self
+                .wait
+                .iter()
+                .any(|w| w.held() || matches!(w, Wait::Usage { reset, .. } if *reset > now)))
+    }
+
     /// Its stage and waits in one line, as the history notes them.
     pub fn summary(&self) -> String {
         let mut labels: Vec<String> = self.wait.iter().map(Wait::label).collect();

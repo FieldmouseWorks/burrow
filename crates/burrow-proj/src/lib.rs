@@ -37,6 +37,10 @@
 //! proj run --key KEY PROJECT "task"  what its starter knows it by before
 //!                             it has its id: one job a key, taken at once
 //!                             (a key a started job has is refused)
+//! proj run --key KEY --join PROJECT "task"  one job at work a key: while
+//!                             the key's job is at work, the run joins it
+//!                             (says its id, starts nothing); once it has
+//!                             ended, the key is the new job's
 //! proj reply [--first] ID "message"  continue that job's conversation
 //! proj reply --cut-off N ID "message"  so, if its turn N was cut off
 //!                             (else exit 3)

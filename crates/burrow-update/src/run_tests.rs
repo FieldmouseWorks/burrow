@@ -228,7 +228,7 @@ fn an_input_that_doesnt_build_is_held_back_and_the_rest_go() {
     assert!(!logs.join("build-nixpkgs.log").exists());
     let job = jobs(&m);
     assert!(
-        job.starts_with("run --pipeline --role update homelab box-update: these updates don't build with box's flake: burrow. "),
+        job.starts_with("run --pipeline --role update --key box-update/build-inputs/burrow --join homelab box-update: these updates don't build with box's flake: burrow. "),
         "{job}"
     );
     assert!(m.cfg.state.join("jobs/build-inputs").exists());
@@ -295,6 +295,12 @@ fn a_vm_test_the_updates_break_holds_them() {
     assert!(jobs(&m).contains(
         "box-update: the VM test vm fails with these updates on top of main: nixpkgs aaaaaaa -> ccccccc. It passes on main, so the updates break it."
     ));
+    // One job for the test and the inputs it fails with.
+    assert!(
+        jobs(&m).contains("--key box-update/check-vm/burrow:nixpkgs --join "),
+        "{}",
+        jobs(&m)
+    );
     assert_eq!(m.recorded("clean-vm"), None, "never passed first time");
     // Remembered for a day: not run again.
     assert_eq!(go(&m), 1);

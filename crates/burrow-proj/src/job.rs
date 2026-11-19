@@ -234,6 +234,16 @@ impl<'a> Job<'a> {
         crate::record::derive(self).lifecycle()
     }
 
+    /// Whether it's still at work ([`crate::record::Record::at_work`]),
+    /// read as [`Job::lifecycle`] is: what a run under its key with
+    /// `--join` joins.
+    pub fn at_work(&self) -> Result<bool, String> {
+        let _held = self
+            .read_lock()
+            .map_err(|e| format!("{}: {e}", self.file(JobFile::Lock).display()))?;
+        crate::record::derive(self).at_work(crate::now())
+    }
+
     /// Keeps the latest turn's answers as it left them, beside what it held
     /// open (`N.answers`, `N.holds`), and says so (`N.captured`, written
     /// last): the next turn rewrites answers.json, and whoever collects a
