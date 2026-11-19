@@ -41,6 +41,8 @@ lib.genAttrs [
   "autoland.jobIdleMinutes"
   "autoland.proofTimeoutMinutes"
   "autoland.baselinePerPass"
+  "autoland.askAsOwner.repos"
+  "autoland.askAsOwner.perDay"
   "autoland.repos"
   "github.machinery"
   "updates.renovate.app"

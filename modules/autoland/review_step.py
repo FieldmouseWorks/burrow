@@ -8,11 +8,14 @@ from typing import NamedTuple
 import common as C
 import reviewers as V
 from common import MIN, repo_cfg
+from step_context import clock
 
 # A push the connector hasn't begun on after this long gets asked for once,
-# and after LOST the owner hears of it: it reviews each push within minutes
-# when its usage lasts.
-QUIET, LOST = 30, 120
+# through the owner's door (reviewers.ask); after LOST the owner hears of
+# it, and once asked, only when the ask too went ANSWERED minutes without a
+# word: it reviews each push within minutes when its usage lasts, and
+# answers the owner's ask within a minute.
+QUIET, LOST, ANSWERED = 30, 120, 30
 
 
 class Looked(NamedTuple):
@@ -28,12 +31,12 @@ class Looked(NamedTuple):
     changed: bool  # retargeted or edited after its push: clean isn't the reviewers' to settle alone
 
 
-def look(repo, pr, st, digest, line, age, after, tried, needed):
-    """The reviewers' part of the PR's step this pass. st is its state;
-    digest and line its listing; age how long its head has been still
-    (since its push, as near as GitHub says); after books its next pass,
-    and tried strikes a step GitHub refused or clears it (step.py's);
-    needed, whether its head needs a review round at all (train.review)."""
+def look(repo, pr, digest, line, age, after, tried, needed):
+    """The reviewers' part of the PR's step this pass. digest and line are
+    its listing; age how long its head has been still (since its push, as
+    near as GitHub says); after books its next pass, and tried strikes the
+    ask when the owner's door failed or clears it (step.py's); needed,
+    whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     names = V.on(repo)
     said = {r: V.verdict(repo, pr) for r in names}
@@ -58,16 +61,23 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
             waiting.append(f"{V.NAMES[r]} is reviewing this commit")
         elif v == "none":
             waiting.append(f"Waiting for {V.NAMES[r]}'s review of this commit")
-            if age >= QUIET * MIN:
-                tried("ask", V.ask(repo, pr, st, f"No review of {pr['headRefOid'][:7]} came after its push."))
-            else:
+            at, unasked = V.asked(repo, pr, 0), None
+            if at is None and age >= QUIET * MIN:
+                at, unasked, failed = V.ask(repo, pr)
+                tried("ask", failed)
+                unasked = unasked or failed
+            elif at is None:
                 after(C.NOW - age, QUIET)  # ends: asked once, then listed
-            if age >= LOST * MIN:
+            # The owner hears of it once its push is LOST minutes old and,
+            # when the owner's door asked, the ask went unanswered too.
+            due = max(C.NOW - age + LOST * MIN, (at or 0) + ANSWERED * MIN)
+            if C.NOW >= due:
                 x = f"no review of {pr['headRefOid'][:7]} after {int(age // MIN)} minutes"
-                stuck.append(f"{V.NAMES[r]}: {x}")
-                digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, x + " (its usage, or the connector's setup)"))
+                how = f"asked as the owner at {clock(at)}, unanswered" if at else f"not asked as the owner: {unasked}" if unasked else "not asked"
+                stuck.append(f"{V.NAMES[r]}: {x} ({how})")
+                digest.append((f"{V.NAMES[r]} hasn't reviewed it", line, f"{x}; {how} (its usage, or the connector's setup)"))
             else:
-                after(C.NOW - age, LOST)  # ends: listed for the owner
+                after(due, 0)  # ends: listed for the owner
     # Retargeted or edited after its push, Codex's clean can't settle it: it
     # binds no base or description (burrow-upkeep's verdict), so a judge,
     # whose verdict binds both, decides (step.py).

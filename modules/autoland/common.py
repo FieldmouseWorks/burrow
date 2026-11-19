@@ -308,6 +308,28 @@ def comment(repo, n, body):
     return write("api", f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}", check=False)
 
 
+def ask_as_owner(repo, n, head):
+    """The owner's door (burrow-review-ask, config.askAsOwner) on the PR's
+    head: what came of it, as it says (its Outcome). It runs as a unit of
+    the machine user's own, as a proof build does, so it acts as that
+    user's gh login while this unit never holds it, and nothing of this
+    unit's environment (its App token) goes with it. Waited for: it
+    reads the PR and posts at most one comment."""
+    unit = "autoland-ask-" + hashlib.sha256(f"{repo}#{n}@{head}".encode()).hexdigest()[:16]
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    try:
+        p = subprocess.run(["systemd-run", "--user", "--wait", "--pipe", "--quiet", "--collect", f"--unit={unit}",
+                            "--", *CFG["askAsOwner"]["command"], repo, str(n), head],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"outcome": "failed", "why": f"systemd-run: {e}"}
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return {"outcome": "failed", "why": f"systemd-run: {p.stderr.strip()[-300:] or p.returncode}"}
+
+
 def me():
     """The steward's login as REST gives it: its App's bot. Its statuses,
     comments, judges' verdicts and merges are posted as it, and nobody

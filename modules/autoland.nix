@@ -2,7 +2,8 @@
 # own, once a reviewer has nothing left to say (autoland/steward.py).
 #
 #   ready -> Codex reviews it, through its GitHub connector (the ChatGPT
-#            Codex Connector, on the owner's ChatGPT account, every push)
+#            Codex Connector, on the owner's ChatGPT account, every push;
+#            a late one is asked for as the owner: askAsOwner)
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing in the head's own change, CI green on the head
 #         -> (R2 by Conary's class policy, no CI: a Claude job judges it)
@@ -113,6 +114,8 @@ let
     # runs and ends it, the shell its command runs in, the git that makes
     # its worktrees, and where they go, out of projectsDir and its servers.
     proofRun = "${burrowProof}/bin/burrow-proof";
+    # The owner's door, and its record (reviewers.py), or null.
+    askAsOwner = cfg.askAsOwner.door;
     bash = "${pkgs.bash}/bin/bash";
     git = "${pkgs.git}/bin/git";
     runsDir = "${config.burrow.scratchDir}/proofs";
@@ -303,6 +306,7 @@ in
     (import ./autoland/proof.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
+    (import ./autoland/review-ask.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     # The heavy slots its proof builds take, where the machine has them.
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
@@ -919,7 +923,7 @@ in
         (chatgpt-codex-connector[bot]): findings come as review threads, and a
         summary comment says which commit it reviewed. Fix or answer every finding
         (reply on the thread, push the fix) and resolve the thread; a push gets a new
-        review, and with no push the steward asks for one (`@codex review`).
+        review. With none, ${if cfg.askAsOwner.repos == [ ] then "the steward can't ask for one: the connector takes that ask from no App" else "in ${lib.concatStringsSep ", " cfg.askAsOwner.repos} the steward asks for one as ${config.burrow.owner} (the bare `@codex review`, once a head), since the connector takes that ask from no App. It posts it through burrow-review-ask, its one door that acts as ${config.burrow.owner}, and the only thing it ever does as them"}; a review that still doesn't come goes to ${config.burrow.owner}'s digest.
       - Once it finds nothing on the head, every thread is
         resolved and CI is green on the head, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.${lib.optionalString (trains != [ ]) ''

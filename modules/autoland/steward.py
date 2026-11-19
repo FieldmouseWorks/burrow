@@ -16,7 +16,7 @@ event reports):
      steward kept about it forgotten: before anything else acts on it.
   2. For each open PR that isn't a draft, work out where it stands and do
      the next thing (step.py): read what Codex's GitHub connector said of
-     its head (reviewers.py), asking it again when a look is owed, hand open
+     its head (reviewers.py), asking it again as the owner (its one door that acts as them) when a look is owed, hand open
      findings, red CI or a conflict with its base to a Claude job, build
      the checks only a machine of the owner's runs that are a build
      (proofBuilds, proofs.py), run those that are a command (proofRuns)
