@@ -2,7 +2,8 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -76,6 +77,47 @@ pub fn copy_file(from: impl AsRef<Path>, to: impl AsRef<Path>) {
         }
     }
     fs::copy(from, to).unwrap();
+}
+
+/// A directory served over HTTP under `/builds`, as nginx serves the
+/// machine's build store: a file it holds, or a 404. Returns its URL; it
+/// serves until the test process ends.
+pub fn build_store(dir: impl AsRef<Path>) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/builds", l.local_addr().unwrap());
+    let dir = dir.as_ref().to_path_buf();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            let Ok(read) = c.try_clone() else { continue };
+            let mut r = BufReader::new(read);
+            let mut line = String::new();
+            let _ = r.read_line(&mut line);
+            let mut w = line.split_whitespace();
+            let (method, target) = (w.next().unwrap_or(""), w.next().unwrap_or(""));
+            let mut h = String::new();
+            while r.read_line(&mut h).is_ok_and(|n| n > 0) && h != "\r\n" {
+                h.clear();
+            }
+            let file = target
+                .strip_prefix("/builds/")
+                .filter(|f| !f.split('/').any(|p| p == ".." || p.is_empty()))
+                .and_then(|f| fs::read(dir.join(f)).ok());
+            let (status, body) = match file {
+                Some(b) => ("200 OK", b),
+                None => ("404 Not Found", Vec::new()),
+            };
+            let _ = write!(
+                c,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            if method != "HEAD" {
+                let _ = c.write_all(&body);
+            }
+        }
+    });
+    url
 }
 
 #[cfg(test)]

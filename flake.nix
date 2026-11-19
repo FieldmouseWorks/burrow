@@ -104,6 +104,9 @@
       # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl. No test reads README.md,
       # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
+      # Their nix is the newest, as the hosted runners' install-nix is: the
+      # build store's shadow (burrow-flake-check) asks an HTTP store about
+      # paths nobody has, which only a newer nix fails on (burrow#1223).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -118,7 +121,7 @@
             "house"
             "docs/settings-reference.md"
           ];
-          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
+          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nixVersions.latest pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

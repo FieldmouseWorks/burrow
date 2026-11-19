@@ -1,7 +1,8 @@
 //! With real nix, on a chroot store of the test's own and a binary cache in
-//! a directory standing in for the build store. Needs nix, jq, curl and
-//! coreutils on PATH, as the flake's check has them.
+//! a directory, served over HTTP as the build store is. Needs nix, jq, curl
+//! and coreutils on PATH, as the flake's check has them.
 use super::*;
+use std::net::TcpListener;
 
 /// A chroot store, a cache beside it, and nix's config for them.
 struct Here {
@@ -71,6 +72,11 @@ impl Here {
         self.ok("nix", &["copy", "--to", &to, &path]);
         self.ok("nix", &["store", "delete", &path]);
         (hash, path)
+    }
+
+    /// The cache, served over HTTP as the build store is.
+    fn store(&self) -> String {
+        burrow_test::build_store(self.join("cache"))
     }
 
     /// The derivation this expression is, instantiated in the store.
@@ -203,10 +209,11 @@ fn a_leg_says_what_the_store_has_of_what_it_builds_cold() {
     fs::write(h.join("builds-restore-start"), "1000000000000\n").unwrap();
     fs::write(h.join("builds-restore-end"), "1002500000000\n").unwrap();
     let store = Store {
-        url: format!("file://{}", h.join("cache").display()),
+        url: h.store(),
         key: fs::read_to_string(&pk).unwrap().trim().to_owned(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     let r = store.ask(&[served, unsigned, missing]).unwrap();
     assert_eq!(r.served, ["x"]);
@@ -249,15 +256,43 @@ fn with_no_key_named_only_what_needs_no_signature_counts() {
     let h = Here::new();
     let (cold, _) = three(&h);
     let store = Store {
-        url: format!("file://{}", h.join("cache").display()),
+        url: h.store(),
         key: String::new(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     let r = store.ask(&cold).unwrap();
     assert_eq!(r.served, ["x"]);
     assert_eq!(r.unserved, ["missing", "unsigned"]);
     assert_eq!(r.untrusted, 1);
+}
+
+/// An HTTP store that has none of the outputs of what a leg builds cold,
+/// which the run's own store hasn't either, says so: none, not an error.
+/// (Asked with `nix path-info`, nix 2.35 over HTTP said "don't know how to
+/// build these paths" and failed: burrow#1223.)
+#[test]
+fn an_http_store_with_none_of_the_outputs_says_none() {
+    let h = Here::new();
+    fs::create_dir_all(h.join("cache")).unwrap();
+    fs::write(h.join("cache/nix-cache-info"), "StoreDir: /nix/store\n").unwrap();
+    let cold = [h.drv(&built("one")), h.drv(&built("two"))];
+    let store = Store {
+        url: h.store(),
+        key: String::new(),
+        temp: h.dir.clone(),
+        nix_config: Some(h.config()),
+        deadline: DEADLINE,
+    };
+    let r = store.ask(&cold).unwrap();
+    assert!(r.served.is_empty() && r.bytes == 0, "{:?}", r.served);
+    assert_eq!(r.unserved, ["one", "two"]);
+    assert!(
+        r.lines()[0].contains("it has 0 of the 2 derivations this leg builds cold"),
+        "{:?}",
+        r.lines()
+    );
 }
 
 /// A store that isn't there is said, never a failure: the leg builds as
@@ -266,7 +301,7 @@ fn with_no_key_named_only_what_needs_no_signature_counts() {
 fn a_store_that_doesnt_answer_is_an_error_to_say() {
     let h = Here::new();
     let drv = h.drv(&built("missing"));
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/builds", closed.local_addr().unwrap());
     drop(closed);
     let store = Store {
@@ -274,8 +309,45 @@ fn a_store_that_doesnt_answer_is_an_error_to_say() {
         key: String::new(),
         temp: h.dir.clone(),
         nix_config: Some(h.config()),
+        deadline: DEADLINE,
     };
     assert!(store.ask(&[drv]).is_err());
+}
+
+/// A store that takes its connections and never answers holds a leg for
+/// one deadline, however many outputs it's asked about: curl's own
+/// `--max-time` is each transfer's, so the batch has a deadline of its own.
+#[test]
+fn a_store_that_stalls_holds_a_leg_one_deadline_not_one_per_output() {
+    let h = Here::new();
+    let cold = [
+        h.drv(&built("one")),
+        h.drv(&built("two")),
+        h.drv(&built("three")),
+    ];
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/builds", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for c in l.incoming() {
+            held.extend(c.ok());
+        }
+    });
+    let store = Store {
+        url,
+        key: String::new(),
+        temp: h.dir.clone(),
+        nix_config: Some(h.config()),
+        deadline: "2",
+    };
+    let start = std::time::Instant::now();
+    let e = store.ask(&cold).unwrap_err().to_string();
+    let took = start.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "three stalled outputs took {took:?}"
+    );
+    assert!(e.contains("past the 2s deadline"), "{e}");
 }
 
 #[test]
