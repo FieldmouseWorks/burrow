@@ -66,8 +66,8 @@ fn refuses_the_original_keep_builds_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    // The kept builds' six, and the build store's two.
-    assert_eq!(unreported(&old).len(), 8);
+    // The kept builds' seven, and the build store's two.
+    assert_eq!(unreported(&old).len(), 9);
 }
 
 #[test]
