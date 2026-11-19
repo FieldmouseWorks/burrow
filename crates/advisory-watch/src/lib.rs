@@ -49,12 +49,12 @@ impl Finding {
 
 /// Now, as `date -Is` wrote it, in the machine's time zone.
 pub fn stamp() -> String {
-    jiff::Zoned::now()
+    jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
 }
 
 /// Today, in the machine's time zone.
 pub fn today() -> String {
-    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
+    jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string()
 }
