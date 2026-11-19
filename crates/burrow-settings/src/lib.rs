@@ -3,6 +3,7 @@
 //! to change it. Other settings can join this document without another store.
 pub mod credit;
 pub mod door;
+pub mod landing;
 mod live;
 pub use live::{path_exists, receipt_key};
 pub mod roles;
