@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 
 pub mod nix;
 pub mod prune;
+pub mod upload;
 
 /// The local store's paths, by full name (`/nix/store/…`).
 #[derive(Debug, Default)]
@@ -126,12 +127,7 @@ pub fn keep(nix: &dyn Nix, dir: &Path, gate: Gate) -> Result<Kept, String> {
     // What could be kept: this gate's paths no one signed, but derivations,
     // and what the kept builds hold that a derivation here makes, though
     // this gate didn't need it; all they hold, when it failed.
-    let mine: BTreeSet<&String> = store
-        .paths
-        .iter()
-        .filter(|(p, info)| !info.signed && !p.ends_with(".drv"))
-        .map(|(p, _)| p)
-        .collect();
+    let mine = own(&store);
     let made = match gate {
         Gate::Passed => {
             let drvs: Vec<String> = store
@@ -150,20 +146,11 @@ pub fn keep(nix: &dyn Nix, dir: &Path, gate: Gate) -> Result<Kept, String> {
         .filter(|p| made.as_ref().is_none_or(|m| m.contains(*p)))
         .filter(|p| !store.paths.contains_key(*p))
         .collect();
-    // Of those, a download only when the rest refers to it, near or far.
     let could: BTreeSet<&String> = mine.union(&carried).copied().collect();
-    let mut wanted: BTreeSet<&String> = BTreeSet::new();
-    let mut todo: Vec<&String> = could
-        .iter()
-        .copied()
-        .filter(|p| !known(&store, &before, p).download)
-        .collect();
-    while let Some(p) = todo.pop() {
-        if wanted.insert(p) {
-            let refs = known(&store, &before, p).references;
-            todo.extend(refs.iter().filter(|r| could.contains(r)));
-        }
-    }
+    let wanted = worth(&could, |p| {
+        let k = known(&store, &before, p);
+        (k.download, k.references)
+    });
     let gate: Vec<String> = mine
         .iter()
         .filter(|p| wanted.contains(*p))
@@ -209,6 +196,50 @@ pub fn keep(nix: &dyn Nix, dir: &Path, gate: Gate) -> Result<Kept, String> {
             .map(|p| known(&store, &before, p).nar_size)
             .sum(),
     })
+}
+
+/// The paths of the store no one signed, but derivations: what this run
+/// built, or took from the kept builds (a public cache's are signed), on a
+/// store that started empty, as a hosted runner's does.
+fn own(store: &Store) -> BTreeSet<&String> {
+    store
+        .paths
+        .iter()
+        .filter(|(p, info)| !info.signed && !p.ends_with(".drv"))
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Of `could`, what's worth handing on: every path but a download, and a
+/// download only when one of those refers to it, near or far. `known` says
+/// of each whether it's a download, and what it refers to.
+fn worth<'a>(
+    could: &BTreeSet<&'a String>,
+    known: impl Fn(&'a String) -> (bool, &'a [String]),
+) -> BTreeSet<&'a String> {
+    let mut wanted: BTreeSet<&String> = BTreeSet::new();
+    let mut todo: Vec<&String> = could.iter().copied().filter(|p| !known(p).0).collect();
+    while let Some(p) = todo.pop() {
+        if wanted.insert(p) {
+            todo.extend(known(p).1.iter().filter(|r| could.contains(r)));
+        }
+    }
+    wanted
+}
+
+/// What this run's own store holds that keep would keep of this gate, and
+/// what a run uploads to the build store (crates/burrow-builds): every path
+/// no one signed, but derivations, and a download only when one of those
+/// refers to it.
+pub fn picked(store: &Store) -> Vec<String> {
+    let mine = own(store);
+    worth(&mine, |p| {
+        let i = &store.paths[p];
+        (i.download, &i.references)
+    })
+    .into_iter()
+    .cloned()
+    .collect()
 }
 
 /// What keep needs to know of a path that could be kept.

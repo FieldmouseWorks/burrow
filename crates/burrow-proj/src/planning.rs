@@ -192,7 +192,7 @@ mod tests {
             let given = prompt(&source, std::path::Path::new("@PROJ_TASK_SOURCE@"));
             let new = crate::cmd::New {
                 task_source: Some(source.clone()),
-                engine: Some(crate::engine::Engine::Codex),
+                engine: Some(crate::engine::Engine::Claude),
                 local_work: true,
                 ..Default::default()
             };
@@ -207,7 +207,7 @@ mod tests {
             let actual = std::fs::read_to_string(job.path("prompt.1")).unwrap();
             assert!(actual.len() < MAX_INPUT);
             assert!(actual.contains(&job.path("task-source").to_string_lossy().to_string()));
-            assert_eq!(crate::read(&job.path("engine")).as_deref(), Some("codex"));
+            assert_eq!(crate::read(&job.path("engine")).as_deref(), Some("claude"));
             previous.push(id);
         }
     }

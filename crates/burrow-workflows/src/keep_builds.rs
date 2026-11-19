@@ -19,6 +19,21 @@ fn job() -> Value {
     workflow(".github/workflows/flake-check.yml")["jobs"]["check"].clone()
 }
 
+/// The check job's step that makes the kept builds' directory, the one
+/// that restores them, and the one that installs Nix, which names them.
+fn restoring(all: &[Value]) -> (&Value, &Value, &Value) {
+    let find = |f: &dyn Fn(&Value) -> bool| all.iter().find(|s| f(s)).unwrap();
+    (
+        find(&|s| s["run"] == "mkdir -p \"$RUNNER_TEMP/kept\""),
+        find(&|s| s["id"] == "kept-restore"),
+        find(&|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))
+        }),
+    )
+}
+
 fn ctx(pairs: &[(&str, V)]) -> Ctx {
     pairs
         .iter()
@@ -32,7 +47,7 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
-    let (made, restore, install) = (&all[2], &all[4], &all[5]);
+    let (made, restore, install) = restoring(all);
     for (keep, nix) in [(true, true), (true, false), (false, true)] {
         let c = ctx(&[
             ("inputs.keep-builds", keep.into()),
@@ -225,7 +240,7 @@ fn a_negative_restores_every_legs_kept_builds() {
     let all = steps(neg);
     let gate = job();
     let gate_all = steps(&gate);
-    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[4], &gate_all[5]);
+    let (gate_made, gate_restore, gate_install) = restoring(gate_all);
     let uses = |s: &Value, action: &str| s["uses"].as_str().is_some_and(|u| u.starts_with(action));
     let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
     let restores: Vec<&Value> = all

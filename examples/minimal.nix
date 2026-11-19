@@ -48,11 +48,8 @@
       owners = [ "sam" ];
       authors = [ "sam" ];
       app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
-      reviewers.codex.enable = true;
       # Its PRs land through its merge train (on the ledger, below).
       repos."sam/homelab".train = true;
-      # Never shown to the reviewers, so never documentation either.
-      repos."sam/r".skipPaths = [ "^docs/private/$" ];
     };
     house.enable = true;
     cpu = {

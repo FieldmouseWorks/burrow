@@ -493,3 +493,12 @@ fn the_description_is_read_again_and_written_once() {
         );
     }
 }
+
+#[test]
+fn quiet_text_pings_nobody_and_marks_nothing() {
+    assert_eq!(
+        quiet("@evil @-x @é a@b @ <!-- x -->"),
+        "@\u{200b}evil @\u{200b}-x @\u{200b}é a@\u{200b}b @ &lt;!-- x -->"
+    );
+    assert_eq!(quiet("@"), "@");
+}

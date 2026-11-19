@@ -52,7 +52,7 @@ pub(crate) fn ended(cfg: &Config, id: &str) {
     if inbox.triage.is_none() {
         return;
     }
-    let sorting = dirs(&inbox.state.join(".triage"), "")
+    let sorting = dirs(&super::record::files::sorting_root(&inbox.state), "")
         .iter()
         .any(|d| read(&d.join("job")).as_deref() == Some(id));
     if sorting {
@@ -108,9 +108,14 @@ pub(super) fn settled(job: &Job) -> Option<Settled> {
 
 impl Pass<'_> {
     /// Every sorting record's job settled that can be, before the pass asks
-    /// GitHub anything: an end whose own settling was missed (its unit
-    /// killed, its job's lock held then) is caught up here. A record whose
-    /// job is gone, with no failed sorting to keep, is retired.
+    /// GitHub anything: its question's state recovered first (an accepted
+    /// answer's cleanup applied, an abandoned resume reconciled), then an
+    /// end whose own settling was missed (its unit killed, its job's lock
+    /// held then) caught up. These are steps the pass takes: asking where a
+    /// sorting record stands ([`Pass::holds_sorting_slot`]) never takes
+    /// them. A job whose lock is held now (a turn starting) is left to the
+    /// next pass. A record whose job is gone, with no failed sorting to
+    /// keep, is retired.
     pub(super) fn settle(&self) {
         if self.inbox.triage.is_none() {
             return;
@@ -126,14 +131,12 @@ impl Pass<'_> {
                 }
                 continue;
             }
+            if let Ok(Some(_held)) = job.try_lock()
+                && let Err(e) = crate::question::recover(&job)
+            {
+                eprintln!("proj sorting question recovery: {e}");
+            }
             settle(self.cfg, &job, false);
         }
-    }
-
-    /// Whether the record's job is settled.
-    pub(super) fn record_settled(&self, d: &std::path::Path) -> bool {
-        read(&d.join("job"))
-            .filter(|j| !j.is_empty())
-            .is_some_and(|id| settled(&Job::new(self.cfg, &id)).is_some())
     }
 }

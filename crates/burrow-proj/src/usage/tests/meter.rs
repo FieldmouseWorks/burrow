@@ -7,6 +7,25 @@ use serde_json::json;
 
 use super::*;
 
+// `proj why`'s read-only look says what the drain's `room` is about to,
+// leaving the hold, its notice and the slot folder as they were.
+fn seen_agrees(cfg: &Config, d: &tempfile::TempDir, held: bool) -> bool {
+    let before = out(cfg).map(|s| (s.until, s.back, s.refused()));
+    let told_before = told(d).len();
+    let _ = fs::remove_dir(cfg.jobs.join(".slots"));
+    let slots = cfg.jobs.join(".slots").exists();
+    let seen = crate::slot::seen_room(cfg, crate::engine::Engine::Claude, false);
+    assert_eq!(out(cfg).map(|s| (s.until, s.back, s.refused())), before);
+    assert_eq!(out(cfg).is_some(), held);
+    assert_eq!(told(d).len(), told_before);
+    assert_eq!(
+        cfg.jobs.join(".slots").exists(),
+        slots,
+        "seen_room made a folder"
+    );
+    seen
+}
+
 #[test]
 fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     use burrow_usage_reset::meter::{FRESH, Snapshot, Window};
@@ -44,6 +63,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();
+    assert!(!seen_agrees(&cfg, &d, true));
     assert!(!crate::slot::room(
         &cfg,
         crate::engine::Engine::Claude,
@@ -57,6 +77,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
         meter
             .record(cfg.meters.as_ref().unwrap(), "claude")
             .unwrap();
+        assert!(!seen_agrees(&cfg, &d, true));
         assert!(!crate::slot::room(
             &cfg,
             crate::engine::Engine::Claude,
@@ -67,26 +88,25 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     }
     meter.read_at = t as f64;
     meter.requested_at = Some(meter.read_at);
-    // Every window must have room, and another engine cannot release it.
+    // Every window must have room.
     meter.windows.get_mut("five_hour").unwrap().used = 100.0;
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();
+    assert!(!seen_agrees(&cfg, &d, true));
     assert!(!crate::slot::room(
         &cfg,
         crate::engine::Engine::Claude,
         false
     ));
     meter.windows.get_mut("five_hour").unwrap().used = 6.0;
-    meter.record(cfg.meters.as_ref().unwrap(), "codex").unwrap();
-    assert!(!crate::slot::room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();
+    assert!(
+        seen_agrees(&cfg, &d, true),
+        "proj why says the fresh meter's release the drain is about to make"
+    );
     assert!(
         crate::slot::room(&cfg, crate::engine::Engine::Claude, false),
         "next scheduling pass releases the held queue"
@@ -177,4 +197,36 @@ fn a_completed_read_does_not_prove_when_its_request_began() {
         assert!(out(&cfg).is_some());
         assert_eq!(told(&d).len(), 1);
     }
+}
+
+#[test]
+fn a_fresh_meter_never_shows_an_owner_pause_as_room() {
+    let (d, mut cfg) = rig();
+    cfg.meters = Some(d.path().join("meters"));
+    cfg.pipeline_slots = 0;
+    cfg.min_free_memory = 0;
+    let t = now();
+    hold(&cfg, t + 7200, "the owner's pause").unwrap();
+    fs::create_dir_all(cfg.meters.as_ref().unwrap()).unwrap();
+    fs::write(
+        cfg.meters.as_ref().unwrap().join("claude.json"),
+        json!({
+            "windows": {"seven_day": {"used": 1.0, "resets_at": 0.0}},
+            "credits": false, "read_at": (t + 1) as f64, "requested_at": (t + 1) as f64
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(out_metered(&cfg).is_some());
+    assert!(!crate::slot::seen_room(
+        &cfg,
+        crate::engine::Engine::Claude,
+        false
+    ));
+    assert!(!crate::slot::room(
+        &cfg,
+        crate::engine::Engine::Claude,
+        false
+    ));
+    assert!(out(&cfg).is_some(), "only the owner ends an owner pause");
 }

@@ -34,18 +34,12 @@ pub fn meters(cfg: &Config) -> Vec<Meter> {
     latest.into_values().collect()
 }
 
-pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Option<i64> {
-    admission_reset(cfg, job, engine).filter(|t| *t > now())
+pub(crate) fn held(cfg: &Config, job: &Job) -> Option<i64> {
+    admission_reset(cfg, job).filter(|t| *t > now())
 }
-pub(crate) fn admission_reset(
-    cfg: &Config,
-    job: &Job,
-    engine: crate::engine::Engine,
-) -> Option<i64> {
+pub(crate) fn admission_reset(cfg: &Config, job: &Job) -> Option<i64> {
     let request = crate::job::Request::peek(job).ok()?;
-    let app = crate::turn::github_app(cfg, request.app, engine)
-        .ok()
-        .flatten()?;
+    let app = crate::turn::github_app(request.app)?;
     let repo = read(&job.file(JobFile::Link))
         .and_then(|link| crate::github::target(&link).map(|(r, _)| r))
         .unwrap_or_else(|| crate::pick::github_repo(cfg, &request.project));
@@ -655,13 +649,17 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
             crate::policy::Kind::Automated,
         )
         .unwrap();
-        assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_some());
+        // As the user, no App's meter holds it.
+        assert!(held(&cfg, &job).is_none());
+        request.app = Some("workers".into());
+        request.save(&job).unwrap();
+        assert!(held(&cfg, &job).is_some());
         // A file the job writes names no App; its request does.
         fs::write(job.path("app"), "other").unwrap();
-        assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_some());
+        assert!(held(&cfg, &job).is_some());
         request.app = Some("other".into());
         request.save(&job).unwrap();
-        assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_none());
+        assert!(held(&cfg, &job).is_none());
         assert_eq!(meters(&cfg).len(), 2);
     }
 }

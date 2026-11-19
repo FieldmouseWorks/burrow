@@ -10,7 +10,7 @@ which."""
 import os
 
 from harness import C, FAIL, JOBS, R, STATES, WROTE, mkpr, tmp
-from undos import ROW, undo_pr, writer, writer_runs
+from undos import ARGS, ROW, gate, undo_pr, writer, writer_runs
 
 C._for.append("sam")
 kept_undo = C.CFG.get("undo")
@@ -35,7 +35,8 @@ def default(state="FAILURE", sha=TIP, parent="SUCCESS", runs=("SUCCESS", "FAILUR
     and its check runs ending as runs say."""
     return {"defaultBranchRef": {"name": "main", "target": {
         "oid": sha,
-        "statusCheckRollup": {"state": state, "contexts": {"nodes": [{"conclusion": c} for c in runs]}},
+        "statusCheckRollup": {"state": state, "contexts": {"nodes": [
+            gate(c) if c == "FAILURE" else gate(c, 70 + i, f"job{i}") for i, c in enumerate(runs)]}},
         "parents": {"nodes": [{"statusCheckRollup": {"state": parent} if parent else None}]},
         "associatedPullRequests": {"nodes": [landed()] if prs is None else prs}}}}
 
@@ -53,10 +54,11 @@ def fresh():
     writer(out=[ROW])
 
 
-# One landing turned it red: undone at once, as the writer, with no job.
+# One landing turned it red: undone at once, as the writer, with no job,
+# with why: the red run, the checks that failed and the first error line.
 fresh()
 assert R.watch_default(repo, default(), [], mine) == {}
-assert writer_runs() == [{"args": ["undo", "sam/u#12"], "tokens": []}], writer_runs()
+assert writer_runs() == [{"args": ARGS, "tokens": []}], writer_runs()
 assert JOBS == [] and mine == [], (JOBS, mine)
 assert red()["undos"] == [40] and red()["asked"] and red()["undone"] == ["sam/u#12"], red()
 assert C.WAKE.get("sam/u") == C.NOW + 60, C.WAKE

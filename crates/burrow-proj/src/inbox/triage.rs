@@ -128,7 +128,7 @@ impl Pass<'_> {
     }
 
     pub(super) fn sorting_dir(&self) -> PathBuf {
-        self.inbox.state.join(".triage")
+        super::record::files::sorting_root(&self.inbox.state)
     }
 
     /// The labels triage puts on, as each repo is given them: name, colour,
@@ -242,10 +242,7 @@ impl Pass<'_> {
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
         let claimed = self.claimed(repo);
-        let going = dirs(&root, "")
-            .iter()
-            .filter(|d| self.sorting_slot(d))
-            .count();
+        let going = self.sorting_holders().len();
         let mut room = t.at_once.saturating_sub(going);
         let mut launch_failed = false;
         for issue in all {
@@ -267,9 +264,9 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
-                let why = ((d.join("plan").is_file() || self.record_settled(&d))
-                    && !self.sorting_slot(&d))
-                .then_some("its verdict's steps are still being carried out");
+                let verdict =
+                    self.look().record(repo, &n, None).wait == Some(super::record::Wait::Verdict);
+                let why = verdict.then_some("its verdict's steps are still being carried out");
                 self.planner_wait(repo, &n, why);
                 continue;
             }

@@ -1,8 +1,7 @@
 //! `burrow-fix plugin CONFIG`: the plugin the flow runs, on stdin and
 //! stdout. `burrow-fix broker CONFIG`: the broker it forwards to.
 use burrow_fix::broker::Broker;
-use burrow_fix::jobs::Proj;
-use burrow_fix::{Config, plugin};
+use burrow_fix::{Config, plugin, proj};
 use burrow_producer::serve::{Controller, Server};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -31,7 +30,7 @@ fn main() -> ExitCode {
                     })
                 });
                 let broker = Arc::new(
-                    Broker::new(cfg.clone(), Box::new(Proj(cfg)), github)
+                    Broker::new(cfg.clone(), Box::new(proj(&cfg)), github)
                         .map_err(|e| e.to_string())?,
                 );
                 let stopped = broker.reconcile()?;

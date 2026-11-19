@@ -539,8 +539,13 @@ pub(crate) fn holds(job: &Job) -> Result<Vec<Wait>, String> {
         }
         None => false,
     };
-    let question = text(&crate::ask::host_path(job, "question"))?.is_some();
-    if text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
+    // A question an accepted answer has retired is answered, though the
+    // cleanup that removes its files ([`crate::question::recover`]) may not
+    // have run yet: every reader sees it answered, recovered or not.
+    let id = text(&crate::ask::host_path(job, "question-id"))?.unwrap_or_default();
+    let retired = crate::question::retiring(job, &id);
+    let question = !retired && text(&crate::ask::host_path(job, "question"))?.is_some();
+    if !retired && text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
         held.push(Wait::Owner);
     } else if asked || question {
         held.push(Wait::Ask);
@@ -560,11 +565,9 @@ fn limits(job: &Job, state: &str, facts: Option<&Facts>) -> Vec<Wait> {
         if let Some((_, reset)) = facts.quota_reset {
             held.push(Wait::Quota(reset));
         }
-        let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
-            (state == "queued")
-                .then(|| facts.spent.as_ref().map(|s| s.release()))
-                .flatten()
-        });
+        let reset = (state == "queued")
+            .then(|| facts.spent.as_ref().map(|s| s.release()))
+            .flatten();
         if matches!(state, "queued" | "running")
             && let Some(release) = usage::last_release(job.cfg)
             && job.engine_label(&facts.turn) == "Claude"
@@ -637,11 +640,8 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
             .map(|a| (a.target.clone(), a.since.clone()))
             .collect(),
         quota_reset: if state == "queued" {
-            let engine = read(&job.turn_file(&n, TurnFile::Engine))
-                .and_then(|s| crate::engine::Engine::parse(&s).ok())
-                .unwrap_or(crate::engine::Engine::Claude);
             let since = mtime(&prompt).unwrap_or(0);
-            crate::github_quota::admission_reset(job.cfg, job, engine)
+            crate::github_quota::admission_reset(job.cfg, job)
                 .filter(|reset| *reset > since)
                 .map(|reset| (since, reset))
         } else if state == "running" {
@@ -649,13 +649,7 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
         } else {
             crate::github_quota::reset(job, &n)
         },
-        usage_reset: awaited
-            .iter()
-            .find(|a| a.target == USAGE_LIMIT)
-            .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?))),
-        spent: (read(&job.turn_file(&n, TurnFile::Engine)).as_deref() != Some("codex"))
-            .then(|| usage::kept(job.cfg))
-            .flatten(),
+        spent: usage::kept(job.cfg),
         turn: n,
         state: state.to_owned(),
     })

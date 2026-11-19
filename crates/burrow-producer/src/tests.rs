@@ -514,6 +514,7 @@ fn review() -> sign::Review {
 fn judgment() -> sign::Judgment {
     sign::Judgment {
         repo: REPO.into(),
+        pr: 5,
         revision: flow::Revision {
             head: HEAD.into(),
             base: "3333333333333333333333333333333333333333".into(),
@@ -524,6 +525,7 @@ fn judgment() -> sign::Judgment {
         verdict: Some(conary_core::plugin::Judgment::Pass),
         provenance: None,
         basis: None,
+        reasons: "Sound.".into(),
     }
 }
 

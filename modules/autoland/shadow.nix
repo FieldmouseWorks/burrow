@@ -27,7 +27,7 @@ let
     let
       own = overrides repo;
       rc = settings.defaults // own;
-      codex = rc.codex && settings.reviewers.codex.enable;
+      codex = rc.codex;
     in {
       # Whose PRs are the steward's authors': its people, and the bots
       # (their REST logins) whose PRs it lands too.
@@ -47,13 +47,14 @@ let
         proof_timeout = minutes cfg.proofTimeoutMinutes;
         job_timeout = minutes cfg.jobTimeoutMinutes;
         reviewers = lib.optional codex "codex";
-        review_authors = [ stewardLogin ];
+        # Codex's GitHub connector posts the reviews.
+        review_authors = [ "chatgpt-codex-connector[bot]" ];
         verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
-        # A commit with an `Engine: codex` trailer (burrow-proj's git hook
-        # marks a Codex job's with it) goes to a judge, and one by none of the
-        # bots' addresses is someone editing a dependency update, as the
-        # steward reads a PR's commits (touches.py, burrow-upkeep's commits).
-        judge_engines = [ "codex" ];
+        # No job engine's commits go to a judge on their own: there are no
+        # Codex jobs. One by none of the bots' addresses is someone editing a
+        # dependency update, as the steward reads a PR's commits (touches.py,
+        # burrow-upkeep's commits).
+        judge_engines = [ ];
         bot_emails = [ settings.dependabotEmail ];
         renovate_email = settings.renovateEmail;
         renovate_login = settings.renovate;

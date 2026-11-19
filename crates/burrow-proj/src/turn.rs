@@ -12,7 +12,7 @@ use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
 use crate::engine::{self, Engine, LONG, NEXT, answer, is_error};
-use crate::job::{Job, USAGE_LIMIT, kick};
+use crate::job::{Job, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
 use crate::record::{JobFile, Marker, TurnFile, TurnMarker, deadline};
@@ -338,10 +338,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             return Err(Fail::quiet(1));
         }
     };
-    if choice.engine == Engine::Codex && agent.is_some() {
-        outcome("codex cannot run a --vm job; agent sandboxes are Claude-only");
-        return Err(Fail::quiet(1));
-    }
     crate::retry::Identity::capture_choice(&job, &n, &choice).map_err(|e| Fail::new(1, e))?;
     job.record_choice(&n, &choice)
         .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
@@ -352,18 +348,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // here (slot::take), to read it again: an App that switch took away
     // fails the turn.
     let mut app_env = String::new();
-    match github_app(cfg, request.app.clone(), choice.engine) {
-        Ok(None) => {}
-        Ok(Some(app)) => match cfg.app_environment(&app).filter(|e| !e.is_empty()) {
+    if let Some(app) = github_app(request.app.clone()) {
+        match cfg.app_environment(&app).filter(|e| !e.is_empty()) {
             Some(e) => app_env = e,
             None => {
                 outcome(&format!("no GitHub App {app} on this machine to act as"));
                 return Err(Fail::quiet(1));
             }
-        },
-        Err(why) => {
-            outcome(&why);
-            return Err(Fail::quiet(1));
         }
     }
     // In the turn's journal too, where its wait would be looked into.
@@ -485,19 +476,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         drop(bridge);
         let rc = code(status);
         let oomed = oom_kills() > ooms;
-        let last = engine::ended(
-            choice.engine,
-            &stream,
-            from,
-            exit(
-                rc,
-                cut,
-                job.turn_file(&n, TurnFile::Quiet).exists(),
-                job.turn_file(&n, TurnFile::Late).exists(),
-                oomed,
-            ),
-            &read(&job.turn_file(&n, TurnFile::Stderr)).unwrap_or_default(),
-        );
+        let last = engine::last_result(&stream, from);
         let declaration_error = agent
             .as_deref()
             .and_then(|a| crate::guest::collect(cfg, &job, &n, a).err());
@@ -530,37 +509,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         let refusal = last
             .as_ref()
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
-        if choice.engine == Engine::Codex {
-            if let Some((Some(due), _)) = &refusal {
-                if let Err(e) = crate::record::mark(&job, Marker::Await)
-                    .write(format!("{USAGE_LIMIT}\t{}\t{due}\n", now()))
-                {
-                    outcome(&format!("couldn't keep Codex's usage wait: {e}"));
-                    return Err(Fail::quiet(1));
-                }
-                let _ = crate::state_reads::write(
-                    job.turn_file(&n, TurnFile::Result),
-                    format!("{}\n", answer(&stream)),
-                );
-                outcome("usage limit; waiting for Codex's reset");
-                return Ok(());
-            }
-            if last.as_ref().is_some_and(|l| {
-                is_error(l) && burrow_codex::logged_out(l["result"].as_str().unwrap_or_default())
-            }) {
-                let _ = crate::state_reads::write(
-                    job.turn_file(&n, TurnFile::Result),
-                    "codex is logged out; run autoland-codex-login job\n",
-                );
-                outcome("codex is logged out; run autoland-codex-login job on the machine");
-                return Err(Fail::quiet(1));
-            }
-        }
         if let Some((_, said)) = &refusal
             && !usage::login::holds_machine(said, agent.is_some())
         {
             let _ = crate::state_reads::write(
-                job.turn(&n, "result"),
+                job.turn_file(&n, TurnFile::Result),
                 format!("{}\n", usage::login::SANDBOX),
             );
             outcome(usage::login::SANDBOX);
@@ -736,26 +689,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     }
 }
 
-/// The GitHub App a turn on ENGINE acts as: the job's own (--app, its
-/// `app`), else, on Codex, the machine's (`machinery`), else none, and the
-/// turn acts as the user. A Codex turn's sandbox keeps the user's own logins
-/// out (engine/sandbox.rs: gh's config, the keyring, a GH_TOKEN from their
-/// profile), so as the user it would reach no GitHub at all, and find that
-/// out only once its work was done: on a machine with no App of its own it
-/// doesn't start.
-pub fn github_app(
-    cfg: &Config,
-    own: Option<String>,
-    engine: Engine,
-) -> Result<Option<String>, String> {
-    let named = |a: &Option<String>| a.clone().filter(|a| !a.is_empty());
-    match (named(&own), engine) {
-        (Some(app), _) => Ok(Some(app)),
-        (None, Engine::Claude) => Ok(None),
-        (None, Engine::Codex) => named(&cfg.machinery).map(Some).ok_or_else(|| {
-            "a Codex job reaches GitHub only as a GitHub App (proj run --app, or burrow.github.machinery), since its sandbox keeps your own logins out, and this job and machine have none".to_owned()
-        }),
-    }
+/// The GitHub App a turn acts as: the job's own (--app, its `app`), else
+/// none, and the turn acts as the user.
+pub fn github_app(own: Option<String>) -> Option<String> {
+    own.filter(|a| !a.is_empty())
 }
 
 /// A file's lines, none when it can't be read.
@@ -774,15 +711,6 @@ fn touch(path: &Path) {
 
 /// An exit status as the shell has it: 128 and the signal for a run a
 /// signal ended.
-/// The exit a run's engine reads how it ended from, when the run ended
-/// itself: not cut, gone quiet, timed out, or killed for memory, which the
-/// turn ends or carries on from, so an engine that turns a failed exit
-/// into an error (Codex's) doesn't make one of it. A memory kill can come
-/// to the engine itself, or to what it ran, which it may exit failed over.
-fn exit(rc: i32, cut: bool, quiet: bool, late: bool, oomed: bool) -> Option<i32> {
-    (!cut && !quiet && !late && !oomed).then_some(rc)
-}
-
 fn code(status: ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status

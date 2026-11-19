@@ -20,6 +20,15 @@ impl Pass<'_> {
         claimed
     }
 
+    /// The live inbox job whose brief names issue N, if any: what
+    /// [`Pass::claimed`] counts it claimed by.
+    pub(super) fn claimer(&self, repo: &str, n: &str) -> Option<String> {
+        self.live(repo).into_iter().find_map(|(d, _, id)| {
+            let input = fs::read_to_string(d.join("input")).unwrap_or_default();
+            references(repo, &input).contains(n).then_some(id)
+        })
+    }
+
     /// The live inbox job whose own issue is N, if any. A brief that only
     /// mentions N doesn't own it: a task list moves on unless its parent's
     /// own job is still at it (mid-split, say).

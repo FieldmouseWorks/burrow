@@ -66,7 +66,8 @@ fn refuses_the_original_keep_builds_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    assert_eq!(unreported(&old).len(), 6);
+    // The kept builds' six, and the build store's two.
+    assert_eq!(unreported(&old).len(), 8);
 }
 
 #[test]
@@ -76,6 +77,8 @@ fn reporters_distinguish_soft_failure_cache_miss_and_extraction_failure() {
     let flow = workflow(".github/workflows/flake-check.yml");
     let job = &flow["jobs"]["check"];
     for (id, key) in [
+        ("builds-tool", "builds-tool"),
+        ("builds-write", "builds-write"),
         ("keep-tool", "keep-tool"),
         ("keep", "keep-builds"),
         ("keep-save", "keep-save"),

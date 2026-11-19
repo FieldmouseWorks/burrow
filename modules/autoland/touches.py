@@ -116,7 +116,7 @@ def pr_commits(repo, pr, st):
     """What burrow-upkeep's `commits` (crates/burrow-upkeep/src/commits.rs)
     reads of the PR's head, every commit since it left its base, from
     GitHub's compare a page at a time (its list of a PR's commits stops at
-    250): {codex, edited}, whether a Codex job wrote one and whether anyone
+    250): {edited}, whether anyone
     but the bots made one; {short: why} when GitHub won't list them all,
     which no later read changes; None when they couldn't be read this pass
     (logged), which isn't kept and is asked again next pass: a head whose
@@ -136,18 +136,6 @@ def pr_commits(repo, pr, st):
             st.pop(old, None)
         st["commitsHead"], st["commits"] = seen, out["commits"] or {"short": out["short"]}
     return st["commits"]
-
-
-def codex_written(repo, pr, st):
-    """Whether a Codex job wrote a commit of the PR's (an `Engine: codex`
-    trailer on any of them): None if they couldn't be read this pass, so it
-    can neither land nor spend a judge. Where GitHub won't list them all,
-    why (a str): no one can say a Codex job didn't write it, so it's judged
-    as if one did, never landed on its reviews alone."""
-    got = pr_commits(repo, pr, st)
-    if got is None:
-        return None
-    return got["short"] if "short" in got else got["codex"]
 
 
 def provenance(repo, pr, st):

@@ -82,7 +82,6 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
-        Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         Some("_host-view") if view == View::Owner => crate::host_jobs::view(cfg, &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
@@ -125,13 +124,19 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some("why") => {
-            let usage = "usage: proj why ID [--json]";
+            let usage = "usage: proj why ID|OWNER/REPO#N [--json]";
             let id = arg(args, 1, usage)?;
             let json = match args.get(2).map(String::as_str) {
                 None => false,
                 Some("--json") if args.len() == 3 => true,
                 _ => return Err(Fail::new(2, usage)),
             };
+            // An issue's record, followed into its job. A job's id may hold
+            // a `#` (its project's name), but never OWNER/REPO.
+            if crate::inbox::record::issue_target(id).is_some() {
+                put(&view.plain(&crate::inbox::record::why(cfg, id, json)?));
+                return Ok(());
+            }
             let job = Job::new(cfg, id);
             if !job.dir.is_dir() {
                 return Err(Fail::new(1, format!("no job {id}")));
@@ -898,9 +903,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     // A ready issue waiting for a slot (proj-inbox's drain): whatever turn
     // this was, its slot is room now, and the drain's own pass looks, from
     // the saved ready lists, listing nothing.
-    if let Some(inbox) = &cfg.inbox
-        && inbox.state.join(crate::inbox::WAITING).exists()
-    {
+    if crate::inbox::record::drain_waiting(cfg) {
         names.push(crate::inbox::DRAIN_KICK.to_owned());
     }
     kick(cfg, names);

@@ -6,7 +6,10 @@
 //! - `undo OWNER/REPO#N`: the change that PR is;
 //! - `undo --actor SESSION`: everything an agent session landed;
 //! - `undo --since TIME --repo OWNER/REPO`: everything that landed on the
-//!   repo after TIME (RFC 3339).
+//!   repo after TIME (RFC 3339);
+//!
+//! each followed by `--reason` and why, the rest of the line, which cn
+//! requires and the undo keeps.
 //!
 //! burrow-events runs a pass on the repo's issue events, which runs
 //! `cn undo` on the ledger, as its writers do, and answers with the undo's

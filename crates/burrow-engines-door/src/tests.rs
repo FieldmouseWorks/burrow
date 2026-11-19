@@ -65,11 +65,16 @@ fn set(cfg: &Config, line: &str) {
         .unwrap_or_else(|e| panic!("{line}: {e}"));
 }
 
-/// The engine `work` runs on now.
+/// The named routes in force, which tell one saved setup from another
+/// (the default, `*`, is in every one once a setup has been applied).
 fn work(cfg: &Config) -> String {
     let force = cfg.settings.roles().unwrap();
-    force.route("work", None).text()
+    let named = force.roles.keys().filter(|k| *k != "*");
+    named.cloned().collect::<Vec<_>>().join(" ")
 }
+
+const ONE: &str = "work";
+const TWO: &str = "work work@sam/two";
 
 #[test]
 fn switch_bad_setup_and_non_authors() {
@@ -83,7 +88,7 @@ fn switch_bad_setup_and_non_authors() {
             "model judge claude unset",
             "offer claude models",
             "role work claude",
-            "role work@sam/code codex",
+            "role work@sam/code claude",
             "engines save next",
             "role work@sam/code unset",
             "engines save first",
@@ -104,7 +109,7 @@ fn switch_bad_setup_and_non_authors() {
         .to_owned();
     assert!(
         comment.contains("Was active: first\nActive: next")
-            && comment.contains("work@sam/code codex"),
+            && comment.contains("work@sam/code claude"),
         "{comment}"
     );
     assert_eq!(gh.asked("PATCH").len(), 1);
@@ -147,9 +152,10 @@ fn a_failed_reply_does_not_repeat_back() {
     let cfg = door(
         d.path(),
         &[
-            "role work codex",
-            "engines save second",
             "role work claude",
+            "role work@sam/two claude",
+            "engines save second",
+            "role work@sam/two unset",
             "engines save first",
             "engines use second",
         ],
@@ -162,14 +168,14 @@ fn a_failed_reply_does_not_repeat_back() {
         .unwrap()
         .2 = vec![ok(403, json!({"message":"refused"}), &[])].into();
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(work(&cfg), "claude");
+    assert_eq!(work(&cfg), ONE);
     let mut gh = github("sam", "use back", None);
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(work(&cfg), "claude");
+    assert_eq!(work(&cfg), ONE);
     // Once closed successfully a reopened issue really does ask again.
     cycle(&mut gh, "second-open");
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(work(&cfg), "codex");
+    assert_eq!(work(&cfg), TWO);
 }
 
 fn cycle(gh: &mut Fake, id: &str) {
@@ -193,7 +199,7 @@ fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
         &[
             "role work claude",
             "engines save one",
-            "role work codex",
+            "role work@sam/two claude",
             "engines save two",
             "engines use one",
             "engines use two",
@@ -210,15 +216,15 @@ fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
     })]
     .into();
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(work(&cfg), "claude");
+    assert_eq!(work(&cfg), ONE);
     // GitHub may have closed it despite the lost response, or a person may
     // close it manually. The latest reopen event distinguishes both cases.
     let mut reopened = github("sam", "use back", None);
     cycle(&mut reopened, "reopened-after-ambiguous-close");
     pass(&mut reopened, &cfg).unwrap();
-    assert_eq!(work(&cfg), "codex");
+    assert_eq!(work(&cfg), TWO);
     pass(&mut reopened, &cfg).unwrap(); // same open cycle: only a reply retry
-    assert_eq!(work(&cfg), "codex");
+    assert_eq!(work(&cfg), TWO);
 }
 
 #[test]
@@ -229,9 +235,10 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
         &[
             "role work claude",
             "engines save one",
-            "role work codex",
+            "role work@sam/two claude",
             "engines save two",
-            "role work codex over 80 claude",
+            "role work@sam/two unset",
+            "role work@sam/three claude",
             "engines save three",
             "engines use two",
             "engines use one",
@@ -248,11 +255,11 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     fs::create_dir(&blocked).unwrap();
     let mut gh = github("sam", "use back", None);
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(work(&cfg), "claude");
+    assert_eq!(work(&cfg), ONE);
     set(&cfg, "engines use three");
     fs::remove_dir(blocked).unwrap();
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(work(&cfg), "codex over 80 claude");
+    assert_eq!(work(&cfg), "work work@sam/three");
 }
 
 #[test]
@@ -330,7 +337,7 @@ fn a_switch_the_door_before_the_settings_made_is_answered_not_made_again() {
         &[
             "role work claude",
             "engines save one",
-            "role work codex",
+            "role work@sam/two claude",
             "engines save two",
         ],
     );
@@ -349,7 +356,7 @@ fn a_switch_the_door_before_the_settings_made_is_answered_not_made_again() {
     .unwrap();
     let mut gh = github("sam", "use back", None);
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(work(&cfg), "codex", "back wasn't made again");
+    assert_eq!(work(&cfg), TWO, "back wasn't made again");
     let comment = gh
         .asked("POST")
         .last()
@@ -367,7 +374,7 @@ fn a_legacy_request_waits_for_cutover_and_unsynced_receipts_stay_open() {
     let mut cfg = door(d.path(), &[]);
     let old = d.path().join("old");
     fs::create_dir(&old).unwrap();
-    fs::write(old.join("roles"), "work codex\n").unwrap();
+    fs::write(old.join("roles"), "work claude\nwork@sam/two claude\n").unwrap();
     cfg.settings.legacy_roles = Some(old);
     let mut gh = github("sam", "use back", None);
     assert!(pass(&mut gh, &cfg).is_err());
@@ -394,26 +401,23 @@ fn a_legacy_request_waits_for_cutover_and_unsynced_receipts_stay_open() {
     let mut gh = github("sam", "use back", None);
     pass(&mut gh, &cfg).unwrap();
     assert!(!gh.asked("PATCH").is_empty());
-    assert_eq!(
-        work(&cfg),
-        "claude",
-        "retry only answered the recovered receipt"
-    );
+    assert_eq!(work(&cfg), "", "retry only answered the recovered receipt");
 }
 
 #[test]
 fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
     use burrow_settings::roles::{Migration, Roles, Route, Setups};
     use std::path::{Component, Path, PathBuf};
-    let routing = |engine: &str| Roles {
-        roles: [(
-            "work".into(),
-            Route {
-                engine: engine.into(),
-                over: None,
-            },
-        )]
-        .into(),
+    let routing = |keys: &str| Roles {
+        roles: keys
+            .split_whitespace()
+            .map(|k| {
+                let route = Route {
+                    engine: "claude".into(),
+                };
+                (k.to_owned(), route)
+            })
+            .collect(),
         ..Default::default()
     };
     let relative = |absolute: &Path| {
@@ -449,15 +453,12 @@ fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
             cfg.settings
                 .migrate(
                     Migration {
-                        routing: routing("claude"),
+                        routing: routing(ONE),
                         setups: Setups {
-                            saved: [
-                                ("one".into(), routing("claude")),
-                                ("two".into(), routing("codex")),
-                            ]
-                            .into(),
+                            saved: [("one".into(), routing(ONE)), ("two".into(), routing(TWO))]
+                                .into(),
                             active: Some("one".into()),
-                            previous: Some(routing("codex")),
+                            previous: Some(routing(TWO)),
                         },
                         receipts: [(import_path.to_string_lossy().into_owned(), original.into())]
                             .into(),
@@ -472,11 +473,7 @@ fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
             cfg.state = lookup_path;
             let mut gh = github("sam", "use back", None);
             pass(&mut gh, &cfg).unwrap();
-            assert_eq!(
-                work(&cfg),
-                "codex",
-                "{imported} -> {lookup}: cycle replayed"
-            );
+            assert_eq!(work(&cfg), TWO, "{imported} -> {lookup}: cycle replayed");
             let comment = gh
                 .asked("POST")
                 .last()

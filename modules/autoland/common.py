@@ -309,8 +309,8 @@ def comment(repo, n, body):
 
 
 def me():
-    """The steward's login as REST gives it: its App's bot. The reviewers'
-    reviews, its statuses, comments and merges are posted as it, and nobody
+    """The steward's login as REST gives it: its App's bot. Its statuses,
+    comments, judges' verdicts and merges are posted as it, and nobody
     else can post as it: a user's login can't have "[bot]" in it."""
     return CFG["app"]["slug"] + "[bot]"
 
@@ -388,14 +388,14 @@ def seal(repo, n, name, verdict, head, base):
 
 
 def quote(body):
-    """A PR's description as the reviewers are shown it: each line quoted,
-    so nothing in it reads as their brief going on."""
+    """A PR's description as a judge is shown it: each line quoted, so
+    nothing in it reads as its brief going on."""
     return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
 
 
 def fingerprint(body):
-    """What a review or a judge's verdict carries of the description it was
-    on: the reasons a description gives are part of what's judged."""
+    """What a judge's verdict carries of the description it was on: the
+    reasons a description gives are part of what's judged."""
     return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
 
 

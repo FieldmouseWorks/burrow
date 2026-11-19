@@ -156,9 +156,21 @@ pub fn metered(cfg: &Config) {
     }
 }
 
+/// The machine's hold as the next scheduling pass leaves it: [`out`], less
+/// one a fresh meter proves over, which [`metered`] would release (never an
+/// owner pause: only the owner or its deadline ends that). Reads only, so an
+/// observer (`proj why`) says what the drain does without releasing anything.
+pub fn out_metered(cfg: &Config) -> Option<Spent> {
+    out(cfg).filter(|s| s.owner || meter_proves(cfg, s).is_none())
+}
+
 fn meter_start(cfg: &Config) -> Option<i64> {
+    meter_proves(cfg, &out(cfg)?)
+}
+
+/// When a fresh Claude meter that proves `s` over was requested, if one does.
+fn meter_proves(cfg: &Config, s: &Spent) -> Option<i64> {
     use burrow_usage_reset::meter::{FRESH, Snapshot};
-    let s = out(cfg)?;
     let dir = cfg.meters.as_ref()?;
     let now = now() as f64;
     let meter = Snapshot::read(dir, "claude", now)?;
@@ -918,7 +930,7 @@ fn title(s: &Spent) -> String {
 fn body(cfg: &Config, s: &Spent) -> String {
     if s.owner {
         return format!(
-            "The owner paused Claude work until {}. Reason: {}. Running turns continue; Codex work remains eligible. Use `proj usage back` to release this pause early.",
+            "The owner paused Claude work until {}. Reason: {}. Running turns continue. Use `proj usage back` to release this pause early.",
             when(s.until),
             s.said
         );

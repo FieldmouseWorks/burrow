@@ -8,7 +8,7 @@
 //!   ranking), with the priority, pipeline repo and age that put each there.
 //! - **line**: every turn waiting in line for a slot ([`crate::slot`]).
 //! - **slots**: every slot proj knows of: the shared line's (`claude`), the
-//!   one `unstick` slot, Codex's pool, the drain's `drainJobs` and the
+//!   one `unstick` slot, the drain's `drainJobs` and the
 //!   sorting jobs' `atOnce`, and the machine's heavy slots. Each says what
 //!   holds it (job, repo, issue or PR, role, engine, model, effort), since
 //!   when, and how that holder stands: running, queued, parked on an await,
@@ -111,8 +111,6 @@ pub enum SlotKind {
     Claude,
     /// The one slot past `maxJobs` for jobs run --unstick.
     Unstick,
-    /// One of Codex's own pool.
-    Codex,
     /// One of the drain's `drainJobs`: an issue it handed on, until that
     /// issue's record goes.
     Drain,
@@ -613,7 +611,7 @@ pub(crate) fn held(
 /// Latest engine and installation readings and their holds.
 fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
     use burrow_usage_reset::meter::{FRESH, Snapshot as Read, Span};
-    [Engine::Claude, Engine::Codex]
+    [Engine::Claude]
         .into_iter()
         .map(|engine| {
             let reading = cfg
@@ -673,20 +671,6 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
-/// The issues the inbox says wait for sorting, each with why.
-fn waiting(cfg: &Config) -> Vec<String> {
-    let Some(i) = cfg.inbox.as_ref() else {
-        return Vec::new();
-    };
-    let mut lines: Vec<String> = std::fs::read_dir(i.state.join(".triage-waiting"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| crate::read(&e.ok()?.path()))
-        .collect();
-    lines.sort();
-    lines
-}
-
 fn holds(cfg: &Config) -> Holds {
     Holds {
         paused: cfg.paused_repos(),
@@ -703,7 +687,7 @@ fn holds(cfg: &Config) -> Holds {
                 drain: t.drain,
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
-                waiting: waiting(cfg),
+                waiting: crate::inbox::record::sorting_waits(cfg),
             }),
     }
 }

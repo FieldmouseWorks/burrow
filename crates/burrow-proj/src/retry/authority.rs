@@ -132,20 +132,18 @@ impl Identity {
 /// directory are the sandbox's to write, so none of them says it is waiting.
 pub(super) fn holds_slot(cfg: &Config, pid: u32) -> io::Result<bool> {
     let mut held = std::collections::HashSet::new();
-    for pool in [".slots", ".codex-slots"] {
-        let entries = match fs::read_dir(cfg.jobs.join(pool)) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name != "unstick" && !name.bytes().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            if let Ok(meta) = fs::metadata(entry.path()) {
-                held.insert(lock_id(&meta));
-            }
+    let entries = match fs::read_dir(cfg.jobs.join(".slots")) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    for entry in entries.into_iter().flatten().filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != "unstick" && !name.bytes().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(entry.path()) {
+            held.insert(lock_id(&meta));
         }
     }
     holds(Path::new("/proc"), pid, &held)
