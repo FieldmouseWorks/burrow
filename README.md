@@ -56,7 +56,12 @@ Each has an entry below, and each can be imported on its own.
   `bypassPermissions`, set in `/etc/claude-code/managed-settings.json` so no
   project can override it. The only prompts are `permissions.ask` rules for
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
-  deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
+  deleting remote data, force-pushing `main`). The standing-authority
+  commands in `modules/claude/standing.nix` (`proj reply`, `settings land`,
+  taking a label off, `gh run rerun`) are `permissions.allow` rules, so a
+  session whose mode puts Claude Code's auto-mode check in front of its
+  commands doesn't have that check refuse them; the one-way doors still ask
+  first. A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
   branch. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.

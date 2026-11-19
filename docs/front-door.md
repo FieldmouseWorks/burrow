@@ -356,6 +356,9 @@ For work the owner wants to watch or steer live, a thread starts a Remote
 Control session on the project's server (`modules/remote-control.nix`): the
 project's Claude, in its own git worktree, in `burrow.remoteControl.permissionMode`
 (bypassPermissions alongside `burrow.claude`, so only the one-way doors ask).
+A session claude.ai puts in auto mode has a check in front of the rest; the
+standing-authority commands, `proj reply` among them, are allow rules that
+skip it (`burrow.claude`, in the README), and the one-way doors still ask.
 The owner's messages in the thread reach it directly. The catch: each thread
 shows the owner an approval card first, and a box with no desktop app can't be
 pre-approved.
