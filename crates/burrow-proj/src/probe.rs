@@ -479,6 +479,192 @@ mod tests {
             }
         }
     }
+    /// A gh that answers every GraphQL read with `reply`, as `gh api -i`
+    /// does.
+    fn gh(dir: &Path, reply: &serde_json::Value) -> PathBuf {
+        let gh = dir.join("gh");
+        burrow_test::executable(
+            &gh,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf 'HTTP/2.0 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n'\ncat <<'REPLY'\n{reply}\nREPLY\n"
+            ),
+        );
+        gh
+    }
+    #[test]
+    fn issue_answers_cross_the_bridge_as_scrubbed_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let token = format!("ghp_{}", "x".repeat(36));
+        let who = serde_json::json!({"login":"sam","__typename":"User","databaseId":1});
+        let reply = serde_json::json!({"data":{"repository":{"issue":{
+            "state":"OPEN","createdAt":"2026-11-01T00:00:00Z",
+            "title":"PRIVATE TITLE","body":"PRIVATE BODY",
+            "author":who,
+            "labels":{"totalCount":1,"nodes":[{"name":format!("label {token}")}]},
+            "userContentEdits":{"totalCount":100,"nodes":vec![serde_json::json!({"editor":who,"diff":"PRIVATE EDIT"}); 100]},
+            "timelineItems":{"totalCount":0,"nodes":[]}
+        }}}});
+        cfg.probe.as_mut().unwrap().tools.gh = Some(gh(dir.path(), &reply));
+        let first = cfg.clone();
+        let job = Job::new(&first, "issue");
+        let _bridge = Bridge::start(&first, &job, "1", None).unwrap();
+        let ask = |words: &[&str]| {
+            exchange(
+                &socket(&first, &job, "1"),
+                &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        let got = ask(&["issue", "sam/box", "210"]).unwrap();
+        assert!(got.contains("at GitHub's cap of 100"), "{got}");
+        assert!(
+            got.contains("- sam (User 1): opened it, 100 edits"),
+            "{got}"
+        );
+        assert!(got.contains("[redacted]") && !got.contains(&token), "{got}");
+        assert!(!got.contains("PRIVATE"), "{got}");
+
+        // GitHub's error, with a credential in it, is scrubbed too.
+        let failing =
+            serde_json::json!({"errors":[{"message":format!("Authorization: Bearer {token}")}]});
+        cfg.probe.as_mut().unwrap().tools.gh = Some(gh(dir.path(), &failing));
+        let job = Job::new(&cfg, "issue-error");
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        let err = exchange(
+            &socket(&cfg, &job, "1"),
+            &["issue".into(), "sam/box".into(), "210".into()],
+        )
+        .unwrap_err();
+        assert!(err.starts_with("GitHub didn't say: "), "{err}");
+        assert!(err.contains("[redacted]") && !err.contains(&token), "{err}");
+
+        // Arguments outside the grammar never reach the host.
+        for bad in [
+            &["issue", "sam/box", "0"][..],
+            &["issue", "sam/box", "1;id"],
+            &["runners", "a", "b"],
+            &["trust", "--write"],
+            &["stop", "job"],
+        ] {
+            assert!(ask(bad).is_err(), "{bad:?}");
+        }
+    }
+    #[test]
+    fn vm_mailbox_returns_host_trust_and_runners_like_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let probe = cfg.probe.as_mut().unwrap();
+        probe.trust = Some(
+            serde_json::from_value(serde_json::json!({
+                "inbox": {"authors": [{"login": "sam", "id": 1}], "vm": false},
+                "apps": [{"name": "workers", "login": "workers[bot]", "id": 3}],
+                "machinery": "workers"
+            }))
+            .unwrap(),
+        );
+        probe.runners = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "ci-runner", "kind": "named", "repos": ["sam/box"], "labels": ["box"],
+                "defined": true, "user": "ci", "environment": {"PATH": "/nonexistent/bin"}
+            }))
+            .unwrap(),
+        ];
+        let id = format!(
+            "probe-facts-{}",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        let job = Job::new(&cfg, &id);
+        let executable = dir.path().join("agent");
+        burrow_test::executable(
+            &executable,
+            "#!/bin/sh\n[ \"$1\" = sh ] || exit 1\nshift 2\nexec \"$@\"\n",
+        );
+        let path = PathBuf::from(guest::path(&job, "1"));
+        let bridge = Bridge::start_with(&cfg, &job, "1", Some("vm"), executable).unwrap();
+        let trust = guest_exchange(&path, &["trust".into()]).unwrap();
+        assert!(
+            trust.contains("- a Codex job with no --app: the App workers[bot] (3)"),
+            "{trust}"
+        );
+        let runners = guest_exchange(&path, &["runners".into()]).unwrap();
+        assert!(
+            runners.contains("ci-runner: a named runner for sam/box"),
+            "{runners}"
+        );
+        assert!(
+            runners.contains("default toolchain: none: neither rustc nor rustup is on PATH"),
+            "{runners}"
+        );
+        drop(bridge);
+        for extension in ["probe", "answer", "probe-lock"] {
+            let _ = fs::remove_file(path.with_extension(extension));
+        }
+    }
+    #[test]
+    fn github_errors_are_scrubbed_whole_before_the_cut_on_both_transports() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let key = format!("-----BEGIN RSA {} KEY-----", "PRIVATE");
+        let end = format!("-----END RSA {} KEY-----", "PRIVATE");
+        // Each credential straddles the 500-character cut.
+        let said = [
+            (token.clone(), format!("{}{token} after", "x".repeat(490))),
+            (
+                "hunter2hunter2".to_string(),
+                format!("{}https://ci:hunter2hunter2@example.com/x", "y".repeat(480)),
+            ),
+            // Past what is kept whole at all.
+            (
+                "a1B2c3D4e5a1".to_string(),
+                format!("{}{token}", "k".repeat(70_000)),
+            ),
+            (
+                "MIIEvQIBADANBgkqhkiG".to_string(),
+                format!(
+                    "{}{key}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n{end}",
+                    "z".repeat(480)
+                ),
+            ),
+        ];
+        let id = format!(
+            "probe-cut-{}",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        for (n, (secret, text)) in said.iter().enumerate() {
+            let failing = serde_json::json!({"errors":[{"message":text}]});
+            cfg.probe.as_mut().unwrap().tools.gh = Some(gh(dir.path(), &failing));
+            let words: Vec<String> = ["issue", "sam/box", "210"].map(String::from).to_vec();
+            // The host socket.
+            let socket_id = format!("{id}-s{n}");
+            let job = Job::new(&cfg, &socket_id);
+            let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+            let err = exchange(&socket(&cfg, &job, "1"), &words).unwrap_err();
+            assert!(
+                !err.contains(&secret[..12]) && !err.contains("hunter2"),
+                "{err}"
+            );
+            // The VM mailbox.
+            let mailbox_id = format!("{id}-m{n}");
+            let job = Job::new(&cfg, &mailbox_id);
+            let executable = dir.path().join("agent");
+            burrow_test::executable(
+                &executable,
+                "#!/bin/sh\n[ \"$1\" = sh ] || exit 1\nshift 2\nexec \"$@\"\n",
+            );
+            let path = PathBuf::from(guest::path(&job, "1"));
+            let bridge = Bridge::start_with(&cfg, &job, "1", Some("vm"), executable).unwrap();
+            let err = guest_exchange(&path, &words).unwrap_err();
+            assert!(
+                !err.contains(&secret[..12]) && !err.contains("hunter2"),
+                "{err}"
+            );
+            drop(bridge);
+            for extension in ["probe", "answer", "probe-lock"] {
+                let _ = fs::remove_file(path.with_extension(extension));
+            }
+        }
+    }
     #[test]
     fn vm_mailbox_returns_host_deployed_result_without_config_or_credentials() {
         let dir = tempfile::tempdir().unwrap();

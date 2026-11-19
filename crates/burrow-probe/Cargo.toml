@@ -12,6 +12,7 @@ burrow-door = { path = "../burrow-door" }
 burrow-events = { path = "../burrow-events" }
 burrow-github = { path = "../burrow-github" }
 jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +20,7 @@ serde_json.workspace = true
 [dev-dependencies]
 burrow-github = { path = "../burrow-github", features = ["fake"] }
 burrow-test = { path = "../burrow-test" }
+burrow-upkeep = { path = "../burrow-upkeep" }
 tempfile.workspace = true
 
 [lints]
