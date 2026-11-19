@@ -480,6 +480,7 @@ fn revert_to(cfg: &Config, prev: &Path) -> Result<u8, Broke> {
     // writing the boot default. A refused activation changed nothing, and
     // the running system may not have moved yet, so that one is waited out
     // and prev put back.
+    let mut began = false;
     let rc = loop {
         if let Ok(lock) = OpenOptions::new()
             .write(true)
@@ -488,6 +489,13 @@ fn revert_to(cfg: &Config, prev: &Path) -> Result<u8, Broke> {
             .open(&cfg.activation_lock)
         {
             let _ = flock(&lock, FlockOperation::LockExclusive);
+        }
+        // When the revert got past whatever held it off and began: the
+        // switch's own part of its window ends here, and the rest is how
+        // long activating takes on this machine (tests/switch.nix).
+        if !began {
+            began = true;
+            cfg.journal("notice", &format!("reverting to {}", prev.display()));
         }
         let rc = exit_of(
             Command::new(prev.join("bin/switch-to-configuration"))

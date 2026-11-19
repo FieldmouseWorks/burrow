@@ -386,7 +386,10 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
     assert_eq!(m.fake("switch-to-configuration"), "one test\n");
     assert_eq!(
         m.fake("journal"),
-        format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
+        format!(
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n"
+        )
     );
     nothing_pending(&m, &one);
     // One that doesn't get back says so, as a revert does.
@@ -401,7 +404,8 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
     assert_eq!(
         m.fake("journal"),
         format!(
-            "-t box-switch -p err REVERT FAILED (exit 0): still running the unconfirmed {two}\n"
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p err REVERT FAILED (exit 0): still running the unconfirmed {two}\n"
         )
     );
     // And one that can't start.
@@ -594,7 +598,10 @@ fn the_revert_puts_the_confirmed_system_back() {
     assert_eq!(m.fake("switch-to-configuration"), "one test\n");
     assert_eq!(
         m.fake("journal"),
-        format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
+        format!(
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n"
+        )
     );
     assert_eq!(
         said(&m.switch(&["--status"])),
@@ -613,7 +620,7 @@ fn the_revert_puts_the_confirmed_system_back() {
         (
             Some(0),
             String::new(),
-            format!("not confirmed, reverted to {one} (activation exit 0)\n")
+            format!("reverting to {one}\nnot confirmed, reverted to {one} (activation exit 0)\n")
         )
     );
 }
@@ -629,6 +636,13 @@ fn the_revert_waits_out_switch_to_configurations_lock() {
         m.fake("switch-to-configuration"),
         "one test\none test\none test\n"
     );
+    // It says when it began once, however often it was refused.
+    let journal = m.fake("journal");
+    assert!(
+        journal.starts_with(&format!("-t box-switch -p notice reverting to {one}\n")),
+        "{journal}"
+    );
+    assert_eq!(journal.matches("reverting to").count(), 1, "{journal}");
     // And held: it waits for the activation holding it.
     let m = Machine::switched(false);
     let lock = File::create(m.path("s2c.lock")).unwrap();
@@ -640,9 +654,16 @@ fn the_revert_waits_out_switch_to_configurations_lock() {
     thread::sleep(Duration::from_millis(500));
     assert!(revert.try_wait().unwrap().is_none(), "it didn't wait");
     assert_eq!(m.running(), m.sys("two"));
+    // Held off, it hasn't begun: its journal line marks the end of the wait.
+    assert_eq!(m.fake("journal"), "");
     drop(lock);
     assert!(revert.wait().unwrap().success());
     assert_eq!(m.running(), one);
+    let journal = m.fake("journal");
+    assert!(
+        journal.starts_with(&format!("-t box-switch -p notice reverting to {one}\n")),
+        "{journal}"
+    );
 }
 
 #[test]
@@ -658,7 +679,8 @@ fn a_revert_that_doesnt_get_back_says_so_and_status_too() {
     assert_eq!(
         m.fake("journal"),
         format!(
-            "-t box-switch -p err REVERT FAILED (exit 1): still running the unconfirmed {two}\n"
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p err REVERT FAILED (exit 1): still running the unconfirmed {two}\n"
         )
     );
     let out = m.switch(&["--status"]);
