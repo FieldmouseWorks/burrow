@@ -1,10 +1,10 @@
 //! What a judge reads of a PR on GitHub, through Conary's own reads and
 //! helpers, never a copy: the PR as it is now, held to what a request
-//! names, and its discussion (every review thread, review body and marked
-//! comment), whose digest is the request's `context`.
+//! names, and its discussion (every review thread and review body), whose
+//! digest is the request's `context`.
 use conary_github::api::PullRequest;
 use conary_github::flow::{
-    self, Read, ReviewThread, Revision, ThreadComment, conversation, judging_context, review_bodies,
+    self, Read, ReviewThread, Revision, ThreadComment, judging_context, review_bodies,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -43,7 +43,6 @@ pub fn current(
 pub struct Discussion {
     pub threads: BTreeMap<String, ReviewThread>,
     pub reviews: BTreeMap<u64, ThreadComment>,
-    pub conversation: Vec<ThreadComment>,
 }
 
 impl Discussion {
@@ -54,13 +53,12 @@ impl Discussion {
         Ok(Self {
             threads: source.snapshot(repo, pr).map_err(failed)?.threads,
             reviews: review_bodies(&source.reviews(repo, pr).map_err(failed)?),
-            conversation: conversation(&source.comments(repo, pr).map_err(failed)?),
         })
     }
 
     /// Its `flow::judging_context`.
     pub fn context(&self) -> String {
-        judging_context(&self.threads, &self.reviews, &self.conversation)
+        judging_context(&self.threads, &self.reviews)
     }
 
     /// All of it, each comment quoted line by line under who wrote it, as
@@ -85,11 +83,6 @@ impl Discussion {
         for (id, review) in &self.reviews {
             let _ = writeln!(out, "Review {id}'s body:");
             out.push_str(&said(review));
-            out.push('\n');
-        }
-        for c in &self.conversation {
-            out.push_str("A PR comment carrying a finding or an answer:\n");
-            out.push_str(&said(c));
             out.push('\n');
         }
         if out.is_empty() {

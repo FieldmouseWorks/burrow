@@ -64,7 +64,7 @@ let
       "job_login" "job_timeout" "judge_engines" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_merge_after" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
-      "train" "train_stall_after" "verdict_authors" ];
+      "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
   # Every key a config has: all of Settings' but the seal keys,
   # renovate_run and default_priority, left to Conary's defaults. Conary's defaults name no
