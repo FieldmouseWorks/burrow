@@ -56,6 +56,7 @@ impl Machine {
             steward_released: p("released.json"),
             events_template: p("events-template.json"),
             events: p("events.json"),
+            conaryd_started: p("conaryd-started"),
             steward_kick: String::new(),
         };
         Self { dir, cfg, settings }
@@ -91,7 +92,19 @@ impl Machine {
         let steward = self.holding().lands(Owner::Steward);
         let conaryd = self.given().iter().any(|r| r.eq_ignore_ascii_case(REPO));
         assert!(!(steward && conaryd), "both land {REPO}");
-        assert_eq!(conaryd, self.holding().lands(Owner::Conaryd));
+        let allowed = self.settings.decision(REPO).unwrap().allowed;
+        assert_eq!(conaryd, self.holding().lands(Owner::Conaryd) && allowed);
+    }
+
+    /// conaryd started again on the events file as it is now, as
+    /// conary-flow-given says once it has.
+    fn started(&self) {
+        use sha2::Digest;
+        let hash: String = sha2::Sha256::digest(fs::read(&self.cfg.events).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        fs::write(&self.cfg.conaryd_started, hash).unwrap();
     }
 
     fn release(&self, generation: u64) {
@@ -168,19 +181,18 @@ fn conaryd_lets_go_only_once_its_pass_and_workers_have_ended() {
     running.lock().unwrap();
 
     m.set("steward");
+    // Taken off conaryd's events file at once, and given to nobody until
+    // conaryd has started again on that file.
+    assert!(m.run(&mut kicks).waiting.contains(REPO));
+    assert!(m.given().is_empty() && !m.holding().lands(Owner::Steward));
+    m.started();
     let cfg = m.cfg.clone();
     let run = std::thread::spawn(move || {
         let mut kicks = Kicks::default();
         let moved = run(&cfg, &mut kicks, &PATIENT).unwrap();
         (moved, kicks.0)
     });
-    // It's taken off conaryd's events file at once, and given to nobody
-    // while the worker runs.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while m.holding().to.is_none() {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // And while the worker runs.
     std::thread::sleep(Duration::from_millis(300));
     assert!(!run.is_finished());
     m.exclusive();
@@ -204,6 +216,8 @@ fn a_pass_conaryd_has_under_way_is_waited_for() {
     m.release(1);
     m.run(&mut kicks);
     m.set("steward");
+    m.run(&mut kicks);
+    m.started();
     let data = m.dir.path().join("data");
     let repo: conary_core::op::Repo = REPO.parse().unwrap();
     let pass = conary_github::flow::Data::open(&data, &repo).unwrap();
@@ -294,6 +308,8 @@ fn a_repo_conaryd_may_not_have_stays_or_goes_back_to_the_steward() {
         ..m.settings.clone()
     };
     fs::write(&m.cfg.settings, serde_json::to_vec(&narrower).unwrap()).unwrap();
+    assert!(m.run(&mut kicks).waiting.contains(REPO));
+    m.started();
     let moved = m.run(&mut kicks);
     assert_eq!(moved.moved.get(REPO), Some(&Owner::Steward));
     assert!(m.given().is_empty());
@@ -310,14 +326,64 @@ fn a_pause_is_its_own_switch() {
     m.run(&mut kicks);
     m.release(1);
     m.run(&mut kicks);
-    // The repo changed hands and is still paused; the pause didn't move it.
+    // The repo changed hands and is still paused; the pause didn't move
+    // it, and conaryd isn't given it while it lasts.
     let decision = m.settings.decision(REPO).unwrap();
     assert!(!decision.allowed);
     assert!(decision.landing.lands(Owner::Conaryd));
+    assert!(m.given().is_empty());
     m.settings
         .command(&["allow".into(), REPO.into()], "test")
         .unwrap();
     assert_eq!(m.run(&mut kicks), Moved::default());
+    assert_eq!(m.given(), [REPO]);
+    // Paused again, conaryd isn't given it, and it still holds it.
+    m.settings
+        .command(&["pause".into(), REPO.into()], "test")
+        .unwrap();
+    assert_eq!(m.run(&mut kicks), Moved::default());
+    assert!(m.given().is_empty() && m.holding().lands(Owner::Conaryd));
+}
+
+#[test]
+fn a_free_lock_is_no_release_until_conaryd_has_started_without_the_repo() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    m.run(&mut kicks);
+    // conaryd started on the file that gave it the repo.
+    m.started();
+    m.set("steward");
+    // No pass and no worker: but a pass that read the old file may yet
+    // take the lock, until conaryd has started again on the new one.
+    for _ in 0..2 {
+        assert!(m.run(&mut kicks).waiting.contains(REPO));
+        assert!(!m.holding().lands(Owner::Steward) && m.given().is_empty());
+    }
+    m.started();
+    assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));
+}
+
+#[test]
+fn a_kick_that_fails_moves_the_repo_all_the_same() {
+    struct Down;
+    impl Wake for Down {
+        fn steward(&mut self, repo: &str) -> Result<(), String> {
+            Err(format!("kicking {repo}: refused"))
+        }
+    }
+    let m = Machine::new();
+    m.set("conaryd");
+    run(&m.cfg, &mut Down, &PATIENT).unwrap();
+    m.release(1);
+    run(&m.cfg, &mut Down, &PATIENT).unwrap();
+    m.set("steward");
+    run(&m.cfg, &mut Down, &PATIENT).unwrap();
+    m.started();
+    let moved = run(&m.cfg, &mut Down, &PATIENT).unwrap();
+    assert_eq!(moved.moved.get(REPO), Some(&Owner::Steward));
 }
 
 #[test]

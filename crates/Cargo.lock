@@ -707,6 +707,7 @@ dependencies = [
  "conary-github",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "ureq",
 ]

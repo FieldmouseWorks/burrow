@@ -65,7 +65,10 @@ def vacate(repo, generation):
     """Stop the steward's work in a repo it's letting go of. True once none
     is left, with its release marker written for this handover."""
     left = []
-    for name, st in prs_states(repo).items():
+    # Its PRs' jobs, and the repo's own: the fix of its red default branch.
+    states = list(prs_states(repo).values())
+    states.append({"redJob": (C.load(f"repo-{repo.replace('/', '_')}.json", {}, live=True).get("red") or {}).get("job")})
+    for st in states:
         for jid in jobs(st):
             if not alive(jid):
                 continue

@@ -39,8 +39,8 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
   handlers take only the repos it holds. Their wake-ups booked for a repo it
   has let go of are spent without a pass. Deliveries for a repo conaryd holds
   go to conaryd's listener exactly as GitHub signed them.
-- conaryd reads its events file, which lists the repos the record gives it
-  and no others.
+- conaryd reads its events file. It lists the repos the record gives
+  conaryd whose automated work is allowed, and no others.
 
 ## A handover
 
@@ -57,9 +57,12 @@ at the same time:
      it isn't given.
 2. **The new owner takes the repo** once the one letting go is quiet:
    - The steward is quiet when its marker names this generation.
-   - conaryd is quiet when no pass holds the flow's repository lock and
-     every worker it launched there has exited (Conary's own locks). Those
-     workers are waited on, never guessed at.
+   - conaryd is quiet once three things hold. It has started again on an
+     events file without the repo: a pass reads its repos before it takes
+     the repo's lock, so until the restart, a pass that read the old file
+     could still start. No pass holds the flow's repository lock. Every
+     worker it launched there has exited. The last two are Conary's own
+     locks, and they're waited on, never guessed at.
 
    Then the record gives the repo to the new owner, and burrow-landing wakes
    it:
@@ -70,9 +73,11 @@ at the same time:
 Setting the owner back before a handover finishes ends the handover, and
 the owner that was letting go carries on. A release for the handover that
 was ended counts for nothing, because its generation is spent.
-burrow-landing reads everything again on each run, at each change of the
-setting or the marker, at each deploy and at boot. A run that was cut short
-carries on from the record.
+burrow-landing reads everything again on each run, which happens at each
+change of the setting, the steward's marker or conaryd's restart, at each
+deploy, at boot, and five minutes after the last run as a backstop. A run
+goes again if what it reads changed while it ran, and a failed run is
+restarted. A run that was cut short carries on from the record.
 
 The repo's ledger state (its changes, evidence and train) stays where it
 is. Both controllers read the same ledger.
@@ -82,12 +87,18 @@ is. Both controllers read the same ledger.
 Pausing is independent of ownership. A switch in ownership doesn't lift
 a pause, and a pause doesn't move ownership:
 
-- `settings pause OWNER/REPO` parks the repo's Claude jobs and proofs under
-  either owner, because proj refuses them. Under the steward it also holds
-  every landing. Under conaryd it doesn't write the flow's pause. To stop
-  conaryd landing in a repo, use the flow's own switch: `cn flow pause OWNER/REPO
-  --reason TEXT`, as the flow's user. It needs no conaryd, GitHub or deploy
-  (Conary's [docs/flow.md](https://github.com/FieldmouseWorks/Conary/blob/main/docs/flow.md#pause-and-hold)).
+- `settings pause OWNER/REPO` stops landing under either owner, and proj
+  parks the repo's Claude jobs and proofs. Under the steward, its decision
+  holds every landing. Under conaryd, the repo is taken off conaryd's events
+  file while the pause lasts, so conaryd passes it no more. Its workers
+  aren't vacated, though; their jobs are proj's to park. A pipeline-only
+  hold that ends writes nothing, so the repo is given back to conaryd at
+  burrow-landing's next run.
+- The flow's own switch, `cn flow pause OWNER/REPO --reason TEXT`, run as the
+  flow's user, is independent of burrow's. It needs no conaryd, GitHub or
+  deploy, and it vacates the flow's workers at conaryd's next pass (Conary's
+  [docs/flow.md](https://github.com/FieldmouseWorks/Conary/blob/main/docs/flow.md#pause-and-hold)).
+  burrow never writes or lifts it.
 - A pause names a whole repository, on both sides. The flow's pause leaves
   room for a narrower scope as another kind of the same pause, but that's not
   built yet. Under conaryd there's no handoff (`settings land` is refused for
@@ -102,5 +113,9 @@ a pause, and a pause doesn't move ownership:
   breaks this is refused.
 - conaryd runs as the flow's user. A flow configuration with a train or
   evidence has it sign the ledger, so that user needs the ledger's key.
-  [Conary#314](https://github.com/FieldmouseWorks/Conary/issues/314)
-  provisions it along with the producers' keys.
+  With no `burrow.ledger.controllerUser`, the flow's user is
+  `burrow.user`, which holds the key. With a controller, nothing gives the
+  controller the key yet.
+- The overlay's `landing` entry is new. A burrow from before it refuses an
+  overlay that has one. Hand every repo back to the steward
+  (`settings landing OWNER/REPO steward`) before rolling back past it.

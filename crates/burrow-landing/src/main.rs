@@ -17,15 +17,29 @@ fn main() -> ExitCode {
                 .map_err(|e| format!("{config}: {e}"))
         })
         .and_then(|cfg| {
-            burrow_landing::run(
-                &cfg,
-                &mut burrow_landing::Kick(&cfg.steward_kick),
-                // A pass is minutes at most; a worker is waited for until
-                // it exits, under the unit's own timeout.
-                &burrow_landing::Patience {
-                    lock: Duration::from_secs(600),
-                },
-            )
+            // A change that comes while a run is under way may start none of
+            // its own (its path unit's start merges into this one), so a run
+            // goes again until what it reads stayed the same throughout.
+            let mut moved = burrow_landing::Moved::default();
+            loop {
+                let before = burrow_landing::inputs(&cfg)?;
+                let this = burrow_landing::run(
+                    &cfg,
+                    &mut burrow_landing::Kick(&cfg.steward_kick),
+                    // A pass is minutes at most; a worker is waited for
+                    // until it exits, under the unit's own timeout.
+                    &burrow_landing::Patience {
+                        lock: Duration::from_secs(600),
+                    },
+                )?;
+                moved.started.extend(this.started);
+                moved.undone.extend(this.undone);
+                moved.moved.extend(this.moved);
+                moved.waiting = this.waiting;
+                if burrow_landing::inputs(&cfg)? == before {
+                    return Ok(moved);
+                }
+            }
         });
     match result {
         Ok(moved) => {

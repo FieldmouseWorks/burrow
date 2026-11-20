@@ -25,6 +25,11 @@ let
   dir = "${stateDir}/landing";
   record = cfg.record;
   events = "${dir}/conaryd-events.json";
+  # The sha256 of the events file conaryd last started on.
+  started = "${dir}/conaryd-started";
+  # The repos' hooks' secret as burrow-events and the hooks have it,
+  # trimmed: conaryd reads a secret file's bytes as they are.
+  secret = "/run/conary-flow/webhook";
   socket = "/run/conary-flow/conaryd.sock";
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-landing;
   # conaryd's flow configuration is one file for every repo it's given, so
@@ -38,9 +43,9 @@ let
   template = pkgs.runCommand "conaryd-events.json" {
     events = builtins.toJSON {
       listen = "127.0.0.1:${toString cfg.port}";
-      # The repos' hooks' secret, which the steward's units load too: GitHub
-      # signs each delivery with it, and burrow-events passes them on whole.
-      secret_path = "/run/credentials/conary-flow.service/webhook";
+      # The repos' hooks' secret: GitHub signs each delivery with it, and
+      # burrow-events passes them on whole.
+      secret_path = secret;
       repos = [ ];
       data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
       flow_config = flowConfig;
@@ -59,6 +64,7 @@ let
     stewardReleased = "${stateDir}/autoland/landing-released.json";
     eventsTemplate = cfg.eventsTemplate;
     inherit events;
+    conarydStarted = started;
     stewardKick = "${config.burrow.events.kick}/autoland";
   });
 in
@@ -156,6 +162,14 @@ in
           };
           serviceConfig = {
             User = ledger.flow.user;
+            ExecStartPre = pkgs.writeShellScript "conary-flow-secret" ''
+              umask 077
+              # Trimmed at both ends, as burrow-events and the hooks read it.
+              s=$(< "$CREDENTIALS_DIRECTORY/webhook")
+              s=''${s#"''${s%%[![:space:]]*}"}
+              s=''${s%"''${s##*[![:space:]]}"}
+              printf %s "$s" > ${secret}
+            '';
             ExecStart = "${ledger.package}/bin/conaryd";
             RuntimeDirectory = builtins.baseNameOf (builtins.dirOf socket);
             RuntimeDirectoryMode = "0700";
@@ -169,15 +183,28 @@ in
           };
         };
         # A repo given to conaryd gets its first pass from conaryd's
-        # start, which kicks every repo it's given; one taken off is
-        # dropped either way.
+        # start, which kicks every repo it's given. One taken off is let go
+        # of only once conaryd has started again without it: a pass reads
+        # its repos before it takes the repo's lock, so until then one that
+        # read the old file may still start. Then it says which file it
+        # started on, which burrow-landing waits for.
         conary-flow-given = {
           description = "landing: restart conaryd's flow on the repos it's given";
           restartIfChanged = false;
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = "${pkgs.systemd}/bin/systemctl restart conary-flow.service";
-          };
+          serviceConfig.Type = "oneshot";
+          # Again while the file changed under it: a change that comes
+          # while this runs may start no run of its own.
+          script = ''
+            hash() { ${pkgs.coreutils}/bin/sha256sum < ${events} | ${pkgs.coreutils}/bin/cut -d' ' -f1; }
+            while :; do
+              on=$(hash)
+              ${pkgs.systemd}/bin/systemctl restart conary-flow.service
+              printf %s "$on" > ${started}.pending
+              ${pkgs.coreutils}/bin/chmod 0644 ${started}.pending
+              ${pkgs.coreutils}/bin/mv ${started}.pending ${started}
+              [ "$(hash)" = "$on" ] && break
+            done
+          '';
         };
         burrow-landing = {
           description = "landing: move each repo's landing between the steward and conaryd as its setting says";
@@ -197,8 +224,19 @@ in
             # It waits for conaryd's workers in a repo it hands back to
             # exit, each within its job's or proof's own timeout.
             TimeoutStartSec = "${toString (lib.max autoland.jobTimeoutMinutes autoland.proofTimeoutMinutes + 15)}min";
+            # A run that fails (a pass of conaryd's that didn't end, a file
+            # it couldn't read) goes again from the record.
+            Restart = "on-failure";
+            RestartSec = "1min";
           };
         };
+      };
+      # The backstop: a pipeline-only hold's end writes nothing, and a run
+      # still waiting on a worker can't hear a change that came meanwhile
+      # until it's done (it then goes again on its own).
+      systemd.timers.burrow-landing = {
+        wantedBy = [ "timers.target" ];
+        timerConfig.OnUnitInactiveSec = "5min";
       };
       systemd.paths = {
         conary-flow-given = {
@@ -212,6 +250,7 @@ in
           pathConfig.PathChanged = [
             config.burrow.settings.effective.overlay
             "${stateDir}/autoland/landing-released.json"
+            started
             "/run/current-system"
           ];
         };
