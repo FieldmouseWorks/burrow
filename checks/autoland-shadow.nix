@@ -20,7 +20,7 @@ let
   base = machinery: (self.nixosConfigurations.example.extendModules {
     modules = [{
       burrow.autoland.shadow = [ "Sam/HomeLab" "sam/plain" ];
-      burrow.autoland.repos."sam/homelab".trainNegative = "negative";
+      burrow.autoland.repos."sam/homelab" = { trainNegative = "negative"; trainSize = 3; };
       burrow.autoland.repos."sam/plain" = {
         settleDelay = 2; codex = false; proofSlots = 1;
         proofRuns.gate = "make check"; proofBuilds.vm = "checks.x86_64-linux.vm";
@@ -126,8 +126,8 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
       and (.evidence == null or (.evidence | keys == $k.evidence))' $f >/dev/null \
       || fail "$f has keys Conary's doesn't: $(jq -c '[keys, (.settings | keys)]' $f)"
   done
-  jq -e '.evidence.negative == "negative" and .settings.train' ${withApp.homelab} >/dev/null \
-    || fail "homelab's overrides (its train and negative) are lost to its name's case"
+  jq -e '.evidence.negative == "negative" and .settings.train and .settings.train_size == 3' ${withApp.homelab} >/dev/null \
+    || fail "homelab's overrides (its train, negative and train size) are lost to its name's case"
   jq -e '.evidence == null and (.settings.train | not)' ${withApp.plain} >/dev/null || fail "plain has evidence with no train negative"
   jq -e '.settings.settle_delay == 120 and .settings.reviewers == [] and .settings.proof_slots == 1
     and .settings.proofs == {gate: {Run: [.settings.proofs.gate.Run[0], "-c", "make check"]}, vm: {Build: "checks.x86_64-linux.vm"}}
