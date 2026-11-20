@@ -33,6 +33,8 @@ let
   controlledRuns = c: c.systemd.services.burrow-landing.serviceConfig.User == "conary-flow"
     && c.systemd.services.burrow-landing.environment.CONARY_DATA or null == "${c.burrow.stateDir}/flow";
   units = on.systemd.services;
+  # There only while burrow-landing gives conaryd a repo.
+  given = "${on.burrow.stateDir}/landing/conaryd-given";
   flow = units.conary-flow;
   driver = units.burrow-landing;
   template = on.burrow.landing.eventsTemplate;
@@ -53,6 +55,7 @@ let
     (if on.burrow.settings.effective.conaryd != [ "sam/homelab" ] then "the settings don't know which repos conaryd may have" else null)
     (if flow.serviceConfig.User != on.burrow.ledger.flow.user || driver.serviceConfig.User != on.burrow.ledger.flow.user then "conaryd's flow or burrow-landing runs as someone other than the flow's user" else null)
     (if flow.environment.CONARY_EVENTS_CONFIG != "${on.burrow.stateDir}/landing/conaryd-events.json" then "conaryd doesn't read the events file burrow-landing writes" else null)
+    (if !(lib.elem given flow.unitConfig.ConditionPathExists) then "conaryd starts with no repo given it, and fails on credentials a machine that gives it none needn't have" else null)
     (if flow.serviceConfig.KillMode != "process" then "a restart of conaryd kills the flow's workers" else null)
     (if !(lib.elem "${on.burrow.stateDir}/autoland/landing-released.json" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the steward let go" else null)
     (if !(lib.elem "${on.burrow.stateDir}/landing/conaryd-started" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear conaryd start again without a repo it let go of" else null)
@@ -81,6 +84,8 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   cmp "$(jq -r .flow_config ${template})" ${on.burrow.autoland.flowConfigs}/sam/homelab.json \
     || fail "conaryd's flow config isn't the repo's rendered one"
   grep -q "${template}" ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} || fail "burrow-landing doesn't write the rendered events file"
+  jq -e '.conaryd.given == "${given}"' ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} >/dev/null \
+    || fail "burrow-landing doesn't keep the marker conaryd starts on, so it starts with no repo given it"
   jq '. + {bogus: 1}' ${template} > key.json
   jq '.repos = "sam/homelab"' ${template} > type.json
   ! ${flowFiles} events key.json || fail "an events file with a key Conary doesn't know was taken"

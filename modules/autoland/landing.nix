@@ -29,6 +29,9 @@ let
   # the count conaryd last started on.
   serial = "${dir}/conaryd-events.serial";
   started = "${dir}/conaryd-started";
+  # There while the events file gives conaryd a repo: conaryd runs only
+  # then (crates/burrow-landing).
+  given = "${dir}/conaryd-given";
   data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
   # The repos' hooks' secret as burrow-events and the hooks have it,
   # trimmed: conaryd reads a secret file's bytes as they are.
@@ -68,7 +71,7 @@ let
     inherit data;
     # Without conaryd, a repo the record still gives it (its last one taken
     # off at a deploy) is handed back once the workers it left have exited.
-    conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started; } else null;
+    conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started given; } else null;
     stewardKick = "${config.burrow.events.kick}/autoland";
   });
 in
@@ -200,13 +203,17 @@ in
         # network and no token): it takes the deliveries burrow-events
         # passes it and lands the repos its events file lists, as the
         # flow's controller where it has one. Started only once
-        # burrow-landing has written that file.
+        # burrow-landing has written that file and given it a repo: being
+        # listed in burrow.landing.conaryd gives it none, and with none it
+        # neither runs nor reads its credentials, so a machine that has
+        # none (the rehearsal's VM) never sees it fail on them. Given a
+        # repo without them, it fails, and says so.
         conary-flow = {
           description = "landing: Conary's flow, for the repos burrow-landing gives conaryd";
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
-          unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events ];
+          unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events given ];
           environment = ledger.env // ledger.flow.env // {
             CONARY_SOCKET = socket;
             CONARY_EVENTS_CONFIG = events;

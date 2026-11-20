@@ -25,6 +25,10 @@
 //! file, whose change restarts it (autoland/landing.nix), and its start kicks
 //! every repo it's given; the steward gets a kick of the repo's pass.
 //!
+//! conaryd runs only while it's given a repo: its marker (`given`) is there
+//! exactly then, and conary-flow starts only while it is, so a machine that
+//! gives it nothing never starts it, nor needs its credentials.
+//!
 //! conaryd is given a repo it holds only while the repo's automated work is
 //! allowed: `settings pause OWNER/REPO` takes it off conaryd's events file,
 //! so it lands nothing there, without moving who holds it.
@@ -75,6 +79,11 @@ pub struct Conaryd {
     /// The serial conaryd last started on, written once it has
     /// (autoland/landing.nix's conary-flow-given).
     pub started: PathBuf,
+    /// There while the events file gives conaryd a repo, and only then:
+    /// conaryd runs only while it is (conary-flow's condition), so a
+    /// machine that gives it nothing never starts it, nor needs what it
+    /// reads (its credentials).
+    pub given: PathBuf,
 }
 
 /// What a run does beyond its files: wake the owner a repo went to.
@@ -294,6 +303,11 @@ fn publish(
                 .map_err(|e| format!("{repo}: not a repository: {e}"))
         })
         .collect::<Result<_, String>>()?;
+    // Whether conaryd runs at all, set before the count that restarts it;
+    // and a change of it is a publication of its own, counted even when
+    // the file's repos didn't change (a machine whose marker went missing
+    // with a repo still given), so conaryd starts or stops on it.
+    let marked = mark(&c.given, !runtime.repos.is_empty())?;
     let mut body = serde_json::to_vec_pretty(&runtime).map_err(|e| e.to_string())?;
     body.push(b'\n');
     if std::fs::read(events).ok().as_deref() != Some(&body[..]) {
@@ -304,11 +318,26 @@ fn publish(
     // cut short replaced without it.
     let hash = hash_of(events)?;
     let last = read_serial(&c.serial)?;
-    if last.as_ref().and_then(|(_, h)| h.as_deref()) == Some(&hash) {
+    if !marked && last.as_ref().and_then(|(_, h)| h.as_deref()) == Some(&hash) {
         return Ok(());
     }
     let next = last.map_or(0, |(n, _)| n) + 1;
     replace(&c.serial, format!("{next} {hash}\n").as_bytes())
+}
+
+/// Puts `path` there (empty) or takes it away; whether that changed it.
+fn mark(path: &Path, there: bool) -> Result<bool, String> {
+    let was = path
+        .try_exists()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match (was, there) {
+        (false, true) => replace(path, b"")?,
+        (true, false) => {
+            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn replace(path: &Path, body: &[u8]) -> Result<(), String> {
