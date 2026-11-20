@@ -37,65 +37,18 @@ let
   # What the controller may do in the ledger (cfg.dir), so the flow signs
   # its ops (train join and leave, evidence) as burrow.user's writers do:
   # POSIX ACLs naming the controller user, never its group, which every
-  # producer joins (flow.producer). The directory's default entries let
-  # both writers append to and replace whatever the other made first.
-  # It can't write the key's contents (though, like any writer of the
-  # directory, it could replace the file), and the key's owning group gets
-  # nothing however the key was made. The files are the ones Conary's
-  # writer opens in place (conary-core's log.rs, conary-github's bases.rs);
-  # the anchor and key.pub are renamed in, and the flow reads no GitHub
-  # through `etags`, which stays burrow.user's alone.
-  #
-  # It says what the ledger's access is, not what to add to it: every
-  # top-level entry is burrow.user's, and names no one but the controller
-  # it has now, so a controller changed or turned off keeps nothing. A
-  # directory in it (etags) names no one. Run as root on each boot and
-  # switch (burrow-ledger-access), and once the first sync has made the
-  # key (burrow-ledger-access-key), which its default entries don't reach.
-  writable = [ "lock" "ops.jsonl" "anchor" "merge-bases" ];
-  access = pkgs.writeShellApplication {
-    name = "burrow-ledger-access";
-    runtimeInputs = [ pkgs.acl pkgs.coreutils pkgs.gnused ];
-    text = ''
-      dir=${lib.escapeShellArg cfg.dir}
-      user=${lib.escapeShellArg user}
-      controller=${lib.escapeShellArg (toString controller)}
-      [ -d "$dir" ] || exit 0
-      uid=$(id -u "$user")
-      cuid=""
-      [ -z "$controller" ] || cuid=$(id -u "$controller")
-
-      # Every named entry on $1 but the ones it may keep ($2: a regex of
-      # "default:user:UID" and "user:UID"), by number, so a user since
-      # removed is found too.
-      prune() {
-        local e
-        for e in $(getfacl -cpn -- "$1" | sed -nE 's/^(default:)?(user|group):([^:]+):.*/\1\2:\3/p'); do
-          [[ $e =~ ^($2)$ ]] || setfacl -x "''${e/#default:/d:}" -- "$1"
-        done
-      }
-
-      shopt -s nullglob dotglob
-      for f in "$dir" "$dir"/*; do
-        [ "$(stat -c %u -- "$f")" = "$uid" ] || chown -h "$user" -- "$f"
-        [ -L "$f" ] && continue
-        if [ -z "$cuid" ] || { [ -d "$f" ] && [ "$f" != "$dir" ]; }; then
-          [ -z "$(getfacl -cps -- "$f")" ] || setfacl -b -- "$f"
-        elif [ "$f" = "$dir" ]; then
-          prune "$f" "user:$cuid|default:user:($cuid|$uid)"
-        else
-          prune "$f" "user:$cuid"
-        fi
-      done
-      [ -n "$cuid" ] || exit 0
-
-      setfacl -m "u:$cuid:rwx,d:u:$cuid:rwx,d:u:$uid:rwx" -- "$dir"
-      [ ! -e "$dir/key" ] || setfacl --set "u::rw,g::---,o::---,u:$cuid:r,m::r" -- "$dir/key"
-      for f in ${lib.escapeShellArgs writable}; do
-        [ ! -e "$dir/$f" ] || setfacl -m "u:$cuid:rw" -- "$dir/$f"
-      done
-    '';
-  };
+  # producer joins (flow.producer). crates/burrow-ledger-access says which
+  # (the key read, the files Conary's writer opens in place written,
+  # etags no one's) and sets them whole, so a controller changed or turned
+  # off keeps nothing. It runs as root in a directory the controller may
+  # write, so it pins each entry without following a link and sets it
+  # through that alone. Run on each boot and switch (burrow-ledger-access),
+  # and once the first sync has made the key (burrow-ledger-access-key),
+  # which the directory's default entries don't reach.
+  access = lib.escapeShellArgs ([
+    "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-ledger-access}/bin/burrow-ledger-access"
+    cfg.dir user
+  ] ++ lib.optional (controller != null) controller);
   # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
   # private to the controller.
   flowData = "${config.burrow.stateDir}/flow";
@@ -797,7 +750,7 @@ in
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          ExecStart = lib.getExe access;
+          ExecStart = access;
         };
       };
       burrow-ledger-access-key = lib.mkIf (controller != null) {
@@ -807,7 +760,7 @@ in
           # Done once the key is there: a path unit whose service exits
           # would start it again at once.
           RemainAfterExit = true;
-          ExecStart = lib.getExe access;
+          ExecStart = access;
         };
       };
       burrow-ledger-door = lib.mkIf cfg.door.enable {

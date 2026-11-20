@@ -713,6 +713,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-ledger-access"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-ledger-door"
 version = "0.0.0"
 dependencies = [

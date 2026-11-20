@@ -1,0 +1,16 @@
+[package]
+name = "burrow-ledger-access"
+description = "The ledger's access, set as root on files it pins and never on what a name leads to: burrow.user's, and the flow's controller's"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

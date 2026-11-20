@@ -8,7 +8,8 @@
 # burrow.user's writers do (a flow with a train or evidence signs its ops),
 # through ACLs naming it: on a ledger set up after it, and on one that was
 # burrow.user's alone before. Nobody else gets the key, a producer in the
-# controller's group included, and a controller changed or turned off
+# controller's group included, a link the controller puts in the ledger
+# leads that access nowhere else, and a controller changed or turned off
 # keeps nothing. With the option off nothing changes.
 #
 # cn here is a stand-in that touches the ledger's files as Conary's writer
@@ -208,6 +209,33 @@ pkgs.testers.runNixOSTest {
             ["conary-flow", "after"], ["dev", "sam/r"],
             ["conary-flow", "again"], ["dev", "by-hand"],
         ], ops(on)
+        nobody_else_reads_the_key()
+
+    with subtest("a link the controller puts in the ledger leads its access nowhere"):
+        # Files outside the ledger, root's and burrow.user's own, and the
+        # ledger's key: the controller swaps a file it may write, and the
+        # key, for links to them, and the access runs again as root.
+        on.succeed("echo root >/var/lib/root-secret && chmod 600 /var/lib/root-secret")
+        on.succeed("echo dev >/var/lib/dev-secret && chown dev /var/lib/dev-secret && chmod 600 /var/lib/dev-secret")
+        as_flow = "runuser -u conary-flow -- sh -c"
+        on.succeed(f"{as_flow} 'ln -sfn /var/lib/root-secret {ledger}/merge-bases'")
+        on.succeed(f"{as_flow} 'ln -sfn {ledger}/key {ledger}/lock'")
+        on.succeed(f"{as_flow} 'ln -s /var/lib/dev-secret {ledger}/.k && mv -fT {ledger}/.k {ledger}/key'")
+        on.succeed("systemctl restart burrow-ledger-access.service")
+        for f, owner in [("/var/lib/root-secret", "root"), ("/var/lib/dev-secret", "dev")]:
+            assert on.succeed(f"stat -c '%U %a' {f}").strip() == f"{owner} 600", f
+            assert on.succeed(f"getfacl -cps {f}") == "", f
+            on.fail(f"runuser -u conary-flow -- cat {f}")
+        # The links are burrow.user's now, and still links.
+        assert on.succeed(f"stat -c '%U %F' {ledger}/merge-bases {ledger}/lock {ledger}/key") == "dev symbolic link\n" * 3
+        # The ledger as it was: the key back from the last sync's, and the
+        # files the writers open in place made again.
+        on.succeed(f"rm {ledger}/merge-bases {ledger}/lock {ledger}/key")
+        on.succeed(f"runuser -u dev -- sh -c 'head -c 32 /dev/urandom >{ledger}/key && chmod 600 {ledger}/key && touch {ledger}/lock {ledger}/merge-bases'")
+        on.succeed("systemctl restart burrow-ledger-access.service")
+        on.succeed("systemctl start flow@relinked.service")
+        on.succeed(f"runuser -u dev -- {env} cn sign by-hand")
+        assert ops(on)[-2:] == [["conary-flow", "relinked"], ["dev", "by-hand"]], ops(on)
         nobody_else_reads_the_key()
 
     def keeps_nothing(uid):
