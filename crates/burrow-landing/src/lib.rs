@@ -308,7 +308,7 @@ fn publish(
         return Ok(());
     }
     let next = last.map_or(0, |(n, _)| n) + 1;
-    replace(&c.serial, format!("{next} {hash}").as_bytes())
+    replace(&c.serial, format!("{next} {hash}\n").as_bytes())
 }
 
 fn replace(path: &Path, body: &[u8]) -> Result<(), String> {

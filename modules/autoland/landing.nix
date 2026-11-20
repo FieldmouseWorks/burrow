@@ -249,7 +249,7 @@ in
           # start no run of its own.
           script = ''
             # The serial is `N SHA256`: the count, and the file it counts.
-            count() { read -r n _ < ${serial} && echo "$n"; }
+            count() { cut -d' ' -f1 < ${serial}; }
             while :; do
               on=$(count)
               ${pkgs.systemd}/bin/systemctl restart conary-flow.service
