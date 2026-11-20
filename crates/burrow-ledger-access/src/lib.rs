@@ -65,12 +65,6 @@ impl Pinned {
     fn stat(&self) -> rustix::io::Result<Stat> {
         fs::fstat(&self.fd)
     }
-
-    fn is(&self, name: &str) -> bool {
-        self.name
-            .as_deref()
-            .is_some_and(|n| n.to_bytes() == name.as_bytes())
-    }
 }
 
 /// The directory `dir` and each of its entries, pinned, or `None` when
@@ -145,76 +139,121 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         return Ok(());
     }
     let dir = kind == FileType::Directory;
-    let Some(cuid) = access.controller else {
-        return strip(p, &st, dir);
-    };
     let path = p.proc();
     let now = read(&path, ACCESS)?;
-    let base = Base::of(st.st_mode, now.as_ref());
-    let (want, default) = if p.name.is_none() {
-        // The directory: the controller writes it, and what either writer
-        // makes in it takes both.
-        let rwx = 7;
-        let dbase = match read(&path, DEFAULT)? {
-            Some(d) => Base::of(0, Some(&d)),
-            None => base,
-        };
-        let default = dbase.with(&[(cuid, rwx), (access.owner, rwx)], dbase.group | rwx);
-        (base.with(&[(cuid, rwx)], base.group | rwx), Some(default))
-    } else if dir {
-        return strip(p, &st, dir);
-    } else if p.is("key") {
-        // Set whole: the owner reads and writes it, the controller reads
-        // it, and no one else, its owning group included.
-        let key = Base {
-            user: 6,
-            group: 0,
-            other: 0,
-        };
-        (key.with(&[(cuid, 4)], 4), None)
-    } else if WRITABLE.iter().any(|w| p.is(w)) {
-        (base.with(&[(cuid, 6)], base.group | 6), None)
-    } else {
-        // Anything else keeps the controller's entry its default gave it,
-        // and no one else's, through the mask it has.
-        let Some(now) = &now else { return Ok(()) };
-        let named = |e: &Entry| matches!(e.tag, USER | GROUP);
-        let kept: Vec<Entry> = now
-            .0
-            .iter()
-            .copied()
-            .filter(|e| !named(e) || e.tag == USER && e.id == cuid)
-            .collect();
-        match kept.iter().find(|e| e.tag == USER) {
-            None => return strip(p, &st, dir),
-            Some(_) => (Acl(kept), None),
-        }
+    let default_now = if dir { read(&path, DEFAULT)? } else { None };
+    let what = match (p.name.as_deref(), dir) {
+        (None, _) => What::Ledger,
+        (Some(_), true) => What::Dir,
+        (Some(name), false) => What::File(name.to_bytes()),
     };
-    if now.as_ref() != Some(&want) {
-        fs::setxattr(&path, ACCESS, &want.encode(), XattrFlags::empty())?;
+    let want = want(access, what, st.st_mode, now.as_ref(), default_now.as_ref());
+    match (&want.access, &now) {
+        (Some(want), now) if now.as_ref() != Some(want) => {
+            fs::setxattr(&path, ACCESS, &want.encode(), XattrFlags::empty())?;
+        }
+        // As `setfacl -b` leaves it: the mode's group bits are the owning
+        // group's again, not the mask's.
+        (None, Some(now)) => {
+            let base = Base::of(st.st_mode, Some(now));
+            fs::removexattr(&path, ACCESS)?;
+            let mode = (st.st_mode & 0o7000) | base.mode();
+            fs::chmod(&path, Mode::from_raw_mode(mode))?;
+        }
+        _ => {}
     }
-    if let Some(default) = default
-        && read(&path, DEFAULT)?.as_ref() != Some(&default)
-    {
-        fs::setxattr(&path, DEFAULT, &default.encode(), XattrFlags::empty())?;
+    match (&want.default, &default_now) {
+        (Some(want), now) if now.as_ref() != Some(want) => {
+            fs::setxattr(&path, DEFAULT, &want.encode(), XattrFlags::empty())?;
+        }
+        (None, Some(_)) => fs::removexattr(&path, DEFAULT)?,
+        _ => {}
     }
     Ok(())
 }
 
-/// No ACL at all, as `setfacl -b` leaves it: the mode's group bits are the
-/// owning group's again, not the mask's.
-fn strip(p: &Pinned, st: &Stat, dir: bool) -> rustix::io::Result<()> {
-    let path = p.proc();
-    if let Some(now) = read(&path, ACCESS)? {
-        let base = Base::of(st.st_mode, Some(&now));
-        fs::removexattr(&path, ACCESS)?;
-        let mode = (st.st_mode & 0o7000) | base.mode();
-        fs::chmod(&path, Mode::from_raw_mode(mode))?;
+/// Which of the ledger's entries an inode is.
+#[derive(Clone, Copy, Debug)]
+enum What<'a> {
+    /// The ledger's directory itself.
+    Ledger,
+    /// A directory in it (etags).
+    Dir,
+    /// A file in it, by its name.
+    File(&'a [u8]),
+}
+
+/// The ACLs an entry should have (`None`: none at all).
+#[derive(Debug, PartialEq, Eq)]
+struct Want {
+    access: Option<Acl>,
+    default: Option<Acl>,
+}
+
+/// What `what`, with `mode` and the access and default ACLs it has now,
+/// should have.
+fn want(
+    access: &Access,
+    what: What,
+    mode: u32,
+    now: Option<&Acl>,
+    default_now: Option<&Acl>,
+) -> Want {
+    let none = Want {
+        access: None,
+        default: None,
+    };
+    let Some(cuid) = access.controller else {
+        return none;
+    };
+    let base = Base::of(mode, now);
+    let only = |acl| Want {
+        access: Some(acl),
+        default: None,
+    };
+    match what {
+        // The controller writes it, and what either writer makes in it
+        // takes both.
+        What::Ledger => {
+            let rwx = 7;
+            let dbase = default_now.map_or(base, |d| Base::of(0, Some(d)));
+            Want {
+                access: Some(base.with(&[(cuid, rwx)], base.group | rwx)),
+                default: Some(dbase.with(&[(cuid, rwx), (access.owner, rwx)], dbase.group | rwx)),
+            }
+        }
+        What::Dir => none,
+        // Set whole: the owner reads and writes it, the controller reads
+        // it, and no one else, its owning group included.
+        What::File(b"key") => {
+            let key = Base {
+                user: 6,
+                group: 0,
+                other: 0,
+            };
+            only(key.with(&[(cuid, 4)], 4))
+        }
+        What::File(name) if WRITABLE.iter().any(|w| w.as_bytes() == name) => {
+            only(base.with(&[(cuid, 6)], base.group | 6))
+        }
+        // Anything else keeps the controller's entry its default gave it,
+        // and no one else's, through the mask it has.
+        What::File(_) => {
+            let Some(now) = now else { return none };
+            let named = |e: &Entry| matches!(e.tag, USER | GROUP);
+            let kept: Vec<Entry> = now
+                .0
+                .iter()
+                .copied()
+                .filter(|e| !named(e) || e.tag == USER && e.id == cuid)
+                .collect();
+            if kept.iter().any(named) {
+                only(Acl(kept))
+            } else {
+                none
+            }
+        }
     }
-    if dir && read(&path, DEFAULT)?.is_some() {
-        fs::removexattr(&path, DEFAULT)?;
-    }
-    Ok(())
 }
 
 /// The ACL `name` of the inode at `path`, if it has one.
@@ -222,7 +261,9 @@ fn read(path: &str, name: &str) -> rustix::io::Result<Option<Acl>> {
     let mut buf = vec![0u8; 65536];
     match fs::getxattr(path, name, &mut buf[..]) {
         Ok(n) => Acl::decode(&buf[..n]).map(Some).ok_or(Errno::INVAL),
-        Err(Errno::NODATA) => Ok(None),
+        // A file system without ACLs has none to take away: setting one
+        // there still fails.
+        Err(Errno::NODATA | Errno::NOTSUP) => Ok(None),
         Err(e) => Err(e),
     }
 }
