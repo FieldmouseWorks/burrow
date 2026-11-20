@@ -117,13 +117,20 @@ fn write_answer(output: &mut dyn Write, a: &Answer, headers: &str) -> io::Result
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
-    write!(
+    let answered = write!(
         output,
         "HTTP/1.0 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
         a.status,
         body.len()
-    )?;
-    output.flush()
+    )
+    .and_then(|()| output.flush());
+    match answered {
+        // The client left before its answer (nginx reloaded or restarted
+        // mid-upload). An upload is already in the store or refused, and
+        // there's no one left to tell: that's not a failed door.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
 }
 
 /// The head of a request: its method, and the headers the door reads.
