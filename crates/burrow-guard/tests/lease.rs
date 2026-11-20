@@ -1,0 +1,272 @@
+//! Two jobs on one PR branch (FieldmouseWorks/burrow#1072): one pushes a
+//! fix, the other fetches, rebuilds the branch from its own stale copy and
+//! force-pushes. The guard refuses every push that would drop the fix, and
+//! what it lets through git refuses until the fix is taken in.
+
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+use burrow_guard::config::Config;
+use burrow_guard::{Guard, Hook, Input};
+
+fn git_at(dir: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args([
+            "-c",
+            "user.name=Invented",
+            "-c",
+            "user.email=invented@example.invalid",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = git_at(dir, args);
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// `cmd` run by the shell in `dir`, as the job's Bash tool would.
+fn sh(dir: &Path, cmd: &str) -> Output {
+    Command::new("sh")
+        .args(["-c", cmd])
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// What the guard refuses `cmd` for, run in `cwd`.
+fn refusal(cmd: &str, cwd: &Path) -> Option<String> {
+    let config = Config {
+        git: "git".into(),
+        zfs: "/no-such-zfs".into(),
+        snapshot_datasets: Vec::new(),
+        ask_after_seconds: 8,
+    };
+    let guard = Guard {
+        config: &config,
+        mark: cwd.join("mark"),
+    };
+    guard.refusal(&Hook {
+        tool_name: Some("Bash".to_owned()),
+        tool_input: Some(Input {
+            command: Some(cmd.to_owned()),
+        }),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+    })
+}
+
+/// Whether the remote's `pr` holds `commit`.
+fn holds(remote: &Path, commit: &str) -> bool {
+    git_at(
+        remote,
+        &["merge-base", "--is-ancestor", commit, "refs/heads/pr"],
+    )
+    .status
+    .success()
+}
+
+#[test]
+fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = root.path().join("remote.git");
+    let (stale, fixer) = (root.path().join("stale"), root.path().join("fixer"));
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    git(root.path(), &["clone", "-q", "remote.git", "stale"]);
+    git(&stale, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&stale, &["push", "-q", "origin", "main"]);
+    git(&stale, &["checkout", "-q", "-b", "pr"]);
+    git(
+        &stale,
+        &["commit", "-q", "--allow-empty", "-m", "the change"],
+    );
+    git(&stale, &["push", "-q", "-u", "origin", "pr"]);
+    let seen = git(&stale, &["rev-parse", "HEAD"]);
+
+    // The other job fixes the PR's findings and pushes.
+    git(
+        root.path(),
+        &["clone", "-q", "-b", "pr", "remote.git", "fixer"],
+    );
+    git(&fixer, &["commit", "-q", "--allow-empty", "-m", "the fix"]);
+    git(&fixer, &["push", "-q", "origin", "pr"]);
+    let fix = git(&fixer, &["rev-parse", "HEAD"]);
+
+    // This one fetches (main moved), and rebuilds pr from its own copy.
+    git(&stale, &["fetch", "-q", "origin"]);
+    git(
+        &stale,
+        &["commit", "-q", "--amend", "--allow-empty", "-m", "rebuilt"],
+    );
+
+    // Each way to force it, which git would let through over the fix: the
+    // guard refuses them all.
+    for cmd in [
+        "git push -f origin pr",
+        "git push --force",
+        "git push origin +pr",
+        "git push --force-with-lease origin pr",
+        "git push --force-with-lease=pr origin pr",
+        "git push --force-with-lease=pr:origin/pr origin pr",
+        "git push --force-with-lease --force-if-includes -f origin pr",
+        "git push --force-with-lease --force-if-includes origin +pr",
+        // Its remote configured to force, which overrides the lease.
+        "git -c remote.origin.push=+refs/heads/pr:refs/heads/pr push --force-with-lease --force-if-includes origin pr",
+        // A force the guard can't read, or one among words from input.
+        "git push $(printf -- -f) origin pr",
+        "git push origin pr$(printf ' -f')",
+        "printf '%s\\n' pr | xargs git push -f origin",
+        // A bare lease where the named one covers another ref, and two
+        // named leases on one ref, of which git takes the first.
+        &format!("git push --force-with-lease --force-with-lease=other:{seen} origin pr"),
+        &format!("git push --force-with-lease=pr --force-with-lease=pr:{seen} origin pr"),
+    ] {
+        assert!(refusal(cmd, &stale).is_some(), "{cmd}");
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
+        let out = sh(&stale, &dry);
+        assert!(
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout).contains("+\trefs/heads/pr"),
+            "{cmd} would have been refused by git anyway: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // What the guard lets through, git refuses: the fix stays.
+    for cmd in [
+        "git push --force-with-lease --force-if-includes origin pr",
+        "git push --force-with-lease=pr --force-if-includes origin HEAD:pr",
+        &format!("git push --force-with-lease=pr:{seen} origin pr"),
+        // A bare lease beside a named one that covers what it pushes.
+        &format!("git push --force-with-lease --force-with-lease=pr:{seen} origin pr"),
+        &format!("git push --force-with-lease=pr:{seen} --force-with-lease origin pr"),
+    ] {
+        assert_eq!(refusal(cmd, &stale), None, "{cmd}");
+        assert!(!sh(&stale, cmd).status.success(), "{cmd}");
+        assert!(holds(&remote, &fix), "{cmd} dropped the fix");
+    }
+
+    // Once the fix is taken in, the leased push goes through, fix and all.
+    git(&stale, &["reset", "-q", "--hard", "origin/pr"]);
+    git(
+        &stale,
+        &[
+            "commit",
+            "-q",
+            "--amend",
+            "--allow-empty",
+            "-m",
+            "fix, amended",
+        ],
+    );
+    git(&stale, &["rebase", "-q", "origin/main"]);
+    let cmd = "git push --force-with-lease --force-if-includes origin pr";
+    assert_eq!(refusal(cmd, &stale), None);
+    let out = sh(&stale, cmd);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/pr"]),
+        git(&stale, &["rev-parse", "HEAD"])
+    );
+}
+
+/// A source alone, which git's configuration maps onto another branch: a
+/// named lease on the source doesn't cover it, and the bare one beside it
+/// lets the push force over that branch's fix.
+#[test]
+fn a_named_lease_doesnt_cover_a_branch_git_maps_its_source_onto() {
+    let root = tempfile::tempdir().unwrap();
+    let (local, fixer) = (root.path().join("local"), root.path().join("fixer"));
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    git(root.path(), &["clone", "-q", "remote.git", "local"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&local, &["push", "-q", "origin", "main", "main:other"]);
+    let base = git(&local, &["rev-parse", "HEAD"]);
+    git(
+        root.path(),
+        &["clone", "-q", "-b", "other", "remote.git", "fixer"],
+    );
+    git(&fixer, &["commit", "-q", "--allow-empty", "-m", "the fix"]);
+    git(&fixer, &["push", "-q", "origin", "other"]);
+    git(&local, &["fetch", "-q", "origin"]);
+    git(&local, &["checkout", "-q", "-b", "pr"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "rebuilt"]);
+    git(&local, &["branch", "-q", "--set-upstream-to=origin/other"]);
+
+    for config in [
+        "remote.origin.push=refs/heads/pr:refs/heads/other",
+        "push.default=upstream",
+    ] {
+        let cmd = format!(
+            "git -c {config} push --force-with-lease --force-with-lease=pr:{base} origin pr"
+        );
+        assert!(refusal(&cmd, &local).is_some(), "{cmd}");
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
+        let out = sh(&local, &dry);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("+\trefs/heads/pr:refs/heads/other"),
+            "{cmd} would not have forced over the fix: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// A delete beside `--tags` isn't a push that only deletes: git pushes
+/// every tag with it, forced over the remote's by `-f`.
+#[test]
+fn a_delete_beside_tags_is_held_to_a_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join("local");
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    git(root.path(), &["clone", "-q", "remote.git", "local"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&local, &["tag", "v1"]);
+    git(&local, &["push", "-q", "origin", "main", "main:old", "v1"]);
+    // The tag moves here, and the remote still holds the one it had.
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "next"]);
+    git(&local, &["tag", "-f", "v1"]);
+
+    for cmd in [
+        "git push -f origin :old --tags",
+        "git push --force origin --tags :old",
+    ] {
+        assert!(refusal(cmd, &local).is_some(), "{cmd}");
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
+        let out = sh(&local, &dry);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success()
+                && said.contains("+\trefs/tags/v1")
+                && said.contains("-\t:refs/heads/old"),
+            "{cmd} would not have forced the tag: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

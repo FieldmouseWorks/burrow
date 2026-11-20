@@ -63,7 +63,10 @@ Each has an entry below, and each can be imported on its own.
   commands doesn't have that check refuse them; the one-way doors still ask
   first. A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  branch. It refuses any branch's force-push with no lease on the head its
+  pusher saw (`--force-with-lease --force-if-includes`, or one naming the
+  commit), so a job can't drop what another pushed to the same PR. Also
+  writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.

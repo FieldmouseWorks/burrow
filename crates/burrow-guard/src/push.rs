@@ -2,6 +2,15 @@
 //! every other clone depends on. What a push targets is read from its
 //! refspecs, or, with none, from the branch checked out where it runs and
 //! that branch's upstream (`git push --force` on main).
+//!
+//! And any branch's forced update is refused unless it holds a lease on
+//! the head its pusher saw (lease.rs): two jobs, or a job and a session,
+//! can work on one PR, and a force-push rebuilt from a stale branch drops
+//! whatever the other pushed since.
+
+mod lease;
+
+pub use lease::unleased;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -29,6 +38,19 @@ pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
 }
 
 fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
+    let mut places = Places {
+        git,
+        seen: HashMap::new(),
+    };
+    let mut asks = Vec::new();
+    for (at, push) in pushes(cmd, cwd)? {
+        asks.extend(push.ask(&at, &mut places)?);
+    }
+    Ok(asks)
+}
+
+/// Each push in `cmd`, with where it runs.
+fn pushes(cmd: &str, cwd: &Path) -> Result<Vec<(PathBuf, Push)>, Unread> {
     let mut found = Vec::new();
     walk::walk(cmd, &mut |word, rest, budget, more| {
         if runs_git(word, rest.iter(budget).next())
@@ -39,15 +61,7 @@ fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
         }
         Ok(())
     })?;
-    let mut places = Places {
-        git,
-        seen: HashMap::new(),
-    };
-    let mut asks = Vec::new();
-    for (at, push) in found {
-        asks.extend(push.ask(&at, &mut places)?);
-    }
-    Ok(asks)
+    Ok(found)
 }
 
 /// How many places a command's pushes with no refspec may ask git about.
@@ -73,9 +87,17 @@ pub fn runs_git(word: &str, next: Option<&String>) -> bool {
 /// a push the guard can't read.
 fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<(PathBuf, Push)> {
     let mut at = cwd.to_path_buf();
+    let mut repo = Repo::default();
     // Every word it reads, an option's value too.
     let globbed = Cell::new(false);
-    let mut words = words.inspect(|w| globbed.set(globbed.get() || shell::globs(w)));
+    // Every word it reads, push's own too: one with an expansion in it, git's
+    // or push's, may split into any words, options among them, unless it's
+    // quoted, which the guard no longer sees.
+    let expanded = Cell::new(false);
+    let mut words = words.inspect(|w| {
+        globbed.set(globbed.get() || shell::globs(w));
+        expanded.set(expanded.get() || unknown(w));
+    });
     let unread = || {
         let push = Push {
             globbed: true,
@@ -86,14 +108,27 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
     while let Some(w) = words.next() {
         match w.as_str() {
             _ if globbed.get() => return unread(),
-            "push" => return Some((at, Push::read(words))),
+            "push" => {
+                let mut push = Push::read(words);
+                push.repo = repo;
+                push.unread = expanded.get();
+                return Some((at, push));
+            }
             "-C" => at = at.join(words.next()?),
+            "-c" => repo.config(words.next()?),
+            "--config-env" => repo.config_env(words.next()?),
+            "--git-dir" | "--work-tree" => {
+                let value = words.next()?;
+                repo.place(&format!("{w}={value}"));
+            }
+            "--bare" => repo.place(w),
+            w if w.starts_with("--git-dir=") || w.starts_with("--work-tree=") => repo.place(w),
+            w if let Some(setting) = w.strip_prefix("--config-env=") => repo.config_env(setting),
             // Options whose value is the next word.
-            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
-            | "--attr-source" | "--super-prefix" => {
+            "--namespace" | "--attr-source" | "--super-prefix" => {
                 words.next();
             }
-            w if w.starts_with('-') || w.contains(['$', shell::UNKNOWN]) => {}
+            w if w.starts_with('-') || unknown(w) => {}
             _ => return None,
         }
     }
@@ -114,6 +149,100 @@ struct Push {
     /// whatever files match it: any number of words, which may force
     /// (`-f`, `+…`) and name any branch.
     globbed: bool,
+    /// A word the guard can't read, its own or git's: an expansion, which may
+    /// be any words, options and refspecs among them (`$(printf -- -f)`,
+    /// `pr$(printf ' -f')`, `-c x=$(…)`).
+    unread: bool,
+    /// The remote `--repo` names, used where no word names one.
+    remote: Option<String>,
+    /// Its forcing options as git reads them, for lease.rs.
+    lease: Lease,
+    /// Where git reads its configuration, for lease.rs.
+    repo: Repo,
+}
+
+/// git's options ahead of `push` that say which repository it is and how
+/// it's configured, as lease.rs asks git about them.
+#[derive(Debug, Default)]
+struct Repo {
+    /// Each, for git to read the configuration with: `-c` settings,
+    /// `--git-dir`, `--work-tree` and `--bare`.
+    args: Vec<String>,
+    /// A setting from `--config-env` that may configure a push, whose value
+    /// is the environment's, which the guard doesn't see.
+    unread: bool,
+}
+
+impl Repo {
+    /// `-c KEY=VALUE`. One with an expansion in it is left out: its push
+    /// is unread anyway (see [`Push::unread`]).
+    fn config(&mut self, setting: &str) {
+        if !unknown(setting) {
+            self.args.extend(["-c".to_owned(), setting.to_owned()]);
+        }
+    }
+
+    /// `--config-env KEY=ENVVAR`: the value is the environment's, which the
+    /// guard doesn't see.
+    fn config_env(&mut self, setting: &str) {
+        self.unread |= configures_a_push(setting);
+    }
+
+    /// `--git-dir`, `--work-tree` or `--bare`.
+    fn place(&mut self, option: &str) {
+        self.args.push(option.to_owned());
+    }
+}
+
+/// Whether the `KEY=…` setting can configure a push: a remote's, or one
+/// that reads in other files (`include.path`, `includeIf.….path`).
+fn configures_a_push(setting: &str) -> bool {
+    let key = setting.split('=').next().unwrap_or_default();
+    let key = key.to_ascii_lowercase();
+    key.starts_with("remote.") || key.starts_with("include")
+}
+
+/// Whether `word` holds an expansion the guard doesn't read: a parameter
+/// or a substitution.
+fn unknown(word: &str) -> bool {
+    word.contains(['$', shell::UNKNOWN])
+}
+
+/// What a push forces with, as git reads its options: the last of each
+/// wins.
+#[derive(Debug, Default)]
+struct Lease {
+    /// git's force bit, which overrides any lease: `-f` and `--force` set
+    /// it, `--no-force` clears it, and `--mirror` and `--no-mirror` set and
+    /// clear it with the mirror bit (`OPT_BIT` in git's builtin/push.c), so
+    /// `-f --no-mirror` forces nothing.
+    force: bool,
+    /// `-d` or `--delete` (undone by a later `--no-delete`): every refspec
+    /// deletes.
+    delete: bool,
+    /// Each `--force-with-lease` since the last `--no-force-with-lease`.
+    leases: Vec<Expect>,
+    /// `--force-if-includes` (undone by a later `--no-force-if-includes`).
+    if_includes: bool,
+    /// What it pushes beyond its refspecs, each undone by its `--no-`:
+    /// `--tags` (every tag, beside its refspecs), `--all` or `--branches`
+    /// (one bit), and `--mirror`.
+    tags: bool,
+    all: bool,
+    mirror: bool,
+}
+
+/// One `--force-with-lease`, as git keeps it (`push_cas` in git's
+/// remote.c): for each ref it updates, git takes the first entry that
+/// names it, and the bare form only for a ref none names.
+#[derive(Debug)]
+struct Expect {
+    /// The ref it names (`=REF[:…]`), or None for the bare form, which
+    /// covers every ref no other entry names.
+    refname: Option<String>,
+    /// The object it expects (`=REF:OBJECT`), or None for the
+    /// remote-tracking ref's.
+    object: Option<String>,
 }
 
 impl Push {
@@ -135,14 +264,26 @@ impl Push {
                 w if shell::is_only_a_parameter_text(w) => {}
                 w if let Some(option) = w.strip_prefix("--") => {
                     let (name, value) = option.split_once('=').unzip();
-                    match long(name.unwrap_or(option)) {
-                        Long::Force => p.force = true,
-                        Long::All => p.all = true,
-                        Long::Everything => (p.force, p.all) = (true, true),
-                        Long::Value if value.is_none() => {
-                            words.next();
+                    let name = name.unwrap_or(option);
+                    p.lease.read(name, value);
+                    let value = match long(name) {
+                        Long::Force => {
+                            p.force = true;
+                            value
                         }
-                        Long::Value | Long::Other => {}
+                        Long::All => {
+                            p.all = true;
+                            value
+                        }
+                        Long::Everything => {
+                            (p.force, p.all) = (true, true);
+                            value
+                        }
+                        Long::Value if value.is_none() => words.next().map(String::as_str),
+                        Long::Value | Long::Other => value,
+                    };
+                    if resolve(name) == Some("repo") {
+                        p.remote = value.map(str::to_owned);
                     }
                 }
                 // Short options, apart or together: `-f`, `-d` and `-uf`
@@ -150,7 +291,8 @@ impl Push {
                 w if w.starts_with('-') => {
                     for (i, c) in w.char_indices().skip(1) {
                         match c {
-                            'f' | 'd' => p.force = true,
+                            'f' => (p.force, p.lease.force) = (true, true),
+                            'd' => (p.force, p.lease.delete) = (true, true),
                             'o' => {
                                 if i + 1 == w.len() {
                                     words.next();
@@ -345,13 +487,20 @@ const LONG: [(&str, Long); 28] = [
 /// forces nothing, and one that's unknown or could be several stops git
 /// before it pushes.
 fn long(name: &str) -> Long {
-    if let Some(&(_, long)) = LONG.iter().find(|(n, _)| *n == name) {
-        return long;
+    resolve(name)
+        .and_then(|name| LONG.iter().find(|(n, _)| *n == name))
+        .map_or(Long::Other, |&(_, long)| long)
+}
+
+/// The full name of the option `--NAME`, if git takes it for one.
+fn resolve(name: &str) -> Option<&'static str> {
+    if let Some(&(n, _)) = LONG.iter().find(|(n, _)| *n == name) {
+        return Some(n);
     }
     let mut begun = LONG.iter().filter(|(n, _)| n.starts_with(name));
     match (begun.next(), begun.next()) {
-        (Some(&(_, long)), None) => long,
-        _ => Long::Other,
+        (Some(&(n, _)), None) => Some(n),
+        _ => None,
     }
 }
 
