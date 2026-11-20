@@ -15,7 +15,6 @@ use conary_core::plugin::{Judgment, Request, Trigger};
 use serde_json::{Value, json};
 use std::io::Write as _;
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -49,7 +48,7 @@ fn stand_in(dir: &Path) -> PathBuf {
     let seen = dir.join("seen");
     std::fs::create_dir_all(&seen).unwrap();
     let path = dir.join("claude");
-    std::fs::write(
+    burrow_test::executable(
         &path,
         format!(
             r#"#!{bash}
@@ -74,9 +73,7 @@ cat {prints}
             seen = seen.display(),
             prints = dir.join("prints").display(),
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     std::fs::write(dir.join("prints"), printed("pass", "a-model").to_string()).unwrap();
     path
 }
