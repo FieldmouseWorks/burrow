@@ -56,6 +56,14 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The hooks' secret in tests: made as they run, as a real one is, never
+/// written in the source.
+#[cfg(test)]
+pub(crate) fn test_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| format!("hook-{}-{}", std::process::id(), now()))
+}
+
 /// The time now, in seconds since the epoch, as the wake files have it.
 pub fn now() -> f64 {
     SystemTime::now()

@@ -102,8 +102,11 @@ impl Machine {
 
     /// conaryd started again on the events file as it is now, as
     /// conary-flow-given says once it has.
+    /// conaryd started again, on the publication the serial counts, as
+    /// conary-flow-given says once it has.
     fn started(&self) {
-        fs::copy(&self.c().serial, &self.c().started).unwrap();
+        let serial = fs::read_to_string(&self.c().serial).unwrap();
+        fs::write(&self.c().started, serial.split_whitespace().next().unwrap()).unwrap();
     }
 
     fn c(&self) -> &Conaryd {
@@ -391,6 +394,32 @@ fn a_restart_counts_for_one_publication_only() {
     m.set("steward");
     assert!(m.run(&mut kicks).waiting.contains(REPO));
     assert_eq!(fs::read(&m.c().events).unwrap(), without);
+    assert!(!m.holding().lands(Owner::Steward) && m.given().is_empty());
+    m.started();
+    assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));
+}
+
+#[test]
+fn a_publication_cut_short_is_counted_before_it_can_count_as_a_restart() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    m.run(&mut kicks);
+    m.started();
+    let serial = fs::read(&m.c().serial).unwrap();
+    m.set("steward");
+    m.run(&mut kicks);
+    // As if the run had been cut short between the file and its count:
+    // conaryd's acknowledgment of the old count still matches the count.
+    fs::write(&m.c().serial, &serial).unwrap();
+    m.started();
+    let moved = m.run(&mut kicks);
+    assert!(
+        moved.waiting.contains(REPO),
+        "an old restart counted for a new file"
+    );
     assert!(!m.holding().lands(Owner::Steward) && m.given().is_empty());
     m.started();
     assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));

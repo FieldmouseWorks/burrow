@@ -66,9 +66,11 @@ pub struct Conaryd {
     pub events_template: PathBuf,
     /// The events file conaryd reads, the template with its repos.
     pub events: PathBuf,
-    /// Counts the events file's publications: written after each one, so
-    /// the number conaryd started on names one publication, never two
-    /// that happen to hold the same repos.
+    /// Counts the events file's publications, `N SHA256`: the count, and
+    /// the hash of the file it counts. Written after each one, so the
+    /// number conaryd started on names one publication, never two that
+    /// happen to hold the same repos; and a file replaced without its
+    /// count (a run cut short between the two) is seen, and counted.
     pub serial: PathBuf,
     /// The serial conaryd last started on, written once it has
     /// (autoland/landing.nix's conary-flow-given).
@@ -230,20 +232,39 @@ fn restarted(cfg: &Config) -> Result<bool, String> {
     let Some(c) = &cfg.conaryd else {
         return Ok(true);
     };
-    let serial = read_serial(&c.serial)?;
-    Ok(serial.is_some() && read_serial(&c.started)? == serial)
+    // A publication whose count wasn't written yet is none conaryd can
+    // have started on.
+    let Some((serial, hash)) = read_serial(&c.serial)? else {
+        return Ok(false);
+    };
+    let started = read_serial(&c.started)?.map(|(n, _)| n);
+    Ok(hash.as_deref() == Some(&hash_of(&c.events)?) && started == Some(serial))
 }
 
-fn read_serial(path: &Path) -> Result<Option<u64>, String> {
+/// `N` or `N HASH`, as the serial and conaryd's acknowledgment hold them.
+fn read_serial(path: &Path) -> Result<Option<(u64, Option<String>)>, String> {
     match std::fs::read_to_string(path) {
-        Ok(s) => s
-            .trim()
-            .parse()
-            .map(Some)
-            .map_err(|e| format!("{}: {e}", path.display())),
+        Ok(s) => {
+            let mut words = s.split_whitespace();
+            let n = words
+                .next()
+                .unwrap_or_default()
+                .parse()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(Some((n, words.next().map(str::to_owned))))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
+}
+
+fn hash_of(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// The record, then conaryd's events file from it: the repos the record
@@ -275,14 +296,19 @@ fn publish(
         .collect::<Result<_, String>>()?;
     let mut body = serde_json::to_vec_pretty(&runtime).map_err(|e| e.to_string())?;
     body.push(b'\n');
-    if std::fs::read(events).ok().as_deref() == Some(&body[..]) {
+    if std::fs::read(events).ok().as_deref() != Some(&body[..]) {
+        replace(events, &body)?;
+    }
+    // Then its count, after the file it counts, so a serial names a
+    // publication that's already there; written again for a file a run
+    // cut short replaced without it.
+    let hash = hash_of(events)?;
+    let last = read_serial(&c.serial)?;
+    if last.as_ref().and_then(|(_, h)| h.as_deref()) == Some(&hash) {
         return Ok(());
     }
-    replace(events, &body)?;
-    // After the file it counts, so a serial names a publication that's
-    // already there.
-    let next = read_serial(&c.serial)?.unwrap_or(0) + 1;
-    replace(&c.serial, next.to_string().as_bytes())
+    let next = last.map_or(0, |(n, _)| n) + 1;
+    replace(&c.serial, format!("{next} {hash}").as_bytes())
 }
 
 fn replace(path: &Path, body: &[u8]) -> Result<(), String> {

@@ -62,7 +62,10 @@ at the same time:
    - conaryd is quiet once three things hold. It has started again since
      the events file was last published without the repo, which a
      publication serial shows; matching contents isn't enough, because a
-     quick hand-over-and-back republishes the same file. A pass reads its
+     quick hand-over-and-back republishes the same file. The serial also
+     names the hash of the file it counts, so a file replaced by a run cut
+     short before its count was written is counted at the next run, and
+     never taken for one conaryd has started on. A pass reads its
      repos before it takes the repo's lock, so until the restart, a pass
      that read the old file could still start. No pass holds the flow's repository lock. Every
      worker it launched there has exited. The last two are Conary's own

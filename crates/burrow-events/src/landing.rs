@@ -219,7 +219,7 @@ mod tests {
         let (hs, ls) = (handlers.clone(), lines.clone());
         let (hooks, _) = listen(
             0,
-            Arc::new(move |req| delivery(&hs, &ls, landing.as_ref(), "hook-secret", req)),
+            Arc::new(move |req| delivery(&hs, &ls, landing.as_ref(), crate::test_secret(), req)),
         )
         .unwrap();
         let (hs, ls) = (handlers.clone(), lines.clone());
@@ -240,7 +240,7 @@ mod tests {
             "/burrow/hook",
             BODY,
             &[
-                ("X-Hub-Signature-256", &sign("hook-secret", BODY)),
+                ("X-Hub-Signature-256", &sign(crate::test_secret(), BODY)),
                 ("X-GitHub-Event", "pull_request"),
                 ("X-GitHub-Delivery", "d-1"),
                 ("Content-Type", "application/json"),
@@ -360,7 +360,7 @@ mod tests {
         let (head, body) = got[0].split_once("\r\n\r\n").unwrap();
         assert_eq!(body.as_bytes(), BODY);
         for h in [
-            format!("X-Hub-Signature-256: {}", sign("hook-secret", BODY)),
+            format!("X-Hub-Signature-256: {}", sign(crate::test_secret(), BODY)),
             "X-GitHub-Event: pull_request".into(),
             "X-GitHub-Delivery: d-1".into(),
             "Content-Type: application/json".into(),

@@ -245,13 +245,15 @@ in
           # changed under it, since a change that comes while this runs may
           # start no run of its own.
           script = ''
+            # The serial is `N SHA256`: the count, and the file it counts.
+            count() { read -r n _ < ${serial} && echo "$n"; }
             while :; do
-              on=$(cat ${serial})
+              on=$(count)
               ${pkgs.systemd}/bin/systemctl restart conary-flow.service
               printf %s "$on" > ${started}.pending
               chmod 0644 ${started}.pending
               mv ${started}.pending ${started}
-              [ "$(cat ${serial})" = "$on" ] && break
+              [ "$(count)" = "$on" ] && break
             done
           '';
         };

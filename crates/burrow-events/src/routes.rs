@@ -143,7 +143,7 @@ mod tests {
         let (hs, ls) = (handlers.clone(), lines.clone());
         let (hooks, _) = listen(
             0,
-            Arc::new(move |req| delivery(&hs, &ls, None, "hook-secret", req)),
+            Arc::new(move |req| delivery(&hs, &ls, None, crate::test_secret(), req)),
         )
         .unwrap();
         let (hs, ls) = (handlers.clone(), lines.clone());
@@ -182,7 +182,7 @@ mod tests {
 
     fn signed_delivery(port: u16, payload: serde_json::Value, event: &str) -> u16 {
         let body = payload.to_string().into_bytes();
-        deliver(port, &body, &sign("hook-secret", &body), event)
+        deliver(port, &body, &sign(crate::test_secret(), &body), event)
     }
 
     // Deliveries go to the handlers that take their event; forged ones, and
@@ -191,7 +191,7 @@ mod tests {
     fn deliveries() {
         let (_h, lines, hooks, _k) = setup();
         let body = br#"{"repository": {"full_name": "sam/r"}}"#;
-        let sig = sign("hook-secret", body);
+        let sig = sign(crate::test_secret(), body);
         assert_eq!(
             deliver(hooks, body, &format!("sha256={}", "0".repeat(64)), "push"),
             401
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(signed_delivery(hooks, json!(["sam/r"]), "push"), 204);
         let junk = b"not json";
         assert_eq!(
-            deliver(hooks, junk, &sign("hook-secret", junk), "push"),
+            deliver(hooks, junk, &sign(crate::test_secret(), junk), "push"),
             204
         );
         assert_eq!(
@@ -333,7 +333,7 @@ mod tests {
                 "/burrow/hook",
                 body,
                 &[
-                    ("X-Hub-Signature-256", &sign("hook-secret", body)),
+                    ("X-Hub-Signature-256", &sign(crate::test_secret(), body)),
                     ("X-GitHub-Event", "push")
                 ]
             ),
