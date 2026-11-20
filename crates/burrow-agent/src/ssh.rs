@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 use crate::Agent;
 use crate::sandbox::Sandbox;
 
-/// How long sshd in a sandbox may take to send its banner: a while, on a
-/// loaded machine. The vsock connects at once, so the banner's is
-/// ConnectTimeout.
-pub const BANNER: Duration = Duration::from_secs(60);
-/// How long the sandbox may take to boot.
+/// How long a sandbox may take to answer: to boot, and then for its sshd to
+/// send the banner. On a loaded machine a nested one can stall for minutes
+/// with nothing wrong, so a sandbox that's running gets as long as one
+/// that's booting. The vsock connects at once (and fails at once when the
+/// VM is gone), so the banner's wait is ssh's ConnectTimeout.
 pub const BOOT: Duration = Duration::from_secs(900);
+/// How long the last, out-loud try waits, once BOOT has run out.
+const SAY_WHY: Duration = Duration::from_secs(30);
 
 /// ssh into a sandbox as the user, with `opts` first (the first value ssh
 /// is given for an option is the one it takes), then `command`.
@@ -33,7 +35,7 @@ pub fn ssh(
         .args(opts)
         .args(["-o", "BatchMode=yes", "-o", "LogLevel=ERROR"])
         .arg("-o")
-        .arg(format!("ConnectTimeout={}", BANNER.as_secs()))
+        .arg(format!("ConnectTimeout={}", BOOT.as_secs()))
         .args([
             "-o",
             "StrictHostKeyChecking=no",
@@ -95,11 +97,11 @@ fn within(c: &mut Command, limit: Duration) -> bool {
 
 /// Waits for the sandbox's sshd, while its unit runs, for BOOT at most.
 pub fn wait_ready(agent: &Agent, sb: &Sandbox) -> Result<(), String> {
-    let limit = BANNER + Duration::from_secs(5);
     let until = Instant::now() + BOOT;
     let truth = ["true".to_owned()];
     while Instant::now() < until {
-        if within(&mut ssh(agent, sb, &[], &truth)?, limit) {
+        let left = until.saturating_duration_since(Instant::now());
+        if within(&mut ssh(agent, sb, &[], &truth)?, left) {
             return Ok(());
         }
         if !agent.quietly("systemctl", &["-q", "is-active", &sb.unit()]) {
@@ -110,7 +112,7 @@ pub fn wait_ready(agent: &Agent, sb: &Sandbox) -> Result<(), String> {
     // Once more, out loud, so the reason is on screen.
     said_last(
         &mut ssh(agent, sb, &["-o", "LogLevel=DEBUG1"], &truth)?,
-        limit,
+        SAY_WHY,
         25,
     );
     Err(format!(
