@@ -248,9 +248,13 @@ awaits("SAM/R#5")
 claimed(waits=True, owns=False)
 first = ISSUED[-1]
 run(clean(**threads), 7300)
-status, digest = run(clean(**threads), 7400)
+status, digest = a_pass(clean(**threads), 7400)
 assert JOBS == [] and first in STOPPED, (status, JOBS, STOPPED)
 assert "once the last one on the branch has stood down" in status and digest == [], (status, digest)
+# The wait is the steward's own, with its deadline: one that never clears
+# still goes to the watchdog, which kicks a pass.
+it = stall()
+assert it["kick"] == "autoland/sam/r" and it["due"] == it["since"] + 120 * 60 and overdue() is None, it
 C.upkeep = real_upkeep
 STATES.clear()
 HELD.clear()
