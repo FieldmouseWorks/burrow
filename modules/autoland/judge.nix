@@ -165,6 +165,7 @@ in
         credential = "judge-key";
         seal = "judge-seal";
         flow = autoland.flowConfigs;
+        flow_key = autoland.flow.judgeKey;
         settings = config.burrow.settings.effective;
         owner = config.burrow.owner;
         api = "https://api.github.com";

@@ -45,6 +45,9 @@ let
   seals = lib.optionalAttrs (enabled ? judge) { judge-seal = enabled.judge.sealFile; };
   keyFile = name: "/run/${keysUnit}/${name}";
   needs = lib.optional (seals != { }) "${keysUnit}.service";
+  # The judge's: what the configs name, and what its producer checks they
+  # name, holding as it does the same sealFile as its own credential.
+  judgeKey = keyFile "judge-seal";
   # The producers a repo's evidence trusts, and the checks each may attest
   # (Conary's docs/m6-plugins.md, "Who produces what"): the judge its
   # judgment, the proof producer the repo's proofs. One with none there
@@ -157,7 +160,7 @@ let
       } // lib.optionalAttrs (seals ? judge-seal) {
         # The judge's seal key, its sealFile, as the flow's controller alone
         # reads it.
-        judge_key_file = keyFile "judge-seal";
+        judge_key_file = judgeKey;
       };
     };
   # Loaded by the machine's own cn as it's built (`cn flow settings`), as
@@ -195,7 +198,7 @@ let
   config = "${configs}/%I.json";
 in
 {
-  inherit configs needs;
+  inherit configs needs judgeKey;
   # One repo's, by its name.
   file = flowFile;
   # The unit holding the flow's seal keys, null with none.

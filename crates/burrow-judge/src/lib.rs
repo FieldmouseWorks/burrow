@@ -51,6 +51,10 @@ pub struct Config {
     /// The flow's configurations, one a repo (`OWNER/NAME.json`,
     /// lowercased): whom it reads verdicts from, and its seal key.
     pub flow: PathBuf,
+    /// The file those configurations name for the seal key
+    /// (`judge_key_file`): the flow's controller's copy of the same key
+    /// the producer gets as `seal`, which only the controller can read.
+    pub flow_key: PathBuf,
     /// The settings source: the judging role's route and its engine's
     /// offers.
     pub settings: burrow_settings::Config,

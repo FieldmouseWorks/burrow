@@ -687,14 +687,14 @@ in
         inherit credentials;
         token = "${steward}/bin/autoland-steward token";
         config = shadow.file;
-        inherit (shadow) needs;
+        inherit (shadow) needs judgeKey;
       };
       description = ''
         What runs Conary's flow as the steward's App (autoland/landing.nix):
         the credentials its token reads, the token's command, each
         shadowed repo's flow configuration by name, and the units a unit
         running the flow requires (the one holding its seal keys, which its
-        configurations name).
+        configurations name), and the file they name for the judge's.
       '';
     };
 

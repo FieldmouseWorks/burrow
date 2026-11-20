@@ -11,7 +11,9 @@
 # off there's no such unit (checks/autoland-flow-plugins.nix).
 #
 # The judge's producer and looks aren't started: only the flow's half is
-# tested here (tests/judge-look.nix and crates/burrow-judge have theirs).
+# tested here, and that the producer's config names the same key file
+# (tests/judge-look.nix and crates/burrow-judge, which checks the producer
+# refuses a flow naming any other, have theirs).
 #
 #   nix build .#checks.x86_64-linux.autoland-flow-keys -L
 { self, pkgs }:
@@ -83,6 +85,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed("jq -e '.settings.judge_key_file == \"${keyFile}\" and (.settings | has(\"judge_key\") | not)' ${config}")
         # conaryd's is the same file: the configs' entry links to it.
         machine.succeed("jq -e --arg c \"$(readlink -f ${config})\" '.flow_config == $c' ${nodes.machine.burrow.landing.eventsTemplate}")
+        # And the judge's producer, holding the same sealFile as its own
+        # credential, checks the flow names that file before it judges.
+        machine.succeed("jq -e '.flow_key == \"${keyFile}\" and .seal == \"judge-seal\"' /etc/burrow/autoland-judge-plugin.json")
 
     with subtest("both units that run the flow require the keys' unit"):
         for unit in ["conary-flow.service", "autoland-shadow@acme-widget.service"]:

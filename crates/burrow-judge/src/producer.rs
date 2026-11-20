@@ -46,7 +46,7 @@ use burrow_producer::records::{Record, Records, Target};
 use burrow_producer::serve::Work;
 use burrow_producer::sign::{Judgment, Signer};
 use conary_core::plugin::{Answer, Context, Provenance, Request, Response, Sessions, Task};
-use conary_github::flow::{Basis, SealKey};
+use conary_github::flow::{Basis, SealKey, Settings};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -207,7 +207,7 @@ impl Producer {
                 "the flow in {repo} reads verdicts from no account, so no judgment of its would count"
             ));
         }
-        if flow.settings.judge_key.as_ref() != Some(&self.seal) {
+        if !self.sealed_alike(&flow.settings) {
             return Err(format!(
                 "the flow in {repo} doesn't read judgments under this producer's seal key"
             ));
@@ -348,6 +348,19 @@ impl Producer {
             .state
             .join("heads")
             .join(format!("{}+{head}", repo.to_lowercase().replace('/', "+")))
+    }
+
+    /// Whether a flow with `settings` reads judgments under this
+    /// producer's seal key: given inline, it's the producer's own; given as
+    /// a file, it's the file the module makes of the producer's own key
+    /// for the flow's controller, which the producer can't read itself.
+    /// Neither, or both (which Conary refuses to load), it doesn't.
+    fn sealed_alike(&self, settings: &Settings) -> bool {
+        match (&settings.judge_key, &settings.judge_key_file) {
+            (Some(key), None) => *key == self.seal,
+            (None, Some(file)) => *file == self.cfg.flow_key,
+            _ => false,
+        }
     }
 
     /// Why `repo`'s PR `pr` can't have a judgment on `head`: another PR's

@@ -23,7 +23,8 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
     let cfg = serde_json::json!({
         "socket": d.join("none.sock"), "controller": "flow",
         "producer": "machine-judge", "credential": "judge-key", "seal": "judge-seal",
-        "flow": d.join("flow"), "settings": {"overlay": overlay},
+        "flow": d.join("flow"), "flow_key": d.join("flow-key"),
+        "settings": {"overlay": overlay},
         "role": "judge", "owner": "Sam",
         "api": "https://api.github.com", "token": "true", "gh": "gh",
         "git": "git", "github": "https://github.com", "state": d.join("state"),
