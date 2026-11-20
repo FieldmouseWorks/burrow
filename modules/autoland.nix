@@ -680,7 +680,7 @@ in
     };
 
     flow = mkOption {
-      type = types.attrsOf types.anything;
+      type = types.lazyAttrsOf types.raw;
       readOnly = true;
       internal = true;
       default = {
