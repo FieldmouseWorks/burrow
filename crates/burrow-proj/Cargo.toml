@@ -14,6 +14,7 @@ burrow-github = { path = "../burrow-github" }
 burrow-usage-reset = { path = "../burrow-usage-reset" }
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }
+burrow-notify = { path = "../burrow-notify" }
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 rustix = { version = "1.1.6", features = ["process", "fs", "net"] }
 serde.workspace = true

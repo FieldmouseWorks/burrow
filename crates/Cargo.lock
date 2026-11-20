@@ -799,6 +799,7 @@ dependencies = [
  "burrow-events",
  "burrow-github",
  "burrow-heavy",
+ "burrow-notify",
  "burrow-probe",
  "burrow-process",
  "burrow-settings",

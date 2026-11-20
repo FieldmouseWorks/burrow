@@ -379,43 +379,64 @@ fn what_counts_as_sorted() {
     assert!(p.sorted("sam/box", &t, &pr, &Default::default()));
 }
 
-// A proj question's notice is never sorted nor drained, whatever labels it
-// has: only a person answers it, and a job closing it gets it posted again.
+// A machine's notice no job is handed is never sorted nor drained, whatever
+// labels it has: a proj question's (only a person answers it, and a job
+// closing it gets it posted again), and one its opener has `--handled` (an
+// update's flaky test, with its own job on it already).
 #[test]
-fn a_question_notice_is_never_handed_to_a_job() {
+fn a_notice_no_job_is_handed_is_never_sorted_nor_drained() {
     let b = Box::new();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-    let notice = |n, labels: &[&str]| {
+    let question = "[proj-question-wend-20261110-153036-F5wP-5] A project job needs an answer";
+    let handled = format!("It's flaky.\n\n{}", burrow_notify::HANDLED);
+    let notice = |n, kind: usize, labels: &[&str]| {
         let mut i = issue(n, "sam", labels);
-        i["title"] =
-            json!("[proj-question-wend-20261110-153036-F5wP-5] A project job needs an answer");
+        if kind == 0 {
+            i["title"] = json!(question);
+        } else {
+            i["title"] = json!("[flaky-agents] VM test agents is flaky");
+            i["body"] = json!(handled);
+        }
         i["repository_url"] = json!("https://api.github.com/repos/sam/box");
         i["created_at"] = json!("2026-11-01T00:00:00Z");
         i
     };
     let mut p = b.pass();
-    for labels in [&["updates"][..], &[], &["ready"]] {
-        let i = notice(1, labels);
-        assert!(p.sorted("sam/box", &t, &i, &Default::default()), "{i}");
+    for kind in [0, 1] {
+        for labels in [&["updates"][..], &[], &["ready"]] {
+            let i = notice(1, kind, labels);
+            assert!(p.sorted("sam/box", &t, &i, &Default::default()), "{i}");
+        }
     }
-    // Only the notice's own key in brackets, at the start, marks one.
-    for title in [
-        "Fix [proj-question-x-1]",
-        "[proj] question",
-        "proj-question-x-1",
+    // Only the question's own key in brackets, at the start, marks one, and
+    // only the mark on a line of its own a handled one.
+    for (title, body) in [
+        ("Fix [proj-question-x-1]", "It's broken."),
+        ("[proj] question", "It's broken."),
+        ("proj-question-x-1", "It's broken."),
+        ("[flaky-agents] VM test agents is flaky", "It's flaky."),
+        ("Fix it", &format!("Quoting `{}`", burrow_notify::HANDLED)),
     ] {
         let mut i = issue(1, "sam", &[]);
         i["title"] = json!(title);
+        i["body"] = json!(body);
         assert!(!p.sorted("sam/box", &t, &i, &Default::default()), "{i}");
     }
     // One labelled ready before this is never kept for the drain.
-    let mut fix = issue(2, "sam", &["ready"]);
+    let mut fix = issue(3, "sam", &["ready"]);
     fix["repository_url"] = json!("https://api.github.com/repos/sam/box");
     fix["created_at"] = json!("2026-11-02T00:00:00Z");
-    p.note_ready("sam/box", &[notice(1, &["updates", "ready"]), fix])
-        .unwrap();
+    p.note_ready(
+        "sam/box",
+        &[
+            notice(1, 0, &["updates", "ready"]),
+            notice(2, 1, &["updates", "ready"]),
+            fix,
+        ],
+    )
+    .unwrap();
     let next: Vec<String> = p.next_ready().into_iter().map(|c| c.n).collect();
-    assert_eq!(next, ["2"]);
+    assert_eq!(next, ["3"]);
 }
 
 /// What a sorting job for issue N, as the fixtures have it, read of it.

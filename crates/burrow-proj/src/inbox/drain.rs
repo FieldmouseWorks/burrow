@@ -553,7 +553,7 @@ impl Pass<'_> {
 /// if it's a ready one.
 fn ready_entry(i: &Value) -> Option<Value> {
     let ready = i.get("pull_request").is_none()
-        && !crate::question::is_notice(i)
+        && !super::triage::notice(i)
         && i["labels"]
             .as_array()
             .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(READY)));

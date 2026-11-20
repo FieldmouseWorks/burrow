@@ -166,11 +166,8 @@ impl Pass<'_> {
         issue: &Value,
         claimed: &BTreeSet<String>,
     ) -> bool {
-        // A proj question's notice waits on a person, whatever its labels:
-        // a job's reply isn't an answer, and its `proj done` closing the
-        // notice only gets it posted again.
         if issue.get("pull_request").is_some()
-            || crate::question::is_notice(issue)
+            || notice(issue)
             || !self.eligible(repo, issue)
             || super::enrollment::automatic_parked(self.inbox, repo, issue)
             || claimed.contains(&raw(&issue["number"]))
@@ -673,4 +670,16 @@ pub(super) enum Step {
     Post(String),
     Close(String),
     Split(Vec<crate::planning::Task>),
+}
+
+/// Whether an issue is a machine's notice that no job is handed, whatever
+/// its labels, so neither triage nor the drain takes it:
+///
+/// - a proj question's: it waits on a person. A job's reply isn't an answer,
+///   and its `proj done` closing the notice only gets it posted again.
+/// - one its opener has `--handled` (HOST-notify's mark): the opener closes
+///   it once its problem clears, with a job of its own on it where there is
+///   one. A second job would only redo the first's work.
+pub(super) fn notice(issue: &Value) -> bool {
+    crate::question::is_notice(issue) || issue["body"].as_str().is_some_and(burrow_notify::handled)
 }

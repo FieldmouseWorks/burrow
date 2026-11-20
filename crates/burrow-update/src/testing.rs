@@ -68,8 +68,8 @@ pub const BRANCH: &str = "box-update";
 ///   4 changing nothing.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
 ///   that's there, or healthy, then T/excused when that's there.
-/// - notify keeps what it opens and closes in T/notices, and each notice's
-///   body in T/notice-KEY.
+/// - notify keeps what it opens (only `--handled`) and closes in T/notices,
+///   and each notice's body in T/notice-KEY.
 /// - vulnix reports, for a system, each line "COMMIT CVE PACKAGE SCORE" of
 ///   T/vulnix-db whose commit its flake.lock has; it says T/vulnix-says
 ///   instead when that's there, and fails with T/vulnix-down there.
@@ -246,7 +246,8 @@ esac
                 r#"#!/bin/sh
 T=${0%/*}/..
 case $1 in
-  open) printf 'open %s: %s\n' "$2" "$3" >>"$T/notices"; printf '%s\n' "$4" >"$T/notice-$2" ;;
+  open) [ "$2" = --handled ] || exit 9; shift
+    printf 'open %s: %s\n' "$2" "$3" >>"$T/notices"; printf '%s\n' "$4" >"$T/notice-$2" ;;
   close) printf 'close %s: %s\n' "$2" "$3" >>"$T/notices" ;;
   *) exit 9 ;;
 esac

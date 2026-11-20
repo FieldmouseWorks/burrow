@@ -96,9 +96,11 @@ pub fn job_key(cfg: &Config, key: &str, of: &[String]) -> String {
 
 /// The owner hears of `key`'s problem: `title`, and `body` for what it is
 /// and who's on it. HOST-notify keeps one notice a problem, and says
-/// whatever GitHub does, in the journal.
+/// whatever GitHub does, in the journal. The notice is `--handled`: this
+/// settles it ([`settled`]), with its job, where it has one, under jobs/KEY,
+/// so the inbox never hands it to another.
 pub fn open(cfg: &Config, key: &str, title: &str, body: &str) {
-    notify(cfg, &["open", key, title, body]);
+    notify(cfg, &["open", "--handled", key, title, body]);
 }
 
 /// `key`'s problem, settled: its job and how long it's been seen forgotten,
