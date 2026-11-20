@@ -142,6 +142,9 @@ in
         # A switch leaves a running one be: the path unit's next start is
         # the new one, and it goes on from the record.
         restartIfChanged = false;
+        # One of the flow's own units, on its state (burrow.ledger keeps
+        # the controller to those).
+        environment = ledger.flow.env;
         serviceConfig = {
           Type = "oneshot";
           # The flow's own: it reads conaryd's state, its pass's lock and
