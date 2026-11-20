@@ -4,17 +4,54 @@
 # socket. Producers listen each in a directory of their own under one only
 # the controller's group may enter, so burrow.user, whom every authoring
 # session runs as, can't reach one at all; each producer checks its peer
-# too (crates/burrow-producer). The ledger stays readable to both, and with
-# the option off nothing changes.
+# too (crates/burrow-producer). The controller signs the ledger as
+# burrow.user's writers do (a flow with a train or evidence signs its ops),
+# through ACLs naming it: on a ledger set up after it, and on one that was
+# burrow.user's alone before. Nobody else gets the key, a producer in the
+# controller's group included. With the option off nothing changes.
+#
+# cn here is a stand-in that touches the ledger's files as Conary's writer
+# does (conary-core's log.rs, conary-github's bases.rs and etags.rs): it
+# proves the permissions, not a real conaryd's train.
 #
 #   nix build .#checks.x86_64-linux.ledger-controller -L
 { self, pkgs }:
 let
-  cn = pkgs.writeShellScriptBin "cn" ''
-    case $1 in
-      init) echo anchored >"$CONARY_LEDGER/anchor" ;;
-    esac
-  '';
+  cn = pkgs.writeShellApplication {
+    name = "cn";
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ];
+    text = ''
+      d=''${CONARY_LEDGER:-}
+      # One op, signed: under the lock, with the key read, appended to the
+      # log and the merge bases in place, and the anchor renamed in.
+      sign() {
+        exec 9>>"$d/lock"
+        flock 9
+        [ "$(head -c 32 "$d/key" | wc -c)" = 32 ]
+        echo "$(id -un) $1" >>"$d/ops.jsonl"
+        echo "$1 base" >>"$d/merge-bases"
+        echo "$(wc -l <"$d/ops.jsonl") $(id -un)" >"$d/.anchor.$$.new"
+        mv -f "$d/.anchor.$$.new" "$d/anchor"
+      }
+      case $1 in
+        # As Conary sets a ledger up: its key made readable by its owner
+        # only and linked into place, the rest renamed in, and the etags
+        # cache the writer's alone.
+        init)
+          (umask 077; head -c 32 /dev/urandom >"$d/.key.new")
+          ln "$d/.key.new" "$d/key"
+          rm "$d/.key.new"
+          echo public >"$d/.key.pub.new"
+          mv "$d/.key.pub.new" "$d/key.pub"
+          : >>"$d/lock"
+          : >>"$d/ops.jsonl"
+          mkdir -m 0700 "$d/etags"
+          echo "0 $(id -un)" >"$d/anchor"
+          ;;
+        sync | sign) sign "$2" ;;
+      esac
+    '';
+  };
   gh = pkgs.writeShellScriptBin "gh" ''
     case "$*" in
       "auth token") echo gho_stand_in ;;
@@ -55,11 +92,24 @@ let
     burrow.ledger = ledger // lib.optionalAttrs controller { controllerUser = "conary-flow"; };
     burrow.events.enable = lib.mkForce false;
     users.users.dev.isNormalUser = true;
+    # Someone else in burrow.user's group, who never gets the key.
+    users.users.other = { isNormalUser = true; group = config.users.users.dev.group; };
+    environment.systemPackages = [ pkgs.acl ];
     # A producer, as a user of its own, wired as a producer's unit is.
     systemd.services.producer = lib.mkIf controller {
       serviceConfig = config.burrow.ledger.flow.producer "test" // {
         User = "nobody";
         ExecStart = "${python} ${listen}";
+      };
+    };
+    # The flow signing an op (a train's join, leave or step, evidence), as
+    # the flow's units run: as its user, on its state.
+    systemd.services."flow@" = {
+      environment = config.burrow.ledger.env // config.burrow.ledger.flow.env;
+      serviceConfig = {
+        Type = "oneshot";
+        User = config.burrow.ledger.flow.user;
+        ExecStart = "${cn}/bin/cn sign %i";
       };
     };
   };
@@ -71,6 +121,23 @@ pkgs.testers.runNixOSTest {
   nodes.off = node false;
 
   testScript = ''
+    ledger = "/var/lib/burrow/conary"
+    env = f"env CONARY_LEDGER={ledger}"
+
+    def ops(m):
+        return [l.split(" ", 1) for l in m.succeed(f"cat {ledger}/ops.jsonl").splitlines()]
+
+    def nobody_else_reads_the_key():
+        # Not burrow.user's group, not anyone, and not a producer, which
+        # is in the controller's group.
+        on.fail(f"runuser -u other -- cat {ledger}/key")
+        on.fail(f"runuser -u nobody -- cat {ledger}/key")
+        on.fail(f"systemd-run --wait --pipe --quiet -p User=nobody -p SupplementaryGroups=conary-flow cat {ledger}/key")
+        on.succeed(f"runuser -u conary-flow -- test -r {ledger}/key")
+        on.fail(f"runuser -u conary-flow -- test -w {ledger}/key")
+        # The etags cache stays the writer's alone: the flow reads none.
+        on.fail(f"runuser -u conary-flow -- ls {ledger}/etags")
+
     start_all()
     on.wait_for_unit("multi-user.target")
     off.wait_for_unit("multi-user.target")
@@ -93,14 +160,51 @@ pkgs.testers.runNixOSTest {
         assert on.succeed("systemd-run --wait --pipe --quiet -p User=conary-flow ${python} ${ask}") == "ok\n"
         assert on.succeed("stat -c '%U %G %a' /run/conary-producers").strip() == "root conary-flow 710"
 
-    with subtest("cn still reads the ledger, as burrow.user and as the controller"):
+    with subtest("on a ledger set up after it, the flow and burrow.user both sign"):
         on.succeed("systemctl start burrow-ledger@sam-r.service")
-        for who in ["dev", "conary-flow"]:
-            assert on.succeed(f"runuser -u {who} -- cat /var/lib/burrow/conary/anchor") == "anchored\n", who
+        # The key the first sync made gets the controller's access at once.
+        on.wait_until_succeeds(f"runuser -u conary-flow -- test -r {ledger}/key", timeout=60)
+        # So the flow makes the merge bases, and burrow.user appends to them.
+        on.succeed(f"rm {ledger}/merge-bases")
+        for op in ["train-join", "train-step", "evidence", "train-leave"]:
+            on.succeed(f"systemctl start flow@{op}.service")
+        on.succeed("systemctl start burrow-ledger@sam-r.service")
+        on.succeed(f"runuser -u dev -- {env} cn sign by-hand")
+        assert ops(on) == [
+            ["dev", "sam/r"],
+            ["conary-flow", "train-join"], ["conary-flow", "train-step"],
+            ["conary-flow", "evidence"], ["conary-flow", "train-leave"],
+            ["dev", "sam/r"], ["dev", "by-hand"],
+        ], ops(on)
+        assert on.succeed(f"stat -c %U {ledger}/merge-bases").strip() == "conary-flow"
+        assert on.succeed(f"tail -n1 {ledger}/merge-bases") == "by-hand base\n"
+        # Everyone still reads the log; the key stays as it was made.
+        on.succeed(f"runuser -u nobody -- cat {ledger}/ops.jsonl {ledger}/anchor")
+        assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 640", "the key's group bits are its ACL's mask"
+        nobody_else_reads_the_key()
+
+    with subtest("on a ledger burrow.user had alone before, a switch lets the flow sign"):
+        on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock")
+        on.fail("systemctl start flow@before.service")
+        on.succeed("systemctl restart systemd-tmpfiles-resetup.service")
+        on.succeed("systemctl start flow@after.service")
+        on.succeed("systemctl start burrow-ledger@sam-r.service")
+        on.succeed("systemctl start flow@again.service")
+        on.succeed(f"runuser -u dev -- {env} cn sign by-hand")
+        assert [o for o in ops(on)[7:]] == [
+            ["conary-flow", "after"], ["dev", "sam/r"],
+            ["conary-flow", "again"], ["dev", "by-hand"],
+        ], ops(on)
+        nobody_else_reads_the_key()
 
     with subtest("with the option off, nothing changes"):
+        off.succeed("systemctl start burrow-ledger@sam-r.service")
+        off.succeed("systemctl start flow@by-dev.service")
+        assert [o[0] for o in ops(off)] == ["dev", "dev"], ops(off)
         off.fail("id conary-flow")
         off.fail("test -e /run/conary-producers")
         off.fail("test -e /var/lib/burrow/flow")
+        assert off.succeed(f"getfacl -cps {ledger} {ledger}/key") == ""
+        assert off.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
   '';
 }

@@ -458,6 +458,8 @@ Each has an entry below, and each can be imported on its own.
   user of its own that no authoring job, sandbox or proj run shares, on state
   only it reads,
   and only it may reach a producer's socket under `/run/conary-producers`.
+  It signs the ledger as burrow.user does, through ACLs on `dir` naming it,
+  so its file system must support POSIX ACLs.
 - **`builds`** (`burrow.builds`): The machine's build store
   ([gate design](docs/gate-design.md#2-one-build-store-written-by-whoever-may-sign)):
   a Nix binary cache nginx serves at `https://HOST/PATH`, signed with a key

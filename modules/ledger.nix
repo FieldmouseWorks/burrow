@@ -34,6 +34,25 @@ let
   # enter, and checks its peer is the controller too (crates/burrow-producer).
   controller = cfg.controllerUser;
   producers = "/run/conary-producers";
+  # What the controller may do in the ledger (cfg.dir), so the flow signs
+  # its ops (train join and leave, evidence) as burrow.user's writers do:
+  # POSIX ACLs naming the controller user, never its group, which every
+  # producer joins (flow.producer). The directory's default entries let
+  # both writers append to and replace whatever the other made first.
+  # The key is read-only to it, and its owning group gets nothing however
+  # the key was made. The files are the ones Conary's writer opens in
+  # place (conary-core's log.rs, conary-github's bases.rs); the anchor and
+  # key.pub are renamed in, and the flow reads no GitHub through `etags`,
+  # which stays burrow.user's alone. Applied on each boot and switch, and
+  # by burrow-ledger-access once the first sync has made the key.
+  writable = [ "lock" "ops.jsonl" "anchor" "merge-bases" ];
+  controllerAcl = lib.optionalAttrs (controller != null) ({
+    ${cfg.dir}."a+".argument =
+      "u:${controller}:rwx,d:u:${controller}:rwx,d:u:${user}:rwx";
+    "${cfg.dir}/key".a.argument = "u::rw,g::---,o::---,u:${controller}:r,m::r";
+  } // lib.genAttrs (map (f: "${cfg.dir}/${f}") writable) (_: {
+    "a+".argument = "u:${controller}:rw";
+  }));
   # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
   # private to the controller.
   flowData = "${config.burrow.stateDir}/flow";
@@ -223,7 +242,8 @@ in
       defaultText = lib.literalExpression ''"''${config.burrow.stateDir}/conary"'';
       description = ''
         The ledger: its op log, readable by everyone, and its signing key,
-        readable by burrow.user only. Persist it if / is ephemeral: a ledger
+        readable by burrow.user only, and by the flow's controller when there
+        is one (`controllerUser`). Persist it if / is ephemeral: a ledger
         whose key is lost stops until the key is put back.
       '';
     };
@@ -381,8 +401,11 @@ in
         work, both by the producers' socket directory (${producers}, which
         only its group may enter) and by each producer's peer check. Its
         state (`CONARY_DATA`) is its own, in ${flowData}. It reads the
-        ledger as everyone does. Null, the default, runs the flow as
-        burrow.user, as before.
+        ledger as everyone does, and writes and signs it as burrow.user's
+        writers do (a flow with a train or evidence signs its ops), through
+        POSIX ACLs on `dir` that name it: that directory's file system must
+        support them. Null, the default, runs the flow as burrow.user, as
+        before.
       '';
     };
 
@@ -616,16 +639,22 @@ in
       CONARY_ANCHOR_REPO = cfg.anchorRepo;
     } // lib.optionalAttrs cfg.daemon { CONARY_SOCKET = socket; };
 
-    systemd.tmpfiles.settings.burrow = {
+    systemd.tmpfiles.settings.burrow = lib.mkMerge [ controllerAcl ({
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
-      ${cfg.dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+      # With a controller, its mode is set only on creation: a chmod of a
+      # directory with an ACL sets its mask, and would take the
+      # controller's write away until controllerAcl ran again.
+      ${cfg.dir}.d = {
+        mode = if controller == null then "0755" else ":0755";
+        inherit user; group = config.users.users.${user}.group;
+      };
       ${passDir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
     } // lib.optionalAttrs (controller != null) {
       ${flowData}.d = { mode = "0700"; user = controller; group = controller; };
       # Entered, not listed, by the controller's group alone; each producer
       # is let in to make its own directory there (flow.producer).
       ${producers}.d = { mode = "0710"; user = "root"; group = controller; };
-    };
+    }) ];
 
     users.users = lib.mkIf (controller != null) {
       ${controller} = {
@@ -687,6 +716,12 @@ in
       wantedBy = [ "paths.target" ];
       pathConfig.PathExists = "${cfg.dir}/key.pub";
     };
+    # The controller's access (controllerAcl) once the first sync has made
+    # the key, which boot and switch would otherwise only give it next time.
+    systemd.paths.burrow-ledger-access = lib.mkIf (controller != null) {
+      wantedBy = [ "paths.target" ];
+      pathConfig.PathExists = "${cfg.dir}/key";
+    };
     # For runners GitHub hosts. The lookup reads at most 64 KiB of a
     # request, under nginx's own cap.
     services.nginx.virtualHosts = lib.mkIf (reuse.path != null) {
@@ -709,6 +744,17 @@ in
         Nice = 10;
       };
     }) // {
+      burrow-ledger-access = lib.mkIf (controller != null) {
+        description = "ledger: let the flow's controller sign the ledger";
+        after = [ "systemd-tmpfiles-setup.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          # Done once the key is there: a path unit whose service exits
+          # would start it again at once.
+          RemainAfterExit = true;
+          ExecStart = "${config.systemd.package}/bin/systemd-tmpfiles --create --prefix=${cfg.dir}";
+        };
+      };
       burrow-ledger-door = lib.mkIf cfg.door.enable {
         description = "ledger: answer the undo issues in ${cfg.door.repo}";
         after = [ "network-online.target" ];
