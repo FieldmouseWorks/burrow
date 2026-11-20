@@ -90,6 +90,17 @@ impl Config {
     }
 }
 
+/// What the flow's configuration asks the plugin to run with (its
+/// `execution`), as JSON: its engine, with no model or effort, since it
+/// offers none.
+pub fn choice() -> serde_json::Value {
+    serde_json::json!(conary_core::plugin::Choice {
+        engine: ENGINE.into(),
+        model: None,
+        effort: None,
+    })
+}
+
 /// The plugin the flow runs, forwarding to the producer at `cfg.socket`.
 pub fn plugin(cfg: &Config) -> burrow_producer::plugin::Plugin {
     burrow_producer::plugin::Plugin {

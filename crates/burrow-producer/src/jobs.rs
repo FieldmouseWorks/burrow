@@ -226,6 +226,31 @@ pub fn offered(settings: &burrow_settings::Config, role: &str) -> Result<Offer, 
     Ok(Offer { engine, models })
 }
 
+/// What the flow should ask a job on `role` to run with (its
+/// configuration's `execution`): the engine the plugin names itself by
+/// ([`offered`]) and the model and effort the role is set to on it, with no
+/// repo's own: conaryd reads one configuration for every repo it lands, so
+/// a choice is the machine's. [`runnable`] then holds a job in a repo to it
+/// exactly, so a repo the role is set apart for refuses it. Refused when
+/// the engine doesn't offer that model or effort, as a job's answer would be.
+pub fn choice(settings: &burrow_settings::Config, role: &str) -> Result<Choice, String> {
+    let offer = offered(settings, role)?;
+    let tuning = settings
+        .role_view()?
+        .in_force
+        .tuning(role, None, &offer.engine);
+    if let Some(why) = offer.refuses(tuning.model.as_ref(), tuning.effort.as_ref()) {
+        return Err(format!(
+            "the {role} role wouldn't run as the plugin offers, so its answer would be refused: {why}"
+        ));
+    }
+    Ok(Choice {
+        engine: offer.engine,
+        model: tuning.model,
+        effort: tuning.effort,
+    })
+}
+
 /// Whether a job on `role` in `repo` would run as the flow asks, before one
 /// starts: proj runs it on the role's route and tuning, and Conary refuses
 /// an answer on another engine than the plugin names, a model or effort it

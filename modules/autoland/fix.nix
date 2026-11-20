@@ -16,6 +16,7 @@ let
   inherit (config.burrow.github) machineApp;
   flow = config.burrow.ledger.flow;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-fix;
+  flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   # Null with no controller, which the assertion below refuses.
   socket = if flow.producers == null then null else "${flow.producers}/fix/broker.sock";
 
@@ -72,6 +73,19 @@ in
       '';
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for fixes.";
+    };
+
+    choice = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${cfg.role}";
+      defaultText = lib.literalMD "the command that prints the fixing role's choice";
+      description = ''
+        The command that prints what the flow configuration's `execution`
+        asks fixes to run with: the fixing role's engine,
+        model and effort as the settings source declares them.
+      '';
     };
   };
 

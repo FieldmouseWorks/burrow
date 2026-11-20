@@ -580,8 +580,11 @@ dependencies = [
 name = "burrow-flow-files"
 version = "0.0.0"
 dependencies = [
+ "burrow-producer",
+ "burrow-settings",
  "conary-core",
  "conary-github",
+ "serde_json",
 ]
 
 [[package]]

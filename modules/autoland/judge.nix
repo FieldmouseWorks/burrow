@@ -32,6 +32,7 @@ let
   apps = config.burrow.github.apps;
   app = if cfg.app == null then null else apps.${cfg.app} or null;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-judge;
+  flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   producer = "autoland-judge";
   runnerUnit = "burrow-judge-runner";
   state = "${stateDir}/${producer}";
@@ -52,6 +53,9 @@ let
     ''
     else appToken machineApp.socket;
   configFile = pkgs.writeText "burrow-judge.json" (builtins.toJSON cfg.config);
+  # Where the plugin reads its config: not the store path itself, since the
+  # config names the flow's configs (`flow`), and those name the plugin.
+  etcConfig = "burrow/autoland-judge-plugin.json";
   # Whether the judging engine runs out of authoring sessions' reach: not
   # until burrow#1186, which moves it and makes this true.
   isolated = false;
@@ -94,6 +98,18 @@ in
         The producer's Ed25519 secret, its 32 bytes, readable by root: a
         secret, never in the store. The producer alone gets it, as its
         systemd credential.
+      '';
+    };
+
+    publicKey = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9_-]{43}";
+      example = "Mf3hq6hSbtrH0pDB4dPzO2Ff1F6yyhBiR6R-4VYJ8jM";
+      description = ''
+        The public half of keyFile: the producer's Ed25519 public key, its
+        32 bytes in unpadded base64url (Conary's docs/service-attestation.md),
+        which the machine's producers file trusts for its judgment check,
+        `conary/judgment`. Not a secret,
+        so it's kept in the store.
       '';
     };
 
@@ -156,10 +172,23 @@ in
       type = lib.types.path;
       readOnly = true;
       default = pkgs.writeShellScript "burrow-judge-plugin" ''
-        exec ${lib.getExe package} plugin ${configFile}
+        exec ${lib.getExe package} plugin /etc/${etcConfig}
       '';
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for judgments.";
+    };
+
+    choice = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${cfg.role}";
+      defaultText = lib.literalMD "the command that prints the judging role's choice";
+      description = ''
+        The command that prints what the flow configuration's `execution`
+        asks judgments to run with: the judging role's
+        engine, model and effort as the settings source declares them.
+      '';
     };
   };
 
@@ -178,6 +207,8 @@ in
         message = "burrow.autoland.plugins.judge: the producer acts on GitHub as an App, so it needs burrow.autoland.plugins.judge.app, one of burrow.github.apps, with ${producer} among its users.";
       }
     ];
+
+    environment.etc.${etcConfig}.source = configFile;
 
     users.users.${producer} = {
       isSystemUser = true;

@@ -52,7 +52,10 @@ let
       && runner.serviceConfig.RuntimeDirectory == "burrow-judge-runner";
     producerCommand = lib.hasSuffix "/bin/burrow-judge producer ${configFile}" (plain producer.serviceConfig.ExecStart);
     runnerCommand = lib.hasSuffix "/bin/burrow-judge runner ${configFile}" (plain runner.serviceConfig.ExecStart);
-    plugin = lib.hasInfix "/bin/burrow-judge plugin ${configFile}" (plain on.burrow.autoland.plugins.judge.plugin.text);
+    # The plugin reads the same config where the machine keeps it: the
+    # config names the flow's configs, which name the plugin.
+    plugin = lib.hasInfix "/bin/burrow-judge plugin /etc/burrow/autoland-judge-plugin.json" (plain on.burrow.autoland.plugins.judge.plugin.text)
+      && plain "${on.environment.etc."burrow/autoland-judge-plugin.json".source}" == configFile;
     config = read.socket == "/run/conary-producers/judge/producer.sock" && read.controller == "conary-flow"
       && read.role == "judge" && read.producer == "sam/judge" && read.credential == "judge-key"
       && read.seal == "judge-seal" && read.jobs == on.burrow.proj.jobsDir

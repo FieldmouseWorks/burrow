@@ -36,6 +36,9 @@ let
   # Null with no controller, which the assertion below refuses.
   socket = if flow.producers == null then null else "${flow.producers}/proof/producer.sock";
   configFile = pkgs.writeText "burrow-proof.json" (builtins.toJSON cfg.config);
+  # Where the plugin reads its config: not the store path itself, since the
+  # config names the flow's configs (`flow`), and those name the plugin.
+  etcConfig = "burrow/autoland-proof-plugin.json";
 in
 {
   options.burrow.autoland.plugins.proof = {
@@ -61,6 +64,18 @@ in
         The producer's Ed25519 secret, its 32 bytes, readable by root: a
         secret, never in the store. The producer alone gets it, as its
         systemd credential.
+      '';
+    };
+
+    publicKey = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9_-]{43}";
+      example = "Mf3hq6hSbtrH0pDB4dPzO2Ff1F6yyhBiR6R-4VYJ8jM";
+      description = ''
+        The public half of keyFile: the producer's Ed25519 public key, its
+        32 bytes in unpadded base64url (Conary's docs/service-attestation.md),
+        which the machine's producers file trusts for the repo's proofs'
+        checks. Not a secret,
+        so it's kept in the store.
       '';
     };
 
@@ -114,10 +129,23 @@ in
       type = lib.types.path;
       readOnly = true;
       default = pkgs.writeShellScript "burrow-proof-plugin" ''
-        exec ${package}/bin/burrow-proof-plugin plugin ${configFile}
+        exec ${package}/bin/burrow-proof-plugin plugin /etc/${etcConfig}
       '';
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for proofs.";
+    };
+
+    choice = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = "${package}/bin/burrow-proof-plugin choice";
+      defaultText = lib.literalMD "the command that prints the plugin's choice";
+      description = ''
+        The command that prints what the flow configuration's `execution`
+        asks proofs to run with: the plugin's own engine, a
+        program's, which offers no model or effort.
+      '';
     };
   };
 
@@ -132,6 +160,8 @@ in
         message = "burrow.autoland.plugins.proof: the producer acts on GitHub as an App, so it needs burrow.autoland.plugins.proof.app, one of burrow.github.apps, with ${producer} among its users.";
       }
     ];
+
+    environment.etc.${etcConfig}.source = configFile;
 
     users.users.${producer} = {
       isSystemUser = true;

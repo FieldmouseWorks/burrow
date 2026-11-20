@@ -358,7 +358,13 @@ Each has an entry below, and each can be imported on its own.
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
   key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`,
   and a machine that turns it on fails to build until #1186 moves the
-  judging engine out of authoring sessions' reach.
+  judging engine out of authoring sessions' reach. Each enabled plugin is
+  in a shadowed repo's flow config (autoland/shadow.nix): its executable,
+  its role's choice as the settings source declares it (a build reads no
+  live settings, so a role set live to anything else refuses the flow's
+  choice), and, where the repo has evidence, its producer's public key
+  (`plugins.proof.publicKey`, `plugins.judge.publicKey`) in the producers
+  file, trusted for the repo's proofs or `conary/judgment` alone.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every
