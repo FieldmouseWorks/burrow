@@ -31,6 +31,16 @@ fn printed(verdict: &str, model: &str) -> Value {
         "modelUsage": {model: {"outputTokens": 1}}})
 }
 
+/// bash, by its path on PATH: a build's sandbox has no /usr/bin/env, and
+/// the stand-in needs bash's own /dev/tcp.
+fn bash() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH is set");
+    std::env::split_paths(&path)
+        .map(|d| d.join("bash"))
+        .find(|b| b.is_file())
+        .expect("bash is on PATH")
+}
+
 /// A stand-in for Claude Code in `dir`: it keeps its arguments, where it
 /// ran, its environment and its prompt in `dir/seen`, asks its proxy for
 /// a host it may not reach and then for its API's, keeping what each
@@ -42,7 +52,7 @@ fn stand_in(dir: &Path) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!{bash}
 seen={seen}
 printf '%s\n' "$@" >$seen/args
 pwd >$seen/pwd
@@ -60,6 +70,7 @@ ask example.org:443
 ask api.anthropic.com:443
 cat {prints}
 "#,
+            bash = bash().display(),
             seen = seen.display(),
             prints = dir.join("prints").display(),
         ),
