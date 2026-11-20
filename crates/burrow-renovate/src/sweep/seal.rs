@@ -54,7 +54,7 @@ impl Verdict<'_> {
         if !REPO.is_match(repo) {
             return Err(format!("the repo is OWNER/NAME, not {repo:?}"));
         }
-        if !NUMBER.is_match(n) {
+        if !NUMBER.is_match(n) || n.parse::<u64>().is_err() {
             return Err(format!("a PR's number, not {n:?}"));
         }
         if !matches!(*verdict, "ok" | "held") {
@@ -70,7 +70,7 @@ impl Verdict<'_> {
         let key = key(&path, true)
             .map_err(|e| format!("{}: {e}", path.display()))?
             .expect("a key it made");
-        let mac = self.mac(&key).expect("a number checked above");
+        let mac = self.mac(&key).expect("a number, as checked above");
         Ok(format!("<!-- {NAME}: {verdict} {head} on {base} {mac} -->"))
     }
 

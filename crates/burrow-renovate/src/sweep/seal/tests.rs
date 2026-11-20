@@ -224,6 +224,8 @@ fn it_seals_only_what_a_marker_can_name() {
         v(REPO, "0", "ok", &one, "main"),
         v(REPO, "01", "ok", &one, "main"),
         v(REPO, "+1", "ok", &one, "main"),
+        // Past any PR's number: refused, not a panic.
+        v(REPO, "99999999999999999999", "ok", &one, "main"),
         v(REPO, "1", "maybe", &one, "main"),
         v(REPO, "1", "ok", "abc", "main"),
         v(REPO, "1", "ok", &"ABCDEF0123".repeat(4), "main"),
