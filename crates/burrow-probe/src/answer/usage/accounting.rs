@@ -36,6 +36,9 @@ pub struct Invocation {
     /// The most the run may spend, in micro-dollars, when its marker says
     /// (proj gives a `claude-api` run `--max-budget-usd` and writes it here).
     pub budget: Option<i64>,
+    /// The engine the run was on, when its marker says (an older one
+    /// doesn't: its turn's engine is its own).
+    pub engine: Option<String>,
     pub cost: f64,
     pub missing: BTreeSet<String>,
     pub recovered: BTreeSet<String>,
@@ -132,6 +135,7 @@ pub fn decode(
                     marked: true,
                     at: v["at"].as_i64(),
                     budget: v["budget"].as_i64(),
+                    engine: v["engine"].as_str().map(str::to_owned),
                     ..Invocation::default()
                 });
             }

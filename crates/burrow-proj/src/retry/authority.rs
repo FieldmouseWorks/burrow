@@ -39,6 +39,16 @@ impl Identity {
         }
         Self::save(job, n, choice.clone())
     }
+    /// The turn moves to `choice`, an engine of the same conversation its
+    /// role's route took it on to when a run was refused
+    /// ([`engine::reroute`]): its later runs, and a retained retry, run on it.
+    pub fn reroute(job: &Job, n: &str, choice: &engine::Choice) -> Result<(), String> {
+        let saved = Self::load(job, n)?.ok_or("the turn has no execution identity to move")?;
+        if saved.choice.engine.conversation() != choice.engine.conversation() {
+            return Err("a turn moves only within its conversation".into());
+        }
+        Self::save(job, n, choice.clone())
+    }
     pub fn capture_legacy(job: &Job, n: &str) -> Result<(), String> {
         if Self::load(job, n)?.is_some() {
             return Ok(());

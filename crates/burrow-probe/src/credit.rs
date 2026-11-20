@@ -1,7 +1,11 @@
 //! The API credit meter as the machine stands: burrow-settings' credit
 //! setting and meter, over the cycle's [`ENGINE`] run costs that proj
 //! recorded in its jobs, each run of a turn at its own start, decoded by the same accounting the usage answer
-//! uses (answer/usage/accounting.rs). The probe's `usage` answer shows it,
+//! uses (answer/usage/accounting.rs). A run is the credit's when its marker
+//! names [`ENGINE`] (an older marker names none: its turn's engine is its
+//! own), so a turn its route moved between the subscription and the credit
+//! is charged for its credit runs alone; proj keeps such a turn's engine
+//! [`ENGINE`] once it has been on the credit, which is how its job is found. The probe's `usage` answer shows it,
 //! and proj's admission of every [`ENGINE`] run reads the same [`meter`]
 //! (burrow-proj's engine/api.rs).
 //!
@@ -157,6 +161,9 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         // turn's first start in N.started and writes its own in its marker.
         let mut started = None;
         for run in &report.invocations {
+            // A run on the engine its marker names; an older marker's, on
+            // its turn's.
+            let api = &run.engine.as_deref().map_or(*api, |e| e == ENGINE);
             let charged = *api || run.recovered.iter().any(|id| gaps.contains(id));
             if !charged {
                 continue;

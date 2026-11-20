@@ -414,6 +414,7 @@ fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
             .map(|k| {
                 let route = Route {
                     engine: "claude".into(),
+                    over: vec![],
                 };
                 (k.to_owned(), route)
             })

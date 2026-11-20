@@ -81,6 +81,7 @@ fn kind_type(kind: &Kind) -> String {
         Kind::OneOf(_) => "word".into(),
         Kind::Repo => "repository".into(),
         Kind::Maybe(kind) => format!("{} or null", kind_type(kind)),
+        Kind::Omitted(kind) => format!("{}, optional", kind_type(kind)),
         Kind::List(kind) => format!("list of {}", kind_type(kind)),
         Kind::Map(kind) => format!("map of {}", kind_type(kind)),
         Kind::Record(fields) => format!(
@@ -107,6 +108,7 @@ fn allowed(kind: &Kind) -> String {
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
         Kind::Repo => "`OWNER/NAME`".into(),
         Kind::Maybe(kind) => format!("{}, or `null`", allowed(kind)),
+        Kind::Omitted(kind) => format!("{}, or left out", allowed(kind)),
         Kind::List(kind) | Kind::Map(kind) => match allowed(kind) {
             any if any == "any" => any,
             each => format!("each {each}"),

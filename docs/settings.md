@@ -209,7 +209,8 @@ Which engine, model and effort runs each kind of job are live settings in
 the same overlay, changed through the same door and logged the same way:
 
 ```
-proj settings role ROLE ENGINE                      which engine runs ROLE
+proj settings role ROLE ENGINE [over PCT ENGINE]... which engine runs ROLE, then
+                                                   where its turns go on to
 proj settings role ROLE unset                      back to the declared default
 proj settings model ROLE ENGINE MODEL|- [EFFORT|-] its model and effort on ENGINE
 proj settings model ROLE ENGINE unset
@@ -219,8 +220,31 @@ proj engines [save NAME [--replace] | use NAME | use back]
 
 A role key is `ROLE`, `ROLE@OWNER/REPO`, `*` (every role) or
 `*@OWNER/REPO`; the closest one wins: a named role over `*`, a repo's key
-over the bare one, the repo matched case-insensitively. The one engine is
-`claude`. A steward judge follows its role like any other.
+over the bare one, the repo matched case-insensitively. The engines are
+`claude`, on the subscription's login, and `claude-api`, the same Claude
+Code on the API credit (`proj.apiCredit` above). A steward judge follows
+its role like any other.
+
+A route is an ordered chain: `claude over 95 claude-api` runs the role on
+the subscription, and on the credit once the subscription is short. Each
+`over PCT ENGINE` says when to go on past the engine before it: once that
+engine has used PCT percent by its fresh meter (any of Claude's windows,
+or the credit's spend of its cycle's budget), or is out of usage (a hold a
+refusal recorded, whatever the meter last said; for the credit, no room by
+its meter or no key). The turn then takes the first engine after it that
+is under its own threshold and has room by its fresh meter (the credit's
+pacing and reserve included); failing that, the first that can run at all;
+failing that, the first engine, whose turn waits for it as before. A
+missing, unreadable or stale reading moves nothing, and no turn is moved
+onto an engine that can't vouch for its room. A script decides this each
+time a turn starts, never a model, and nothing is remembered: a turn goes
+back to the first engine as soon as it isn't short. A run refused for
+usage, or one the credit refuses, is routed again before it runs once
+more, and carries on in the same conversation when the engine it goes to
+shares it (both Claude engines do). A pinned engine (an issue's label)
+starts the chain where the route names it, or runs alone when it doesn't.
+A sandbox never goes on to the credit: it's given no key. An engine is
+named once per route.
 
 Nothing is an implicit fallback: the schema declares each default and
 `proj settings show` shows it as one. Every role runs on Claude (`*`); a

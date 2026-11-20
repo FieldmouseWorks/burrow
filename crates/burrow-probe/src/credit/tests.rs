@@ -467,3 +467,57 @@ fn a_run_without_its_cost_is_held_at_its_budget() {
             .contains("no recorded cost yet")
     );
 }
+
+/// The host's marker for a run on ENGINE, with BUDGET when it has one.
+fn on(at: i64, engine: &str, budget: Option<i64>) -> Value {
+    match budget {
+        Some(b) => json!({"type":"burrow.run","at":at,"engine":engine,"budget":b}),
+        None => json!({"type":"burrow.run","at":at,"engine":engine}),
+    }
+}
+
+/// A turn its route moved between the subscription and the credit, in one
+/// session, is charged for its credit runs alone, each by the engine its
+/// marker names: a subscription run refused before its cost is neither
+/// charged nor pending, and a subscription run after the credit's isn't
+/// charged either. Its turn's engine (the credit, once it's been on it)
+/// still finds it.
+#[test]
+fn a_moved_turn_is_charged_for_its_credit_runs_alone() {
+    let jobs = Jobs::new();
+    let (first, second) = (SINCE + HOUR, SINCE + 2 * HOUR);
+    let refused = json!({"type":"result","session_id":"s","is_error":true,"result":"Claude reached its weekly allowance"});
+    // Out of usage, then on to the credit.
+    jobs.turn(
+        "onto",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[
+            on(first, "claude", None),
+            init("s"),
+            refused,
+            on(second, ENGINE, Some(5 * M)),
+            init("s"),
+            result("s", 2.0),
+        ]),
+    );
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(second, 2 * M)]);
+    // The credit short, then back on the subscription: its $1.50 alone.
+    let jobs = Jobs::new();
+    jobs.turn(
+        "back",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[
+            on(first, ENGINE, Some(3 * M)),
+            init("t"),
+            result("t", 1.5),
+            on(second, "claude", None),
+            init("t"),
+            result("t", 4.0),
+        ]),
+    );
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(first, 1_500_000)]);
+}

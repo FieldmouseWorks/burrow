@@ -138,6 +138,90 @@ fn every_change_is_logged() {
     assert_eq!(lines[1]["actor"], "test");
 }
 
+/// A route is an ordered chain: the first engine, then each it moves on to
+/// past its threshold. One without `over` is stored as it always was, and a
+/// chain goes through saved setups and back unchanged.
+#[test]
+fn a_route_is_an_ordered_chain_through_setups() {
+    let (_d, cfg) = rig();
+    set(&cfg, "role triage claude").unwrap();
+    assert_eq!(
+        overlay(&cfg)["routing"]["roles"]["triage"],
+        serde_json::json!({"engine": "claude"}),
+        "a single engine is stored as before"
+    );
+    set(&cfg, "engines save plain").unwrap();
+    set(&cfg, "role * claude over 95 claude-api").unwrap();
+    set(&cfg, "role triage claude-api over 50.5 claude").unwrap();
+    let stored = overlay(&cfg)["routing"]["roles"].clone();
+    assert_eq!(
+        stored["*"],
+        serde_json::json!({"engine": "claude", "over": [{"pct": 95.0, "engine": "claude-api"}]})
+    );
+    // What `settings show` holds it to takes both shapes, and no other.
+    let kind = crate::schema::find("proj.roles").unwrap().kind;
+    kind.check(&stored).unwrap();
+    for wrong in [
+        serde_json::json!({"*": {"engine": "claude", "over": [{"pct": 101, "engine": "claude-api"}]}}),
+        serde_json::json!({"*": {"engine": "claude", "over": [{"engine": "claude-api"}]}}),
+        serde_json::json!({"*": {"engine": "claude", "over": {"pct": 95, "engine": "claude-api"}}}),
+    ] {
+        assert!(kind.check(&wrong).is_err(), "{wrong}");
+    }
+    let force = cfg.roles().unwrap();
+    let route = force.route("fix", None);
+    assert_eq!(route.text(), "claude over 95 claude-api");
+    assert_eq!(
+        route.engines().collect::<Vec<_>>(),
+        ["claude", "claude-api"]
+    );
+    assert_eq!(
+        force.route("triage", None).text(),
+        "claude-api over 50.5 claude"
+    );
+    let said = set(&cfg, "engines save credit").unwrap();
+    assert!(said.contains("* claude over 95 claude-api\n"), "{said}");
+    set(&cfg, "engines use plain").unwrap();
+    assert_eq!(cfg.roles().unwrap().route("fix", None).text(), "claude");
+    set(&cfg, "engines use back").unwrap();
+    assert_eq!(overlay(&cfg)["routing"]["roles"], stored);
+    set(&cfg, "engines use plain").unwrap();
+    set(&cfg, "engines use credit").unwrap();
+    assert_eq!(overlay(&cfg)["routing"]["roles"], stored);
+    assert!(cfg.engines().unwrap().contains("Active: credit"));
+
+    let before = fs::read(cfg.roles_file()).unwrap();
+    for bad in [
+        "role fix claude over",
+        "role fix claude over 95",
+        "role fix claude over 95 claude-api over",
+        "role fix claude under 95 claude-api",
+        "role fix claude over x claude-api",
+        "role fix claude over NaN claude-api",
+        "role fix claude over inf claude-api",
+        "role fix claude over 101 claude-api",
+        "role fix claude over -1 claude-api",
+        "role fix claude over 95 codex",
+        "role fix claude over 95 claude-api over 99 claude",
+        "role fix claude-api over 95 claude-api",
+    ] {
+        assert!(set(&cfg, bad).is_err(), "{bad}");
+    }
+    assert_eq!(fs::read(cfg.roles_file()).unwrap(), before, "nothing kept");
+    // A stored chain is checked on the way in, as a typed one is.
+    let mut twice = super::route(&["claude", "over", "95", "claude-api"]).unwrap();
+    twice.over.push(Hop {
+        pct: 50.0,
+        engine: "claude".into(),
+    });
+    let stored = Roles {
+        roles: [("fix".to_owned(), twice)].into(),
+        ..Default::default()
+    };
+    let err = stored.check(&default_offers()).unwrap_err();
+    assert!(err.contains("claude is on the route twice"), "{err}");
+}
+
 #[test]
 fn engines_use_changes_exactly_the_saved_values() {
     let (_d, cfg) = rig();
@@ -251,6 +335,7 @@ fn the_old_files_migrate_once() {
             "triage".to_owned(),
             Route {
                 engine: "claude".into(),
+                over: vec![],
             },
         )]
         .into(),

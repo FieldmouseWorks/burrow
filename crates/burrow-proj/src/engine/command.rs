@@ -167,7 +167,7 @@ pub fn spawn(
     // The marker, with the budget, is written before the admission's lock
     // goes: the next admission's meter counts this run at it.
     let budget = admission.as_ref().map(|a| a.budget);
-    let child = job.start_budgeted_run(n, crate::now(), budget, || c.spawn());
+    let child = job.start_budgeted_run(n, crate::now(), choice.engine, budget, || c.spawn());
     drop(admission);
     child
 }
