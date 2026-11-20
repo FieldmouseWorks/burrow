@@ -3,7 +3,12 @@ one-shot handoffs in it: a PR a trusted request handed to the steward while
 its repo is paused (`settings land OWNER/REPO#N HEAD`, burrow's
 docs/settings.md). A handoff admits that PR's own pass and its landing at
 that head, nothing else: every Claude job, proof and review the repo would
-start stays paused, so what it still needs keeps it waiting."""
+start stays paused, so what it still needs keeps it waiting.
+
+It also says who lands the repo's PRs (`landing`, burrow-settings'
+landing.rs): the steward or conaryd. Every landing write (a merge, a train
+write, a PR's own step and the jobs and proofs it starts) is gated by held(),
+which no handoff overrides where the steward doesn't land the repo."""
 import json
 import subprocess
 
@@ -30,6 +35,30 @@ def decision(repo):
     return decision
 
 
+def landing(repo):
+    """The repo's landing as the record has it ({"owner", "to",
+    "generation"}), or None when the decision can't be read, which lets the
+    steward land nothing."""
+    d = decision(repo)
+    return None if d is None else d["landing"]
+
+
+def lands(holding):
+    """Whether the steward may land in a repo with this landing: it holds it
+    and no handover is under way. None (unreadable): no."""
+    return holding is not None and holding["owner"] == "steward" and holding["to"] is None
+
+
+def held(repo, pr=None):
+    """paused(), for a landing write: true too wherever the steward doesn't
+    land the repo, whatever the repo's admission or a handoff of the PR
+    says, so it never lands beside conaryd."""
+    d = decision(repo)
+    if d is None or not lands(d["landing"]):
+        return True
+    return not d["allowed"] and not (pr is not None and handoff(d, pr))
+
+
 def handoff(decision, pr):
     """The handoff in decision for this PR at its head, if there is one."""
     return next((h for h in (decision or {}).get("handed", ())
@@ -46,9 +75,10 @@ def paused(repo, pr=None):
 
 
 def handed(repo, pr):
-    """Whether the PR, at its head, is in a paused repo only by its handoff."""
+    """Whether the PR, at its head, is in a paused repo only by its handoff,
+    in a repo the steward lands."""
     d = decision(repo)
-    return d is not None and not d["allowed"] and handoff(d, pr) is not None
+    return d is not None and lands(d["landing"]) and not d["allowed"] and handoff(d, pr) is not None
 
 
 def spend(repo, n, head):

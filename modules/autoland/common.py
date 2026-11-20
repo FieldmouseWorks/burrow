@@ -26,7 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
-from admission import decision, handed, spend, spend_closed  # noqa: F401 (the steward's, as C.*)
+from admission import decision, handed, held, landing, lands, spend, spend_closed  # noqa: F401 (the steward's, as C.*)
 import proof_state
 from proof_state import build_unit, user_systemctl, build_state
 

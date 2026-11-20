@@ -70,7 +70,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (S, 'open_prs', lambda owner, name: (info, copy.deepcopy(prs[name]))),
             (S.P, 'begin', lambda *a: None), (S.P, 'place', lambda repo, n: n),
             (S.T, 'begin', lambda repo: S.T.STOPPED.pop(repo, None)), (S.T, 'on', lambda *a: True),
-            (S.T, 'step', train), (S.step, 'handle', handle),
+            (S.T, 'step', train), (S.step, 'handle', handle), (S.L, 'lands', lambda repo: True),
             (S, 'branches', lambda repo, *a, **k: branches.append(repo)),
             (S, 'upkeep', lambda *a: None),
             (C, 'follow_renames', lambda names: None), (C, 'taken', lambda *a: None),

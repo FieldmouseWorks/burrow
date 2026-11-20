@@ -329,8 +329,9 @@ def land(repo, pr, repo_info):
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
     # Read again right before it: a pause since the pass began stops it,
     # and in a paused repo only a handoff of this PR at this head lets it by.
+    # Where the steward doesn't land the repo, nothing does.
     handed = C.handed(repo, pr)
-    if not handed and C.paused(repo):
+    if not handed and C.held(repo):
         raise C.JobPaused(f"{repo}: repository work paused before merge")
     try:
         C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
