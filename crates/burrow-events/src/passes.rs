@@ -183,6 +183,17 @@ pub fn serve(
         let started = !ready.is_empty();
         let mut ready = ready.into_iter();
         while let Some((pass, scope)) = ready.next() {
+            // The steward's pass over a repo conaryd now lands (`landing`)
+            // doesn't start, however it was booked (a wake-up from before
+            // the handover, say): it's spent, so the same booking isn't
+            // taken again.
+            if let Pass::Repo(repo) = &pass
+                && !h.holds(repo)
+            {
+                eprintln!("{name}: {pass} skipped: conaryd lands it");
+                line.done(&pass, true, now());
+                continue;
+            }
             let unit = h.unit(&pass);
             // One already running (from before this service started, say)
             // began before this pass was due, and asking for it again only

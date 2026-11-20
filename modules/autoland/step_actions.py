@@ -330,7 +330,7 @@ class Actions:
         none: the verdicts are taken from the store (proofs.py). A PR
         handed to the steward in a paused repo has its proofs paused with
         the repo: it lands only on what was proved already."""
-        if C.paused(self.repo):
+        if C.held(self.repo):
             raise C.JobPaused(f"{self.repo}: proofs paused")
         builds = [c for c in self.ci_names if c in self.rc["proofBuilds"]]
         runs = [] if builds else [c for c in self.ci_names if c in self.rc["proofRuns"]]

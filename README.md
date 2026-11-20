@@ -335,6 +335,11 @@ Each has an entry below, and each can be imported on its own.
   Conary's landing flow, the steward's replacement, decide beside each pass
   without acting (`cn flow compare`, in `autoland-shadow@`'s journal after
   each pass), showing where the two part before a repo switches over.
+  A shadowed repo in `burrow.landing.conaryd` switches with one live
+  setting, `settings landing OWNER/REPO conaryd` (and back with `steward`):
+  burrow-landing hands it over once the one letting go has nothing at work
+  there, and the two never land it at once
+  ([docs/landing.md](docs/landing.md)).
   `plugins.fix.enable` (off) runs Conary's fix plugin and its broker
   (crates/burrow-fix): the flow's fixes run as proj jobs on the fixing role
   (`plugins.fix.role`), one live fix a PR, stopped when the flow's request

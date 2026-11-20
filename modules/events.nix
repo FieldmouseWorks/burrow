@@ -20,8 +20,11 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
+    # Who lands each repo (Conary#313): the record burrow-landing keeps,
+    # read again at every delivery, kick and pass.
+    landing = if cfg.landing.record == null then null else { inherit (cfg.landing) record forward; };
     handlers = lib.mapAttrs (name: h: {
-      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap yieldTo;
+      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap yieldTo landing;
       issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
     }) cfg.handlers;
   });
@@ -228,6 +231,18 @@ in
               one.
             '';
           };
+          landing = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Whether this is the steward's: it takes a repo's deliveries,
+              kicks and wake-ups only while burrow.events.landing.record
+              says the steward holds the repo's landing (a handover away
+              included, so its passes let go of their work). Once conaryd
+              holds it they're conaryd's, and a wake-up booked before is
+              spent without a pass, so the two never land at once.
+            '';
+          };
           yieldTo = mkOption {
             type = types.nullOr types.str;
             default = null;
@@ -245,6 +260,33 @@ in
           };
         };
       });
+    };
+
+    landing = {
+      record = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          The landing record (burrow-landing's, Conary#313): who lands each
+          repo's PRs, the steward or conaryd. Null: the steward lands every
+          repo's, and nothing goes to conaryd.
+        '';
+      };
+      forward = mkOption {
+        type = types.nullOr types.port;
+        default = null;
+        description = ''
+          conaryd's webhook port on 127.0.0.1: each signed delivery about a
+          repo the record gives conaryd (and no handover under way) goes on
+          to it as GitHub sent it, body and signature, and one it doesn't
+          take is answered 502, so GitHub's log shows it. Null: none goes.
+        '';
+      };
+      events = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = "The events conaryd takes, which every repo's hook sends too (hookEvents) while it's forwarded to.";
+      };
     };
 
     url = mkOption {
@@ -266,8 +308,9 @@ in
     hookEvents = mkOption {
       type = types.listOf types.str;
       readOnly = true;
-      default = lib.unique (lib.sort lib.lessThan (lib.concatMap (h: h.events) (lib.attrValues cfg.handlers)));
-      description = "Every event a handler takes: what each repo's hook sends.";
+      default = lib.unique (lib.sort lib.lessThan (lib.concatMap (h: h.events) (lib.attrValues cfg.handlers)
+        ++ lib.optionals (cfg.landing.forward != null) cfg.landing.events));
+      description = "Every event a handler takes, and conaryd's while it's forwarded to: what each repo's hook sends.";
     };
   };
 

@@ -527,6 +527,7 @@ name = "burrow-events"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-settings",
  "burrow-test",
  "hmac",
  "serde",
@@ -691,6 +692,20 @@ dependencies = [
  "burrow-builds",
  "burrow-github",
  "burrow-test",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "burrow-landing"
+version = "0.0.0"
+dependencies = [
+ "burrow-settings",
+ "conary-core",
+ "conary-github",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

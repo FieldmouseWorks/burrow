@@ -512,7 +512,7 @@ def start(jid, build_json, what, starter=None):
     """The proof's folder, with what it is (build.json), then its unit: a
     build's runs run(); a run's, starter (its command line, the folder
     after it) starts. Its id, or None when it wouldn't start."""
-    if C.paused(build_json["repo"]):
+    if C.held(build_json["repo"]):
         return None
     prune()
     here = os.path.join(STATE, "builds", jid)
@@ -570,7 +570,7 @@ def run(jid):
     restoring = os.path.join(here, "policy-restoring")
     resumed = os.path.exists(restoring)
     b = load(f"builds/{jid}/build.json", None)
-    if C.paused(b["repo"]):
+    if C.held(b["repo"]):
         return
     if resumed:
         os.unlink(restoring)

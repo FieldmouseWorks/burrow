@@ -71,9 +71,13 @@ settings show
 settings pause OWNER/REPO
 settings allow OWNER/REPO
 settings land OWNER/REPO#N HEAD
+settings landing OWNER/REPO steward|conaryd
 proj usage hold UNIX_TIMESTAMP --only pipeline
 proj usage back
 ```
+
+`landing` says who lands the repo's PRs, the steward or conaryd
+([landing.md](landing.md) owns the subject).
 
 Pipeline scope intersects the effective allow list with `pipelineRepos`
 (including `leadRepos`). It expires at the deadline, or

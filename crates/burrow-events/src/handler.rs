@@ -18,6 +18,21 @@ pub struct Config {
     pub port: Option<u16>,
     pub kick_port: u16,
     pub handlers: BTreeMap<String, Handler>,
+    /// Who lands each repo's PRs (Conary#313): none, the steward lands
+    /// every repo's and nothing goes to conaryd.
+    #[serde(default)]
+    pub landing: Option<crate::landing::Landing>,
+}
+
+impl Config {
+    /// Hand the landing record to the handlers that need it (`landing`).
+    pub fn wire(mut self) -> Self {
+        let record = self.landing.as_ref().map(|l| l.record.clone());
+        for h in self.handlers.values_mut().filter(|h| h.landing) {
+            h.record = record.clone();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -62,6 +77,13 @@ pub struct Handler {
     /// it yields to none.
     #[serde(default)]
     pub yield_to: Option<String>,
+    /// The steward's: it takes a repo's deliveries, kicks and wake-ups only
+    /// while the landing record says the steward holds the repo.
+    #[serde(default)]
+    pub landing: bool,
+    /// That record (the config's `landing.record`), set by Config::wire.
+    #[serde(skip)]
+    pub record: Option<PathBuf>,
 }
 
 fn yes() -> bool {
@@ -94,11 +116,23 @@ impl Handler {
         }
     }
 
+    /// Whether the handler takes `repo` as its landing stands now: always,
+    /// unless it's the steward's (`landing`) and the record gives the repo
+    /// to conaryd.
+    pub fn holds(&self, repo: &str) -> bool {
+        match (&self.record, self.landing) {
+            (Some(record), true) => crate::landing::steward_holds(record, repo),
+            _ => true,
+        }
+    }
+
     /// Whether this delivery (its repo already checked) starts the
     /// handler's pass.
     pub fn takes(&self, event: &str, payload: &Value) -> bool {
         let repo = at(payload, &["repository", "full_name"]).and_then(Value::as_str);
-        if !self.events.iter().any(|e| e == event) || !repo.is_some_and(|r| self.covers(r)) {
+        if !self.events.iter().any(|e| e == event)
+            || !repo.is_some_and(|r| self.covers(r) && self.holds(r))
+        {
             return false;
         }
         if event == "status"

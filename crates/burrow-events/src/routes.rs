@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::handler::Handler;
 use crate::http::{Request, signed};
+use crate::landing::{Landing, forward};
 use crate::line::{DEBOUNCE, Line, Pass};
 use burrow_github::repo_name;
 
@@ -17,8 +18,16 @@ pub type Lines = Arc<BTreeMap<String, Line>>;
 
 /// The webhook's deliveries, nginx passes them on: each goes to the handlers
 /// that take it (`Handler::takes`). A commit status goes to none whose own
-/// passes posted it (`ownStatuses`), which is no news to them.
-pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request) -> u16 {
+/// passes posted it (`ownStatuses`), which is no news to them. One about a
+/// repo conaryd lands goes on to conaryd too (`landing`); one it didn't take
+/// is answered 502, so GitHub's log shows it and it can be sent again.
+pub fn delivery(
+    handlers: &Handlers,
+    lines: &Lines,
+    landing: Option<&Landing>,
+    secret: &str,
+    req: &Request,
+) -> u16 {
     let event = req.header("X-GitHub-Event").unwrap_or("");
     if req.body.is_empty() || !signed(secret, &req.body, req.header("X-Hub-Signature-256")) {
         // A forgery, a probe, or a hook whose secret isn't this one: say
@@ -46,6 +55,13 @@ pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request)
                 None => lines[name].event(h.place(repo), now()),
             }
         }
+    }
+    if let Some(port) = landing.and_then(|l| l.forward_to(repo))
+        && let Err(e) = forward(port, req)
+    {
+        let id = req.header("X-GitHub-Delivery").unwrap_or("?");
+        eprintln!("{repo}: delivery {id} ({event}) not taken by conaryd: {e}");
+        return 502;
     }
     202
 }
@@ -118,7 +134,8 @@ fn printable(v: &str) -> String {
 }
 
 /// POST /kick/HANDLER[/OWNER/REPO], from this machine. A repo the handler
-/// doesn't take (`repos`) is no kick.
+/// doesn't take (`repos`, or the steward's while conaryd lands it) is no
+/// kick.
 pub fn kick(handlers: &Handlers, lines: &Lines, req: &Request) -> u16 {
     let path = req.target.split('?').next().unwrap_or("");
     let parts: Vec<&str> = path.split('/').collect();
@@ -131,7 +148,7 @@ pub fn kick(handlers: &Handlers, lines: &Lines, req: &Request) -> u16 {
     if repo.is_empty() {
         // Due at once: nothing follows a full pass's kick to wait for.
         lines[parts[2]].event(Pass::Full, now() - DEBOUNCE);
-    } else if repo_name(&repo) && h.covers(&repo) {
+    } else if repo_name(&repo) && h.covers(&repo) && h.holds(&repo) {
         lines[parts[2]].event(h.place(&repo), now());
     } else {
         return 404;
@@ -193,7 +210,7 @@ mod tests {
         let (hs, ls) = (handlers.clone(), lines.clone());
         let (hooks, _) = listen(
             0,
-            Arc::new(move |req| delivery(&hs, &ls, "hook-secret", req)),
+            Arc::new(move |req| delivery(&hs, &ls, None, crate::test_secret(), req)),
         )
         .unwrap();
         let (hs, ls) = (handlers.clone(), lines.clone());
@@ -232,7 +249,7 @@ mod tests {
 
     fn signed_delivery(port: u16, payload: serde_json::Value, event: &str) -> u16 {
         let body = payload.to_string().into_bytes();
-        deliver(port, &body, &sign("hook-secret", &body), event)
+        deliver(port, &body, &sign(crate::test_secret(), &body), event)
     }
 
     // Deliveries go to the handlers that take their event; forged ones, and
@@ -241,7 +258,7 @@ mod tests {
     fn deliveries() {
         let (_h, lines, hooks, _k) = setup();
         let body = br#"{"repository": {"full_name": "sam/r"}}"#;
-        let sig = sign("hook-secret", body);
+        let sig = sign(crate::test_secret(), body);
         assert_eq!(
             deliver(hooks, body, &format!("sha256={}", "0".repeat(64)), "push"),
             401
@@ -263,7 +280,7 @@ mod tests {
         assert_eq!(signed_delivery(hooks, json!(["sam/r"]), "push"), 204);
         let junk = b"not json";
         assert_eq!(
-            deliver(hooks, junk, &sign("hook-secret", junk), "push"),
+            deliver(hooks, junk, &sign(crate::test_secret(), junk), "push"),
             204
         );
         assert_eq!(
@@ -383,7 +400,7 @@ mod tests {
                 "/burrow/hook",
                 body,
                 &[
-                    ("X-Hub-Signature-256", &sign("hook-secret", body)),
+                    ("X-Hub-Signature-256", &sign(crate::test_secret(), body)),
                     ("X-GitHub-Event", "push")
                 ]
             ),

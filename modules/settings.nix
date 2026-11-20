@@ -12,6 +12,10 @@ let
     legacyRoles = if config.burrow.proj.enable or false then "${config.users.users.${user}.home}/.config/proj" else null;
     legacyEnginesLock = if (config.burrow.proj.enable or false) && (config.burrow.proj.engines.door.enable or false)
       then "${stateDir}/proj-engines/${lib.toLower (builtins.replaceStrings [ "/" ] [ "--" ] config.burrow.proj.engines.door.repo)}/lock" else null;
+    # Who lands each repo (autoland/landing.nix): the record, wherever the
+    # steward runs, and the repos conaryd may be given.
+    landingRecord = if config.burrow.autoland.enable or false then config.burrow.landing.record else null;
+    conaryd = lib.attrByPath [ "burrow" "landing" "conaryd" ] [ ] config;
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);

@@ -111,6 +111,8 @@ let
 in
 {
   inherit configs;
+  # One repo's, by its name.
+  file = flowFile;
   # What a successful pass starts: the shadow, which skips a repo with no
   # config.
   onSuccess = lib.optional (cfg.shadow != [ ] && !cfg.dryRun) "autoland-shadow@%i.service";

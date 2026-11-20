@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S.P, 'begin', lambda *a: None), (S.P, 'place', lambda repo, n: n),
                 (S.T, 'begin', lambda repo: S.T.STOPPED.pop(repo, None)),
                 (S.T, 'on', lambda *a: True), (S.T, 'step', lambda *a: None),
-                (S.step, 'handle', handle), (S, 'branches', lambda *a, **k: None),
+                (S.step, 'handle', handle), (S.L, 'lands', lambda repo: True), (S, 'branches', lambda *a, **k: None),
                 (S, 'upkeep', lambda *a: None),
                 (C, 'taken', lambda *a: None), (C, 'poke', lambda *a: None),
                 (C, 'coverage', lambda rs, done: {'repos': {r['repo']: {'covered': r in done} for r in rs}}),

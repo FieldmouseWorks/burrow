@@ -47,8 +47,9 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
     try:
         # A PR handed to the steward (admission.py) gets its own pass in a
         # paused repo: whatever else it needs (a Claude job, a proof, a
-        # review) is still paused, and keeps it waiting here.
-        if C.paused(repo, pr):
+        # review) is still paused, and keeps it waiting here. Nothing of a
+        # PR's own step goes ahead in a repo the steward doesn't land.
+        if C.held(repo, pr):
             raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
     except C.JobPaused as e:

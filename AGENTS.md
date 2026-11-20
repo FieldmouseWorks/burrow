@@ -13,6 +13,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
   fixed and held.
+- [docs/landing.md](docs/landing.md): who lands each repo, the steward or
+  conaryd, the one setting that switches it and how a handover goes.
 - [docs/proj-design.md](docs/proj-design.md): proj's design (one record per
   job and issue, waits that say what ends them, one pass) and its stages.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
