@@ -32,6 +32,10 @@ pub struct Config {
     /// What takes one of the machine's heavy slots for a VM test (burrow.cpu's
     /// heavy), when it has them.
     pub heavy: Option<PathBuf>,
+    /// burrow-update itself, unwrapped: what a VM test runs in its heavy
+    /// slot, as the user, to look at origin's main once more before the
+    /// test starts (`unless-moved`, follow.rs).
+    pub program: PathBuf,
     /// The machine's own project, where its fix jobs go (proj run), and the
     /// App they act as on GitHub, when it has one.
     pub project: String,
@@ -133,7 +137,7 @@ mod tests {
             "update": "box-update", "host": "box", "state": "/s", "work": "/w",
             "user": "sam", "home": "/home/sam", "uid": 1000, "runuser": "/b/runuser", "path": "/b",
             "configuration": "box", "system": "x86_64-linux", "heavy": "/b/heavy",
-            "project": "homelab", "app": "workers",
+            "program": "/b/burrow-update", "project": "homelab", "app": "workers",
             "train": {"repo": "sam/homelab", "branch": "box-update", "settled": "review-settled",
                       "context": "conary/train", "steward": "sams-steward"},
             "origin": "https://github.com/sam/homelab", "flake": "/home/sam/homelab",
@@ -149,6 +153,7 @@ mod tests {
         std::fs::write(&path, config.to_string()).unwrap();
         let cfg = Config::read(&path).unwrap();
         assert_eq!(cfg.train.unwrap().steward, "sams-steward");
+        assert_eq!(cfg.program.to_str(), Some("/b/burrow-update"));
         assert_eq!(
             (cfg.heavy.unwrap().to_str(), cfg.app.as_deref()),
             (Some("/b/heavy"), Some("workers"))

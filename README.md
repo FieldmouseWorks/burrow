@@ -122,7 +122,9 @@ Each has an entry below, and each can be imported on its own.
   compares health checks before and after (`HOST-health`), confirms and pushes
   to main (as a PR the merge train lands, when the flake's repo has its train
   on); anything that breaks reverts and goes to a Claude job. It deploys main
-  too, so a merged PR goes live the same way. The `proj-config` health check
+  too, so a merged PR goes live the same way. It never tests or switches to a
+  main that has moved on: it looks again before each VM test (and in its
+  heavy slot) and before the switch, and starts over from the new head. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
   and the role settings every turn reads before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. A check that

@@ -79,6 +79,9 @@ impl Run<'_> {
                 ),
             ));
         }
+        // Never a main origin has moved past: the run starts over from the
+        // new one, which is what goes live.
+        self.still_main()?;
         let tools = &cfg.tools;
         let log = cfg.state.join("logs/switch.log");
         let before = cfg.state.join("health-before");

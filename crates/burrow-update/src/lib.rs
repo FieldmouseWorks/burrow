@@ -14,6 +14,8 @@
 //!   a run found live
 //! - push.rs: what went live, onto main
 //! - check.rs: a VM test, in a heavy slot where the machine has them
+//! - follow.rs: main looked at again before each VM test and the switch,
+//!   and the run started over when it moved
 //! - dispatch.rs: a problem, handed to a Claude job and told to the owner
 //! - train.rs: HOST-update's own PR, in a repo whose PRs land through its
 //!   merge train
@@ -28,6 +30,7 @@ mod bump;
 mod check;
 pub mod config;
 mod dispatch;
+pub mod follow;
 mod live;
 mod memo;
 mod push;

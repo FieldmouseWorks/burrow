@@ -1,5 +1,5 @@
 //! HOST-update as the machine runs it: burrow-update CONFIG [--force |
-//! status], with stand-ins for what it runs as root that keep how they were
+//! status], and the word a VM test's heavy slot runs (unless-moved), with stand-ins for what it runs as root that keep how they were
 //! run in FAKE, a dir of the test's own. A run's own steps are the
 //! library's tests (run_tests.rs); these are its words, what it says, and
 //! its exits.
@@ -89,7 +89,7 @@ impl Machine {
             "update": "box-update", "host": "box", "state": m.path("state"), "work": m.path("scratch/work"),
             "user": "sam", "home": m.path("home"), "uid": 1000, "runuser": b.join("runuser"), "path": "/b",
             "configuration": "box", "system": "x86_64-linux", "heavy": null,
-            "project": "homelab", "app": null, "train": null,
+            "program": BIN, "project": "homelab", "app": null, "train": null,
             "origin": "https://github.com/sam/homelab", "flake": m.path("operator"),
             "group": "users", "owner": "Sam", "manifest": null,
             "releases": "https://downloads.example/claude", "checks": ["vm"],
@@ -265,4 +265,70 @@ fn a_run_says_what_it_did_and_why_it_broke() {
     );
     assert!(!m.path("state/status.json").exists());
     assert_eq!(m.fake("others"), "", "nothing past the clone");
+}
+
+/// git, in `at`, as the test: what it printed.
+fn git(at: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.org")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.org")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+}
+
+/// main, in the bare repo `origin` stands for, moved on by a commit of
+/// `other`'s: the commit.
+fn lands(other: &Path, message: &str) -> String {
+    git(other, &["commit", "-q", "--allow-empty", "-m", message]);
+    git(other, &["push", "-q", "origin", "HEAD:main"]);
+    git(other, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+    git(d, &["clone", "-q", "origin.git", "work"]);
+    git(d, &["clone", "-q", "origin.git", "other"]);
+    let other = d.join("other");
+    let main = lands(&other, "one");
+    let work = d.join("work");
+    let word = |words: &[&str]| {
+        Command::new(BIN)
+            .arg("unless-moved")
+            .arg(&work)
+            .args(words)
+            .output()
+            .unwrap()
+    };
+    // Still main: the command runs, as itself (and its exit is its own).
+    let out = word(&[&main, "--", "sh", "-c", "echo tested; exit 3"]);
+    assert_eq!(said(&out), (Some(3), "tested\n".into(), String::new()));
+
+    // main moved: nothing runs, and the clone has heard where it went.
+    let now = lands(&other, "two");
+    let out = word(&[&main, "--", "echo", "tested"]);
+    assert_eq!(
+        said(&out),
+        (
+            Some(1),
+            String::new(),
+            format!("main moved to {now}: not testing a tree on {main}\n")
+        )
+    );
+    assert_eq!(git(&work, &["rev-parse", "refs/remotes/origin/main"]), now);
+
+    // Not a commit, or no command: a usage, and nothing run.
+    for words in [&["HEAD", "--", "true"][..], &[&now, "--"], &[&now, "true"]] {
+        assert_eq!(word(words).status.code(), Some(2), "{words:?}");
+    }
 }

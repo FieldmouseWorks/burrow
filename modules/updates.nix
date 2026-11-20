@@ -127,6 +127,9 @@ let
     configuration = config.burrow.switch.configName;
     # burrow.cpu's slots, which the VM tests wait for where the machine has them.
     heavy = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else null;
+    # Itself, unwrapped: what a VM test runs in its slot to look at main
+    # once more before it starts.
+    program = "${inputs.self.packages.${system}.burrow-update}/bin/burrow-update";
     app = if machineApp == null then null else machineApp.name;
     train = if train then {
       repo = githubRepo; branch = update; settled = vars.SETTLED;
