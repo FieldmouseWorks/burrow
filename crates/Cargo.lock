@@ -841,6 +841,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-github",
  "burrow-process",
+ "burrow-settings",
  "burrow-test",
  "jiff 1.0.1",
  "md-5",

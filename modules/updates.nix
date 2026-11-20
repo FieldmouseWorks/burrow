@@ -5,7 +5,8 @@
 #     Claude Code), bump the flake's inputs and Claude Code, build, VM-test,
 #     switch with the dead man's switch, health-check, confirm, push to main.
 #     Breakage reverts itself and goes to a Claude job.
-#   - Renovate: dependency PRs for every repo you own, merged on green CI;
+#   - Renovate: dependency PRs for every repo you own, merged on green CI
+#     where the steward lands (docs/landing.md);
 #     renovate-sweep gives the stuck ones to a Claude job. A repo's push to
 #     its default branch, or its Renovate PRs moving or finishing CI, start
 #     both for that repo (burrow.events); all of them go hourly, for the
@@ -303,6 +304,12 @@ let
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
     };
+    # Who lands each repo (autoland/landing.nix), read at each run: Renovate
+    # merges only where the steward does. None without autoland, where
+    # nothing hands landing over.
+    landing = if autoland.enable or false then lib.attrByPath [ "burrow" "landing" "record" ] null config else null;
+    # A full run as the user leaves out the repos it may not merge in.
+    inherit (renovateSettings) autodiscoverFilter;
     tools = {
       gh = "${renovateGh}/bin/gh";
       renovate = "${renovatePackage}/bin/renovate";
@@ -774,7 +781,8 @@ in
         - `${update} status` says what the last run did. When ${config.burrow.owner} asks how
           updates are going, start there${lib.optionalString (vars.BOOT != "") ", plus `${vars.BOOT} status`"}.
       '' + lib.optionalString rcfg.enable ''
-        - Renovate opens and merges dependency PRs in every repo; renovate-sweep
+        - Renovate opens dependency PRs in every repo, and merges them where the
+          steward lands (where conaryd does, conaryd lands them); renovate-sweep
           hands the stuck ones to Claude jobs.
       '' + lib.optionalString cfg.advisories.enable ''
         - advisory-watch hands new CVEs to Claude jobs. Jobs from it show up in

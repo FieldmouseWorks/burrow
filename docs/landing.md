@@ -43,6 +43,12 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
   go to conaryd's listener exactly as GitHub signed them.
 - conaryd reads its events file. It lists the repos the record gives
   conaryd whose automated work is allowed, and no others.
+- renovate-run ([crates/burrow-renovate](../crates/burrow-renovate/src/run.rs))
+  reads it as each run of Renovate starts. Renovate merges only in a repo
+  the steward lands; anywhere else, a handover under way included, it opens
+  and updates PRs and merges none, however its config or a security fix
+  asks ([patches/renovate-no-merge.patch](../patches/renovate-no-merge.patch)).
+  If the record can't be read, it merges nowhere and the run fails.
 
 conaryd runs as the flow's user, the controller where there is one
 (`burrow.ledger.controllerUser`). A flow configuration with a train or

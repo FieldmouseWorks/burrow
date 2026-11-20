@@ -23,6 +23,16 @@
 //! that never got Renovate going (its lock, its token) or couldn't be noted fails
 //! whatever the allowance.
 //!
+//! Renovate merges only where the steward lands: burrow-landing's record,
+//! read as each run of Renovate starts (holding the runs' lock), so a
+//! handover either way needs no deploy. In a repo the steward doesn't hold,
+//! a handover to or from it included, only conaryd moves the trunk: its run
+//! has merging forced off and BURROW_RENOVATE_NO_MERGE set, which
+//! Renovate's patched merges (patches/renovate-no-merge.patch) all ask, so
+//! it opens and updates PRs and merges none. A full run as the user leaves
+//! those repos out and gives each a run of its own. A record that can't be
+//! read lets no run merge, and fails the pass.
+//!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::collections::BTreeMap;
@@ -34,11 +44,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use burrow_settings::landing::{Owner, Record};
 use rustix::fs::{FlockOperation, flock};
 use rustix::io::{FdFlags, fcntl_setfd};
 use serde::Deserialize;
 
 use crate::{NOT_RUN, complain, exit_of, say, trimmed};
+
+/// What Renovate's patched merges ask (patches/renovate-no-merge.patch):
+/// set, it merges nothing.
+const NO_MERGE: &str = "BURROW_RENOVATE_NO_MERGE";
+
+/// Where a run of Renovate may merge.
+enum Merges {
+    /// Wherever it runs.
+    Free,
+    /// Nowhere: its repo isn't the steward's, or the record can't be read.
+    Held,
+    /// A run over every repo: everywhere but these, the steward's no
+    /// longer, which it leaves out for runs of their own.
+    Without(Vec<String>),
+}
 
 /// What modules/updates.nix tells renovate-run.
 #[derive(Debug, Deserialize)]
@@ -58,6 +84,13 @@ pub struct Config {
     /// The machine's own App, when Renovate runs as it rather than as the
     /// user.
     pub app: Option<App>,
+    /// burrow-landing's record (burrow.landing.record), read at each run:
+    /// where the steward doesn't land, Renovate merges nothing. None where
+    /// nothing hands landing over (no autoland): Renovate merges everywhere.
+    pub landing: Option<PathBuf>,
+    /// Renovate's autodiscoverFilter as deployed, which a full run as the
+    /// user narrows to leave out the repos it may not merge in.
+    pub autodiscover_filter: Vec<String>,
     pub tools: Tools,
 }
 
@@ -102,10 +135,18 @@ impl Config {
             };
         }
         let Some(app) = &self.app else {
-            let rc = match self.renovate("", &[]) {
-                Ok(rc) => rc,
-                Err(held) => self.held("", &held),
+            let (mut rc, left_out) = match self.renovate("", &[]) {
+                Ok(ran) => ran,
+                Err(held) => (self.held("", &held), Vec::new()),
             };
+            // What it left out, the steward's no longer, each in a run of
+            // its own that merges nothing.
+            for repo in &left_out {
+                rc = rc.max(match self.one(repo) {
+                    Ok(rc) => rc,
+                    Err(held) => self.held(repo, &held),
+                });
+            }
             return rc.max(self.used_up("", started));
         };
         // Every repo the installations reach, a run each. One that fails
@@ -186,6 +227,44 @@ impl Config {
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
         self.renovate(&repo, &[format!("--autodiscover-filter={filter}")])
+            .map(|(rc, _)| rc)
+    }
+
+    /// Where a run of Renovate on `repo` (every repo, as the user, when it's
+    /// empty) may merge, by burrow-landing's record now; and 1 when the
+    /// record can't be read, which lets it merge nowhere.
+    fn merges(&self, repo: &str) -> (Merges, u8) {
+        let Some(path) = &self.landing else {
+            return (Merges::Free, 0);
+        };
+        let record = match Record::read(path) {
+            Ok(record) => record,
+            Err(e) => {
+                complain(&format!(
+                    "{}: {e}: Renovate merges nothing till it reads",
+                    self.name
+                ));
+                return (Merges::Held, 1);
+            }
+        };
+        if !repo.is_empty() {
+            let free = record.holding(repo).lands(Owner::Steward);
+            return (if free { Merges::Free } else { Merges::Held }, 0);
+        }
+        let held: Vec<String> = record
+            .repos
+            .iter()
+            .filter(|(_, holding)| !holding.lands(Owner::Steward))
+            .map(|(repo, _)| repo.clone())
+            .collect();
+        (
+            if held.is_empty() {
+                Merges::Free
+            } else {
+                Merges::Without(held)
+            },
+            0,
+        )
     }
 
     /// After a run of Renovate's failed: GitHub's rate limit, as an error
@@ -272,27 +351,35 @@ impl Config {
     }
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
-    /// empty), in its turn, with a token asked for once it's its turn.
-    /// Renovate's exit, once its run is noted, or a verified quota wait.
-    /// Infrastructure failures are exits which no rate limit excuses.
-    fn renovate(&self, repo: &str, args: &[String]) -> Result<u8, burrow_github::Error> {
+    /// empty), in its turn, with a token asked for once it's its turn, and
+    /// merging only where the record says it may then. Renovate's exit,
+    /// once its run is noted, and the repos a run over every repo left out
+    /// for runs of their own; or a verified quota wait. Infrastructure
+    /// failures are exits which no rate limit excuses.
+    fn renovate(
+        &self,
+        repo: &str,
+        args: &[String],
+    ) -> Result<(u8, Vec<String>), burrow_github::Error> {
         let lock = match OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.run_lock)
         {
             Ok(lock) => lock,
-            Err(e) => return Ok(self.broke(&self.run_lock, e)),
+            Err(e) => return Ok((self.broke(&self.run_lock, e), Vec::new())),
         };
         if let Err(e) = flock(&lock, FlockOperation::LockExclusive) {
-            return Ok(self.broke(&self.run_lock, e.into()));
+            return Ok((self.broke(&self.run_lock, e.into()), Vec::new()));
         }
         // Renovate holds it too, until it's gone: a renovate-run killed
         // while its Renovate still runs (or shuts down) leaves no gap for
         // another run on the same clones.
         if let Err(e) = fcntl_setfd(&lock, FdFlags::empty()) {
-            return Ok(self.broke(&self.run_lock, e.into()));
+            return Ok((self.broke(&self.run_lock, e.into()), Vec::new()));
         }
+        // Read in its turn: a handover while it waited counts.
+        let (merges, unread) = self.merges(repo);
         let mut asked = match &self.app {
             Some(app) => {
                 let mut c = self.command(&app.gh_token);
@@ -307,14 +394,14 @@ impl Config {
         };
         let token = match asked.stderr(Stdio::inherit()).output() {
             Ok(out) if out.status.success() => trimmed(out.stdout),
-            Ok(out) => return Ok(exit_of(out.status)),
+            Ok(out) => return Ok((exit_of(out.status), Vec::new())),
             Err(e) => {
                 complain(&format!(
                     "{}: {}: {e}",
                     self.name,
                     asked.get_program().display()
                 ));
-                return Ok(NOT_RUN);
+                return Ok((NOT_RUN, Vec::new()));
             }
         };
         // An unlinked private file keeps the structured errors separate from
@@ -322,14 +409,38 @@ impl Config {
         // than a path: no log remains after the run, even if it is killed.
         let mut errors = match tempfile::tempfile() {
             Ok(file) => file,
-            Err(e) => return Ok(self.broke(Path::new("Renovate error log"), e)),
+            Err(e) => {
+                return Ok((self.broke(Path::new("Renovate error log"), e), Vec::new()));
+            }
         };
         if let Err(e) = fcntl_setfd(&errors, FdFlags::empty()) {
-            return Ok(self.broke(Path::new("Renovate error log"), e.into()));
+            return Ok((
+                self.broke(Path::new("Renovate error log"), e.into()),
+                Vec::new(),
+            ));
         }
-        let ran = self
-            .command(&self.tools.renovate)
-            .args(args)
+        let mut renovate = self.command(&self.tools.renovate);
+        renovate.args(args);
+        let mut left_out = Vec::new();
+        match merges {
+            Merges::Free => {}
+            // Forced, so the PRs it opens say no automerge; the switch is
+            // what no config can turn back.
+            Merges::Held => {
+                renovate.arg("--automerge=false").env(NO_MERGE, "1");
+            }
+            Merges::Without(repos) => {
+                let filter: Vec<String> = (self.autodiscover_filter.iter().cloned())
+                    .chain(repos.iter().map(|r| format!("!{r}")))
+                    .collect();
+                renovate.arg(format!(
+                    "--autodiscover-filter={}",
+                    serde_json::Value::from(filter)
+                ));
+                left_out = repos;
+            }
+        }
+        let ran = renovate
             .env("RENOVATE_TOKEN", &token)
             .env("GITHUB_COM_TOKEN", &token)
             .env(
@@ -353,14 +464,14 @@ impl Config {
             }
         };
         if let Err((path, e)) = self.ran(if repo.is_empty() { "all" } else { repo }) {
-            return Ok(self.broke(&path, e));
+            return Ok((self.broke(&path, e), left_out));
         }
         if quota_failure
             && let Some(held) = self.spent(repo.split('/').next().filter(|s| !s.is_empty()))
         {
             return Err(held);
         }
-        Ok(rc)
+        Ok((rc.max(unread), left_out))
     }
 
     /// When a run on `name` ended: the last ten, in a file named for the
@@ -463,6 +574,7 @@ mod tests {
     fn its_config_is_every_setting_and_only_those() {
         let config = serde_json::json!({
             "name": "renovate-run", "runLock": "/r/run.lock", "runs": "/r/runs", "wake": "/r/wake.json",
+            "landing": "/r/owners.json", "autodiscoverFilter": ["sam/*"],
             "app": {"env": {"GH_TOKEN_SOCKET": "/run/gh-token/w.sock"}, "owners": ["sam"], "ghToken": "/b/gh-token"},
             "tools": {"gh": "/b/gh", "renovate": "/b/renovate", "covers": "/b/covers"},
         });

@@ -1,0 +1,95 @@
+renovate: merge nothing while BURROW_RENOVATE_NO_MERGE is set
+
+burrow's own, not upstream's. renovate-run (crates/burrow-renovate) sets it
+for a repository whose landing isn't the steward's (burrow-landing's record):
+there only conaryd moves the trunk, and Renovate only opens and updates PRs.
+
+Forcing `automerge: false` isn't enough. A security fix's package rule
+carries its own `force` (vulnerabilityAlerts, which turns automerge on), and
+so can a repository's config, and either outranks the run's. So each way
+Renovate merges asks one switch in its own environment, which no
+repository's config reaches: a PR's merge (and its automerge comment), a
+branch's merge onto its base (held, the branch gets a PR instead), and
+the platform's own automerge, at a PR's creation or its reattempt.
+
+--- a/lib/workers/repository/update/branch/automerge.ts
++++ b/lib/workers/repository/update/branch/automerge.ts
+@@ -3,6 +3,7 @@
+ import { logger } from '../../../../logger/index.ts';
+ import { platform } from '../../../../modules/platform/index.ts';
+ import { scm } from '../../../../modules/platform/scm.ts';
++import { mergesHeld } from '../pr/automerge.ts';
+ import { isScheduledNow } from './schedule.ts';
+ import { resolveBranchStatus } from './status-checks.ts';
+ 
+@@ -21,7 +22,11 @@
+   config: RenovateConfig,
+ ): Promise<AutomergeResult> {
+   logger.debug('Checking if we can automerge branch');
+-  if (!(config.automerge && config.automergeType === 'branch')) {
++  // Held, it opens a PR as if it didn't automerge.
++  if (
++    mergesHeld() ||
++    !(config.automerge && config.automergeType === 'branch')
++  ) {
+     return 'no automerge';
+   }
+   if (!isScheduledNow(config, 'automergeSchedule')) {
+--- a/lib/workers/repository/update/pr/automerge.ts
++++ b/lib/workers/repository/update/pr/automerge.ts
+@@ -18,10 +18,23 @@
+   | 'Conflicted'
+   | 'DryRun'
+   | 'InMergeQueue'
++  | 'MergesHeld'
+   | 'PlatformNotReady'
+   | 'PlatformRejection'
+   | 'off schedule';
+ 
++/**
++ * Whether whoever runs Renovate has it merge nothing in this run
++ * (BURROW_RENOVATE_NO_MERGE, in Renovate's own environment, which no
++ * repository's config reaches): no PR merged, no branch pushed onto its
++ * base, no platform automerge turned on. It still opens and updates PRs.
++ * Every way Renovate merges asks this, so no config (a package rule, a
++ * security fix's own `force`, a repository's) can turn merging back on.
++ */
++export function mergesHeld(): boolean {
++  return !!process.env.BURROW_RENOVATE_NO_MERGE;
++}
++
+ export interface AutomergePrResult {
+   automerged: boolean;
+   branchRemoved?: boolean;
+@@ -43,6 +56,13 @@
+     ignoreTests,
+     rebaseRequested,
+   } = config;
++  if (mergesHeld()) {
++    logger.debug(`PR #${pr.number} isn't merged: merges are held`);
++    return {
++      automerged: false,
++      prAutomergeBlockReason: 'MergesHeld',
++    };
++  }
+   // Return if PR not ready for automerge
+   if (!isScheduledNow(config, 'automergeSchedule')) {
+     logger.debug(`PR automerge is off schedule`);
+--- a/lib/workers/repository/update/pr/index.ts
++++ b/lib/workers/repository/update/pr/index.ts
+@@ -47,6 +47,7 @@
+   prepareLabels,
+   shouldUpdateLabels,
+ } from './labels.ts';
++import { mergesHeld } from './automerge.ts';
+ import { addParticipants } from './participants.ts';
+ import { getPrCache, setPrCache } from './pr-cache.ts';
+ import {
+@@ -59,6 +60,7 @@
+   config: RenovateConfig & PlatformPrOptions,
+ ): PlatformPrOptions {
+   const usePlatformAutomerge = Boolean(
++    !mergesHeld() &&
+     config.automerge &&
+     (config.automergeType === 'pr' || config.automergeType === 'branch') &&
+     config.platformAutomerge,

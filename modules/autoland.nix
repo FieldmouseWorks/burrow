@@ -957,8 +957,11 @@ in
         a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
         follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
         The judge doesn't merge: the steward lands the PR on its verdict. Outside a
-        steward job, a Claude session may merge such a PR itself (squash, delete the
-        branch) once it has made that call.
+        steward job, in a repo the steward lands, a Claude session may merge such a PR
+        itself (squash, delete the branch) once it has made that call.
+      - In a repo conaryd lands, or one on its way to or from it (`settings show` says
+        which), only conaryd merges: no session, person or Renovate merges a PR there, whatever
+        else here says may.
       - ${config.burrow.owner}'s standing authority: merges, GitHub settings changes and cleanup
         are pre-approved. Take the judgment call first; only a genuine one-way door
         you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue

@@ -115,7 +115,9 @@ echo "ghs_$2_$(wc -l <"$FAKE/log")"
         // Renovate: what it was run with, and with whose token. A run with
         // an argument holding what FAKE/renovate-fails says fails.
         "renovate",
-        r#"echo "renovate $* token=$RENOVATE_TOKEN com=$GITHUB_COM_TOKEN" >>"$FAKE/log"
+        // With merges held (BURROW_RENOVATE_NO_MERGE), it says so after
+        // its arguments.
+        r#"echo "renovate $*${BURROW_RENOVATE_NO_MERGE:+ (merges held)} token=$RENOVATE_TOKEN com=$GITHUB_COM_TOKEN" >>"$FAKE/log"
 locked renovate
 # FAKE/renovate-outlives: renovate-run is killed while it runs, and the lock
 # is still held once it's gone.
@@ -170,9 +172,24 @@ impl Machine {
         m.config(serde_json::json!({
             "name": "renovate-run", "runLock": m.path("fake/lock"), "runs": m.path("runs"),
             "wake": m.path("wake.json"), "app": app,
+            "landing": m.path("owners.json"), "autodiscoverFilter": ["sam/*", "kim/*"],
             "tools": {"gh": b.join("gh"), "renovate": b.join("renovate"), "covers": b.join("covers")},
         }));
         m
+    }
+
+    /// burrow-landing's record: who holds each repo, and the one a
+    /// handover under way gives it to.
+    fn landing(&self, repos: &[(&str, &str, Option<&str>)]) {
+        let repos: serde_json::Map<String, serde_json::Value> = repos
+            .iter()
+            .map(|(repo, owner, to)| {
+                let holding = serde_json::json!({"owner": owner, "to": to, "generation": 1});
+                (repo.to_string(), holding)
+            })
+            .collect();
+        let record = serde_json::json!({ "repos": repos });
+        fs::write(self.path("owners.json"), record.to_string()).unwrap();
     }
 
     fn path(&self, p: &str) -> PathBuf {
@@ -559,6 +576,7 @@ fn what_it_cant_lock_or_note_it_says_and_exits_1() {
     let lock = m.path("nowhere/run.lock");
     m.config(serde_json::json!({
         "name": "renovate-run", "runLock": lock, "runs": m.path("runs"), "wake": m.path("wake.json"), "app": null,
+        "landing": null, "autodiscoverFilter": ["sam/*"],
         "tools": {"gh": bin().join("gh"), "renovate": bin().join("renovate"), "covers": bin().join("covers")},
     }));
     let (code, out, err) = m.run(&[]);
@@ -844,4 +862,80 @@ fn subprocess_quota_evidence_needs_a_live_reset_and_a_normal_failure_exit() {
     assert_eq!(code, Some(1));
     assert!(err.starts_with("renovate-run: "), "{err}");
     assert_eq!(m.booked(), serde_json::json!({}));
+}
+
+/// The same config throughout: a handover either way is read at each run.
+#[test]
+fn renovate_merges_only_where_the_steward_lands_by_the_record_at_each_run() {
+    let m = Machine::new(Some(&["sam"]));
+    let held = |repo: &str| format!("{} --automerge=false (merges held)", filter(repo));
+    // No record yet: every repo is the steward's.
+    assert_eq!(m.run(&["sam/a"]), ok(""));
+    assert_eq!(m.runs(), [filter("sam/a")]);
+    // conaryd's, as GitHub spells it or not; and on its way to conaryd or
+    // back, when neither lands.
+    m.landing(&[
+        ("sam/r", "conaryd", None),
+        ("sam/a", "steward", Some("conaryd")),
+        ("sam/b", "conaryd", Some("steward")),
+        ("sam/c", "steward", None),
+    ]);
+    for (repo, spelt) in [("sam/r", "Sam/R"), ("sam/a", "sam/a"), ("sam/b", "sam/b")] {
+        assert_eq!(m.run(&[repo]), ok(""));
+        assert_eq!(m.runs(), [held(spelt)], "{repo}");
+    }
+    assert_eq!(m.run(&["sam/c"]), ok(""));
+    assert_eq!(m.runs(), [filter("sam/c")]);
+    // A full run asks at each repo's run.
+    m.set("sam-repos", "sam/r\nsam/c\n");
+    assert_eq!(m.run(&[]), ok(""));
+    assert_eq!(m.runs(), [held("Sam/R"), filter("sam/c")]);
+    // Handed back: it merges again, with no new config.
+    m.landing(&[("sam/r", "steward", None)]);
+    assert_eq!(m.run(&["sam/r"]), ok(""));
+    assert_eq!(m.runs(), [filter("Sam/R")]);
+}
+
+#[test]
+fn as_the_user_a_full_run_leaves_out_what_it_may_not_merge_in_for_runs_of_their_own() {
+    let m = Machine::new(None);
+    m.landing(&[
+        ("sam/r", "conaryd", None),
+        ("kim/q", "steward", Some("conaryd")),
+        ("kim/p", "steward", None),
+    ]);
+    assert_eq!(m.run(&[]), ok(""));
+    assert_eq!(
+        m.runs(),
+        [
+            r#"--autodiscover-filter=["sam/*","kim/*","!kim/q","!sam/r"]"#.to_string(),
+            format!("{} --automerge=false (merges held)", filter("kim/q")),
+            format!("{} --automerge=false (merges held)", filter("Sam/R")),
+        ]
+    );
+    // None held: one run over them all, as ever.
+    m.landing(&[("sam/r", "steward", None)]);
+    assert_eq!(m.run(&[]), ok(""));
+    assert_eq!(m.runs(), [""]);
+}
+
+#[test]
+fn a_record_it_cant_read_lets_no_run_merge_and_fails_it() {
+    for app in [Some(&["sam"][..]), None] {
+        let m = Machine::new(app);
+        fs::write(m.path("owners.json"), "not json").unwrap();
+        let words: &[&str] = if app.is_some() { &["sam/a"] } else { &[] };
+        let (rc, out, err) = m.run(words);
+        assert_eq!((rc, out.as_str()), (Some(1), ""));
+        assert!(
+            err.contains("Renovate merges nothing till it reads"),
+            "{err}"
+        );
+        let want = if app.is_some() {
+            filter("sam/a") + " "
+        } else {
+            String::new()
+        };
+        assert_eq!(m.runs(), [format!("{want}--automerge=false (merges held)")]);
+    }
 }
