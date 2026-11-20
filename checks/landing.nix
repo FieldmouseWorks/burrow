@@ -21,6 +21,17 @@ let
     burrow.autoland.repos."sam/plain".settleDelay = 2;
     burrow.landing.conaryd = [ "sam/homelab" ];
   }];
+  # The flow with a controller of its own (burrow.ledger.controllerUser),
+  # as S1 runs it, with and without a repo for conaryd: the ledger keeps
+  # the controller to the flow's own units, so burrow-landing, which runs
+  # as it, must be one (the flow's environment, its state).
+  controlled = conaryd: machine [{
+    burrow.ledger.controllerUser = "conary-flow";
+    burrow.autoland.shadow = [ "sam/homelab" ];
+    burrow.landing.conaryd = conaryd;
+  }];
+  controlledRuns = c: c.systemd.services.burrow-landing.serviceConfig.User == "conary-flow"
+    && c.systemd.services.burrow-landing.environment.CONARY_DATA or null == "${c.burrow.stateDir}/flow";
   units = on.systemd.services;
   flow = units.conary-flow;
   driver = units.burrow-landing;
@@ -35,6 +46,9 @@ let
     (if lib.any (h: h.landing) (lib.attrValues (lib.removeAttrs (handlers plain) [ "autoland" "autoland-continue" ])) then "a handler other than the steward's is held to the record" else null)
     (if plain.burrow.settings.effective.landingRecord != plain.burrow.landing.record then "the steward's decision doesn't read the record" else null)
     (if plain.burrow.settings.effective.conaryd != [ ] then "a repo conaryd may have by default" else null)
+    (if failing (controlled [ ]) != [ ] then "a machine with a flow controller and no repo for conaryd fails: ${toString (failing (controlled [ ]))}" else null)
+    (if failing (controlled [ "sam/homelab" ]) != [ ] then "a machine with a flow controller and a repo for conaryd fails: ${toString (failing (controlled [ "sam/homelab" ]))}" else null)
+    (if !(controlledRuns (controlled [ ])) || !(controlledRuns (controlled [ "sam/homelab" ])) then "burrow-landing doesn't run as the flow's controller on the flow's state" else null)
     (if failing on != [ ] then "a machine with a shadowed repo for conaryd fails: ${toString (failing on)}" else null)
     (if on.burrow.settings.effective.conaryd != [ "sam/homelab" ] then "the settings don't know which repos conaryd may have" else null)
     (if flow.serviceConfig.User != on.burrow.ledger.flow.user || driver.serviceConfig.User != on.burrow.ledger.flow.user then "conaryd's flow or burrow-landing runs as someone other than the flow's user" else null)
