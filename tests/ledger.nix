@@ -29,6 +29,7 @@ let
   cn = pkgs.writeShellScriptBin "cn" ''
     echo "$*" >>/tmp/cn-calls
     echo "$CONARY_REVIEWERS" >/tmp/cn-reviewers
+    echo "$CONARY_REVIEW_AUTHORS" >/tmp/cn-review-authors
     echo "''${GH_TOKEN:-none} ''${CONARY_TOKEN_COMMAND:-none}" >/tmp/cn-auth
     case $1 in
       init) touch "$CONARY_LEDGER/anchor" ;;
@@ -96,6 +97,9 @@ pkgs.testers.runNixOSTest {
 
     with subtest("only the steward's App's word is its, never the token's own login"):
         assert machine.succeed("cat /tmp/cn-reviewers") == "steward[bot]\n"
+
+    with subtest("the connector's posts are the reviewer's word, recorded unattested"):
+        assert machine.succeed("cat /tmp/cn-review-authors") == "chatgpt-codex-connector[bot]\n"
 
     with subtest("as the user, cn has gh's login for every repo"):
         assert machine.succeed("cat /tmp/cn-auth") == "gho_stand_in none\n", machine.succeed("cat /tmp/cn-auth")
