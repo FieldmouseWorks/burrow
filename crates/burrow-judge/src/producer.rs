@@ -11,8 +11,8 @@
 //! - It allocates the next generation for the repo and PR, past any a
 //!   verdict account has posted, and keeps it before anything goes out.
 //!   One persisted and never published is burned.
-//! - Every request is a new judgment: the runner runs it as a fresh proj
-//!   job ([`crate::runner`]). The producer refuses its answer unless its
+//! - Every request is a new judgment: a look runs it in a fresh session
+//!   ([`crate::look`]). The producer refuses its answer unless its
 //!   session is independent (not the author's, a reviewer's or one judged
 //!   before, by Conary's own `Sessions::accept`) and what ran is what the
 //!   plugin offers and the flow chose.
@@ -33,9 +33,10 @@
 //! - What ran is held to what the plugin offered when the request came,
 //!   read once then, never to the settings read again later.
 //!
-//! The runner's answers come from a `burrow.user` proj job, which an
-//! authoring session could forge: the module refuses to turn the judge on
-//! until #1186 moves the judging engine out of that user's reach.
+//! A look is the producer's own unit, as a user systemd makes for it, and
+//! its answer comes from a folder only the producer and that look can
+//! write: no `burrow.user` process, which every authoring session is, can
+//! answer in the judge's place.
 use crate::discussion::{self, current, highest_generation};
 use crate::{Config, Read};
 use burrow_github::{Api, call};
@@ -60,18 +61,13 @@ pub type GitHub = Box<dyn Fn() -> Box<dyn Api> + Send + Sync>;
 
 /// Where a judgment's work is done.
 pub trait Judges: Send + Sync {
+    /// Why `request` can't be judged here at all, asked before any work,
+    /// so a request that can't be judged burns no generation.
+    fn refuses(&self, _request: &Request) -> Result<(), String> {
+        Ok(())
+    }
     /// The judge's answer to `request`, for as long as `work` lasts.
     fn judge(&self, request: &Request, work: &Work) -> Result<Response, String>;
-}
-
-/// The runner, at its socket.
-pub struct Runner(pub PathBuf);
-
-impl Judges for Runner {
-    fn judge(&self, request: &Request, work: &Work) -> Result<Response, String> {
-        burrow_producer::plugin::forward(&self.0, request, work)
-            .map_err(|e| format!("the runner: {e}"))
-    }
 }
 
 pub struct Producer {
@@ -195,11 +191,12 @@ impl Producer {
         };
         // What the plugin offers, read once, now, next to the flow's
         // describe: what ran is held to this, whatever the settings say by
-        // the time the job starts or answers.
+        // the time the look starts or answers.
         let offer = burrow_producer::jobs::offered(&self.cfg.settings, &self.cfg.role)?;
         let choice = request.execution.as_ref().and_then(|e| e.choice.as_ref());
         burrow_producer::jobs::chosen(choice)?;
         burrow_producer::jobs::runnable(&self.cfg.settings, &self.cfg.role, repo, &offer, choice)?;
+        self.judges.refuses(&request)?;
         // Before any work: a head another PR's judgment is on can't take
         // this one's.
         self.held_by(repo, *pr, head)?;
@@ -397,7 +394,7 @@ impl Producer {
         write().map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// The runner's judgment of `request`, held to the request, to the
+    /// A look's judgment of `request`, held to the request, to the
     /// flow's choice and to GitHub again, ready to keep, and the answer
     /// the flow gets.
     fn judge(
@@ -424,14 +421,14 @@ impl Producer {
             return Err("its request was abandoned: it publishes nothing".into());
         }
         if answer.contract != request.contract {
-            return Err("the runner answered in another contract".into());
+            return Err("the look answered in another contract".into());
         }
         let Answer::Judge {
             verdict,
             why: reasons,
         } = answer.answer
         else {
-            return Err("the runner's answer isn't a judgment".into());
+            return Err("the look's answer isn't a judgment".into());
         };
         if reasons.trim().is_empty() {
             return Err("the judge gave no reasons".into());

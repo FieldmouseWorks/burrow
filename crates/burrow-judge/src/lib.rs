@@ -5,36 +5,35 @@
 //! burrow-producer's kit: it answers `describe` and Conary's judge fixture
 //! itself and forwards each judge request to the producer.
 //!
-//! The work is split between two units, since a judgment runs as a proj
-//! job, which is the authoring user's, and the keys must be no such
-//! user's:
+//! The producer, [`producer`], is `autoland-judge`, a user of its own
+//! holding the signing key and the seal key it shares with the flow, which
+//! only the flow's controller may ask. It holds a request to GitHub (head,
+//! base, description and the judging context, by Conary's own helper),
+//! allocates the judgment's generation, has a look judge ([`look`]),
+//! refuses a judge session that isn't independent (Conary's
+//! `Sessions::accept`), holds the PR to GitHub again, and publishes: the
+//! sealed comment, then `conary/judgment` over its receipt. What a crash
+//! interrupts is finished at startup from its record, never judged again.
 //!
-//! - [`producer`]: `autoland-judge`, a user of its own holding the signing
-//!   key and the seal key it shares with the flow. Only the flow's
-//!   controller may ask it. It holds a request to GitHub (head, base,
-//!   description and the judging context, by Conary's own helper),
-//!   allocates the judgment's generation, has the runner judge, refuses a
-//!   judge session that isn't independent (Conary's `Sessions::accept`),
-//!   holds the PR to GitHub again, and publishes: the sealed comment, then
-//!   `conary/judgment` over its receipt. What a crash interrupts is
-//!   finished at startup from its record, never judged again.
-//! - [`runner`]: the judging engine's side, as burrow.user, with no key.
-//!   Only the producer's user may ask it. It quotes every review thread,
-//!   review body and answer the request's context digests, briefs a proj
-//!   job on the judging role with them ([`brief`]), waits on it through its
-//!   record and stops it with its request, and answers what the job
-//!   decided ([`verdict`]).
+//! Each judgment runs in a look of its own, a unit only the producer
+//! starts, as a user systemd makes for it ([`worker`]): the judging
+//! engine, in a fresh session, on a brief ([`brief`]) and a read-only
+//! checkout the producer laid out, with no network but its gate to the
+//! engine's API ([`egress`]). Nothing of a look is `burrow.user`'s, the
+//! user authoring sessions run as, so none of them can answer in the
+//! judge's place.
 pub mod brief;
 pub mod discussion;
+pub mod egress;
+pub mod look;
 pub mod producer;
-pub mod runner;
-pub mod verdict;
+pub mod worker;
 
 use conary_core::plugin::{Answer, Capabilities, Identity, Judgment, Kind, Sandbox, Task};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// What the module tells the plugin, the producer and the runner, one file
+/// What the module tells the plugin, the producer and its looks, one file
 /// for all three.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,10 +43,6 @@ pub struct Config {
     /// The flow's controller user, the one account that may ask the
     /// producer.
     pub controller: String,
-    /// The runner's socket, and the producer's user: the one account that
-    /// may ask the runner.
-    pub runner: PathBuf,
-    pub user: String,
     /// The producer's name, as the machine's producers file has it, and
     /// the systemd credentials its signing key and its seal key come as.
     pub producer: String,
@@ -59,31 +54,35 @@ pub struct Config {
     /// The settings source: the judging role's route and its engine's
     /// offers.
     pub settings: burrow_settings::Config,
-    /// proj, and what goes before its arguments; its jobs directory, where
-    /// a job leaves its answers; the judging role, as the role map names
-    /// it; the App a job acts on GitHub as; how long a job's turn may run,
-    /// and go quiet.
-    pub proj: Vec<String>,
-    pub jobs: PathBuf,
+    /// The judging role, as the role map names it.
     pub role: String,
-    pub app: Option<String>,
-    pub timeout: String,
-    pub idle: String,
     /// Whom a judge sends what it can't decide.
     pub owner: String,
-    /// GitHub's API root, and the commands that print a repo's token (the
-    /// repo is their last argument) for the producer's and the runner's
-    /// reads, through Conary's own client.
+    /// GitHub's API root, and the command that prints a repo's token (the
+    /// repo is its last argument) for the producer's reads, through
+    /// Conary's own client.
     pub api: String,
     pub token: String,
-    pub runner_token: String,
     /// gh as the App the producer posts its sealed comments and check runs
     /// as.
     pub gh: PathBuf,
-    /// The producer's own state: `records/` and `generations/`.
+    /// git, and where it fetches a repo from (`GITHUB/OWNER/NAME.git`).
+    pub git: PathBuf,
+    pub github: String,
+    /// The producer's own state: `records/`, `generations/`, its mirrors
+    /// (`git/`) and its looks' folders (`looks/`).
     pub state: PathBuf,
-    /// The runner's: the jobs it waits on, for a restart to stop.
-    pub runner_state: PathBuf,
+    /// The looks' unit (`UNIT@ID.service`), systemctl, and how long a look
+    /// may run, in seconds.
+    pub unit: String,
+    pub systemctl: PathBuf,
+    pub timeout: u64,
+    /// In a look: Claude Code, and the systemd credential its login comes
+    /// as.
+    pub claude: PathBuf,
+    pub login: String,
+    /// The hosts a look's gate lets it reach, on 443.
+    pub hosts: Vec<String>,
 }
 
 impl Config {
@@ -97,18 +96,6 @@ impl Config {
         let path = self.flow.join(format!("{}.json", repo.to_lowercase()));
         let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))
-    }
-
-    /// The proj the runner starts its judgments with.
-    pub fn proj(&self) -> burrow_producer::jobs::Proj {
-        burrow_producer::jobs::Proj {
-            proj: self.proj.clone(),
-            jobs: self.jobs.clone(),
-            role: self.role.clone(),
-            app: self.app.clone(),
-            timeout: self.timeout.clone(),
-            idle: self.idle.clone(),
-        }
     }
 }
 
@@ -126,11 +113,11 @@ pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
             v2_kinds: vec![],
             v4_kinds: vec![],
             models,
-            // The job runs in proj's own sandbox and engine, with the network
-            // it reads the PR and fetches its head over.
+            // Each look runs in a unit of its own, whose only way out is
+            // its engine's API.
             capabilities: Some(Capabilities {
                 sandbox: Sandbox::Brings,
-                network: true,
+                network: false,
                 devices: vec![],
                 mcp: false,
             }),
@@ -138,7 +125,7 @@ pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
         },
         // What its own answers, describe and the fixture, are by: Conary
         // holds a judgment to a session, so the fixture's names one of its
-        // own, which no real judgment's (a job's) ever is.
+        // own, which no real judgment's (a look's) ever is.
         by: Identity {
             engine,
             session: Some(FIXTURE_SESSION.into()),
@@ -151,7 +138,7 @@ pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
 /// The session the plugin's own answers name.
 pub const FIXTURE_SESSION: &str = "burrow-judge-fixture";
 
-/// Conary's judge fixture, answered with no job: it accepts.
+/// Conary's judge fixture, answered with no look: it accepts.
 pub fn fixture(task: &Task) -> Option<Answer> {
     matches!(task, Task::Judge { .. }).then(|| Answer::Judge {
         verdict: Judgment::Pass,

@@ -354,19 +354,21 @@ Each has an entry below, and each can be imported on its own.
   as a check run; it needs `burrow.ledger.controllerUser` too.
   `plugins.judge.enable` (off) runs Conary's judge plugin and its producer
   (crates/burrow-judge): each request held to the PR's head, base,
-  description and discussion on GitHub, judged as a fresh proj job on the
-  judging role (`plugins.judge.role`) by a runner as burrow.user, and
+  description and discussion on GitHub, judged in a look of the producer's
+  own: Claude Code on the judging role's model (`plugins.judge.role`), in
+  a fresh session, as a user systemd makes for it, reading a checkout the
+  producer fetched, with its own login (`plugins.judge.claudeTokenFile`)
+  and no network but Anthropic's API, none of it burrow.user's; then
   published by the producer, a user of its own, as the sealed comment
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
-  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`,
-  and a machine that turns it on fails to build until #1186 moves the
-  judging engine out of authoring sessions' reach. Each enabled plugin is
-  in a shadowed repo's flow config (autoland/shadow.nix): its executable,
-  its role's choice as the settings source declares it (a build reads no
-  live settings, so a role set live to anything else refuses the flow's
-  choice), and, where the repo has evidence, its producer's public key
-  (`plugins.proof.publicKey`, `plugins.judge.publicKey`) in the producers
-  file, trusted for the repo's proofs or `conary/judgment` alone.
+  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.
+  Each enabled plugin is in a shadowed repo's flow config
+  (autoland/shadow.nix): its executable, its role's choice as the settings
+  source declares it (a build reads no live settings, so a role set live to
+  anything else refuses the flow's choice), and, where the repo has
+  evidence, its producer's public key (`plugins.proof.publicKey`,
+  `plugins.judge.publicKey`) in the producers file, trusted for the repo's
+  proofs or `conary/judgment` alone.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

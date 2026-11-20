@@ -22,13 +22,13 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
     let config = d.join("judge.json");
     let cfg = serde_json::json!({
         "socket": d.join("none.sock"), "controller": "flow",
-        "runner": d.join("runner.sock"), "user": "autoland-judge",
         "producer": "machine-judge", "credential": "judge-key", "seal": "judge-seal",
         "flow": d.join("flow"), "settings": {"overlay": overlay},
-        "proj": ["proj"], "jobs": d.join("jobs"), "role": "judge", "app": null,
-        "timeout": "60m", "idle": "20m", "owner": "Sam",
-        "api": "https://api.github.com", "token": "true", "runner_token": "true",
-        "gh": "gh", "state": d.join("state"), "runner_state": d.join("runner"),
+        "role": "judge", "owner": "Sam",
+        "api": "https://api.github.com", "token": "true", "gh": "gh",
+        "git": "git", "github": "https://github.com", "state": d.join("state"),
+        "unit": "autoland-judge-look", "systemctl": "systemctl", "timeout": 3600,
+        "claude": "claude", "login": "claude-token", "hosts": ["api.anthropic.com"],
     });
     std::fs::write(&config, cfg.to_string()).unwrap();
     let plugin = d.join("burrow-judge-plugin");

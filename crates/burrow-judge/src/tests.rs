@@ -1,12 +1,12 @@
-//! The judge plugin, its producer and its runner, against one scripted
+//! The judge plugin, its producer and its looks, against one scripted
 //! GitHub that Conary's reads and burrow's writes both reach (so what the
-//! producer posts is what it reads back), a scripted runner or job runner,
-//! and the kit's sockets as the flow and the producer reach them.
+//! producer posts is what it reads back), scripted looks or a stand-in
+//! engine, and the kit's sockets as the flow and the producer reach them.
 use super::*;
 use world::{Pr, World, github, read, world};
 
+mod look;
 mod ran;
-mod runner;
 mod world;
 
 use crate::discussion::{Discussion, highest_generation};
@@ -68,26 +68,25 @@ fn config_with(dir: &Path, seal: &str) -> Config {
     Config {
         socket: dir.join("judge.sock"),
         controller: "flow".into(),
-        runner: dir.join("runner.sock"),
-        user: "autoland-judge".into(),
         producer: PRODUCER.into(),
         credential: "judge-key".into(),
         seal: "judge-seal".into(),
         flow: flows,
         settings: settings(dir),
-        proj: vec!["proj".into()],
-        jobs: dir.join("jobs"),
         role: "judge".into(),
-        app: None,
-        timeout: "60m".into(),
-        idle: "20m".into(),
         owner: "Sam".into(),
         api: "http://127.0.0.1:1".into(),
         token: "true".into(),
-        runner_token: "true".into(),
         gh: "gh".into(),
+        git: "git".into(),
+        github: dir.join("github").to_string_lossy().into_owned(),
         state: dir.join("state"),
-        runner_state: dir.join("runner"),
+        unit: "autoland-judge-look".into(),
+        systemctl: "systemctl".into(),
+        timeout: 60,
+        claude: dir.join("claude"),
+        login: "claude-token".into(),
+        hosts: vec!["api.anthropic.com".into()],
     }
 }
 
@@ -115,8 +114,8 @@ fn judge_request(w: &World, why: Vec<Trigger>) -> Request {
         "execution": {"choice": {"engine": "claude", "model": "a-model", "effort": "high"},
             "context": {"kind": "fresh"}},
         "negotiated": negotiated(),
-        "kind": "judge", "repo": REPO, "pr": PR, "head": HEAD, "against": w.against(),
-        "author": {"engine": "claude", "session": AUTHOR},
+        "kind": "judge", "repo": REPO, "pr": PR, "head": w.with(|p| p.head.clone()),
+        "against": w.against(), "author": {"engine": "claude", "session": AUTHOR},
         "reviewers": [{"engine": "codex", "session": REVIEWER}],
         "why": why, "context": w.context(),
     }))
@@ -142,7 +141,7 @@ fn answer(session: &str, verdict: Judgment) -> Response {
     }
 }
 
-/// A runner that runs nothing: it answers what the test scripts, in turn,
+/// Looks that run nothing: it answers what the test scripts, in turn,
 /// doing to the PR first what the test says, and keeps what it was asked.
 #[derive(Clone, Default)]
 struct Scripted(Arc<Mutex<Script>>);
@@ -798,7 +797,7 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
             why,
             owner: "Sam",
             discussion: &discussion,
-            jobs: Path::new("/jobs"),
+            dir: Path::new("/looks/1"),
         })
     };
     for why in [
@@ -806,7 +805,7 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
         vec![Trigger::R2],
         vec![Trigger::MajorDependency],
         vec![Trigger::RoundLimit],
-        vec![Trigger::NoCi, Trigger::AuthorEngine],
+        vec![Trigger::Changed, Trigger::AuthorEngine],
     ] {
         let text = brief(&why);
         for said in [
@@ -820,21 +819,20 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
         assert!(text.contains(burrow_brief::FAILING));
         assert!(text.contains(burrow_brief::MUST_FIX));
         assert!(text.contains(&burrow_brief::land_or_owner("Sam")));
-        assert!(text.contains("/jobs/$PROJ_JOB/answers.json"));
-        // It builds and tests the head itself only when no CI did.
-        assert_eq!(
-            text.contains("run its build and its tests yourself"),
-            why.contains(&Trigger::NoCi),
-            "{why:?}"
-        );
+        // Where the producer laid out the head, its base and the diff.
+        for laid in ["/looks/1/head", "/looks/1/base", "/looks/1/changes.diff"] {
+            assert!(text.contains(laid), "{why:?} leaves out {laid}");
+        }
     }
     assert!(brief(&[Trigger::RoundLimit]).contains(burrow_brief::PAST_LIMIT));
     assert!(brief(&[Trigger::MajorDependency]).contains(burrow_brief::DEP_SEEN));
     assert!(brief(&[Trigger::Asked]).contains(burrow_brief::REVIEWED));
+    assert!(brief(&[Trigger::Asked]).contains("CI is green"));
+    assert!(!brief(&[Trigger::Started]).contains("CI is green"));
 }
 
 #[test]
-fn the_runners_context_is_conarys_own_reading() {
+fn the_looks_context_is_conarys_own_reading() {
     let w = world();
     assert_eq!(
         w.context(),
