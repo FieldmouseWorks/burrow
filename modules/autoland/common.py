@@ -854,8 +854,8 @@ def at_work(jid, key=None, snapshot=None):
     """Whether job jid (or a proof build) is still at work: queued, running,
     nothing can say, or its turn is over but it holds something open
     (job_lifecycle)."""
-    state, held = job_lifecycle(jid, key, snapshot)
-    return state != "parked" and (state in (None, "queued", "running") or held is not None)
+    state, holds = job_lifecycle(jid, key, snapshot)
+    return state != "parked" and (state in (None, "queued", "running") or holds is not None)
 
 
 def holding(lines, key):
