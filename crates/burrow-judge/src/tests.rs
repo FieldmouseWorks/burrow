@@ -593,17 +593,6 @@ fn a_stale_head_base_description_or_discussion_is_refused() {
             p.threads.get_mut("T1").unwrap().comments[1].body = "Edited.".into();
         },
         |p: &mut Pr| {
-            let mark = flow::FindingMark {
-                role: "codex".into(),
-                head: HEAD.into(),
-                issuance: "6".repeat(64),
-                finding: 0,
-            };
-            let answer = flow::answer_body("Out of scope: no input reaches it.", &mark, "fix-1");
-            p.comments
-                .push(json!({"user": {"login": FLOW, "type": "Bot"}, "body": answer}))
-        },
-        |p: &mut Pr| {
             p.reviews
                 .push(json!({"id": 10, "state": "COMMENTED", "body": "Another.",
                 "user": {"login": "reviewer", "type": "Bot"}}))
@@ -817,7 +806,7 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
         vec![Trigger::R2],
         vec![Trigger::MajorDependency],
         vec![Trigger::RoundLimit],
-        vec![Trigger::NoCi, Trigger::HiddenFiles],
+        vec![Trigger::NoCi, Trigger::AuthorEngine],
     ] {
         let text = brief(&why);
         for said in [

@@ -12,8 +12,8 @@ burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
 # Conary owns the plugin contract, the service statement and the receipts;
 # the kit uses them, never a copy. Pinned by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "385eff3f03a775fa2602af1f2b459dd933a6a6b2" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "385eff3f03a775fa2602af1f2b459dd933a6a6b2" }
 ed25519-dalek = "3.0.0"
 rustix = { version = "1.1.6", features = ["fs", "net", "process", "rand"] }
 serde.workspace = true

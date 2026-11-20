@@ -45,6 +45,8 @@ pub fn world() -> World {
             "T1".into(),
             ReviewThread {
                 resolved: true,
+                path: "src/lib.rs".into(),
+                line: Some(1),
                 comments: vec![
                     ThreadComment {
                         author: Some("reviewer".into()),

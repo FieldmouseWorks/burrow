@@ -40,7 +40,6 @@ fn reason(why: Trigger) -> &'static str {
         Trigger::AuthorEngine => {
             "its history names an engine the settings send to a judge, or can't be read whole"
         }
-        Trigger::HiddenFiles => "it touches files the policy keeps out of review",
         Trigger::NoCi => "no CI reported on its head",
         Trigger::Asked => "someone asked for a judge",
         Trigger::RoundLimit => "its review loop reached its round limit with findings still open",
