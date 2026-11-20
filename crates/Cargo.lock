@@ -716,6 +716,7 @@ dependencies = [
 name = "burrow-ledger-access"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "tempfile",
 ]

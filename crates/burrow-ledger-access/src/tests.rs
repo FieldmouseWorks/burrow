@@ -26,12 +26,12 @@ fn ledger() -> (tempfile::TempDir, PathBuf, PathBuf) {
     ] {
         let path = dir.join(name);
         std::fs::write(&path, name).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        burrow_test::permissions(&path, mode);
     }
     std::fs::create_dir(dir.join("etags")).unwrap();
     let outside = root.path().join("secret");
     std::fs::write(&outside, "secret").unwrap();
-    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+    burrow_test::permissions(&outside, 0o600);
     (root, dir, outside)
 }
 
