@@ -184,14 +184,22 @@ so a session carried over from the subscription is charged only its own part.
 Each run of a turn (its first and every retry) counts at its own start, from
 its `burrow.run` marker, so a retry after midnight or a renewal is that
 day's and that cycle's spend.
-The probe's `usage` answer shows it; launch admission and routing are to
-read the same function once the `claude-api` engine and its routing land. Anything it can't read is no room, and so is a
-`claude-api` run of the cycle whose cost isn't recorded yet (still running,
-or stopped before its result and not yet accounted for by a later run of its
-session): the meter says so beside the numbers it knows, and those turns
-therefore run one at a time. A turn stopped for good before its result
-keeps it so for the rest of the cycle; a new balance read from the Console
-(`settings credit` with a different `BUDGET_USD`) starts counting afresh.
+The probe's `usage` answer shows it, and proj admits every `claude-api` run
+(a turn's first and each retry) through the same function, under one lock
+for the machine ([`engine/api.rs`](../crates/burrow-proj/src/engine/api.rs)):
+the run is given the room left (above the reserve, and of today's allowance,
+whichever is less) as its `--max-budget-usd`, and its `burrow.run` marker
+records that budget before the lock goes. Until its cost is recorded, the
+meter counts the run at that budget, so runs going at once never spend the
+same room twice, and one stopped before its result holds no more than it
+was allowed until a later run of its session accounts for it. Claude Code
+stops a run past its budget after the call that took it there, so a run can
+go one call over: the reserve absorbs that, and the Console's spend limit on
+the key's workspace is the backstop past it. Anything the meter can't read
+is no room, and so is a run whose marker gives no budget (one from before
+admission wrote them) until its cost is in. A new balance read from the
+Console (`settings credit` with a different `BUDGET_USD`) starts counting
+afresh.
 `renews` is a day, so the renewed credit counts from 00:00 UTC on it: set
 it to the first day the new credit is surely there.
 

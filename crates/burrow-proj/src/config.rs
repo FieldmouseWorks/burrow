@@ -128,6 +128,12 @@ pub struct Config {
     pub tracked_settings: Option<PathBuf>,
     /// The engines' meters (claude.json), written by usage-reset.
     pub meters: Option<PathBuf>,
+    /// The API key the `claude-api` engine runs on, alone in its file
+    /// (burrow.proj.claudeApi.keyFile): read for that engine's runs only,
+    /// and handed to Claude Code on a descriptor (engine/api.rs). None
+    /// refuses every `claude-api` launch.
+    #[serde(default)]
+    pub claude_api_key_file: Option<PathBuf>,
     /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).

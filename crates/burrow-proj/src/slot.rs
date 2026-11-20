@@ -172,7 +172,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::login::out_for(cfg, usage::login::sandboxed(cfg, id)).is_some()
+    if usage::login::out_for(cfg, usage::login::run_of(cfg, id)).is_some()
         || automation_paused(cfg, &job)
         || crate::github_quota::held(cfg, &job).is_some()
     {
@@ -391,7 +391,8 @@ pub fn take_engine(
 ) -> io::Result<File> {
     crate::waits::rewatch_later(cfg, id);
     match engine {
-        Engine::Claude => take(cfg, id, n, given, may_hand_over),
+        // One line for both: a hold lets the API's turns by (usage::login).
+        Engine::Claude | Engine::ClaudeApi => take(cfg, id, n, given, may_hand_over),
     }
 }
 
@@ -410,7 +411,7 @@ pub fn take(
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
-    let sandboxed = usage::login::sandboxed(cfg, id);
+    let run = usage::login::run_of(cfg, id);
     // This turn says it has its slot only under its job's lock ([`took_slot`]),
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
@@ -438,7 +439,7 @@ pub fn take(
         // run would be refused, an --unstick turn's too. A sandbox's isn't
         // by this machine's expired login (usage/login.rs).
         usage::metered(cfg);
-        let spent = usage::login::out_for(cfg, sandboxed).is_some();
+        let spent = usage::login::out_for(cfg, run).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if !paused && crate::record::unstuck(&job) {
             // Leaving the line needs no census lock: stale looks retain the
@@ -545,8 +546,7 @@ pub fn take(
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
         let hold = usage::out(cfg);
-        if !due(&slots, &queue.join(&me), looked)
-            || hold.as_ref().is_some_and(|h| h.holds_run(sandboxed))
+        if !due(&slots, &queue.join(&me), looked) || hold.as_ref().is_some_and(|h| h.holds_run(run))
         {
             drop(lk);
             sleep(Duration::from_secs(2));
@@ -556,7 +556,7 @@ pub fn take(
         // Only the turns a hold lets by take what's free.
         if let Some(h) = &hold {
             seen.line
-                .retain(|w| !h.holds_run(usage::login::sandboxed(cfg, job_of(&w.name))));
+                .retain(|w| !h.holds_run(usage::login::run_of(cfg, job_of(&w.name))));
         }
         looked = now();
         let cutoff = match usage::admission_cutoff(cfg) {

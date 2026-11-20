@@ -141,7 +141,7 @@ const REPOS: Kind = Kind::List(&Kind::Repo);
 const LANDING_OWNER: Kind = Kind::OneOf(&["steward", "conaryd"]);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
-const ENGINE: Kind = Kind::OneOf(&["claude"]);
+const ENGINE: Kind = Kind::OneOf(crate::roles::ENGINES);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
 const ROUTE: Kind = Kind::Record(&[Field {
@@ -529,14 +529,14 @@ pub static SETTINGS: &[Setting] = &[
     live(
         "proj.models",
         &MODELS,
-        r#"{"* claude": {"model": null, "effort": null}}"#,
+        r#"{"* claude": {"model": null, "effort": null}, "* claude-api": {"model": null, "effort": null}}"#,
         ROLES_OVERLAY,
         "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
     ),
     live(
         "proj.engineOffers",
         &OFFERS,
-        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}}"#,
+        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "claude-api": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}}"#,
         ROLES_OVERLAY,
         "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
@@ -559,7 +559,7 @@ pub static SETTINGS: &[Setting] = &[
         &HOLD,
         "null",
         ".usage.json",
-        "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
+        "The usage hold in force: no turn on the plan (claude) takes a slot until it ends, and no claude-api turn either while it is the owner's pause. Null for none.",
     ),
 ];
 

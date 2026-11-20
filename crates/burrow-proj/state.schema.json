@@ -61,9 +61,18 @@
   ],
   "$defs": {
     "Engine": {
-      "type": "string",
-      "enum": [
-        "claude"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "claude"
+          ]
+        },
+        {
+          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login ([`api`]).",
+          "type": "string",
+          "const": "claude-api"
+        }
       ]
     },
     "EngineMeter": {

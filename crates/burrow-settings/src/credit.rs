@@ -310,9 +310,43 @@ impl Meter {
 
     /// Whether the engine may start a turn now.
     pub fn room(&self) -> bool {
-        self.pending.is_none()
-            && self.spent + self.reserve < self.cycle.budget
-            && self.today < self.allowance
+        self.headroom() > 0
+    }
+
+    /// The most a run started now may spend, in micro-dollars: what's left
+    /// above the reserve, and of today's allowance, whichever is less; none
+    /// while a run's spend is pending. Admission gives a run this as its
+    /// budget, and the ledger holds it against the credit until the run's
+    /// cost is recorded.
+    pub fn headroom(&self) -> i64 {
+        if self.pending.is_some() {
+            return 0;
+        }
+        (self.cycle.budget - self.spent - self.reserve)
+            .min(self.allowance - self.today)
+            .max(0)
+    }
+
+    /// When the clock alone may give it room again, when it has none: spent
+    /// down to the reserve, at the cycle's expiry, when it renews; today's
+    /// allowance spent, at the next UTC midnight (the expiry is one, after
+    /// now, so never before it; and on the last day the allowance is all
+    /// that's left, so spending it is the reserve's case).
+    /// None while it has room, or while only a run whose spend is pending
+    /// holds it: that run's turn ending is what brings it back, not a time.
+    /// Always after [`Meter::now`], so a wake-up booked for it never finds
+    /// the same time to book again.
+    pub fn opens(&self) -> Option<i64> {
+        if self.room() {
+            return None;
+        }
+        if self.spent + self.reserve >= self.cycle.budget {
+            return Some(self.cycle.expires);
+        }
+        if self.today >= self.allowance {
+            return Some(midnight(utc_day(self.now).ok()?).ok()? + DAY);
+        }
+        None
     }
 
     /// Why it has none, when it hasn't.

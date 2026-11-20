@@ -34,7 +34,7 @@ fn engine_of(job: &Job, m: u64) -> Engine {
 /// no conversation to resume.
 fn unseen(job: &Job, n: u64, engine: Engine) -> Vec<u64> {
     let saw = |m: &u64| {
-        engine_of(job, *m) == engine
+        engine_of(job, *m).conversation() == engine.conversation()
             && stream_names_session(&job.turn_file(&m.to_string(), TurnFile::Jsonl), 0)
     };
     let from = if resume(job, engine).is_some() {
@@ -157,6 +157,30 @@ mod tests {
             fs::write(job.turn(&n, "engine"), engine.name()).unwrap();
             fs::read_to_string(first_prompt(&job, &n, engine).unwrap()).unwrap()
         }
+    }
+
+    /// The subscription and the credit run the same Claude Code on the same
+    /// sessions: a job moving between them carries on in its conversation,
+    /// handed nothing it already saw.
+    #[test]
+    fn the_claude_engines_share_one_conversation() {
+        let t = Turns::new();
+        t.ran(1, Some(Engine::Claude), "the brief", "first answer");
+        assert_eq!(
+            resume(&t.job(), Engine::ClaudeApi).as_deref(),
+            Some("claude-session")
+        );
+        assert_eq!(t.starts(2, Engine::ClaudeApi, "a reply"), "a reply\n");
+        // Its stream names the session as Claude's (stream.rs), so the next
+        // turn back on the subscription has seen it too.
+        let job = t.job();
+        let stream = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "system", "session_id": "claude-session"}),
+            serde_json::json!({"type": "result", "is_error": false, "result": "second"}),
+        );
+        fs::write(job.turn("2", "jsonl"), stream).unwrap();
+        assert_eq!(t.starts(3, Engine::Claude, "carry on"), "carry on\n");
     }
 
     #[test]

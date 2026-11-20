@@ -396,3 +396,74 @@ fn no_setting_or_no_jobs_is_no_meter() {
     assert!(meter(&file, None, SINCE).is_err());
     assert!(meter(&file, Some(&jobs.root), SINCE).unwrap().room());
 }
+
+/// The host's marker for a run admitted with BUDGET micro-dollars.
+fn budgeted(at: i64, budget: i64) -> Value {
+    json!({"type":"burrow.run","at":at,"budget":budget})
+}
+
+/// A run still going is held at the budget its admission gave it, so runs
+/// admitted at once never share the same room; its recorded cost replaces
+/// that once it's in, and a later run of its session that accounts for it
+/// releases it. A turn with nothing in its stream yet started no run.
+#[test]
+fn a_run_without_its_cost_is_held_at_its_budget() {
+    let jobs = Jobs::new();
+    let at = SINCE + HOUR;
+    // Going now, admitted with $3, nothing spent yet that it has said.
+    jobs.turn(
+        "a",
+        1,
+        Some(ENGINE),
+        Some(at),
+        &stream(&[budgeted(at, 3 * M), init("s"), assistant("s")]),
+    );
+    // Launching: its turn's files are written, its run not yet.
+    jobs.turn("b", 1, Some(ENGINE), None, "");
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(at, 3 * M)]);
+    // Its result: what it spent, not what it was allowed.
+    jobs.turn(
+        "a",
+        1,
+        Some(ENGINE),
+        Some(at),
+        &stream(&[budgeted(at, 3 * M), init("s"), result("s", 1.25)]),
+    );
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(at, 1_250_000)]);
+    // Stopped before its result: still held at its budget, never pending,
+    // until the session's next run says what it all cost.
+    jobs.turn(
+        "c",
+        1,
+        Some(ENGINE),
+        Some(at),
+        &stream(&[budgeted(at, 2 * M), init("t"), assistant("t")]),
+    );
+    let mut spends = jobs.spends(SINCE).unwrap();
+    spends.sort();
+    assert_eq!(spends, [(at, 1_250_000), (at, 2 * M)]);
+    jobs.turn(
+        "c",
+        2,
+        Some(ENGINE),
+        Some(at + 1),
+        &stream(&[budgeted(at + 1, 2 * M), init("t"), result("t", 1.5)]),
+    );
+    let mut spends = jobs.spends(SINCE).unwrap();
+    spends.sort();
+    assert_eq!(spends, [(at, 0), (at, 1_250_000), (at + 1, 1_500_000)]);
+    // A run with no budget in its marker (from before admission wrote one)
+    // still can't be known: pending, no room.
+    jobs.turn(
+        "d",
+        1,
+        Some(ENGINE),
+        Some(at),
+        &stream(&[run(at), init("u")]),
+    );
+    assert!(
+        jobs.spends(SINCE)
+            .unwrap_err()
+            .contains("no recorded cost yet")
+    );
+}

@@ -77,6 +77,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
+    claudeApiKeyFile = cfg.claudeApi.keyFile;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
@@ -206,6 +207,21 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Claude's meter from usage-reset (claude.json), which proj reads for its usage hold; null disables it.";
+    };
+
+    claudeApi.keyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/secrets/anthropic-api-key";
+      description = ''
+        A file holding only the Anthropic API key the `claude-api` engine
+        runs on, readable by the jobs' user and kept out of the store (a
+        sops-nix secret, say). proj opens it for that engine's runs alone and
+        hands it to Claude Code on a descriptor; no other turn sees it, and
+        every other turn starts with no API credential at all. Null refuses
+        every `claude-api` launch. The credit it spends is metered by
+        `proj.apiCredit` (docs/settings.md).
+      '';
     };
     jobsDir = lib.mkOption {
       type = lib.types.str;
@@ -393,7 +409,7 @@ in
         answers go back as comments and their replies there continue it
       '';
       labels = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.enum [ "claude" ]);
+        type = lib.types.attrsOf (lib.types.enum [ "claude" "claude-api" ]);
         default = { claude = "claude"; };
         description = "Issue labels and the engine each starts. Each label is created in each repo.";
       };
@@ -479,7 +495,7 @@ in
           description = "Sorting jobs at once, across every repo. Each waits in line behind work someone asked for.";
         };
         drain = lib.mkOption {
-          type = lib.types.nullOr (lib.types.enum [ "claude" ]);
+          type = lib.types.nullOr (lib.types.enum [ "claude" "claude-api" ]);
           default = null;
           example = "claude";
           description = ''

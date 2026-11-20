@@ -327,3 +327,32 @@ fn the_door_sets_it_absolutely_and_keeps_the_balance_reading() {
     assert!(off.contains("no room"), "{off}");
     assert_eq!(cfg.credit().unwrap(), None);
 }
+
+#[test]
+fn a_meter_with_no_room_says_when_the_clock_gives_it_back() {
+    // Today's allowance spent: at the next UTC midnight, with room there.
+    let now = at("2026-11-20T18:00:00Z");
+    let today = [spend("2026-11-20T01:00:00Z", 10 * M)];
+    let m = Meter::at(&credit(), now, &today).unwrap();
+    assert_eq!(m.opens(), Some(at("2026-11-21T00:00:00Z")));
+    assert!(
+        Meter::at(&credit(), m.opens().unwrap(), &today)
+            .unwrap()
+            .room()
+    );
+    // Spent down to the reserve: at the expiry, when it renews, with room.
+    let spent = [spend("2026-11-21T00:00:00Z", 95 * M)];
+    let m = Meter::at(&credit(), at("2026-11-25T12:00:00Z"), &spent).unwrap();
+    assert_eq!(m.opens(), Some(at("2026-11-30T00:00:00Z")));
+    assert!(
+        Meter::at(&credit(), m.opens().unwrap(), &spent)
+            .unwrap()
+            .room()
+    );
+    // Room, or only a pending run's spend: no time, its turn's end is the event.
+    let mut m = Meter::at(&credit(), now, &[]).unwrap();
+    assert_eq!(m.opens(), None);
+    m.pending = Some("turn 3 is pending".into());
+    assert!(!m.room());
+    assert_eq!(m.opens(), None);
+}

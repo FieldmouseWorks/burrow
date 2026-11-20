@@ -11,6 +11,11 @@
 //! takes a slot ([`out_for`]), routes as if nothing held it, and its answer
 //! proves nothing of the login here. A limit is the plan's, which every
 //! token shares, so it holds them all, as the owner's pause does.
+//!
+//! The `claude-api` engine runs on neither: its key bills the API credit,
+//! which neither the plan's limits nor its login touch, so no hold but the
+//! owner's pause holds its runs ([`Run::api`]). The credit's own room is its
+//! admission's (engine/api.rs).
 
 use super::{CLOSED, Spent, out, policy, when};
 use crate::config::Config;
@@ -20,17 +25,52 @@ pub(crate) fn is(said: &str) -> bool {
     said == crate::engine::claude::LOGGED_OUT
 }
 
-impl Spent {
-    /// Whether it holds a run in a sandbox (`sandboxed`), or one here.
-    pub fn holds_run(&self, sandboxed: bool) -> bool {
-        !sandboxed || self.owner || !is(&self.said)
+/// A run a hold may hold: where it runs, and on which credential.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Run {
+    /// In a sandbox, on its own token, rather than this machine's login.
+    pub sandboxed: bool,
+    /// On the API credit's key (the `claude-api` engine), not the plan.
+    pub api: bool,
+}
+
+impl Run {
+    /// A run on the plan, in a sandbox (`sandboxed`) or here.
+    pub(crate) fn plan(sandboxed: bool) -> Self {
+        Self {
+            sandboxed,
+            api: false,
+        }
     }
 }
 
-/// The hold a run in a sandbox (`sandboxed`), or one here, waits on now:
-/// for what admits or routes one run, where [`out`] is the machine's.
-pub(crate) fn out_for(cfg: &Config, sandboxed: bool) -> Option<Spent> {
-    out(cfg).filter(|s| s.holds_run(sandboxed))
+impl Spent {
+    /// Whether it holds `run`: the owner's pause holds every run; the plan's
+    /// limits and this machine's login hold no API run.
+    pub fn holds_run(&self, run: Run) -> bool {
+        self.owner || (!run.api && (!run.sandboxed || !is(&self.said)))
+    }
+}
+
+/// The hold `run` waits on now: for what admits or routes one run, where
+/// [`out`] is the machine's.
+pub(crate) fn out_for(cfg: &Config, run: Run) -> Option<Spent> {
+    out(cfg).filter(|s| s.holds_run(run))
+}
+
+/// The run job `id`'s turn would be: in a sandbox as its request says, and
+/// on the engine its turn's protected identity names (a turn with none yet
+/// is taken for one on the plan, which every hold holds).
+pub(crate) fn run_of(cfg: &Config, id: &str) -> Run {
+    let job = crate::job::Job::new(cfg, id);
+    let api = job.turns().is_some_and(|n| {
+        crate::retry::Identity::load(&job, &n)
+            .is_ok_and(|i| i.is_some_and(|i| i.choice.engine == crate::engine::Engine::ClaudeApi))
+    });
+    Run {
+        sandboxed: sandboxed(cfg, id),
+        api,
+    }
 }
 
 /// Whether job `id` runs in a sandbox, as its starter's request says (the

@@ -390,7 +390,7 @@ fn running_handed_references_are_not_drained() {
 
 fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
     let (dir, count) = match engine {
-        Engine::Claude => (".slots", b.cfg.max_jobs),
+        Engine::Claude | Engine::ClaudeApi => (".slots", b.cfg.max_jobs),
     };
     let dir = b.cfg.jobs.join(dir);
     fs::create_dir_all(&dir).unwrap();
@@ -482,6 +482,107 @@ fn a_usage_hold_books_the_drain_for_its_reset() {
     assert!(!b.log().contains("labels[]="), "{}", b.log());
     assert_eq!(p.wake.get("sam/game"), Some(&until));
     assert!(super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists());
+}
+
+// A ready issue routed to `claude-api` whose credit has no room books the
+// drain for when the clock gives it back: nothing else would come on an idle
+// machine. A run going, its spend unknown, books nothing: its turn's end
+// kicks the drain. The owner's pause holds it too, and books its end.
+#[test]
+fn a_spent_api_credit_books_the_drain_for_when_it_opens() {
+    const M: i64 = 1_000_000;
+    let midnight = |days: i64| {
+        let today = jiff::Timestamp::now()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date();
+        today.checked_add(jiff::Span::new().days(days)).unwrap()
+    };
+    let at = |day: jiff::civil::Date| {
+        day.to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
+            .as_second()
+    };
+    // $20 expiring in two days with $5 kept: $10 a day.
+    let renews = midnight(2);
+    let paused = crate::now() + 3600;
+    // Each run as (its budget, its cost once in), written once the credit
+    // is set: a run from before the setting is no run of its cycle.
+    let cases = [
+        (
+            "today's allowance spent",
+            Some((10, Some(10))),
+            false,
+            Some(at(midnight(1))),
+        ),
+        (
+            "spent down to the reserve",
+            Some((15, Some(15))),
+            false,
+            Some(at(renews)),
+        ),
+        // Going with no budget recorded: its spend can't be known.
+        (
+            "a run going, its spend unknown",
+            Some((-1, None)),
+            false,
+            None,
+        ),
+        ("room, slots full", None, false, None),
+        ("the owner's pause", None, true, Some(paused)),
+    ];
+    for (name, run, pause, wake) in cases {
+        let mut b = Box::new();
+        let dir = b.path("settings");
+        crate::config::tests::routes(&mut b.cfg, &dir, "machine-inbox claude-api");
+        crate::config::tests::set(&mut b.cfg, &dir, &[&format!("credit 20 {renews} 200 5")]);
+        b.cfg
+            .inbox
+            .as_mut()
+            .unwrap()
+            .authors
+            .push(burrow_github::fake::author("worker[bot]"));
+        fs::create_dir_all(&b.cfg.jobs).unwrap();
+        if let Some((budget, cost)) = run {
+            let mut marker = json!({"type":"burrow.run","at":crate::now()});
+            if budget >= 0 {
+                marker["budget"] = json!(budget * M);
+            }
+            let mut stream = vec![marker];
+            stream.extend(
+                cost.map(|usd| json!({"type":"result","session_id":"a","total_cost_usd":usd})),
+            );
+            let job = b.cfg.jobs.join("spent");
+            fs::create_dir_all(&job).unwrap();
+            fs::write(job.join("1.engine"), "claude-api").unwrap();
+            fs::write(job.join("1.started"), crate::now().to_string()).unwrap();
+            let text: String = stream.iter().map(|r| format!("{r}\n")).collect();
+            fs::write(job.join("1.jsonl"), text).unwrap();
+        }
+        if pause {
+            crate::usage::hold(&b.cfg, paused, "save usage").unwrap();
+        }
+        let _held = run.is_none().then(|| hold_engine(&b, Engine::ClaudeApi));
+        let i = found(
+            "sam/game",
+            4,
+            "worker[bot]",
+            &["ready"],
+            "2026-10-01T00:00:00Z",
+        );
+        b.pass()
+            .note_ready("sam/game", std::slice::from_ref(&i))
+            .unwrap();
+        on_github(&b, &i);
+        let mut p = b.pass();
+        p.drain().unwrap();
+        assert!(!b.log().contains("labels[]="), "{name}: {}", b.log());
+        assert_eq!(p.wake.get("sam/game").copied(), wake, "{name}");
+        assert!(
+            super::record::files::drain_waiting(&b.cfg.inbox.as_ref().unwrap().state).exists(),
+            "{name}"
+        );
+    }
 }
 
 // A finished turn parked on GitHub still owns its brief until its live wait goes.
@@ -846,3 +947,48 @@ fn full_drain_only_fetches_cached_repair_candidates() {
 }
 
 mod admission;
+
+// A subscription turn retried after its usage limit keeps its place while
+// the plan's hold keeps it; the credit's room isn't held by it, as the line
+// isn't. With no hold on it, it goes first.
+#[test]
+fn a_plan_held_retry_leaves_the_api_credits_room() {
+    let renews = jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .checked_add(jiff::Span::new().days(2))
+        .unwrap();
+    let mut b = Box::new();
+    let dir = b.path("settings");
+    crate::config::tests::set(&mut b.cfg, &dir, &[&format!("credit 20 {renews} 200 5")]);
+    let cfg = &b.cfg;
+    fs::create_dir_all(&cfg.jobs).unwrap();
+    let job = crate::job::Job::new(cfg, "retried");
+    fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    job.set_turns(1).unwrap();
+    crate::record::mark_turn(&job, "1", crate::record::TurnMarker::RetryMigration)
+        .swap(
+            &json!({"waited": crate::now_nanos(), "said": "spent", "deadline": null,
+                    "name": "2-1-retried", "first": false, "retained": true})
+            .to_string(),
+        )
+        .unwrap();
+    assert_eq!(crate::retry::admission(cfg).unwrap().len(), 1);
+    let usage = cfg.jobs.join(crate::usage::FILE);
+    fs::write(
+        &usage,
+        json!({"at":crate::now(), "until":crate::now() + 3600, "said":"spent", "job":"retried"})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
+    assert!(!crate::slot::seen_room(cfg, Engine::Claude, false));
+    fs::remove_file(&usage).unwrap();
+    assert!(!crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
+}

@@ -93,6 +93,7 @@ impl<'a> Job<'a> {
     pub fn engine_label(&self, n: &str) -> &'static str {
         match read(&self.turn_file(n, TurnFile::Engine)).as_deref() {
             Some("claude") | None => "Claude",
+            Some(burrow_settings::credit::ENGINE) => "Claude API",
             _ => "Unknown",
         }
     }

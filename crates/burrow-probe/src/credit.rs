@@ -2,18 +2,22 @@
 //! setting and meter, over the cycle's [`ENGINE`] run costs that proj
 //! recorded in its jobs, each run of a turn at its own start, decoded by the same accounting the usage answer
 //! uses (answer/usage/accounting.rs). The probe's `usage` answer shows it,
-//! and proj's admission and routing are to read the same [`meter`] once the
-//! engine and its routing land.
+//! and proj's admission of every [`ENGINE`] run reads the same [`meter`]
+//! (burrow-proj's engine/api.rs).
 //!
 //! Strict where the usage answer is tolerant: anything about a job with an
 //! [`ENGINE`] turn that can't be read (its folder, a turn's engine, start
 //! or stream, a malformed record) is an error, and an error is no room. An
 //! [`ENGINE`] run of the cycle whose cost isn't recorded (one still
 //! running, or one stopped before its result that no later run of its
-//! session has accounted for) is counted at what it has recorded and makes
-//! the meter pending: its spend can't be known, so there's no room until it
-//! is, and [`ENGINE`] turns therefore run one at a time. The meter still
-//! says what it knows meanwhile.
+//! session has accounted for) is counted at the budget its marker gave it
+//! (`--max-budget-usd`, the most it can spend, which proj's admission sets
+//! from the room left and writes under the admission lock), so runs going
+//! at once never share the same room. One whose marker gives no budget (a
+//! run from before admission wrote one) makes the meter pending instead:
+//! its spend can't be known, so there's no room until it is. The meter
+//! still says what it knows meanwhile. A turn whose stream holds no record
+//! hasn't started a run (proj writes the marker first), so it's nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Read};
@@ -137,11 +141,13 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         if !claude_stream(engine) {
             continue;
         }
-        let report = decode(
-            records(dir, n)?.into_iter(),
-            &mut sessions,
-            &format!("{label}/{n}"),
-        );
+        let records = records(dir, n)?;
+        // A turn waiting to start its first run: the one launching now, as
+        // its admission reads the meter.
+        if records.is_empty() {
+            continue;
+        }
+        let report = decode(records.into_iter(), &mut sessions, &format!("{label}/{n}"));
         decoded.push((n, engine == ENGINE, report));
     }
     let recovered: BTreeSet<&String> = decoded.iter().flat_map(|(_, _, r)| &r.recovered).collect();
@@ -167,22 +173,25 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
             if at < from {
                 continue;
             }
+            let mut micros = micros(run.cost)?;
             if *api {
-                if let Some(id) = run.missing.iter().find(|id| !recovered.contains(id))
-                    && ledger.pending.is_none()
-                {
-                    ledger.pending = Some(format!(
-                        "{ENGINE} turn {id} has no recorded cost yet: running, or stopped before its result"
-                    ));
+                if let Some(id) = run.missing.iter().find(|id| !recovered.contains(id)) {
+                    match run.budget {
+                        // The most it can spend, held until its cost is known.
+                        Some(budget) if budget >= 0 => micros = micros.max(budget),
+                        _ if ledger.pending.is_none() => {
+                            ledger.pending = Some(format!(
+                                "{ENGINE} turn {id} has no recorded cost yet: running, or stopped before its result"
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
                 gaps.extend(run.missing.iter().cloned());
             }
             // A Claude run that accounts for an API run's unrecorded cost is
             // charged whole: its cost includes that run's.
-            ledger.spends.push(Spend {
-                at,
-                micros: micros(run.cost)?,
-            });
+            ledger.spends.push(Spend { at, micros });
         }
     }
     Ok(())

@@ -142,23 +142,23 @@ fn only_this_machines_login_holds_the_machine() {
 /// holds them all.
 #[test]
 fn this_machines_login_hold_lets_a_sandboxs_turn_by() {
-    use crate::usage::login::out_for;
+    use crate::usage::login::{Run, out_for};
     let (_d, cfg) = rig();
     let t = now();
     let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
-    assert_eq!(out_for(&cfg, false), Some(s.clone()));
-    assert_eq!(out_for(&cfg, true), None);
+    assert_eq!(out_for(&cfg, Run::plan(false)), Some(s.clone()));
+    assert_eq!(out_for(&cfg, Run::plan(true)), None);
     // The owner's pause holds every turn, whatever it says.
     assert!(
         Spent {
             owner: true,
             ..s.clone()
         }
-        .holds_run(true)
+        .holds_run(Run::plan(true))
     );
     // A limit met meanwhile is what holds now: the sandbox's turn too.
     record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
-    assert!(out_for(&cfg, true).is_some());
+    assert!(out_for(&cfg, Run::plan(true)).is_some());
 }
 
 /// A sandbox's answer proves its own token, not this machine's login: it
@@ -178,4 +178,35 @@ fn a_sandboxs_answer_ends_a_limit_but_no_login_hold_here() {
     record(&cfg, "web-1", Some(t + 3600), LIMIT, t).unwrap();
     answered(&cfg, t + 6, true);
     assert_eq!(out(&cfg), None);
+}
+
+/// The credit's turns run on neither the plan nor this machine's login: no
+/// hold of theirs holds a `claude-api` run, which a turn's protected
+/// identity says it is; the owner's pause holds it like any other.
+#[test]
+fn no_plan_hold_holds_an_api_run() {
+    use crate::engine::{Choice, Engine};
+    use crate::usage::login::{Run, out_for, run_of};
+    let (_d, cfg) = rig();
+    let t = now();
+    let api = Run {
+        sandboxed: false,
+        api: true,
+    };
+    let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
+    assert_eq!(out_for(&cfg, api), None);
+    record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
+    assert_eq!(out_for(&cfg, api), None);
+    assert!(out_for(&cfg, Run::plan(false)).is_some());
+    assert!(Spent { owner: true, ..s }.holds_run(api));
+    let job = crate::job::Job::new(&cfg, "api-1");
+    std::fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    assert_eq!(run_of(&cfg, "api-1"), Run::plan(false));
+    let choice = Choice {
+        engine: Engine::ClaudeApi,
+        ..Choice::default()
+    };
+    crate::retry::Identity::capture_choice(&job, "1", &choice).unwrap();
+    assert_eq!(run_of(&cfg, "api-1"), api);
 }
