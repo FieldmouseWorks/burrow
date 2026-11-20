@@ -17,7 +17,7 @@
 # proves the permissions, not a real conaryd's train.
 #
 #   nix build .#checks.x86_64-linux.ledger-controller -L
-{ self, pkgs }:
+{ self, pkgs, accessTests }:
 let
   cn = pkgs.writeShellApplication {
     name = "cn";
@@ -277,5 +277,11 @@ pkgs.testers.runNixOSTest {
         off.fail("test -e /var/lib/burrow/flow")
         assert off.succeed(f"getfacl -cps {ledger} {ledger}/key") == ""
         assert off.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
+
+    # The access unit's own tests that set ACLs on files, which a Nix
+    # build's seccomp filter refuses (crates/burrow-ledger-access's
+    # #[ignore]d ones), with the rest, as a user, in a tmp that takes ACLs.
+    with subtest("the access unit's tests that set ACLs pass"):
+        print(off.succeed("for t in ${accessTests}/bin/*; do runuser -u dev -- $t --include-ignored 2>&1 || exit 1; done"))
   '';
 }

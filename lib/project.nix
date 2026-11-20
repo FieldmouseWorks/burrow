@@ -638,6 +638,27 @@ let
       rust-test = craneLib.cargoTest (common // {
         inherit cargoArtifacts;
         nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ rustCfg.testInputs pkgs;
+        # A crate's test executables, built as rust-test builds them but not
+        # run: `rust-test.testBinaries "CRATE"`, each in bin/, for a check
+        # that runs the tests a Nix build can't (#[ignore]d, with
+        # --include-ignored) where they can, a VM test: the sandbox's
+        # seccomp filter refuses every setxattr, so no ACL, say.
+        passthru.testBinaries = package: craneLib.mkCargoDerivation (common // {
+          inherit cargoArtifacts;
+          pnameSuffix = "-test-binaries-${package}";
+          cargoExtraArgs = "--locked -p ${package}";
+          doInstallCargoArtifacts = false;
+          nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ [ pkgs.jq ];
+          buildPhaseCargoCommand = ''
+            cargoWithProfile test $cargoExtraArgs --no-run --message-format json-render-diagnostics >"$TMPDIR/built.json"
+          '';
+          installPhaseCommand = ''
+            mkdir -p $out/bin
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+              "$TMPDIR/built.json" | while read -r f; do cp "$f" $out/bin/; done
+            [ -n "$(ls $out/bin)" ]
+          '';
+        });
       });
     };
 

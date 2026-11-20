@@ -2,8 +2,9 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 
-/// The test's own uid. The ledgers on disk name only it: a build's user
-/// namespace maps no other, and the kernel refuses an ACL naming one.
+/// The test's own uid. The ledgers on disk name only it, so the tests that
+/// set ACLs need no other user; they run in checks.ledger-controller's VM,
+/// since a Nix build's seccomp filter refuses every setxattr.
 const ME: fn() -> u32 = || rustix::process::getuid().as_raw();
 /// Controllers for [`want`] alone, which touches no file.
 const OWNER: u32 = 1000;
@@ -251,6 +252,7 @@ fn a_controller_changed_or_turned_off_keeps_nothing() {
 }
 
 #[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
 fn on_disk_the_controller_gets_its_access_and_turned_off_keeps_none() {
     let (_root, dir, _) = ledger();
     run(&dir, Some(ME()));
@@ -295,6 +297,7 @@ fn on_disk_the_controller_gets_its_access_and_turned_off_keeps_none() {
 }
 
 #[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
 fn a_link_in_the_ledger_leads_its_access_nowhere() {
     let (_root, dir, outside) = ledger();
     for name in ["merge-bases", "key", "lock"] {
@@ -315,6 +318,7 @@ fn a_link_in_the_ledger_leads_its_access_nowhere() {
 }
 
 #[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
 fn a_name_swapped_for_a_link_after_it_was_pinned_changes_only_what_was_pinned() {
     let (_root, dir, outside) = ledger();
     let kept = dir.parent().unwrap().join("old-merge-bases");
