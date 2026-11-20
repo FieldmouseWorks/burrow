@@ -22,6 +22,10 @@ let
   cfg = config.burrow.updates;
   inherit (config.burrow) prefix user stateDir tools;
   inherit (config.burrow.github) machineApp machineGh;
+  # The App Renovate acts as (updates/renovate-identity.nix), and gh as it:
+  # its own, which needn't be the machinery's, else the user's login.
+  renovateApp = cfg.renovate.actor;
+  renovateGh = if renovateApp == null then pkgs.gh else renovateApp.gh;
   account = config.users.users.${user};
   system = pkgs.stdenv.hostPlatform.system;
   update = "${prefix}-update";
@@ -93,6 +97,7 @@ let
     name = health;
     dir = "/etc/${healthD}";
     required = cfg.requiredHealth;
+    explains = cfg.healthExplains;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 90;
@@ -125,6 +130,8 @@ let
     train = if train then {
       repo = githubRepo; branch = update; settled = vars.SETTLED;
       context = config.burrow.ledger.trainContext; steward = autoland.app.slug;
+      # Its PR is how pipeline fixes reach the machine: first in the line.
+      first = autoland.labels.first;
     } else null;
     inherit (cfg) origin checks;
     flake = config.burrow.flake;
@@ -185,6 +192,7 @@ let
       nixStore = "${config.nix.package}/bin/nix-store";
       vulnix = lib.getExe pkgs.vulnix;
       osvScanner = lib.getExe pkgs.osv-scanner;
+      cargo = "${pkgs.cargo}/bin/cargo";
       proj = "${tools.proj}/bin/proj";
     };
   });
@@ -290,13 +298,13 @@ let
     # The renovate handler's: what GitHub's rate limit holds off is booked
     # again there for when it lifts.
     wake = renovateWake;
-    app = if machineApp == null then null else {
-      inherit (machineApp) env;
+    app = if renovateApp == null then null else {
+      inherit (renovateApp) env;
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
     };
     tools = {
-      gh = "${machineGh}/bin/gh";
+      gh = "${renovateGh}/bin/gh";
       renovate = "${renovatePackage}/bin/renovate";
       covers = "${coversTool}";
     };
@@ -320,7 +328,14 @@ let
     # The App the jobs it starts act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };
+    # Who Renovate comments as, as REST spells it: its own App's bot; null
+    # when it runs as the user.
+    renovate = if renovateApp == null then null else renovateApp.login;
     renovateRun = renovateRunFor;
+    # The labels that keep the steward off a PR, which keep the sweep off
+    # it too: none without the steward's module.
+    held = let a = config.burrow.autoland or { }; in
+      lib.optionals (a ? labels) [ a.labels.hold a.labels.owner ];
     tools = {
       gh = "${machineGh}/bin/gh";
       git = lib.getExe config.programs.git.package;
@@ -418,6 +433,7 @@ in
   imports = [
     ./updates/health-options.nix
     (import ./common.nix inputs)
+    (import ./updates/renovate-identity.nix inputs)
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
@@ -532,8 +548,8 @@ in
 
     renovate = {
       enable = lib.mkEnableOption ''
-        a self-hosted Renovate for every repo it can see: as the machine's own
-        App (burrow.github.machinery), else as the user, with gh's login'';
+        a self-hosted Renovate for every repo it can see: as `app`, else as
+        the user, with gh's login'';
       autodiscoverFilter = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         example = [ "sam/*" ];
@@ -545,9 +561,9 @@ in
         defaultText = lib.literalExpression "burrow.autoland.owners, when autoland is on";
         example = [ "sam" "sams-org" ];
         description = ''
-          As the machine's own App: the GitHub users and orgs its installations
-          are on, whose repos a full pass looks through (autodiscoverFilter
-          still says which it covers). An App's token is one installation's,
+          As `app`: the GitHub users and orgs its installations are on, whose
+          repos a full pass looks through (autodiscoverFilter still says
+          which it covers). An App's token is one installation's,
           so each repo's run gets its owner's.
         '';
       };
@@ -576,17 +592,6 @@ in
           refresh. autodiscoverFilter still has to take them.
         '';
       };
-      gitAuthor = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = "renovate <renovate@example.com>";
-        description = ''
-          Who Renovate's commits are by. Not the user's own email: Renovate
-          keeps a branch that has a commit by someone other than this, and
-          rebases over everything else, so fixes pushed as the user would be
-          lost.
-        '';
-      };
       timezone = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = config.time.timeZone;
@@ -601,7 +606,7 @@ in
       settings = lib.mkOption {
         type = lib.types.attrs;
         default = { };
-        description = "Merged into burrow's Renovate settings.";
+        description = "Merged into burrow's Renovate settings; its author is `gitAuthor`, and a different one here fails evaluation.";
       };
       path = lib.mkOption {
         type = lib.types.listOf lib.types.package;
@@ -708,6 +713,15 @@ in
           }
         '';
       });
+
+      # No Remote Control server starts while Claude Code is logged out, so
+      # a login gone before a switch explains the operator's check and the
+      # servers failing after it: the switch restarted them, it didn't break
+      # them.
+      burrow.updates.healthExplains = lib.mkIf
+        ((config.burrow.claude.enable or false) && (config.burrow.remoteControl.enable or false)) {
+          claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ];
+        };
 
       environment.systemPackages = [ updateTool healthTool ];
       burrow.tools.update = updateTool;
@@ -830,8 +844,27 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
-        assertion = machineApp == null || rcfg.owners != [ ];
-        message = "burrow.updates.renovate.owners: name the accounts the App ${machineApp.slug or ""} is installed on, whose repos Renovate looks through.";
+        # renovate-policy.nix merges settings over gitAuthor, so a gitAuthor
+        # there would be the author Renovate commits as while the steward
+        # (and renovate-identity.nix's checks) go by the option's: the
+        # option is its one home.
+        assertion = !(rcfg.settings ? gitAuthor) || rcfg.settings.gitAuthor == rcfg.gitAuthor;
+        message = ''
+          burrow.updates.renovate.settings.gitAuthor is ${builtins.toJSON rcfg.settings.gitAuthor or null},
+          but burrow.updates.renovate.gitAuthor, who the steward knows Renovate's
+          commits by, is ${builtins.toJSON rcfg.gitAuthor}. Set it through
+          burrow.updates.renovate.gitAuthor instead.'';
+      } {
+        assertion = renovateApp == null || rcfg.owners != [ ];
+        message = "burrow.updates.renovate.owners: name the accounts the App ${renovateApp.slug or ""} is installed on, whose repos Renovate looks through.";
+      } {
+        # renovate-sweep's gh is the machinery's App's, which can't learn the
+        # user's login to tell Renovate's comments by.
+        assertion = renovateApp != null || machineApp == null;
+        message = ''
+          burrow.updates.renovate.app is null, so Renovate acts as the user, but
+          burrow.github.machinery is ${machineApp.name or ""}: renovate-sweep, as that App, can't tell
+          Renovate's comments. Give Renovate an App (the machinery's, or its own).'';
       } {
         assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
         message = ''
@@ -865,8 +898,8 @@ in
         };
       };
 
-      # Renovate as the machine's own App, or as the user with gh's login,
-      # like the other jobs that talk to GitHub: every repo it covers, or
+      # Renovate as its App (renovate.app, the machinery's unless it has one
+      # of its own), or as the user with gh's login: every repo it covers, or
       # (renovate@) the one its instance names. One at a time, however
       # started: they share the clones.
       systemd.services = lib.genAttrs [ "renovate" "renovate@" ] (name: online // {

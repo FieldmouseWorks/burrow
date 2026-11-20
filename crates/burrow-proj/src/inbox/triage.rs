@@ -27,13 +27,16 @@
 //! when it started and what the job read of it (`input`: a verdict on an
 //! issue whose text or authors' comments changed since is dropped, and the
 //! issue sorted again), then the verdict's steps (`plan`) and how many of
-//! them GitHub has taken (`did`). A job whose issue an agent may no longer
-//! read (labelled outside text, or its opener no longer an author) is
-//! stopped wherever it is, queued or running. A job that ends with no answer at all (its
+//! them GitHub has taken (`did`). The verdict itself is read from what the
+//! job's end kept of its answer, with no GitHub call ([`super::settle`]).
+//! A job whose issue an agent may no longer read (labelled outside text, or
+//! its opener no longer an author) is stopped wherever it is, queued or
+//! running. A job that ends with no answer at all (its
 //! engine refused it, say) leaves `failed` there instead: the issue is
 //! sorted again once it changes, or once another issue's verdict shows
 //! sorting works again, and nothing is said on it meanwhile.
 
+use crate::inbox::record::files::{self, File};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,7 +48,7 @@ use super::{Pass, dirs, key, raw, say, trimmed};
 use crate::cmd::{New, start_job, stop, told};
 use crate::config::Triage;
 use crate::job::Job;
-use crate::{Fail, io_fail, read};
+use crate::{Fail, io_fail};
 
 /// An issue an agent can take and finish now.
 pub(super) const READY: &str = "ready";
@@ -126,7 +129,7 @@ impl Pass<'_> {
     }
 
     pub(super) fn sorting_dir(&self) -> PathBuf {
-        self.inbox.state.join(".triage")
+        super::record::files::sorting_root(&self.inbox.state)
     }
 
     /// The labels triage puts on, as each repo is given them: name, colour,
@@ -163,7 +166,11 @@ impl Pass<'_> {
         issue: &Value,
         claimed: &BTreeSet<String>,
     ) -> bool {
+        // A proj question's notice waits on a person, whatever its labels:
+        // a job's reply isn't an answer, and its `proj done` closing the
+        // notice only gets it posted again.
         if issue.get("pull_request").is_some()
+            || crate::question::is_notice(issue)
             || !self.eligible(repo, issue)
             || super::enrollment::automatic_parked(self.inbox, repo, issue)
             || claimed.contains(&raw(&issue["number"]))
@@ -194,12 +201,11 @@ impl Pass<'_> {
             return true;
         }
         if self.inbox.planning && self.has_task_list(Some(repo), &raw(&issue["number"])) {
-            return !self
-                .sorting_dir()
-                .join(format!("{}-{}", key(repo), raw(&issue["number"])))
-                .join("plan")
-                .exists()
-                && self.verified_source(repo, issue).unwrap_or(false);
+            return !files::has_plan(&self.sorting_dir().join(format!(
+                "{}-{}",
+                key(repo),
+                raw(&issue["number"])
+            ))) && self.verified_source(repo, issue).unwrap_or(false);
         }
         if self.inbox.planning
             && (labels.contains(&TRACKER)
@@ -236,10 +242,7 @@ impl Pass<'_> {
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
         let claimed = self.claimed(repo);
-        let going = dirs(&root, "")
-            .iter()
-            .filter(|d| self.sorting_slot(d))
-            .count();
+        let going = self.sorting_holders().len();
         let mut room = t.at_once.saturating_sub(going);
         let mut launch_failed = false;
         for issue in all {
@@ -253,7 +256,7 @@ impl Pass<'_> {
             // Its last sorting ended without an answer: sorted again once
             // the issue changes, or once another's verdict shows sorting
             // works again.
-            if let Some(failed) = read(&d.join("failed")) {
+            if let Some(failed) = files::failed_on(&d) {
                 if failed == updated {
                     self.planner_wait(repo, &n, None);
                     continue;
@@ -261,8 +264,9 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
-                let why = (d.join("plan").is_file() && !self.sorting_slot(&d))
-                    .then_some("its verdict's steps are still being carried out");
+                let verdict =
+                    self.look().record(repo, &n, None).wait == Some(super::record::Wait::Verdict);
+                let why = verdict.then_some("its verdict's steps are still being carried out");
                 self.planner_wait(repo, &n, why);
                 continue;
             }
@@ -288,11 +292,13 @@ impl Pass<'_> {
                 }
             };
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-            for (f, v) in [("updated", &updated), ("job", &id)] {
-                fs::write(d.join(f), format!("{v}\n")).map_err(|e| io_fail(&d.join(f), e))?;
+            for (f, v) in [(File::Updated, &updated), (File::Job, &id)] {
+                files::mark(&d, f).put(format!("{v}\n"))?;
             }
             Self::hand(&d, &input)?;
-            fs::write(d.join("seen"), seen.to_string()).map_err(|e| io_fail(&d, e))?;
+            files::mark(&d, File::Seen)
+                .write(seen.to_string())
+                .map_err(|e| io_fail(&d, e))?;
             room = room.saturating_sub(1);
         }
         Ok(())
@@ -404,8 +410,8 @@ impl Pass<'_> {
             else {
                 continue;
             };
-            let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-                if !d.join("failed").exists() {
+            let Some(id) = files::job(&d).filter(|j| !j.is_empty()) else {
+                if !files::failed(&d) {
                     let _ = fs::remove_dir_all(&d);
                 }
                 continue;
@@ -442,8 +448,7 @@ impl Pass<'_> {
             // A resolved one-way question's owner label was ours, not an
             // independent sorting verdict. Clear it and ignore a stale list
             // snapshot of that label when consuming the resumed verdict.
-            let answered =
-                read(&d.join("question-notice")).is_some_and(|n| n.ends_with("\tone-way"));
+            let answered = files::question_notice(&d).is_some_and(|n| n.ends_with("\tone-way"));
             let resolved = open.cloned().map(|mut issue| {
                 if answered && let Some(labels) = issue["labels"].as_array_mut() {
                     labels.retain(|l| {
@@ -472,7 +477,14 @@ impl Pass<'_> {
             }
             let mut failed = false;
             if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
-                match told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into())) {
+                // The answer as its end kept it, with no GitHub call
+                // ([`super::settle`]); read now if it was never settled.
+                let answer = match super::settle::settled(&job) {
+                    Some(kept) => kept.answer.ok_or(()),
+                    None => told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into()))
+                        .map_err(drop),
+                };
+                match answer {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {
                             self.retry(repo);
@@ -499,9 +511,9 @@ impl Pass<'_> {
                 continue;
             }
             if failed {
-                let updated = read(&d.join("updated")).unwrap_or_default();
-                let _ = fs::write(d.join("failed"), format!("{updated}\n"));
-                let _ = fs::remove_file(d.join("job"));
+                let updated = files::updated(&d).unwrap_or_default();
+                let _ = files::mark(&d, File::Failed).write(format!("{updated}\n"));
+                let _ = files::mark(&d, File::Job).remove();
             } else {
                 let _ = fs::remove_dir_all(&d);
             }
@@ -513,7 +525,7 @@ impl Pass<'_> {
     /// ended without an answer gets another go.
     fn sorting_works(&self) {
         for d in dirs(&self.sorting_dir(), "") {
-            if d.join("failed").exists() && !d.join("job").exists() {
+            if files::failed(&d) && !files::has_job(&d) {
                 let _ = fs::remove_dir_all(&d);
             }
         }
@@ -580,11 +592,7 @@ impl Pass<'_> {
     /// the same steps whatever the settings say by then. None when the
     /// record can't keep them.
     fn plan(&self, d: &Path, t: &Triage, id: &str, answer: &str) -> Option<Vec<Step>> {
-        let kept = d.join("plan");
-        if let Some(plan) = fs::read(&kept)
-            .ok()
-            .and_then(|p| serde_json::from_slice(&p).ok())
-        {
+        if let Some(plan) = files::plan(d).and_then(|p| serde_json::from_slice(&p).ok()) {
             return Some(plan);
         }
         let mut plan = self.steps(t, id, answer);
@@ -596,7 +604,9 @@ impl Pass<'_> {
             .filter(|s| matches!(s.as_str(), "high" | "medium" | "low"))
             .unwrap_or_else(|| "medium".into());
         plan.insert(0, Step::Priority(format!("priority: {priority}")));
-        fs::write(&kept, serde_json::to_vec(&plan).ok()?).ok()?;
+        files::mark(d, File::Plan)
+            .write(serde_json::to_vec(&plan).ok()?)
+            .ok()?;
         Some(plan)
     }
 
@@ -605,9 +615,7 @@ impl Pass<'_> {
     /// Each one GitHub takes is counted there, so a pass that comes back to
     /// it carries on from the next and says nothing twice.
     fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step], job: &Job) -> bool {
-        let did: usize = read(&d.join("did"))
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0);
+        let did: usize = files::did(d).and_then(|n| n.parse().ok()).unwrap_or(0);
         for (i, step) in steps.iter().enumerate().skip(did) {
             let took = match step {
                 Step::Priority(l) => {
@@ -626,13 +634,17 @@ impl Pass<'_> {
                 }
                 Step::Close(reason) => self.close(repo, n, reason),
                 Step::Split(tasks) => {
-                    let Ok(input) = fs::read_to_string(d.join("input")) else {
+                    let Ok(input) = files::input(d) else {
                         return false;
                     };
                     self.prepare_plan(repo, n, &input, tasks) && self.split_children(repo, n, tasks)
                 }
             };
-            if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {
+            if !took
+                || files::mark(d, File::Did)
+                    .write(format!("{}\n", i + 1))
+                    .is_err()
+            {
                 return false;
             }
         }
@@ -641,7 +653,7 @@ impl Pass<'_> {
                 .iter()
                 .any(|s| matches!(s, Step::Label(l) if l == READY))
         {
-            let Ok(input) = fs::read_to_string(d.join("input")) else {
+            let Ok(input) = files::input(d) else {
                 return false;
             };
             if !self.prepare_plan(repo, n, &input, &[]) {

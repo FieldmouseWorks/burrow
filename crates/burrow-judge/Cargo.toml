@@ -1,0 +1,31 @@
+[package]
+name = "burrow-judge"
+description = "Conary's judge plugin and its producer: the flow's judgments run as proj jobs on the judging role, sealed and signed by a producer with a user and keys of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-brief = { path = "../burrow-brief" }
+burrow-github = { path = "../burrow-github" }
+burrow-producer = { path = "../burrow-producer" }
+burrow-settings = { path = "../burrow-settings" }
+# The plugin contract, the seal, the receipts and the judging context are
+# Conary's, pinned with the kit's by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+burrow-producer = { path = "../burrow-producer", features = ["test-key"] }
+burrow-test = { path = "../burrow-test" }
+ed25519-dalek = "3.0.0"
+rustix = { version = "1.1.6", features = ["process"] }
+
+[lints]
+workspace = true

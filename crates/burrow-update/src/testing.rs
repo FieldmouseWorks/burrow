@@ -50,7 +50,9 @@ pub const BRANCH: &str = "box-update";
 ///   or fails, with HOME/unfetchable-INPUT there.
 /// - heavy takes a slot (HOME/nix.log says so) and runs what follows `--`.
 /// - proj logs each call to HOME/proj.log and says its job's id, unless
-///   HOME/proj-down is there: then it fails.
+///   HOME/proj-down is there: then it fails. A run under a --key whose job
+///   is at work (HOME/keys/KEY, `/` as `+`, holds its id) joins it: says
+///   that id. Taking the file away is that job ending.
 /// - claude says its version, the claude-code.json of the system that runs
 ///   (T/current-system), and answers a prompt (logged in HOME/claude.log)
 ///   with OK, unless HOME/claude-mute is there.
@@ -59,10 +61,13 @@ pub const BRANCH: &str = "box-update";
 ///
 /// - switch puts T/current-system at the system it's given, keeping the
 ///   one before (T/previous) for --abort to go back to, and exits with
-///   T/switch-rc's code when there is one; confirm fails with
-///   T/confirm-fails there.
+///   T/switch-rc's code when there is one (3 or 4 changing nothing, as
+///   a downgrade's and a pending switch's refusals); confirm fails with
+///   T/confirm-fails there. With T/replaced there (another's switch
+///   pending in place of the one they're told), --abort and confirm exit
+///   4 changing nothing.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
-///   that's there.
+///   that's there, or healthy, then T/excused when that's there.
 /// - notify keeps what it opens and closes in T/notices, and each notice's
 ///   body in T/notice-KEY.
 /// - vulnix reports, for a system, each line "COMMIT CVE PACKAGE SCORE" of
@@ -169,7 +174,13 @@ exec "$@"
                 r#"#!/bin/sh
 printf '%s\n' "$*" >>"$HOME/proj.log"
 [ ! -e "$HOME/proj-down" ] || { echo "proj: no slot for it" >&2; exit 1; }
-echo "homelab-$(wc -l <"$HOME/proj.log" | tr -d ' ')"
+key=
+while [ $# -gt 0 ]; do [ "$1" != --key ] || key=$2; shift; done
+held="$HOME/keys/$(printf %s "$key" | tr / +)"
+[ -z "$key" ] || [ ! -e "$held" ] || exec cat "$held"
+id="homelab-$(wc -l <"$HOME/proj.log" | tr -d ' ')"
+[ -z "$key" ] || { mkdir -p "$HOME/keys" && echo "$id" >"$held"; }
+echo "$id"
 "#,
             ),
             (
@@ -189,6 +200,7 @@ T=${0%/*}/..
 printf 'switch %s\n' "$*" >>"$T/calls"
 case $1 in
   --abort)
+    [ ! -e "$T/replaced" ] || { echo "another is pending, not $2" >&2; exit 4; }
     [ ! -e "$T/previous" ] || ln -sfn "$(cat "$T/previous")" "$T/current-system"
     echo "taken back"
     exit 0 ;;
@@ -196,7 +208,7 @@ case $1 in
     echo "switching to $2, to confirm within $BURROW_CONFIRM_WITHIN"
     echo "a switch's own words" >&2
     rc=$(cat "$T/switch-rc" 2>/dev/null || echo 0)
-    [ "$rc" != 3 ] || exit 3
+    case $rc in 3|4) exit "$rc" ;; esac
     readlink -f "$T/current-system" >"$T/previous"
     ln -sfn "$2" "$T/current-system"
     exit "$rc" ;;
@@ -208,7 +220,8 @@ exit 9
                 "confirm",
                 r#"#!/bin/sh
 T=${0%/*}/..
-echo confirm >>"$T/calls"
+printf 'confirm %s\n' "$*" >>"$T/calls"
+[ ! -e "$T/replaced" ] || { echo "$1 isn't pending" >&2; exit 4; }
 echo confirmed
 [ ! -e "$T/confirm-fails" ]
 "#,
@@ -222,7 +235,8 @@ case $1 in
   snapshot) [ ! -e "$T/snapshot-fails" ] && echo healthy >"$2" ;;
   compare)
     [ -e "$2" ] || exit 9
-    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; } ;;
+    [ ! -e "$T/unhealthy" ] || { cat "$T/unhealthy"; exit 1; }
+    echo healthy; [ ! -e "$T/excused" ] || cat "$T/excused" ;;
   *) exit 9 ;;
 esac
 "#,
@@ -340,6 +354,7 @@ pub fn train() -> Train {
         settled: "review-settled".into(),
         context: "conary/train".into(),
         steward: "sams-steward".into(),
+        first: Some("first".into()),
     }
 }
 
@@ -556,6 +571,16 @@ pub fn sha(c: char) -> String {
 }
 
 /// GitHub's list of open PRs: each one's number, head and head's repo.
+/// GitHub taking the train's label on any of its PRs (`train::first`).
+pub fn takes_labels(gh: &mut burrow_github::fake::Fake) {
+    gh.on(
+        "POST",
+        "repos/sam/homelab/issues/",
+        vec![burrow_github::fake::ok(200, json!([]), &[])],
+    );
+}
+
+/// Its open PRs, as GitHub lists them: none labelled.
 pub fn listed(prs: &[(u64, String, Value)]) -> Value {
     prs.iter()
         .map(|(n, sha, repo)| {

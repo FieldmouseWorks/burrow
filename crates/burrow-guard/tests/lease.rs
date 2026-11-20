@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use burrow_guard::config::Config;
-use burrow_guard::{Guard, Hook, Input, Namespace};
+use burrow_guard::{Guard, Hook, Input};
 
 fn git_at(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -53,15 +53,12 @@ fn refusal(cmd: &str, cwd: &Path) -> Option<String> {
     let config = Config {
         git: "git".into(),
         zfs: "/no-such-zfs".into(),
-        systemd_run: "/no-such-systemd-run".into(),
         snapshot_datasets: Vec::new(),
         ask_after_seconds: 8,
     };
     let guard = Guard {
         config: &config,
-        codex: false,
         mark: cwd.join("mark"),
-        namespace: Namespace::Machine,
     };
     guard.refusal(&Hook {
         tool_name: Some("Bash".to_owned()),

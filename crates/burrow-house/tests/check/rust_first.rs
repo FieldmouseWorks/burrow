@@ -23,8 +23,9 @@ fn none() {
     assert_eq!(o.calls[1], "compare ba5e...4ead");
     // The code file it grows is read at its head, for its length.
     assert_eq!(o.calls[2], "content \"src/main.rs\"@4ead");
-    assert_eq!(o.calls[3..10], ["post 4ead"; RULES.len()]);
-    assert_eq!(o.calls[10..], ["pull 7"]);
+    let posts = 3 + RULES.len();
+    assert_eq!(o.calls[3..posts], ["post 4ead"; RULES.len()]);
+    assert_eq!(o.calls[posts..], ["pull 7"]);
 }
 
 // The case it's for: a new Python file and no reason. It fails, and names

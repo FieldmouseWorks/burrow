@@ -27,7 +27,12 @@ in
       description = ''
         A PR with this label goes ahead of every PR without it in its repo's
         line for proofSlots, and the oldest first among those with it: for a
-        fix the rest of the line waits on, opened after them.
+        fix the rest of the line waits on, opened after them. Conary's flow
+        ranks it high too (priority_labels). Fixes that keep the pipeline
+        moving get it by themselves: a red default branch's fix (the
+        steward's pass), HOST-update's PR (burrow-update's train), and the
+        PR a job run --first, --pipeline or --unstick opened and awaits
+        (crates/burrow-proj/src/first.rs).
       '';
     };
     batch = mkOption {
@@ -76,10 +81,6 @@ in
           review = {
             name = "waiting: review";
             description = "Its reviewers, or a Claude job judging it, are looking at this head";
-          };
-          reviewer = {
-            name = "waiting: reviewer";
-            description = "Can't settle until a reviewer out of service is back; the steward's status says which";
           };
           fix = {
             name = "waiting: fix";

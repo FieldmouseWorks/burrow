@@ -30,7 +30,8 @@ fn hook(config: &str, input: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-const CONFIG: &str = r#"{"git": "git", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 8}"#;
+const CONFIG: &str =
+    r#"{"git": "git", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 8}"#;
 
 #[test]
 fn a_command_it_lets_through_gets_no_answer() {
@@ -63,7 +64,7 @@ fn a_guard_that_cant_check_asks() {
         (CONFIG, "not json"),
         (r#"{"git": "git"}"#, ls),
         (
-            r#"{"git": "git", "zfs": "zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 8, "extra": 1}"#,
+            r#"{"git": "git", "zfs": "zfs", "snapshotDatasets": [], "askAfterSeconds": 8, "extra": 1}"#,
             ls,
         ),
     ] {
@@ -85,7 +86,7 @@ fn a_guard_that_cant_check_asks() {
 fn a_guard_that_takes_too_long_asks() {
     let git = common::stand_ins().join("hang");
     let config = format!(
-        r#"{{"git": "{}", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
+        r#"{{"git": "{}", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
         git.display()
     );
     let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push --force-with-lease --force-if-includes"}, "cwd": "/"}"#;
@@ -100,7 +101,7 @@ fn a_guard_that_takes_too_long_asks() {
 }
 
 /// A force-push with no lease on the head its pusher saw has a safe
-/// spelling, so the guard refuses it rather than ask, Claude's guard too.
+/// spelling, so the guard refuses it rather than ask.
 #[test]
 fn an_unleased_force_push_is_refused_not_asked() {
     let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push -f origin feature"}, "cwd": "/"}"#;

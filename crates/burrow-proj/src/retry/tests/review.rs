@@ -207,39 +207,8 @@ fn failed_replacements_keep_the_old_cohort_visible_and_its_priority() {
 }
 
 #[test]
-fn codex_checkpoint_never_hands_over_to_unaware_rollback_startup() {
-    let mut r = rig();
-    let old = r.tmp.path().join("old-startup");
-    let wrong = r.tmp.path().join("wrong-handover");
-    burrow_test::executable(
-        &old,
-        format!(
-            "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_exec) touch '{}' ;;\n*) exit 2 ;;\nesac\n",
-            wrong.display()
-        ),
-    );
-    let path = r.tmp.path().join("config.json");
-    let mut cfg: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    cfg["deployed"] = old.to_str().unwrap().into();
-    fs::write(path, serde_json::to_vec(&cfg).unwrap()).unwrap();
-    saved(&r, "codex");
-    fs::remove_file(Job::new(&r.cfg, "codex").turn("1", "execution")).unwrap();
-    start(&mut r, "codex", "new-codex", "/ordinary");
-    until(|| r.cfg.jobs.join("codex/took").exists() || wrong.exists());
-    assert!(
-        !wrong.exists(),
-        "retained Codex turn handed over to destructive startup"
-    );
-    assert!(
-        !Job::new(&r.cfg, "codex")
-            .turn("1", "retry-migration")
-            .exists()
-    );
-}
-
-#[test]
 fn initial_transfers_start_a_budget_and_unlimited_retries_stay_unlimited() {
-    for slot in ["1", "codex-1", "unstick"] {
+    for slot in ["1", "unstick"] {
         let r = rig();
         let mut state = saved(&r, "initial");
         state.deadline = None;

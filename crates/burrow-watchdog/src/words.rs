@@ -18,7 +18,7 @@ pub fn clock_in(t: f64, tz: &TimeZone) -> String {
     let Ok(at) = Timestamp::from_second(t.floor() as i64) else {
         return format!("{t:.0}");
     };
-    at.to_zoned(tz.clone())
+    at.to_zoned_datetime(tz.clone())
         .strftime("%-I:%M%p %Z")
         .to_string()
         .replace("AM", "am")
@@ -31,7 +31,7 @@ pub fn day(t: f64) -> String {
         return format!("{t:.0}");
     };
     let date = at
-        .to_zoned(TimeZone::system())
+        .to_zoned_datetime(TimeZone::system())
         .strftime("%a %b %-d")
         .to_string();
     format!("{date}, {}", clock(t))

@@ -1,5 +1,5 @@
 //! What systemd, the journal, proj and the system's own links say: `units`,
-//! `journal`, `rc`, `queue`, `deployed` and `oom`.
+//! `journal`, `rc`, `queue`, `why`, `deployed` and `oom`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -196,6 +196,14 @@ fn server(unit: &str) -> String {
 pub fn queue(m: &Machine) -> Result<String, String> {
     let proj = m.cfg.proj.as_ref().ok_or("proj isn't on here")?;
     m.output(proj, &["status"], true, &[])
+        .map(|s| or_none(&s) + "\n")
+}
+
+/// `why OWNER/REPO#N`: where the issue stands with proj's inbox, followed
+/// into its job, as `proj why` says it.
+pub fn why(m: &Machine, issue: &str) -> Result<String, String> {
+    let proj = m.cfg.proj.as_ref().ok_or("proj isn't on here")?;
+    m.output(proj, &["why", issue], true, &[])
         .map(|s| or_none(&s) + "\n")
 }
 

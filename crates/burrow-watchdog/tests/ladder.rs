@@ -789,6 +789,165 @@ fn snoozes() {
     assert_eq!(m.escalated().len(), 1);
 }
 
+// A snoozed stall that clears for a while with nothing fixed (a switch
+// resets the failed unit, which fails again on its next run) is the same
+// stall when it's back before its more time is up: no second job, and the
+// next step once that time's up. Back only after it: a stall of its own.
+#[test]
+fn snooze_outlasts_a_clear() {
+    let stalled = |m: &Machine, since: f64, now: f64| {
+        m.write(
+            &m.steward,
+            json!({"sam/r#7": item(since, now - MIN, None)}),
+            now,
+        );
+    };
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    let until = T + MIN + 120.0 * MIN;
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    assert_eq!(m.run(T + 2.0 * MIN).1, BTreeMap::new());
+    stalled(&m, T + 20.0 * MIN, T + 30.0 * MIN);
+    let (wake, stalls) = m.run(T + 30.0 * MIN);
+    assert_eq!((wake, stalls.len(), m.runs().len()), (Some(until), 1, 1));
+    assert!(m.kicks().is_empty());
+    m.run(until);
+    assert_eq!((m.escalated().len(), m.runs().len()), (1, 1));
+
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    m.run(T + 2.0 * MIN);
+    // Back overdue in the first pass after its more time ran out, with no
+    // pass between to prune it: the expired rest is no match.
+    stalled(&m, T + 3.0 * H, T + 4.0 * H);
+    m.run(T + 4.0 * H);
+    assert!(m.state().resting.is_empty());
+    assert_eq!((m.runs().len(), m.escalated().len()), (2, 0));
+
+    // Back in another phase in time: a stall of its own too.
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    m.run(T + 2.0 * MIN);
+    let mut next = item(T + 20.0 * MIN, T + 29.0 * MIN, None);
+    next["phase"] = "waiting for review".into();
+    m.write(&m.steward, json!({"sam/r#7": next}), T + 30.0 * MIN);
+    m.run(T + 30.0 * MIN);
+    assert_eq!(m.runs().len(), 2);
+}
+
+// A deploy wait behind its update's own PR is the update run's while one
+// looks (not overdue), and back from its old since once the run has, its
+// phase quoting that run's word: the very same stall, so the more time a job
+// gave it holds through every run, with no second job.
+#[test]
+fn snooze_outlasts_a_run_that_looks() {
+    let behind = |said: &str| {
+        let mut it = named(
+            "sam/r's main going live",
+            &format!("3 commits; behind box-update's own PR #405; its last run: {said}"),
+            T - 5.0 * H,
+            T - MIN,
+        );
+        it["kick"] = "update".into();
+        it
+    };
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"deploy/sam/r": behind("current at noon")}),
+        T,
+    );
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "deploy/sam/r",
+        360,
+        "its PR waits on a fix in review",
+        T + MIN,
+    )
+    .unwrap();
+    let until = T + MIN + 360.0 * MIN;
+    let running = named(
+        "sam/r's main going live",
+        "box-update has been putting it live since then",
+        T + 20.0 * MIN,
+        T + 80.0 * MIN,
+    );
+    m.write(&m.steward, json!({"deploy/sam/r": running}), T + 21.0 * MIN);
+    assert_eq!(m.run(T + 21.0 * MIN).1, BTreeMap::new());
+    m.write(
+        &m.steward,
+        json!({"deploy/sam/r": behind("current at one")}),
+        T + 25.0 * MIN,
+    );
+    let (wake, stalls) = m.run(T + 25.0 * MIN);
+    assert_eq!(
+        (wake, stalls.len(), m.kicks().len(), m.runs().len()),
+        (Some(until), 1, 1, 0)
+    );
+}
+
+// A stall whose kick changes has the new one tried, as a stall of its own
+// would: a deploy wait kicked through dispatch while an earlier run was in
+// its way, back on HOST-update (the same since) once that run has ended, gets
+// HOST-update's kick, and a job only after that kick's GRACE.
+#[test]
+fn a_new_kick_is_tried() {
+    let behind = |kick: &str, refresh: bool| {
+        let mut it = item(T - 3.0 * H, T - MIN, Some(kick));
+        it["refresh"] = json!(refresh);
+        json!({"deploy/sam/r": it})
+    };
+    let m = Machine::new();
+    m.write(&m.steward, behind("dispatch", true), T);
+    m.pass(T, false);
+    assert_eq!(m.kicks(), ["dispatch"]);
+    m.write(&m.steward, behind("update", false), T + MIN);
+    m.pass(T + MIN, false);
+    assert_eq!(m.kicks(), ["dispatch", "update"]);
+    assert!(m.runs().is_empty());
+    m.pass(T + MIN + GRACE - 1.0, false);
+    assert!(m.runs().is_empty());
+    m.pass(T + MIN + GRACE, false);
+    assert_eq!((m.kicks().len(), m.runs().len()), (2, 1));
+}
+
 // What a source writes that isn't an item is left out, not a crash, and half
 // a file is no file.
 #[test]

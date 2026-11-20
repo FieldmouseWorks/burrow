@@ -14,12 +14,22 @@ from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+# burrow-brief (argv[2]), which the steward's tasks read their policy text
+# from as they're imported.
+BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
+                        str(Path(__file__).resolve().parents[2] / 'crates/target/debug/burrow-brief'))
 # Keep deadline coverage on the established test entry point, including
 # when the negative gate runs these tests with the base check definition.
 subprocess.run([sys.executable, str(Path(__file__).with_name("timeouts.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("limits.py")),
+                *sys.argv[1:]], check=True)
+
 subprocess.run([sys.executable, str(Path(__file__).with_name("batches.py")),
+                *sys.argv[1:]], check=True)
+
+subprocess.run([sys.executable, str(Path(__file__).with_name("looks.py")),
                 *sys.argv[1:]], check=True)
 
 subprocess.run([sys.executable, str(Path(__file__).with_name("listing.py")),
@@ -28,9 +38,12 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("listing.py")),
 subprocess.run([sys.executable, str(Path(__file__).with_name("continuations.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("rereads.py")),
+                *sys.argv[1:]], check=True)
+
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',
+    cfg.write_text(json.dumps(dict(brief=[BRIEF], context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',
                                   conary='cn', trainContext='train', snapDir=tmp)))
     os.environ['AUTOLAND_CONFIG'] = str(cfg)
     import common as C
@@ -71,6 +84,28 @@ with tempfile.TemporaryDirectory() as tmp:
                 reader = Reader(kind, head)
                 assert reader.fixing() is None
                 assert reader.ends == {kind: 'done'}
+
+    # A fix job between turns on its own PR whose turn's answers just went
+    # up (claims.rs's owns) is still at work: what went up resumes it, so
+    # no second job is handed its branch (PSIV#459). One whose turn left
+    # nothing new has ended, as above; and a judge or proof job awaiting its
+    # own PR ended whatever claims says.
+    for kind in ON:
+        for head in ('original', 'own-push'):
+            for resumes, at in ((True, kind), (False, None)):
+                says('done', 'await SAM/R#5')
+                reader = Reader(kind, head)
+                reader.st['answering'] = {'job': {'kind': kind, 'waits': True, 'owns': resumes}}
+                assert reader.fixing() == at, (kind, head, resumes)
+                if resumes:
+                    assert reader.awaits == {kind: "this PR's next change"} and not reader.ends
+                else:
+                    assert reader.ends == {kind: 'done'}
+    for kind in ('judged', 'proved'):
+        says('done', 'await sam/r#5')
+        reader = Reader(kind, 'original')
+        reader.st['answering'] = {'job': {'kind': 'handed', 'waits': True, 'owns': True}}
+        assert reader.running(kind, 'original') == '' and reader.ends == {kind: 'done'}
 
     # A job of any kind holding a question (or a one-way one left for the
     # owner) is still at work, however its turn ended (a failed resume
@@ -186,4 +221,14 @@ with tempfile.TemporaryDirectory() as tmp:
         proj.chmod(0o755)
         assert C.lifecycle('job') == want, (out, code, C.lifecycle('job'))
     assert C.at_work('job') is True, 'unknown is kept'
+# A retirement look that posts answers, or leaves them to go again, hands the
+# branch to no new fix job though no job owns it: the PR it read is stale.
+import claims
+for status, clear, want in ((None, True, True), (None, False, False),
+                            ('A Claude job\'s answers went up: reading the PR again', True, False),
+                            ("GitHub didn't take a Claude job's answers: they go up next try", True, False)):
+    with patch.object(claims, 'see', lambda *a, **k: (status, {'clear': clear})):
+        assert claims.stand_down('r', {}, {}, 't', None, None, None) is want, (status, clear)
+with patch.object(claims, 'see', lambda *a, **k: (None, None)):
+    assert claims.stand_down('r', {}, {}, 't', None, None, None) is True
 print('Python lifecycle and handoff: ok')

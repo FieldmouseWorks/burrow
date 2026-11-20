@@ -73,20 +73,22 @@ pub fn which(name: &str) -> PathBuf {
 
 /// A binary of the workspace's own. A test can't name another package's
 /// binary, but `cargo test` from crates/ builds every package's that its
-/// tests run, beside the test binaries: target/PROFILE/NAME.
+/// tests run, into target/PROFILE/NAME. The test binary sits somewhere
+/// below that (target/PROFILE/deps/, or since cargo 1.100
+/// target/PROFILE/build/PACKAGE/HASH/out/), so it's the nearest directory
+/// above the test binary that holds NAME as a file.
 pub fn workspace_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let bin = exe
-        .parent()
-        .and_then(Path::parent)
-        .map(|profile| profile.join(name))
-        .unwrap();
-    assert!(
-        bin.is_file(),
-        "{} isn't built: `cargo test` from crates/ builds it, as does `cargo build -p {name}`",
-        bin.display()
-    );
-    bin
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(name))
+        .find(|bin| bin.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "no {name} in any directory above {}: `cargo test` from crates/ builds it, as does `cargo build -p {name}`",
+                exe.display()
+            )
+        })
 }
 
 /// What a step did.

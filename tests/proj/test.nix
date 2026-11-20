@@ -144,8 +144,12 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(8788)
 
     def kicks():
-        # The watchdog's are looked at apart: proj kicks it at every change.
-        return [k for k in machine.succeed("cat /tmp/kicks").split() if k != "/kick/watchdog"]
+        # proj's own. The watchdog's are looked at apart: proj kicks it at
+        # every change. /kick/units is burrow-units-watch's, never proj's: it
+        # asks for a pass each time pid 1 says a unit started or finished,
+        # which here is burrow-settings-reconcile's timer every 30 to 70s,
+        # and so lands in whatever window a test counts proj's kicks.
+        return [k for k in machine.succeed("cat /tmp/kicks").split() if k not in ("/kick/watchdog", "/kick/units")]
 
     def waits(until=None, timeout=30):
         # What proj last told the watchdog; with `until`, once that holds of

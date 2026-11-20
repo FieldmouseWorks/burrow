@@ -12,7 +12,7 @@ import os
 
 import proofs as P
 import waits
-from harness import CI_GREEN, HELD, JOBS, STATES, STOPPED, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
+from harness import CI_GREEN, HELD, JOBS, STATES, STOPPED, UNSTOPPABLE, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
 
 stand_in()
 kept = C.job
@@ -173,9 +173,89 @@ status, _ = run(clean(**threads), 7400)
 assert JOBS == [] and "a Claude job has it since" in status, status
 ends("done")
 awaits("SAM/R#5")  # only this PR, however GitHub's names are cased
-run(clean(**threads), 7500)
-status, digest = run(clean(**threads), 7600)
+
+
+def claimed(**flags):
+    """What claims (burrow-upkeep) says of the latest job between turns."""
+    path = f"{tmp}/state/pr-sam_r-5.json"
+    with open(path) as f:
+        st = json.load(f)
+    st["answering"][ISSUED[-1]].update(flags)
+    with open(path, "w") as f:
+        json.dump(st, f)
+
+
+real_upkeep = C.upkeep
+
+
+def retiring_upkeep(*args, **kw):
+    """burrow-upkeep's `claims` as claims.rs answers a retire (its own tests,
+    claims_tests.rs, hold the rules): a waiting job is marked retiring and
+    named to stop, and kept until proj says it's over (STOPPED)."""
+    if args[0] != "claims":
+        return real_upkeep(*args, **kw)
+    look = json.loads(kw["input"])
+    answering, stop = {}, []
+    for jid, rec in look["answering"].items():
+        if rec.get("retiring") and jid in STOPPED:
+            continue
+        if rec.get("retiring") or (look["retire"] and rec.get("waits") and not rec.get("owns")):
+            rec = {**rec, "retiring": True, "owns": True}
+            stop.append({"jid": jid, "why": "retiring"})
+        answering[jid] = rec
+    return {"answering": answering, "pushedBy": look["pushedBy"], "stop": stop, "answered": [], "wake": None,
+            "limited": None, "clear": not any(r.get("owns") for r in answering.values())}
+
+
+C.upkeep = retiring_upkeep
+# Its turn's answers just went up, which resumes it: still at work on the
+# branch, so nothing else is handed it (PSIV#459).
+claimed(waits=True, owns=True)
+for t in (7500, 7600):
+    status, digest = run(clean(**threads), t)
+    assert JOBS == [] and "its Claude job awaits this PR's next change" in status and digest == [], (t, status, JOBS)
+# Its turn left nothing new: it ended without fixing it, and the second is
+# handed once the first is retired, so proj never resumes it on the same
+# branch.
+claimed(waits=True, owns=False)
+first = ISSUED[-1]
+# One proj won't stop is no one retired: it stays kept (claims.rs), and no
+# second job is handed the branch while it's at large, on this pass or the
+# next.
+UNSTOPPABLE.add(first)
+for t in (7700, 7800):
+    status, digest = run(clean(**threads), t)
+    assert JOBS == [] and first not in STOPPED, (t, status, JOBS)
+# Waiting on the first to stand down isn't a job that couldn't start: the
+# stop that failed is the strike, and nothing is listed for the wait.
+assert "once the last one on the branch has stood down" in status and digest == [], (status, digest)
+UNSTOPPABLE.clear()
+run(clean(**threads), 7900)
+status, digest = run(clean(**threads), 8000)
 assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
+assert first in STOPPED, (first, STOPPED)
+# The same on the pass that does stop the first: claims keeps it until proj
+# says it's over, so the second is handed the branch on a later pass, and
+# that one pass between the two lists nothing (remi#1449: burrow#1287 was
+# on the stuck issue as a PR no Claude job could start for).
+STATES.clear()
+HELD.clear()
+fresh_pr_state()
+run(clean(**threads), 0)
+run(clean(**threads), 7200)
+ends("done")
+awaits("SAM/R#5")
+claimed(waits=True, owns=False)
+first = ISSUED[-1]
+run(clean(**threads), 7300)
+status, digest = a_pass(clean(**threads), 7400)
+assert JOBS == [] and first in STOPPED, (status, JOBS, STOPPED)
+assert "once the last one on the branch has stood down" in status and digest == [], (status, digest)
+# The wait is the steward's own, with its deadline: one that never clears
+# still goes to the watchdog, which kicks a pass.
+it = stall()
+assert it["kick"] == "autoland/sam/r" and it["due"] == it["since"] + 120 * 60 and overdue() is None, it
+C.upkeep = real_upkeep
 STATES.clear()
 HELD.clear()
 

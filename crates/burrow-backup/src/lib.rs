@@ -222,9 +222,9 @@ pub fn local(epoch: i64) -> String {
     zoned(epoch).map_or_else(|| epoch.to_string(), |z| z.strftime("%F %T").to_string())
 }
 
-fn zoned(epoch: i64) -> Option<jiff::Zoned> {
+fn zoned(epoch: i64) -> Option<jiff::ZonedDateTime> {
     let t = jiff::Timestamp::from_second(epoch).ok()?;
-    Some(t.to_zoned(jiff::tz::TimeZone::system()))
+    Some(t.to_zoned_datetime(jiff::tz::TimeZone::system()))
 }
 
 /// A backup's short ID, as restic shows it.

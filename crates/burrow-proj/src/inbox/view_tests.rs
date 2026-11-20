@@ -1,6 +1,7 @@
 //! The inbox's part of the live snapshot, against the stand-ins in
 //! [`super::sorting_tests`].
 
+use crate::inbox::record::files;
 use std::fs;
 
 use serde_json::Value;
@@ -11,7 +12,7 @@ use crate::now;
 use crate::snapshot::{SlotKind, SlotState, Snapshot};
 
 /// Job `id`, about sam/game#N, its one turn ended on `proj await` of
-/// sam/game#AWAITED `ago` seconds back, on Codex's `small` at `high`; and the
+/// sam/game#AWAITED `ago` seconds back, on Claude's `small` at `high`; and the
 /// drain's record of having handed it on.
 fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
     let d = b.cfg.jobs.join(id);
@@ -23,7 +24,7 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
         ("project", "/src/game".to_owned()),
         ("link", format!("https://github.com/sam/game/issues/{n}")),
         ("role", "inbox".to_owned()),
-        ("1.engine", "codex".to_owned()),
+        ("1.engine", "claude".to_owned()),
         ("1.model", "small".to_owned()),
         ("1.effort", "high".to_owned()),
         ("1.outcome", "done".to_owned()),
@@ -50,8 +51,8 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
         .state
         .join(format!("sam_game-{n}"));
     fs::create_dir_all(&r).unwrap();
-    fs::write(r.join("drained"), format!("sam/game#{n}\n")).unwrap();
-    fs::write(r.join("job"), format!("{id}\n")).unwrap();
+    fs::write(r.join(files::File::Drained), format!("sam/game#{n}\n")).unwrap();
+    fs::write(r.join(files::File::Job), format!("{id}\n")).unwrap();
 }
 
 /// 2026-11-11's stall: three jobs the drain handed on, each parked on an
@@ -63,7 +64,7 @@ fn the_11_11_stall() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Codex);
+    t.drain = Some(Engine::Claude);
     t.drain_jobs = 3;
     for (i, n) in [11u64, 12, 13].into_iter().enumerate() {
         parked(&b, &format!("job-{n}"), n, 100 + n, 600 * (i as i64 + 1));
@@ -103,7 +104,7 @@ fn the_11_11_stall() {
     );
     assert_eq!(
         snap.holds.triage.as_ref().map(|t| (t.drain, t.drain_jobs)),
-        Some((Some(Engine::Codex), 3))
+        Some((Some(Engine::Claude), 3))
     );
 
     // `proj status` is the snapshot's, line for line: each job as the
@@ -152,7 +153,7 @@ fn a_parked_sorting_job_holds_its_slot() {
     fs::remove_dir_all(state.join("sam_game-21")).unwrap();
     let r = state.join(".triage").join("sam_game-21");
     fs::create_dir_all(&r).unwrap();
-    fs::write(r.join("job"), "sort-21\n").unwrap();
+    fs::write(r.join(files::File::Job), "sort-21\n").unwrap();
     let snap = Snapshot::take(&b.cfg, 15).unwrap();
     let sorting: Vec<_> = snap
         .slots
@@ -167,7 +168,7 @@ fn a_parked_sorting_job_holds_its_slot() {
     assert_eq!(h.awaits, ["sam/game#121"]);
     assert_eq!(
         (h.engine, h.model.as_deref(), h.effort.as_deref()),
-        (Some(Engine::Codex), Some("small"), Some("high"))
+        (Some(Engine::Claude), Some("small"), Some("high"))
     );
     let age = s.age.unwrap();
     assert!((900..905).contains(&age), "{age}s, not 900s");
@@ -180,7 +181,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Codex);
+    t.drain = Some(Engine::Claude);
     t.drain_jobs = 2;
     fs::write(b.path("active"), "").unwrap();
     for count in 0..=3 {
@@ -193,7 +194,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
                 .state
                 .join(format!("sam_game-{count}"));
             fs::create_dir_all(&r).unwrap();
-            fs::write(r.join("drained"), format!("sam/game#{count}")).unwrap();
+            fs::write(r.join(files::File::Drained), format!("sam/game#{count}")).unwrap();
             if count == 2 {
                 let job = b.cfg.jobs.join("old-job");
                 fs::create_dir_all(&job).unwrap();
@@ -205,7 +206,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
                     crate::policy::Kind::Automated,
                 )
                 .unwrap();
-                fs::write(r.join("job"), "old-job").unwrap();
+                fs::write(r.join(files::File::Job), "old-job").unwrap();
             }
         }
         let status = Snapshot::take(&b.cfg, 0).unwrap().status();

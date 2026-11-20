@@ -3,6 +3,7 @@
 use super::super::sorting_tests::{Box, issue};
 use super::tests::parent_fixture;
 use super::*;
+use crate::inbox::record::files;
 
 /// The child, as GitHub has it now.
 fn child(b: &Box, state: &str) {
@@ -322,7 +323,7 @@ fn a_closure_whose_text_wasnt_checked_keeps_nothing() {
         serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
     rest["body"] = json!("It's broken, and the docs need it too.");
     // Its answer posted, as the jobs pass does first.
-    fs::write(d.join("answered"), "1\n").unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
     let job = crate::job::Job::new(&b.cfg, "j1");
     assert!(!b.pass().keep_landing("sam/box", "7", &job, &d, &rest));
     assert_eq!(kept(&b), None);
@@ -591,4 +592,162 @@ fn a_list_whose_child_is_still_open_is_unchanged() {
     );
     assert_eq!(after.rendered, before.rendered);
     assert!(!b.log().contains("issues/8 -f state=closed"));
+}
+
+/// Comments on #8, as GitHub gives them: `body` by `login`, last edited by
+/// `editor` when there is one.
+fn said_on_child(b: &Box, login: &str, body: &str, editor: Option<&str>) {
+    let mut c = json!({"id": 5, "user": burrow_github::fake::actor(login), "body": body,
+        "created_at": "2026-11-13T17:22:33Z"});
+    if let Some(editor) = editor {
+        let by = burrow_github::fake::actor(editor);
+        c["userContentEdits"] =
+            json!({"totalCount": 1, "nodes": [{"editor": by, "deletedBy": null}]});
+    }
+    fs::write(
+        b.path("repos_sam_box_issues_8_comments"),
+        json!([[c]]).to_string(),
+    )
+    .unwrap();
+}
+
+/// The successor, sam/burrow#948, as GitHub has it now.
+fn successor(b: &Box, state: &str) {
+    let mut it = issue(948, "sam", &[]);
+    it["state"] = json!(state);
+    fs::write(b.path("repos_sam_burrow_issues_948"), it.to_string()).unwrap();
+}
+
+/// A merged PR in sam/burrow closes sam/burrow#948, and only that issue.
+fn successor_landed(b: &Box) {
+    fs::write(
+        b.path("merged-sam_burrow-948"),
+        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+            {"merged":true,"url":"https://github.com/sam/burrow/pull/979"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn sequence(b: &Box, parent: &Value) {
+    b.pass().sequence("sam/box", std::slice::from_ref(parent));
+}
+
+#[test]
+fn a_child_continued_elsewhere_waits_on_its_successor_and_lands_with_it() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(
+        &b,
+        "sam",
+        "Continued as sam/burrow#948, opened in the repo the work lives in.",
+        None,
+    );
+    successor(&b, "open");
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b));
+    assert!(!notice_open(&b), "a live successor is no stall");
+    assert!(
+        p.wake.contains_key("sam/box"),
+        "a merge elsewhere is looked for"
+    );
+    let list = stored(&b).checklist("sam/box", "7");
+    assert!(
+        list.contains("[ ] #8: task 0 — continued as sam/burrow#948"),
+        "{list}"
+    );
+    assert!(!list.contains("the list waits"), "{list}");
+
+    successor(&b, "closed");
+    successor_landed(&b);
+    sequence(&b, &parent);
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains("[x] #8: task 0 — https://github.com/sam/burrow/pull/979")
+    );
+}
+
+#[test]
+fn only_an_authors_unedited_comment_continues_a_child() {
+    for (by, editor) in [("mallory", None), ("sam", Some("mallory"))] {
+        let (mut b, parent, _) = parent_fixture();
+        notifier(&mut b);
+        child(&b, "closed");
+        said_on_child(&b, by, "Continued as sam/burrow#948.", editor);
+        successor(&b, "closed");
+        successor_landed(&b);
+        sequence(&b, &parent);
+        assert!(!advanced(&b), "{by} {editor:?}");
+        assert!(
+            notice_open(&b),
+            "closed by hand with no successor: the owner hears"
+        );
+    }
+}
+
+#[test]
+fn a_successor_off_this_machine_or_on_its_own_list_is_none() {
+    for named in [
+        "Continued as elsewhere/repo#948.",
+        "Continued as #9.",
+        "Continued as #7.",
+    ] {
+        let (mut b, parent, _) = parent_fixture();
+        notifier(&mut b);
+        child(&b, "closed");
+        said_on_child(&b, "sam", named, None);
+        sequence(&b, &parent);
+        assert!(!advanced(&b), "{named}");
+        assert!(notice_open(&b), "{named}: the list waits and says so");
+    }
+}
+
+#[test]
+fn a_successor_closed_without_a_landing_leaves_the_child_waiting() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(&b, "sam", "Continued as sam/burrow#948.", None);
+    successor(&b, "open");
+    sequence(&b, &parent);
+    assert!(!notice_open(&b));
+    // It closes with nothing landed: the child waits as a hand close does.
+    successor(&b, "closed");
+    sequence(&b, &parent);
+    assert!(!advanced(&b));
+    assert!(notice_open(&b));
+    let list = stored(&b).checklist("sam/box", "7");
+    assert!(list.contains("the list waits"), "{list}");
+    assert!(!list.contains("continued as"), "{list}");
+}
+
+#[test]
+fn a_successor_that_is_a_pr_lands_when_it_merges() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(&b, "sam", "Continued as #950, the PR that does it.", None);
+    let open = pr(&b, "sam/box", 950, false);
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(p.unreached.is_empty(), "a PR is no outage");
+    assert!(!advanced(&b));
+    assert!(!notice_open(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains("continued as sam/box#950")
+    );
+    pr(&b, "sam/box", 950, true);
+    sequence(&b, &parent);
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains(&format!("[x] #8: task 0 — {open}"))
+    );
 }

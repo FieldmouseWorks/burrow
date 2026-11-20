@@ -14,6 +14,11 @@
 //! sends for a continuing problem. Both update an existing notice's title and
 //! body when the facts change. It is safe to retry after an ambiguous reply.
 //!
+//! A notice someone closed by hand while its problem still stands isn't
+//! posted again at once, or a closer that keeps closing it (a job ending
+//! `proj done` on it, say) would loop: it waits a day from when the close
+//! was seen, then comes back as a new issue that says the old one was closed.
+//!
 //! GitHub never fails the caller: a notice that can't be sent goes to the
 //! journal and is dropped. With no repo, every notice only goes to the
 //! journal. `pending` asks nothing of GitHub and answers with its exit
@@ -211,69 +216,145 @@ struct Notices<'a> {
 impl Notices<'_> {
     fn open(self, key: &str, title: &str, body: &str, now: u64, remind: bool) -> Result<(), Error> {
         let Notices { cfg, repo, api } = self;
-        let stamp = cfg.dir.join(key);
+        let path = cfg.dir.join(key);
+        let stamp = Stamp::read(&path);
         // Fails when GitHub can't be asked, so that's never taken for "no
         // issue", which would open a second one.
         let open = github::open_issues(api, repo, &cfg.label, key)?;
         let Some(first) = open.first() else {
+            let mut body = body.to_owned();
+            if let Some(closed) = stamp.issue {
+                // Opened and shown open, and not closed by `close` (which
+                // forgets the number first): someone closed it by hand.
+                if !stamp.closed {
+                    return Stamp {
+                        said: now,
+                        issue: Some(closed),
+                        closed: true,
+                    }
+                    .write(&path);
+                }
+                if now.saturating_sub(stamp.said) <= DAY {
+                    return Ok(());
+                }
+                body = format!(
+                    "Posted again: #{closed} was closed by hand, but this still stands. It closes by itself once it clears.\n\n{body}"
+                );
+            }
             // Before the notice file: with no label there's no issue, and
             // nothing to close.
             github::label(api, repo, &cfg.label, &cfg.name)?;
             // Kept before it's asked for: GitHub can open the issue and the
             // answer still be lost, and then only this says it needs closing.
-            write_stamp(&stamp, now)?;
-            return github::create(
+            Stamp {
+                said: now,
+                issue: None,
+                closed: false,
+            }
+            .write(&path)?;
+            let made = github::create(
                 api,
                 repo,
                 &format!("[{key}] {title}"),
-                body,
+                &body,
                 &cfg.label,
                 cfg.assignee.as_deref().filter(|a| !a.is_empty()),
-            );
+            )?;
+            return Stamp {
+                said: now,
+                issue: Some(made),
+                closed: false,
+            }
+            .write(&path);
         };
+        let mut seen = Stamp {
+            issue: Some(first.number),
+            closed: false,
+            ..stamp
+        };
+        if seen != stamp {
+            seen.write(&path)?;
+        }
         let wanted = format!("[{key}] {title}");
         if first.title != wanted || first.body != body {
             github::update(api, repo, first.number, &wanted, body)?;
         }
-        if remind && now.saturating_sub(said(&stamp)) > DAY {
+        if remind && now.saturating_sub(seen.said) > DAY {
             github::comment(api, repo, first.number, &format!("Still happening: {body}"))?;
-            write_stamp(&stamp, now)?;
+            seen.said = now;
+            seen.write(&path)?;
         }
         Ok(())
     }
 
     fn close(self, key: &str, what: &str) -> Result<(), Error> {
         let Notices { cfg, repo, api } = self;
-        let stamp = cfg.dir.join(key);
+        let path = cfg.dir.join(key);
         // Only what this asked for, so a clear notice asks GitHub nothing.
-        if !stamp.exists() {
+        if !path.exists() {
             return Ok(());
+        }
+        // Its issue forgotten before it's closed: a close whose answer is
+        // lost isn't taken for one closed by hand.
+        let stamp = Stamp::read(&path);
+        if stamp.issue.is_some() {
+            Stamp {
+                issue: None,
+                closed: false,
+                ..stamp
+            }
+            .write(&path)?;
         }
         for n in github::open_issues(api, repo, &cfg.label, key)? {
             github::close(api, repo, n.number, what)?;
         }
         // Forgotten only once none is open, so a failed close is tried again
         // by the next one.
-        match fs::remove_file(&stamp) {
+        match fs::remove_file(&path) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
-                Err(Error::said(format!("{}: {e}", stamp.display())))
+                Err(Error::said(format!("{}: {e}", path.display())))
             }
             _ => Ok(()),
         }
     }
 }
 
-/// When the notice was last said; never, when its file can't say.
-fn said(stamp: &Path) -> u64 {
-    fs::read_to_string(stamp)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+/// A notice's file: when it was last said, the issue it was last seen open
+/// as, and whether that issue has since been seen closed by hand. Written
+/// `SAID [ISSUE [closed]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    said: u64,
+    issue: Option<u64>,
+    closed: bool,
 }
 
-fn write_stamp(stamp: &Path, now: u64) -> Result<(), Error> {
-    fs::write(stamp, format!("{now}\n"))
-        .map_err(|e| Error::said(format!("{}: {e}", stamp.display())))
+impl Stamp {
+    /// Said never, and no issue known, as far as its file can't say.
+    fn read(path: &Path) -> Stamp {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let mut words = text.split_whitespace();
+        let said = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+        let issue = words.next().and_then(|w| w.parse().ok());
+        let closed = issue.is_some() && words.next() == Some("closed");
+        Stamp {
+            said,
+            issue,
+            closed,
+        }
+    }
+
+    fn write(&self, path: &Path) -> Result<(), Error> {
+        let mut text = self.said.to_string();
+        if let Some(n) = self.issue {
+            text.push_str(&format!(" {n}"));
+            if self.closed {
+                text.push_str(" closed");
+            }
+        }
+        fs::write(path, format!("{text}\n"))
+            .map_err(|e| Error::said(format!("{}: {e}", path.display())))
+    }
 }
 
 #[cfg(test)]

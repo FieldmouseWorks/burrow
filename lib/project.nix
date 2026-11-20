@@ -638,6 +638,43 @@ let
       rust-test = craneLib.cargoTest (common // {
         inherit cargoArtifacts;
         nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ rustCfg.testInputs pkgs;
+        # A crate's test executables, built as rust-test builds them but not
+        # run: `rust-test.testBinaries "CRATE"`, each in bin/, for a check
+        # that runs the tests a Nix build can't (#[ignore]d, with
+        # --include-ignored) where they can, a VM test: the sandbox's
+        # seccomp filter refuses every setxattr, so no ACL, say. Built from
+        # the workspace less the other packages' tests (cargoTests), so only
+        # a change to CRATE's tests or to code changes it, and the negative
+        # run builds a check that runs it only for those; such a check says
+        # so in its testFiles.
+        passthru.testBinaries = package: craneLib.mkCargoDerivation (common // {
+          inherit cargoArtifacts;
+          src =
+            let
+              own = lib.findFirst (d: (readToml (pathOf "${d}/Cargo.toml")).package.name == package)
+                (throw "testBinaries: no package ${package} in ${rustCfg.dir}") (lib.attrNames cargoPackages);
+            in
+            lib.cleanSourceWith {
+              inherit (rustSrc) src;
+              name = "source";
+              filter = path: type:
+                let p = builtins.unsafeDiscardStringContext (toString path); in
+                p == own || lib.hasPrefix "${own}/" p || !(cargoTests p type);
+            };
+          pnameSuffix = "-test-binaries-${package}";
+          cargoExtraArgs = "--locked -p ${package}";
+          doInstallCargoArtifacts = false;
+          nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ [ pkgs.jq ];
+          buildPhaseCargoCommand = ''
+            cargoWithProfile test $cargoExtraArgs --no-run --message-format json-render-diagnostics >"$TMPDIR/built.json"
+          '';
+          installPhaseCommand = ''
+            mkdir -p $out/bin
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+              "$TMPDIR/built.json" | while read -r f; do cp "$f" $out/bin/; done
+            [ -n "$(ls $out/bin)" ]
+          '';
+        });
       });
     };
 

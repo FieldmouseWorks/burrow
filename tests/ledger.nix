@@ -4,7 +4,8 @@
 # unavailable (cn exits 75) books the repo's next pass instead of failing the
 # unit, which would fail a switch running meanwhile. Anything else still
 # fails it. As the machine's own App, cn asks gh-token for each repo's token
-# and is never given the user's login.
+# and is never given the user's login, and so does the gate-reuse lookup's
+# token command (tests/ledger-gate-reuse.nix runs the lookup).
 #
 #   nix build .#checks.x86_64-linux.ledger -L
 { self, pkgs }:
@@ -28,6 +29,7 @@ let
   cn = pkgs.writeShellScriptBin "cn" ''
     echo "$*" >>/tmp/cn-calls
     echo "$CONARY_REVIEWERS" >/tmp/cn-reviewers
+    echo "$CONARY_REVIEW_AUTHORS" >/tmp/cn-review-authors
     echo "''${GH_TOKEN:-none} ''${CONARY_TOKEN_COMMAND:-none}" >/tmp/cn-auth
     case $1 in
       init) touch "$CONARY_LEDGER/anchor" ;;
@@ -68,7 +70,7 @@ pkgs.testers.runNixOSTest {
       };
       machinery = "workers";
     };
-    burrow.ledger = ledger;
+    burrow.ledger = ledger // { gateReuse = { enable = true; repos = [ "sam/r" ]; }; };
     burrow.events.enable = lib.mkForce false;
     users.users.dev.isNormalUser = true;
     environment.systemPackages = [ pkgs.openssl ];
@@ -96,6 +98,9 @@ pkgs.testers.runNixOSTest {
     with subtest("only the steward's App's word is its, never the token's own login"):
         assert machine.succeed("cat /tmp/cn-reviewers") == "steward[bot]\n"
 
+    with subtest("the connector's posts are the reviewer's word, recorded unattested"):
+        assert machine.succeed("cat /tmp/cn-review-authors") == "chatgpt-codex-connector[bot]\n"
+
     with subtest("as the user, cn has gh's login for every repo"):
         assert machine.succeed("cat /tmp/cn-auth") == "gho_stand_in none\n", machine.succeed("cat /tmp/cn-auth")
         assert machine.succeed("cat /tmp/gh-calls") == "auth token none\n" * 2
@@ -112,6 +117,14 @@ pkgs.testers.runNixOSTest {
         app.succeed("systemctl start burrow-ledger.service")
         listed = app.succeed("cat /tmp/gh-calls").splitlines()
         assert listed == ["repo list /run/gh-token/workers.sock"], listed
+
+    with subtest("the gate-reuse lookup's token is the App's too, for the repo it's asked about"):
+        env = app.succeed("systemctl show -P Environment conary-gate-reuse.service").split()
+        path = next(e for e in env if e.startswith("CONARY_GATE_REUSE_CONFIG=")).split("=", 1)[1]
+        command = json.loads(app.succeed(f"cat {path}"))["token_command"]
+        # With nothing of the App's env: the command brings what it needs.
+        token = app.succeed(f"su dev -s /bin/sh -c 'env -i {command} sam/r'")
+        assert token.startswith("ghs_") and token == app.succeed("cat /tmp/cn-token"), token
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")

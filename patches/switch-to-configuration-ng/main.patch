@@ -1,0 +1,41 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -32,6 +32,9 @@
+ use regex::Regex;
+ use syslog::Facility;
+ 
++// burrow: never wait on a job queued behind a run already going.
++mod held;
++
+ mod systemd_manager {
+     #![allow(non_upper_case_globals)]
+     #![allow(non_camel_case_types)]
+@@ -1084,6 +1087,10 @@
+     submitted_jobs: &Rc<RefCell<HashMap<dbus::Path<'static>, Job>>>,
+ ) -> anyhow::Result<()> {
+     while !submitted_jobs.borrow().is_empty() {
++        // burrow: all that's left waits behind runs from before the activation.
++        if held::only_held(conn, submitted_jobs.borrow().keys()) {
++            break;
++        }
+         log::debug!(
+             "waiting for submitted jobs to finish, still have {} job(s)",
+             submitted_jobs.borrow().len()
+@@ -1896,6 +1903,7 @@
+     let mut units_to_reload = map_from_list_file(RELOAD_LIST_FILE);
+ 
+     let dbus_conn = LocalConnection::new_system().context("Failed to open dbus connection")?;
++    held::begin(&dbus_conn);
+     let systemd = systemd1_proxy(&dbus_conn);
+     let logind = login1_proxy(&dbus_conn);
+ 
+@@ -2449,7 +2457,8 @@
+     }
+ 
+     // Wait for the restart job of sysinit-reactivation.service to finish
+-    block_on_jobs(&dbus_conn, &submitted_jobs)?;
++    // burrow: a barrier: the rest of the system counts on what it sets up.
++    held::whole(|| block_on_jobs(&dbus_conn, &submitted_jobs))?;
+ 
+     // Before reloading we need to ensure that the units are still active. They may have been
+     // deactivated because one of their requirements got stopped. If they are inactive but should

@@ -37,7 +37,7 @@ fn a_security_fix_merges_itself_and_is_the_owners_a_day_on() {
     m.prs(&[old.clone()]);
     let p = m.pass();
     assert!(p.task().contains("#5 "));
-    let today = jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
+    let today = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
     assert_eq!(m.key(5, ""), format!("{} {today} red\n", sha(5)));
     let stuck = "Renovate opened these security fixes over a day ago and they haven't merged. A red one goes to a Claude job every day; if the same one keeps failing, the cause is probably outside the repo (its CI runner, a broken default branch):\n- Update foo5 to v2: https://github.com/sam/r/pull/5";
     assert_eq!(

@@ -18,12 +18,18 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{Gate, LOGS, lines};
-use crate::expr::{V, value};
+use crate::expr::{V, condition, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
+/// The flake's inputs, in the store apart the failing evaluation tries
+/// again in.
+mod inputs;
 /// Which new tests count as having passed on the old code: those a check
 /// that passed runs.
 mod runs;
+/// A check that never ends on the old code: built once, under a timeout,
+/// and caught where it passes on the head.
+mod timeouts;
 
 /// t's derivation once its test wants 2, which fails it.
 const WANTS_2: &str = r#""want":"2\n""#;
@@ -249,7 +255,27 @@ impl Repo {
 fn every_pr_gets_one_from_the_workflows_own_files() {
     let wf = workflow(".github/workflows/flake-check.yml");
     let job = &wf["jobs"]["negative"];
-    assert_eq!(job["if"], "github.event_name == 'pull_request'");
+    // Every PR, unless its caller turns it off in a call whose negative
+    // doesn't count (burrow's flake.yml, train.rs); on by default.
+    let input = &wf["on"]["workflow_call"]["inputs"]["negative"];
+    assert_eq!(input["type"], "boolean");
+    assert_eq!(input["default"], true);
+    let cond = text(&job["if"]);
+    for (event, on, runs) in [
+        ("pull_request", true, true),
+        ("pull_request", false, false),
+        ("push", true, false),
+        ("push", false, false),
+    ] {
+        let ctx = [
+            ("github.event_name", V::from(event)),
+            ("inputs.negative", V::from(on)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        assert_eq!(condition(cond, &ctx), runs, "{event}, negative {on}");
+    }
     assert_eq!(job["permissions"]["id-token"], "write");
     // On the runner's runner, or the one the caller names for it.
     for (negative, runner) in [("", "remi"), ("fresh-remi", "fresh-remi")] {
@@ -316,20 +342,21 @@ fn a_test_that_catches_its_change_fails_on_the_old_code() {
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     assert_eq!(ran.list("tests"), ["tests/want.txt"]);
     assert_eq!(ran.list("checks"), ["t"]);
-    // Built, then what it's built from, then the base's, then again on
-    // its own: its own builder's failure, on what the new tests change.
+    // What it's built from, then it on its own, then the same for the
+    // base's: its own builder's failure, on what the new tests change,
+    // built once.
     let builds = ran.builds();
     assert_eq!(builds.len(), 4, "{builds:?}");
+    assert!(builds[0].contains("-dep.drv^out"), "{builds:?}");
     assert!(
-        builds[0].contains("-t.drv^*") && !builds[0].contains("-other.drv"),
+        builds[1].contains("-t.drv^*") && !builds[1].contains("-other.drv"),
         "{builds:?}"
     );
-    assert!(builds[1].contains("-dep.drv^out"), "{builds:?}");
+    assert_eq!(builds[2], builds[0], "{builds:?}");
     assert!(
-        builds[2].contains("-t.drv^*") && builds[2] != builds[0],
+        builds[3].contains("-t.drv^*") && builds[3] != builds[1],
         "{builds:?}"
     );
-    assert_eq!(builds[3], builds[0], "{builds:?}");
     // The negative tree: the base's code, the head's tests.
     let tree = ran.found.as_ref().unwrap()["tree"]
         .as_str()
@@ -790,113 +817,6 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
         assert!(ran.found.is_none(), "{says}: {}", ran.out);
         assert!(ran.out.contains(says), "{says}: {}", ran.out);
     }
-}
-
-/// A flake input the store hasn't got yet is fetched by whichever
-/// evaluation needs it first. When that's the negative tree's failing one,
-/// its failure is still the test's own: the second try, which fetches
-/// nothing, is the one held to it. And when it came from a substituter,
-/// as nixpkgs does on a fresh runner, which leaves no copy the fetchers
-/// keep, the second try still fetches nothing: the inputs are copied
-/// into its store first.
-#[test]
-fn an_input_the_failing_evaluation_fetched_first_still_counts() {
-    let r = Repo::new();
-    let s = &r.g.s;
-    // The input: a tarball, served over HTTP as often as it's asked for.
-    let www = s.join("www");
-    write(&www.join("dep/x.txt"), "x\n");
-    let mut tar = s.command("tar");
-    tar.args(["czf", "dep.tar.gz", "dep"]).current_dir(&www);
-    assert!(crate::harness::output(tar).status.success());
-    let tarball = fs::read(www.join("dep.tar.gz")).unwrap();
-    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/dep.tar.gz", server.local_addr().unwrap());
-    std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader, Write};
-        for mut conn in server.incoming().flatten() {
-            let mut request = BufReader::new(conn.try_clone().unwrap());
-            let mut line = String::new();
-            while request.read_line(&mut line).is_ok_and(|n| n > 2) {
-                line.clear();
-            }
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                tarball.len()
-            );
-            let _ = conn.write_all(head.as_bytes());
-            let _ = conn.write_all(&tarball);
-        }
-    });
-    let flake = read(&r.origin.join("flake.nix"))
-        .replace(
-            "  outputs = { self }:",
-            &format!("  inputs.dep = {{ url = \"{url}\"; flake = false; }};\n  outputs = {{ self, dep }}:"),
-        )
-        .replace("{ inherit drv; }", "{ inherit drv dep; }");
-    write(&r.origin.join("flake.nix"), &flake);
-    write(
-        &r.origin.join("tests/check.nix"),
-        "{ drv, ... }: drv \"fromtests\" [ ]\n",
-    );
-    // Locked with a cache of its own, then collected, so neither the job's
-    // store nor its fetcher cache has the input.
-    let nix = |args: &[&str]| {
-        let mut cmd = s.command(args[0]);
-        cmd.args(&args[1..])
-            .current_dir(&r.origin)
-            .env("NIX_CONFIG", &r.g.nix_config)
-            .env("XDG_CACHE_HOME", s.join("lock-cache"));
-        let out = crate::harness::output(cmd);
-        assert!(
-            out.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
-    };
-    s.git(&r.origin, &["add", "-A"]);
-    nix(&["nix", "flake", "lock"]);
-    // A binary cache holding the input, for the second run.
-    let archived: serde_json::Value =
-        serde_json::from_str(&nix(&["nix", "flake", "archive", "--json"])).unwrap();
-    let dep_path = archived["inputs"]["dep"]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let bincache = format!("file://{}", s.join("bincache").display());
-    nix(&["nix", "copy", "--to", &bincache, &dep_path]);
-    nix(&["nix-store", "--gc"]);
-    s.git(&r.origin, &["add", "-A"]);
-    s.git(&r.origin, &["commit", "-qm", "an input"]);
-    let head = r.pr(
-        "needsdep",
-        &[
-            ("lib.txt", Some("2\n")),
-            (
-                "tests/check.nix",
-                Some(
-                    "{ drv, dep }: builtins.seq (builtins.readFile \"${dep}/x.txt\") (throw \"needs what the change adds\")\n",
-                ),
-            ),
-        ],
-    );
-    let ran = r.run(&head, "", "");
-    assert_eq!(ran.code, 0, "{}", ran.out);
-    assert_eq!(ran.result(), "fail", "{}", ran.out);
-    assert!(ran.list("checks").contains(&"fromtests"), "{}", ran.out);
-    // Again with neither the store nor the fetchers' cache holding it,
-    // and the binary cache to substitute it from.
-    nix(&["nix-store", "--gc"]);
-    fs::remove_dir_all(s.join("cache")).unwrap();
-    let config = r.g.nix_config.replace(
-        "substituters =",
-        &format!("require-sigs = false\nsubstituters = {bincache}"),
-    );
-    assert_ne!(config, r.g.nix_config);
-    let ran = r.run_with(&head, "", &[("NIX_CONFIG", &config)]);
-    assert_eq!(ran.code, 0, "{}", ran.out);
-    assert_eq!(ran.result(), "fail", "{}", ran.out);
 }
 
 /// An evaluation a signal or a limit stopped didn't fail on the old code.

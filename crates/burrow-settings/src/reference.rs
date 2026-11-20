@@ -26,10 +26,9 @@ pub fn markdown() -> String {
          \n\
          An option that isn't live is set in the machine's flake, under `burrow.`\n\
          and its name: a change is a PR to the flake and a deploy. A live one is kept\n\
-         in a file on the machine (the settings overlay under `burrow.stateDir`;\n\
-         proj's in the job user's `~/.config/proj`, setups in `roles.d/` beside the\n\
-         roles file, and the usage hold in proj's jobs directory), and its readers\n\
-         read it again at their next decision.\n\
+         in a file on the machine (the settings overlays under `burrow.stateDir`,\n\
+         and the usage hold in proj's jobs directory), and its readers read it\n\
+         again at their next decision.\n\
          \n\
          | Option | Type | Allowed | Default | Live | Owner | Kept in | What it is |\n\
          |---|---|---|---|---|---|---|---|\n",
@@ -56,10 +55,15 @@ pub fn markdown() -> String {
             kept,
             s.help.to_owned(),
         ];
-        let row: Vec<_> = row.iter().map(|cell| cell.replace('|', "\\|")).collect();
-        out.push_str(&format!("| {} |\n", row.join(" | ")));
+        out.push_str(&line(&row));
     }
     out
+}
+
+/// One table row, a pipe in a cell escaped: it would end the cell.
+fn line(cells: &[String]) -> String {
+    let cells: Vec<_> = cells.iter().map(|cell| cell.replace('|', "\\|")).collect();
+    format!("| {} |\n", cells.join(" | "))
 }
 
 fn code(text: &str) -> String {
@@ -72,7 +76,8 @@ fn kind_type(kind: &Kind) -> String {
         Kind::Bool => "boolean".into(),
         Kind::Count { .. } => "integer".into(),
         Kind::Text => "text".into(),
-        Kind::Percent => "number".into(),
+        Kind::Percent | Kind::Usd => "number".into(),
+        Kind::Date => "date".into(),
         Kind::OneOf(_) => "word".into(),
         Kind::Repo => "repository".into(),
         Kind::Maybe(kind) => format!("{} or null", kind_type(kind)),
@@ -96,6 +101,8 @@ fn allowed(kind: &Kind) -> String {
         Kind::Bool => "`true`, `false`".into(),
         Kind::Count { min } => format!("{min} or more"),
         Kind::Percent => "0 to 100".into(),
+        Kind::Usd => "dollars, 0 or more, to the cent".into(),
+        Kind::Date => "`YYYY-MM-DD`".into(),
         Kind::Text | Kind::Object => "any".into(),
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
         Kind::Repo => "`OWNER/NAME`".into(),
@@ -141,6 +148,9 @@ mod tests {
             "| `settings.pipelineUntil` | integer or null | 0 or more, or `null` | `null` | yes | proj | `settings/overlay.json` |"
         ));
         // A pipe in a cell would end it.
-        assert!(text.contains(r#"`["(^\|/)secrets?/","#), "pipes escaped");
+        assert_eq!(
+            line(&["`(^|/)x`".into(), "y".into()]),
+            "| `(^\\|/)x` | y |\n"
+        );
     }
 }

@@ -25,24 +25,38 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     let tracked: serde_json::Map<String, Value> =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
-    let (file, overrides, until) = match &cfg.settings {
+    let (file, overrides, until, landing) = match &cfg.settings {
         Some(policy) if burrow_settings::path_exists(&policy.overlay)? => {
             let (overrides, until) = policy.readings()?;
             (
                 policy.overlay.clone(),
                 Some(json!(overrides)),
                 Some(json!(until)),
+                Some(json!(policy.landing_set()?)),
             )
         }
-        Some(policy) => (policy.overlay.clone(), None, None),
-        None => (cfg.jobs.join(".settings-unconfigured"), None, None),
+        Some(policy) => (policy.overlay.clone(), None, None, None),
+        None => (cfg.jobs.join(".settings-unconfigured"), None, None, None),
     };
+    readings.push(Reading::live("settings.landing", file.clone(), landing));
     readings.push(Reading::live(
         "settings.repositoryOverrides",
         file.clone(),
         overrides,
     ));
     readings.push(Reading::live("settings.pipelineUntil", file, until));
+    readings.push(match &cfg.settings {
+        Some(policy) => Reading::live(
+            "proj.apiCredit",
+            policy.credit_file(),
+            policy.credit()?.map(|credit| json!(credit)),
+        ),
+        None => Reading::live(
+            "proj.apiCredit",
+            cfg.jobs.join(".settings-unconfigured"),
+            None,
+        ),
+    });
     // Each role setting, from one version of them: the declared defaults
     // with what's set over them, or the default where nothing is.
     let view = cfg.role_view()?;
