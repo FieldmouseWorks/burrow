@@ -23,6 +23,22 @@ use watch::Run;
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
+/// The answer a turn's runs already gave, if the last of them answered
+/// without an error: what a retry the credit won't admit leaves it.
+fn answered(stream: &Path) -> Option<serde_json::Value> {
+    engine::last_result(stream, 0).filter(|l| !is_error(l))
+}
+
+/// A turn the credit refused ends there, the refusal its result and outcome:
+/// no hold on any other turn, and no run again (engine/api.rs).
+fn api_refused(job: &Job, n: &str, refused: &engine::api::Refused, outcome: &dyn Fn(&str)) -> Fail {
+    let text = refused.to_string();
+    eprintln!("proj: {text}");
+    let _ = crate::state_reads::write(job.turn_file(n, TurnFile::Result), format!("{text}\n"));
+    outcome(&text);
+    Fail::quiet(1)
+}
+
 /// What a run refused for usage is told in the next, once it's back, with
 /// what it was refused saying and the turn's prompt.
 pub(crate) const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
@@ -461,6 +477,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         ) {
             Ok(c) => c,
             Err(e) => {
+                drop(bridge);
+                if let Some(refused) = engine::api::Refused::of(&e) {
+                    // A retry the credit won't admit (to say what comes
+                    // next, say) leaves the turn the answer it has.
+                    if let Some(answered) = answered(&stream) {
+                        eprintln!("proj: {refused}: the turn ends with its last answer");
+                        break (Some(answered), 0);
+                    }
+                    return Err(api_refused(&job, &n, refused, &outcome));
+                }
                 eprintln!("proj: couldn't start {}: {e}", choice.engine.name());
                 break (None, 1);
             }
@@ -500,6 +526,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             // installation's queue: the watchdog's deadlines follow it.
             crate::waits::rewatch_all(cfg);
             return Ok(());
+        }
+        // Refused by the API (its key, its credit, its budget): the credit's
+        // own, which holds no other turn (engine/api.rs).
+        if choice.engine == Engine::ClaudeApi
+            && let Some(refused) = last
+                .as_ref()
+                .and_then(|l| engine::api::refusal_file(l, &stream, from))
+        {
+            return Err(api_refused(&job, &n, &refused, &outcome));
         }
         // Refused because the plan's usage is spent: so is every other
         // turn's, until the limit resets (usage.rs). This one gives up its

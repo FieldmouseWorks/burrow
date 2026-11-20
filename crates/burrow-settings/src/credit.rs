@@ -310,9 +310,21 @@ impl Meter {
 
     /// Whether the engine may start a turn now.
     pub fn room(&self) -> bool {
-        self.pending.is_none()
-            && self.spent + self.reserve < self.cycle.budget
-            && self.today < self.allowance
+        self.headroom() > 0
+    }
+
+    /// The most a run started now may spend, in micro-dollars: what's left
+    /// above the reserve, and of today's allowance, whichever is less; none
+    /// while a run's spend is pending. Admission gives a run this as its
+    /// budget, and the ledger holds it against the credit until the run's
+    /// cost is recorded.
+    pub fn headroom(&self) -> i64 {
+        if self.pending.is_some() {
+            return 0;
+        }
+        (self.cycle.budget - self.spent - self.reserve)
+            .min(self.allowance - self.today)
+            .max(0)
     }
 
     /// Why it has none, when it hasn't.

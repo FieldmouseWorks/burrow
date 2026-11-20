@@ -81,7 +81,12 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             put(&crate::settings::command(cfg, &args[1..]).map_err(|e| Fail::new(1, e))?);
             Ok(())
         }
-        Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
+        Some("_claude") => {
+            crate::engine::exec_claude(cfg, crate::engine::Engine::Claude, &args[1..])
+        }
+        Some("_claude-api") => {
+            crate::engine::exec_claude(cfg, crate::engine::Engine::ClaudeApi, &args[1..])
+        }
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         Some("_host-view") if view == View::Owner => crate::host_jobs::view(cfg, &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {

@@ -91,9 +91,10 @@ pub fn stream_tail(stream: &Path, view: View) -> String {
     tail.into_iter().collect()
 }
 
-/// Session storage is per engine; `session` remains the active session for job state.
+/// Session storage is per conversation ([`Engine::conversation`]); `session` remains the active session for job state.
 /// A Claude session made before engine routing has no engine marker.
 pub fn resume(job: &Job, engine: Engine) -> Option<String> {
+    let engine = engine.conversation();
     read(&job.file(JobFile::SessionOf(engine)))
         .or_else(|| {
             (engine == Engine::Claude && !job.file(JobFile::SessionEngine).exists())

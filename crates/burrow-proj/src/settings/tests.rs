@@ -136,6 +136,7 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(
         options["proj.models"]["value"],
         json!({"* claude": {"model": null, "effort": null},
+               "* claude-api": {"model": null, "effort": null},
                "triage claude": {"model": "small", "effort": "low"},
                "fix claude": {"model": null, "effort": "high"}})
     );

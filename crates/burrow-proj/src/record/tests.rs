@@ -403,3 +403,34 @@ fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
     fs::create_dir_all(&k.dir).unwrap();
     assert_eq!(derive(&k).json("k")["turn"], serde_json::Value::Null);
 }
+
+/// A queued turn on the plan waits out the plan's usage hold; one on the
+/// API credit doesn't, as nothing but the owner's pause holds it.
+#[test]
+fn a_queued_api_turn_waits_on_no_plan_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = rig(tmp.path(), true);
+    let now = crate::now();
+    crate::usage::record(
+        &cfg,
+        "other",
+        Some(now + 3600),
+        "You've hit your weekly limit",
+        now,
+    )
+    .unwrap();
+    let plan = job(&cfg, "plan");
+    let api = job(&cfg, "api");
+    let choice = crate::engine::Choice {
+        engine: crate::engine::Engine::ClaudeApi,
+        ..crate::engine::Choice::default()
+    };
+    crate::retry::Identity::capture_choice(&api, "1", &choice).unwrap();
+    let usage_wait = |job: &Job| {
+        let r = derive(job);
+        assert_eq!(r.stage.to_string(), "queued");
+        r.wait.iter().any(|w| matches!(w, Wait::Usage { .. }))
+    };
+    assert!(usage_wait(&plan));
+    assert!(!usage_wait(&api));
+}

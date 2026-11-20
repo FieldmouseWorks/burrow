@@ -49,3 +49,53 @@ fn quiet_is_all_of_idle_wherever_in_a_second_the_stream_last_spoke() {
 fn no_idle_never_goes_quiet() {
     assert!(!gone_quiet(1000 * SECOND, 0, 0));
 }
+
+/// A turn the credit refused ends with the refusal as its result and
+/// outcome, in words that name the credit, not the plan's usage.
+#[test]
+fn an_api_refusal_ends_the_turn_in_its_own_words() {
+    use super::{Config, Job, api_refused, engine};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+    cfg.jobs = dir.path().join("jobs");
+    let job = Job::new(&cfg, "job");
+    fs::create_dir_all(&job.dir).unwrap();
+    let told = std::cell::RefCell::new(String::new());
+    let refused = engine::api::Refused::new("its credit has no room: today's allowance spent");
+    api_refused(&job, "1", &refused, &|t| told.borrow_mut().push_str(t));
+    let said = "claude-api refused: its credit has no room: today's allowance spent";
+    assert_eq!(*told.borrow(), said);
+    assert_eq!(
+        fs::read_to_string(job.turn("1", "result")).unwrap(),
+        format!("{said}\n")
+    );
+    assert!(!cfg.jobs.join(crate::usage::FILE).exists());
+}
+
+/// A retry the credit won't admit keeps the answer an earlier run of the
+/// turn gave; with none, or only an error, the refusal is the turn's end.
+#[test]
+fn a_refused_retry_keeps_the_answer_the_turn_has() {
+    use super::answered;
+    let dir = tempfile::tempdir().unwrap();
+    let stream = dir.path().join("1.jsonl");
+    fs::write(&stream, "").unwrap();
+    assert_eq!(answered(&stream), None);
+    let error = r#"{"type":"result","is_error":true,"result":"broke"}"#;
+    fs::write(
+        &stream,
+        format!("{{\"type\":\"burrow.run\",\"at\":1}}\n{error}\n"),
+    )
+    .unwrap();
+    assert_eq!(answered(&stream), None);
+    let good = r#"{"type":"result","is_error":false,"result":"done, no next step said"}"#;
+    fs::write(
+        &stream,
+        format!("{{\"type\":\"burrow.run\",\"at\":1}}\n{good}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        answered(&stream).unwrap()["result"],
+        "done, no next step said"
+    );
+}

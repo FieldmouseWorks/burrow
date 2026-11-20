@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
+pub(crate) mod api;
 mod capabilities;
 pub(crate) mod claude;
 mod claude_limit;
@@ -30,6 +31,10 @@ pub use stream::{
 pub enum Engine {
     #[default]
     Claude,
+    /// The same Claude Code, on the API credit's key instead of the
+    /// subscription's login ([`api`]).
+    #[serde(rename = "claude-api")]
+    ClaudeApi,
 }
 
 /// What a job's record says when it names Codex, which proj no longer runs:
@@ -47,13 +52,23 @@ impl Engine {
     pub fn name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::ClaudeApi => burrow_settings::credit::ENGINE,
         }
     }
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "claude" => Ok(Self::Claude),
+            burrow_settings::credit::ENGINE => Ok(Self::ClaudeApi),
             "codex" => Err(RETIRED.trim_start_matches("- ").to_owned()),
             _ => Err(format!("unknown engine {s}")),
+        }
+    }
+    /// The conversation an engine's turns carry on: both Claude engines run
+    /// the same CLI on the same sessions, so a job moving between the
+    /// subscription and the credit resumes where it was.
+    pub fn conversation(self) -> Self {
+        match self {
+            Self::Claude | Self::ClaudeApi => Self::Claude,
         }
     }
 }
@@ -153,6 +168,9 @@ pub fn refused(
 ) -> Option<(Option<i64>, String)> {
     match engine {
         Engine::Claude => claude::refused(last, stream, now),
+        // The credit's refusals are its own (api::refusal): none holds the
+        // subscription's turns.
+        Engine::ClaudeApi => None,
     }
 }
 
@@ -164,15 +182,13 @@ pub fn refused_file(
     from: u64,
     now: i64,
 ) -> Option<(Option<i64>, String)> {
+    let records = stream::lines(path, from)
+        .ok()?
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok());
     match engine {
-        Engine::Claude => claude::refused_records(
-            last,
-            stream::lines(path, from)
-                .ok()?
-                .map_while(Result::ok)
-                .filter_map(|line| serde_json::from_str::<Value>(&line).ok()),
-            now,
-        ),
+        Engine::Claude => claude::refused_records(last, records, now),
+        Engine::ClaudeApi => None,
     }
 }
 
@@ -180,6 +196,46 @@ pub fn refused_file(
 mod tests {
     use super::*;
     use crate::config::tests::set;
+
+    /// `claude-api` takes the settings door's routes, models and efforts as
+    /// `claude` does, each engine its own; its name survives a record.
+    #[test]
+    fn the_api_engine_takes_its_own_tuning_through_the_door() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        set(
+            &mut cfg,
+            tmp.path(),
+            &[
+                "offer claude models sub-model",
+                "offer claude-api models api-model",
+                "model * claude sub-model low",
+                "model * claude-api api-model high",
+                "role work claude-api",
+            ],
+        );
+        let chosen = resolve(&cfg, "work", None, None).unwrap();
+        assert_eq!(
+            chosen,
+            Choice {
+                engine: Engine::ClaudeApi,
+                model: Some("api-model".into()),
+                effort: Some("high".into()),
+            }
+        );
+        assert_eq!(
+            resolve(&cfg, "other", None, None).unwrap().model.as_deref(),
+            Some("sub-model")
+        );
+        let pinned = resolve(&cfg, "work", None, Some("claude")).unwrap();
+        assert_eq!(pinned.engine, Engine::Claude);
+        assert_eq!(pinned.model.as_deref(), Some("sub-model"));
+        let saved = serde_json::to_string(&chosen).unwrap();
+        assert!(saved.contains(r#""engine":"claude-api""#), "{saved}");
+        assert_eq!(serde_json::from_str::<Choice>(&saved).unwrap(), chosen);
+        assert_eq!(Engine::parse("claude-api"), Ok(Engine::ClaudeApi));
+        assert_eq!(Engine::ClaudeApi.conversation(), Engine::Claude);
+    }
 
     #[test]
     fn the_planner_runs_on_its_roles_settings_like_any_other() {

@@ -331,7 +331,8 @@ impl Pass<'_> {
     /// usage books the repo's pass for when it resets.
     fn no_room(&mut self, repo: &str, engine: Engine) {
         if engine == Engine::Claude
-            && let Some(spent) = usage::login::out_for(self.cfg, self.inbox.vm)
+            && let Some(spent) =
+                usage::login::out_for(self.cfg, usage::login::Run::plan(self.inbox.vm))
         {
             self.book(repo, spent.until);
         }

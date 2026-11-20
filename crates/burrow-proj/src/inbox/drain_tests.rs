@@ -390,7 +390,7 @@ fn running_handed_references_are_not_drained() {
 
 fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
     let (dir, count) = match engine {
-        Engine::Claude => (".slots", b.cfg.max_jobs),
+        Engine::Claude | Engine::ClaudeApi => (".slots", b.cfg.max_jobs),
     };
     let dir = b.cfg.jobs.join(dir);
     fs::create_dir_all(&dir).unwrap();

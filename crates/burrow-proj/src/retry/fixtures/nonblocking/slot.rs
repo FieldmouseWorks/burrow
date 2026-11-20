@@ -304,7 +304,7 @@ pub fn take_engine(
     engine: Engine,
 ) -> io::Result<File> {
     match engine {
-        Engine::Claude => take(cfg, id, n, given, may_hand_over),
+        Engine::Claude | Engine::ClaudeApi => take(cfg, id, n, given, may_hand_over),
     }
 }
 
@@ -590,7 +590,7 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
             .count()
     };
     match engine {
-        Engine::Claude => {
+        Engine::Claude | Engine::ClaudeApi => {
             usage::metered(cfg);
             usage::out(cfg).is_none()
                 && in_line(cfg).is_empty()

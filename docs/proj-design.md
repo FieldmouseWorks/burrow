@@ -331,6 +331,21 @@ it went. The two keep their jobs:
   for it and their tests. The engines then become Conary job plugins
   ([#668](https://github.com/FieldmouseWorks/burrow/issues/668)), and what
   is left of proj is the records, the pass, the meters and the inbox.
+- The `claude-api` engine goes with them, and its plugin keeps what
+  [`engine/api.rs`](../crates/burrow-proj/src/engine/api.rs) holds today.
+  Credentials: its key, from `burrow.proj.claudeApi.keyFile`, reaches only
+  its own runs, on a descriptor, with no login beside it, and every
+  `claude` run starts with no API credential. Continuation: both Claude
+  engines are one conversation (`Engine::conversation`), so a job keeps its
+  session across the subscription and the credit; a judge's independent
+  session stays its own job's. Accounting: each run is admitted through the
+  credit's meter under one machine lock, given the room left as its
+  `--max-budget-usd`, and its marker records that budget, which the meter
+  holds until the run's cost is in; its turns stay recorded as
+  `claude-api` (`N.engine`), so their cost is the credit's alone. Its
+  refusals (no key, no room, a key or credit the API refused, a spent
+  budget) end the turn in words of their own and hold no plan's turn,
+  and no plan's hold but the owner's pause holds its turns.
 
 proj does not become part of Conary, and issues do not become Conary
 intents here. Either may be right later; neither is needed to stop the

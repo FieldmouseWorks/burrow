@@ -33,6 +33,9 @@ pub struct Invocation {
     pub marked: bool,
     /// The marker's time, when it says one.
     pub at: Option<i64>,
+    /// The most the run may spend, in micro-dollars, when its marker says
+    /// (proj gives a `claude-api` run `--max-budget-usd` and writes it here).
+    pub budget: Option<i64>,
     pub cost: f64,
     pub missing: BTreeSet<String>,
     pub recovered: BTreeSet<String>,
@@ -128,6 +131,7 @@ pub fn decode(
                 report.invocations.push(Invocation {
                     marked: true,
                     at: v["at"].as_i64(),
+                    budget: v["budget"].as_i64(),
                     ..Invocation::default()
                 });
             }

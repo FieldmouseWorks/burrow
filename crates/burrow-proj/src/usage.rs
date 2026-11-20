@@ -682,7 +682,10 @@ fn end(cfg: &Config, started: Option<i64>, sandboxed: bool) {
         return;
     }
     // A sandbox's answer says nothing of this machine's login.
-    if ends && s.as_ref().is_some_and(|s| !s.holds_run(sandboxed)) {
+    if ends
+        && s.as_ref()
+            .is_some_and(|s| !s.holds_run(login::Run::plan(sandboxed)))
+    {
         return;
     }
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {

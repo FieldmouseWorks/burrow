@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 mod store;
 pub use store::{Migration, View, legacy_file};
 
-/// The engines a role can run on.
-pub const ENGINES: &[&str] = &["claude"];
+/// The engines a role can run on: Claude Code on the subscription's login,
+/// and the same CLI on the API credit ([`crate::credit::ENGINE`]).
+pub const ENGINES: &[&str] = &["claude", crate::credit::ENGINE];
 
 /// Where a role's turns go: its engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

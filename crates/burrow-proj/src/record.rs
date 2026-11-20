@@ -666,7 +666,15 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
         } else {
             crate::github_quota::reset(job, &n)
         },
-        spent: usage::kept(job.cfg),
+        // The plan's hold, unless it lets this job's turn by: an API run is
+        // held by the owner's pause alone (usage/login.rs).
+        spent: usage::kept(job.cfg).filter(|s| {
+            let run = usage::login::run_of(job.cfg, job.id);
+            s.holds_run(usage::login::Run {
+                sandboxed: false,
+                ..run
+            })
+        }),
         turn: n,
         state: state.to_owned(),
     })

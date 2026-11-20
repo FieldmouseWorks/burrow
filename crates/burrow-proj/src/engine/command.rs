@@ -1,7 +1,7 @@
 //! Engine argv and environment, inside the turn's timeout and login shell.
 
 use super::machine;
-use super::{Choice, stream::resume};
+use super::{Choice, Engine, api, stream::resume};
 use crate::record::{JobFile, TurnFile};
 use crate::{config::Config, job::Job, scratch};
 
@@ -58,6 +58,11 @@ pub fn spawn(
     choice: &Choice,
 ) -> std::io::Result<Child> {
     let mut args = args(choice, resume(job, choice.engine));
+    if choice.engine == Engine::ClaudeApi && agent.is_some() {
+        return Err(
+            api::Refused::new("a sandbox is given no API key, so it doesn't run there").io(),
+        );
+    }
     let out = crate::state_reads::append(&job.turn_file(n, TurnFile::Jsonl))?;
     let mut c = Command::new(&cfg.tools.timeout);
     // No claude.ai connectors (mail, calendar, drive, design tools): one of
@@ -88,6 +93,17 @@ pub fn spawn(
             .stdin(crate::state_reads::open(prompt)?);
         return job.start_run(n, crate::now(), || c.spawn());
     }
+    // Every run on the credit, its first and each retry, only once it's
+    // admitted, with what it has room for as its budget (engine/api.rs).
+    let admission = match choice.engine {
+        Engine::Claude => None,
+        Engine::ClaudeApi => {
+            api::key(cfg).map_err(api::Refused::io)?;
+            let admitted = api::admit(cfg, crate::now()).map_err(api::Refused::io)?;
+            args.extend(admitted.flag());
+            Some(admitted)
+        }
+    };
     let id = job.id;
     let scratch = scratch::dir(cfg, id);
     // Where its own worktrees go, and how long they last.
@@ -124,7 +140,7 @@ pub fn spawn(
         ])
         .arg("proj-engine")
         .arg(&cfg.me)
-        .arg("_claude")
+        .arg(format!("_{}", choice.engine.name()))
         .args(&args)
         .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
         .env(
@@ -148,11 +164,17 @@ pub fn spawn(
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env);
-    job.start_run(n, crate::now(), || c.spawn())
+    // The marker, with the budget, is written before the admission's lock
+    // goes: the next admission's meter counts this run at it.
+    let budget = admission.as_ref().map(|a| a.budget);
+    let child = job.start_budgeted_run(n, crate::now(), budget, || c.spawn());
+    drop(admission);
+    child
 }
 
-/// Resolve the same job contract in Claude's final login/App environment.
-pub fn exec_claude(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
+/// Resolve the same job contract in Claude's final login/App environment,
+/// with `engine`'s credentials and no other's (engine/api.rs).
+pub fn exec_claude(cfg: &Config, engine: Engine, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let id = std::env::var("PROJ_JOB").map_err(|e| crate::Fail::new(1, e.to_string()))?;
     let capabilities = super::capabilities::resolve(
@@ -167,11 +189,13 @@ pub fn exec_claude(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     if !capabilities.inherits_environment() {
         command.env_clear();
     }
-    let error = command
+    command
         .args(capabilities.claude_flags())
         .args(args)
-        .envs(capabilities.environment())
-        .exec();
+        .envs(capabilities.environment());
+    let _key = api::credentials(&mut command, engine, cfg)
+        .map_err(|e| crate::Fail::new(1, e.to_string()))?;
+    let error = command.exec();
     Err(crate::Fail::new(
         1,
         format!("couldn't start claude: {error}"),
