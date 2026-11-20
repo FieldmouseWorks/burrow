@@ -788,7 +788,10 @@ impl Sweep<'_> {
             base,
         };
         verdict.sealed(&self.cfg.state, mac).unwrap_or_else(|why| {
-            complain(&format!("{}: {}: checking #{n}'s seal: {why}", self.cfg.name, self.repo));
+            complain(&format!(
+                "{}: {}: checking #{n}'s seal: {why}",
+                self.cfg.name, self.repo
+            ));
             false
         })
     }

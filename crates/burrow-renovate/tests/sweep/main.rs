@@ -542,9 +542,14 @@ fn marker(n: u64, v: &str, base: &str, mac: &str) -> String {
 /// Verdict `v`'s seal on PR `n`'s head for `base`, under KEY: Conary's
 /// seal, which src/sweep/seal.rs pins to seal.py's.
 fn mac(n: u64, v: &str, base: &str) -> String {
-    conary_github::flow::SealKey::from_hex(KEY)
-        .unwrap()
-        .seal(REPO, n, "major-verdict", v, &sha(n), base)
+    conary_github::flow::SealKey::from_hex(KEY).unwrap().seal(
+        REPO,
+        n,
+        "major-verdict",
+        v,
+        &sha(n),
+        base,
+    )
 }
 
 fn marked(by: &str, marker: &str) -> Value {

@@ -298,11 +298,19 @@ fn only_our_own_sealed_verdict_on_this_head_and_base_counts() {
     // needn't spell it as GitHub does, and a verdict sealed as one counts
     // as the other.
     let m = Machine::new();
-    m.project("r", "https://github.com/Sam/R.git");
+    fs::write(
+        m.path("projects/r/.origin"),
+        "https://github.com/Sam/R.git\n",
+    )
+    .unwrap();
     m.prs(&[pr(3)]);
     m.comments(3, &[m.verdict(3, "held", "main", "me")]);
     let p = m.pass();
-    assert!(p.jobs.is_empty() && p.majors().1.contains("held them"), "{:#?}", p.notices);
+    assert!(
+        p.jobs.is_empty() && p.majors().1.contains("held them"),
+        "{:#?}",
+        p.notices
+    );
     // The newest sealed one is the one, whatever came before it, a marker
     // for another head among them.
     let p = pass(&|m| {
@@ -401,10 +409,19 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
     fs::remove_dir(m.state("verdict.key")).unwrap();
     let p = m.pass();
     let made = fs::read_to_string(m.state("verdict.key")).unwrap();
-    let ok = conary_github::flow::SealKey::from_hex(&made)
-        .unwrap()
-        .seal(REPO, 1, "major-verdict", "ok", &sha(1), "main");
-    assert!(p.task().contains(&marker(1, "ok", "main", &ok)), "{}", p.task());
+    let ok = conary_github::flow::SealKey::from_hex(&made).unwrap().seal(
+        REPO,
+        1,
+        "major-verdict",
+        "ok",
+        &sha(1),
+        "main",
+    );
+    assert!(
+        p.task().contains(&marker(1, "ok", "main", &ok)),
+        "{}",
+        p.task()
+    );
 }
 
 #[test]
