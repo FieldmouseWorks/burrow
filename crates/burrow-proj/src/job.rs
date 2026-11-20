@@ -122,14 +122,26 @@ impl<'a> Job<'a> {
     /// credit it names the credit for good, though its route moves it back
     /// to the subscription in the same conversation (engine/route.rs) and a
     /// retained retry or a handover records it again, since that is how the
-    /// credit's ledger finds the turn's job (burrow-probe's credit.rs).
+    /// credit's ledger finds the turn's job (burrow-probe's credit.rs). The
+    /// first move onto the credit keeps the engine the turn was on in
+    /// N.engine-before first, for good: the runs it made before markers
+    /// named their engine ran there, and the ledger charges them by it.
     pub fn record_engine(&self, n: &str, engine: crate::engine::Engine) -> io::Result<()> {
         use crate::engine::Engine;
         let path = self.turn_file(n, TurnFile::Engine);
+        let was = read(&path);
         if engine.conversation() == Engine::ClaudeApi.conversation()
-            && read(&path).as_deref() == Some(Engine::ClaudeApi.name())
+            && was.as_deref() == Some(Engine::ClaudeApi.name())
         {
             return Ok(());
+        }
+        if engine == Engine::ClaudeApi
+            && let Some(was) = was.filter(|was| was != engine.name())
+        {
+            let before = self.turn_file(n, TurnFile::EngineBefore);
+            if read(&before).is_none() {
+                crate::state_reads::write(before, &was)?;
+            }
         }
         crate::state_reads::write(path, engine.name())
     }
@@ -401,6 +413,38 @@ mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
+    }
+
+    /// A turn's first move onto the credit keeps the engine it was on, which
+    /// the credit's ledger charges its unnamed older runs by; nothing after
+    /// (a move back, a retained retry or a handover recording it again)
+    /// changes it, and a turn that starts on the credit has none.
+    #[test]
+    fn a_turns_first_move_onto_the_credit_keeps_the_engine_it_was_on() {
+        use crate::engine::Engine;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "moved");
+        fs::create_dir(&job.dir).unwrap();
+        let before = |n: &str| fs::read_to_string(job.turn(n, "engine-before")).ok();
+        let engine = |n: &str| fs::read_to_string(job.turn(n, "engine")).unwrap();
+        job.record_engine("1", Engine::Claude).unwrap();
+        job.record_engine("1", Engine::Claude).unwrap();
+        assert_eq!(before("1"), None);
+        job.record_engine("1", Engine::ClaudeApi).unwrap();
+        assert_eq!(engine("1"), "claude-api");
+        assert_eq!(before("1").as_deref(), Some("claude"));
+        for again in [Engine::Claude, Engine::ClaudeApi, Engine::Claude] {
+            job.record_engine("1", again).unwrap();
+            assert_eq!(engine("1"), "claude-api");
+            assert_eq!(before("1").as_deref(), Some("claude"));
+        }
+        job.record_engine("2", Engine::ClaudeApi).unwrap();
+        job.record_engine("2", Engine::Claude).unwrap();
+        job.record_engine("2", Engine::ClaudeApi).unwrap();
+        assert_eq!(before("2"), None);
     }
 
     #[test]

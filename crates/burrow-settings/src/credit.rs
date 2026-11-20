@@ -41,6 +41,10 @@ use crate::{Config, live};
 
 /// The engine whose turns spend the credit.
 pub const ENGINE: &str = "claude-api";
+/// A turn's N.KIND that keeps the engine it ran on before its route first
+/// moved it onto [`ENGINE`]: its runs from before markers named their engine
+/// ran there, though its N.engine names [`ENGINE`] from then on.
+pub const ENGINE_BEFORE: &str = "engine-before";
 /// Where the setting is kept, under `burrow.stateDir`: beside the
 /// admission overlay, under its lock and log, but in a file of its own, so
 /// a generation from before it still reads the admission overlay.

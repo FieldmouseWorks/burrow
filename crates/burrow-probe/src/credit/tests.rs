@@ -521,3 +521,64 @@ fn a_moved_turn_is_charged_for_its_credit_runs_alone() {
     );
     assert_eq!(jobs.spends(SINCE).unwrap(), [(first, 1_500_000)]);
 }
+
+/// A turn from before markers named their engine (a usage refusal held on
+/// the subscription across the deploy, say) that its route then moves onto
+/// the credit: proj keeps the engine it ran on in N.engine-before, so its
+/// older runs stay the subscription's, neither charged nor pending, and
+/// only its credit run is charged. Without that record they fall back to
+/// the turn's engine, which names the credit.
+#[test]
+fn a_turn_moved_onto_the_credit_keeps_its_older_runs_on_the_subscription() {
+    let (first, second, third) = (SINCE + HOUR, SINCE + 2 * HOUR, SINCE + 3 * HOUR);
+    let refused = json!({"type":"result","session_id":"s","is_error":true,"result":"Claude reached its weekly allowance"});
+    let jobs = Jobs::new();
+    jobs.turn(
+        "held",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[
+            run(first),
+            init("s"),
+            result("s", 1.0),
+            run(second),
+            init("s"),
+            refused,
+            on(third, ENGINE, Some(5 * M)),
+            init("s"),
+            result("s", 3.0),
+        ]),
+    );
+    fs::write(
+        jobs.root.join(format!("held/1.{}", credit::ENGINE_BEFORE)),
+        "claude\n",
+    )
+    .unwrap();
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(third, 2 * M)]);
+    // Without it, the older runs are the credit's: the subscription's
+    // dollar is charged to it.
+    fs::remove_file(jobs.root.join(format!("held/1.{}", credit::ENGINE_BEFORE))).unwrap();
+    assert_eq!(
+        jobs.spends(SINCE).unwrap(),
+        [(first, M), (second, 0), (third, 2 * M)]
+    );
+    // A turn that was on the credit before it moved needs no record: its
+    // older runs are its turn's, the credit's.
+    let jobs = Jobs::new();
+    jobs.turn(
+        "api",
+        1,
+        Some(ENGINE),
+        Some(first),
+        &stream(&[
+            run(first),
+            init("t"),
+            result("t", 1.0),
+            on(second, ENGINE, Some(5 * M)),
+            init("t"),
+            result("t", 3.0),
+        ]),
+    );
+    assert_eq!(jobs.spends(SINCE).unwrap(), [(first, M), (second, 2 * M)]);
+}
