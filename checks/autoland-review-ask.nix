@@ -2,7 +2,8 @@
 # conaryd's flow run it with REPO PR HEAD: it starts the door as a unit of
 # the caller's own user manager (which passes it none of the caller's
 # environment), waited for, one unit a head, with only the PR it's for, and
-# its exit and what it prints are the door's. Here systemd-run is a
+# its exit and what it prints are the door's, and the unit ends inside
+# Conary's flow's 180s deadline for a door. Here systemd-run is a
 # stand-in that says what it was asked and exits as the door would.
 { self, pkgs, nixpkgs, ... }:
 let
@@ -35,7 +36,7 @@ in pkgs.runCommand "autoland-review-ask-check" { } ''
   unit=autoland-ask-$(printf '%s' 'sam/r#5@${head}' | sha256sum | cut -c1-16)
   door=$(sed -n 's|.* -- \(/nix/store/[^ ]*-burrow-review-ask\) "\$@"$|\1|p' ${launch})
   [ -x "$door" ] || fail "the launcher doesn't start the door: $(cat ${launch})"
-  printf '%s\n' --user --wait --pipe --quiet --collect "--unit=$unit" -- "$door" sam/r 5 ${head} > want
+  printf '%s\n' --user --wait --pipe --quiet --collect "--unit=$unit" --property=RuntimeMaxSec=150 --property=TimeoutStopSec=10 -- "$door" sam/r 5 ${head} > want
   cmp want args || fail "the launcher asks systemd-run for something else: $(cat args)"
   [ "$(cat runtime)" = "/run/user/$(id -u)" ] || fail "the launcher doesn't find the caller's user manager: $(cat runtime)"
 

@@ -30,12 +30,16 @@ let
   # and conaryd's while the flow has no controller of its own), waited for,
   # so nothing of the caller's environment (its App token, its credentials)
   # goes with it. Its exit and what it prints are the door's. One unit a
-  # head, so two asks of the same head never run at once.
+  # head, so two asks of the same head never run at once. The unit is ended
+  # within 160s (150s, then 10s to stop), inside Conary's flow's 180s
+  # deadline for a door (flow/ask.rs): the flow's kill of its process group
+  # doesn't reach a unit of the user manager's, so without this a door the
+  # flow gave up on could still post.
   launch = pkgs.writeShellScript "burrow-review-ask-as-owner" ''
     unit=autoland-ask-$(printf '%s#%s@%s' "$1" "$2" "$3" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
     export XDG_RUNTIME_DIR=''${XDG_RUNTIME_DIR:-/run/user/$(${pkgs.coreutils}/bin/id -u)}
     exec ${config.systemd.package}/bin/systemd-run --user --wait --pipe --quiet --collect \
-      --unit="$unit" -- ${command} "$@"
+      --unit="$unit" --property=RuntimeMaxSec=150 --property=TimeoutStopSec=10 -- ${command} "$@"
   '';
 in
 {
