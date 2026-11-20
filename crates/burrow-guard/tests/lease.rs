@@ -182,3 +182,39 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
         git(&stale, &["rev-parse", "HEAD"])
     );
 }
+
+/// A delete beside `--tags` isn't a push that only deletes: git pushes
+/// every tag with it, forced over the remote's by `-f`.
+#[test]
+fn a_delete_beside_tags_is_held_to_a_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join("local");
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    git(root.path(), &["clone", "-q", "remote.git", "local"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&local, &["tag", "v1"]);
+    git(&local, &["push", "-q", "origin", "main", "main:old", "v1"]);
+    // The tag moves here, and the remote still holds the one it had.
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "next"]);
+    git(&local, &["tag", "-f", "v1"]);
+
+    for cmd in [
+        "git push -f origin :old --tags",
+        "git push --force origin --tags :old",
+    ] {
+        assert!(refusal(cmd, &local).is_some(), "{cmd}");
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
+        let out = sh(&local, &dry);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success()
+                && said.contains("+\trefs/tags/v1")
+                && said.contains("-\t:refs/heads/old"),
+            "{cmd} would not have forced the tag: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

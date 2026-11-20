@@ -225,6 +225,12 @@ struct Lease {
     leases: Vec<Option<String>>,
     /// `--force-if-includes` (undone by a later `--no-force-if-includes`).
     if_includes: bool,
+    /// What it pushes beyond its refspecs, each undone by its `--no-`:
+    /// `--tags` (every tag, beside its refspecs), `--all` or `--branches`
+    /// (one bit), and `--mirror`.
+    tags: bool,
+    all: bool,
+    mirror: bool,
 }
 
 impl Push {

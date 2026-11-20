@@ -122,6 +122,10 @@ fn a_push_that_only_deletes_needs_no_lease() {
             "git push --force-with-lease --delete origin pr",
             "git push --force-with-lease=pr --delete origin pr",
             "git push --mirror --delete origin pr",
+            // What pushes more than its refspecs, undone.
+            "git push -f origin :old --tags --no-tags",
+            "git push -f --all --no-branches origin :old",
+            "git push --mirror --no-mirror origin :old",
         ]),
         None,
     );
@@ -134,6 +138,13 @@ fn a_push_that_only_deletes_needs_no_lease() {
             "git push origin +:old +new",
             "git push origin :old +new",
             "git push --force-with-lease origin :old new",
+            // Every tag, or every branch, pushed beside the delete.
+            "git push -f origin :old --tags",
+            "git push --force origin --ta :old",
+            "git push --force-with-lease origin :old --tags",
+            "git push -f --all origin :old",
+            "git push -f --branches origin :old",
+            "git push --mirror origin :old",
             // `+:` is every branch both sides have, forced.
             "git push origin +:",
             "git push -f origin",

@@ -13,7 +13,9 @@
 //! (`remote.NAME.push` with a `+`, `remote.NAME.mirror`), from the
 //! repository's configuration or the command's own (`-c`). A delete
 //! rebuilds nothing, so a push that only deletes is let through, forced or
-//! not. And a push the guard can't read in full (an expansion in any of
+//! not; one that also pushes tags or branches its refspecs don't name
+//! (`--tags`, `--all`, `--mirror`) updates them, so it doesn't only
+//! delete. And a push the guard can't read in full (an expansion in any of
 //! its words or git's, which may split into any words, a glob, words from its input, configuration
 //! from the environment, or git that can't answer) may force anything, so
 //! it's refused too, unless what it can read already is.
@@ -76,8 +78,11 @@ impl Push {
         } else {
             refspecs.iter().filter(|r| !deletes(r)).collect()
         };
-        // With no refspec it pushes what git's configuration says.
-        let updating = !lease.delete && (refspecs.is_empty() || !updates.is_empty());
+        // With no refspec it pushes what git's configuration says, and
+        // `--tags`, `--all` and `--mirror` push more than its refspecs,
+        // beside a delete too.
+        let implied = lease.tags || lease.all || lease.mirror;
+        let updating = !lease.delete && (refspecs.is_empty() || !updates.is_empty() || implied);
         let unleased = lease.leases.iter().any(|expect| match expect {
             None => !lease.if_includes,
             Some(oid) => !oid.is_empty() && !is_object_id(oid),
@@ -154,7 +159,10 @@ impl Lease {
         match (resolve(name), negated) {
             // --mirror and --no-mirror set and clear the force bit with
             // their own.
-            (Some("force" | "mirror"), _) => self.force = !negated,
+            (Some("force"), _) => self.force = !negated,
+            (Some("mirror"), _) => (self.force, self.mirror) = (!negated, !negated),
+            (Some("all" | "branches"), _) => self.all = !negated,
+            (Some("tags"), _) => self.tags = !negated,
             (Some("delete"), _) => self.delete = !negated,
             (Some("force-with-lease"), false) => self.leases.push(
                 value
