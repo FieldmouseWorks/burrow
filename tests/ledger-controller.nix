@@ -142,8 +142,11 @@ pkgs.testers.runNixOSTest {
         on.fail(f"systemd-run --wait --pipe --quiet -p User=nobody -p SupplementaryGroups=conary-flow cat {ledger}/key")
         on.succeed(f"runuser -u conary-flow -- test -r {ledger}/key")
         on.fail(f"runuser -u conary-flow -- test -w {ledger}/key")
-        # The etags cache stays the writer's alone: the flow reads none.
+        # The etags cache stays the writer's alone: the flow reads none, and
+        # neither does burrow.user's group (other is in it).
         on.fail(f"runuser -u conary-flow -- ls {ledger}/etags")
+        on.fail(f"runuser -u other -- ls {ledger}/etags")
+        assert on.succeed(f"stat -c '%U %a' {ledger}/etags").strip() == "dev 700", "etags isn't widened"
         # The directory stats as 775 (its ACL's mask): still nobody else's to write.
         on.fail(f"runuser -u other -- touch {ledger}/x")
         on.fail(f"runuser -u nobody -- touch {ledger}/x")
@@ -197,7 +200,7 @@ pkgs.testers.runNixOSTest {
         nobody_else_reads_the_key()
 
     with subtest("on a ledger burrow.user had alone before, a switch lets the flow sign"):
-        on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock")
+        on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock && chmod 700 {ledger}/etags")
         on.fail("systemctl start flow@before.service")
         # As the first switch to it does.
         on.succeed("systemctl restart burrow-ledger-access.service")
@@ -266,6 +269,9 @@ pkgs.testers.runNixOSTest {
         keeps_nothing(new)
         assert on.succeed(f"getfacl -cps {ledger} {ledger}/*") == ""
         assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
+        # Its ACL gone, etags is no wider than it was.
+        assert on.succeed(f"stat -c '%U %a' {ledger}/etags").strip() == "dev 700"
+        on.fail(f"runuser -u other -- ls {ledger}/etags")
 
     with subtest("with the option off, nothing changes"):
         off.wait_for_unit("burrow-ledger-access.service")

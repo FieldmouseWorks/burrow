@@ -152,12 +152,9 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         (Some(want), now) if now.as_ref() != Some(want) => {
             fs::setxattr(&path, ACCESS, &want.encode(), XattrFlags::empty())?;
         }
-        // As `setfacl -b` leaves it: the mode's group bits are the owning
-        // group's again, not the mask's.
         (None, Some(now)) => {
-            let base = Base::of(st.st_mode, Some(now));
             fs::removexattr(&path, ACCESS)?;
-            let mode = (st.st_mode & 0o7000) | base.mode();
+            let mode = stripped(st.st_mode, now);
             fs::chmod(&path, Mode::from_raw_mode(mode))?;
         }
         _ => {}
@@ -170,6 +167,19 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// The mode an inode with `mode` and the ACL `acl` keeps once that ACL is
+/// gone: each class with what it had in effect, and no more. The owning
+/// group's bits are its entry's as far as the mask lets them through, so a
+/// directory Conary made 0700 under the ledger's default entries (owning
+/// group `r-x`, mask `---`) stays 0700, where `setfacl -b` would make it 0750.
+fn stripped(mode: u32, acl: &Acl) -> u32 {
+    let mut base = Base::of(mode, Some(acl));
+    if let Some(mask) = acl.perm(MASK) {
+        base.group &= mask;
+    }
+    (mode & 0o7000) | base.mode()
 }
 
 /// Which of the ledger's entries an inode is.

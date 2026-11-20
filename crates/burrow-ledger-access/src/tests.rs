@@ -189,6 +189,51 @@ fn the_controller_reads_the_key_writes_the_log_and_no_one_else_gets_either() {
 }
 
 #[test]
+fn an_acl_stripped_leaves_no_class_more_than_it_had() {
+    // etags as Conary's 0700 mkdir leaves it under the default entries.
+    let etags = Base {
+        user: 7,
+        group: 5,
+        other: 0,
+    }
+    .with(&[(FLOW, 7)], 0);
+    assert_eq!(stripped(0o40700, &etags), 0o700);
+    let key = Base {
+        user: 6,
+        group: 0,
+        other: 0,
+    }
+    .with(&[(FLOW, 4)], 4);
+    assert_eq!(stripped(0o100640, &key), 0o600);
+    let log = Base {
+        user: 6,
+        group: 4,
+        other: 4,
+    }
+    .with(&[(FLOW, 6)], 6);
+    assert_eq!(stripped(0o102664, &log), 0o2644, "set-id bits stay");
+    // An ACL with no mask: the owning group's entry is what it had.
+    let plain = Acl(vec![
+        Entry {
+            tag: USER_OBJ,
+            id: NO_ID,
+            perm: 6,
+        },
+        Entry {
+            tag: GROUP_OBJ,
+            id: NO_ID,
+            perm: 4,
+        },
+        Entry {
+            tag: OTHER,
+            id: NO_ID,
+            perm: 0,
+        },
+    ]);
+    assert_eq!(stripped(0o100640, &plain), 0o640);
+}
+
+#[test]
 fn a_controller_changed_or_turned_off_keeps_nothing() {
     // Each entry as the first controller left it, and a file its default
     // entries gave it, with a named group someone added.
@@ -278,6 +323,16 @@ fn on_disk_the_controller_gets_its_access_and_turned_off_keeps_none() {
     // Once set, it's left as it is.
     run(&dir, Some(ME()));
     assert_eq!(acl(&dir.join("key"), ACCESS), Some(key));
+    // etags made as Conary makes it, under the directory's default entries,
+    // keeps the 0700 it had in effect once the next run strips them.
+    std::fs::remove_dir(dir.join("etags")).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(dir.join("etags"))
+        .unwrap();
+    assert!(acl(&dir.join("etags"), ACCESS).is_some());
+    run(&dir, Some(ME()));
+    assert_eq!(acl(&dir.join("etags"), ACCESS), None);
+    assert_eq!(mode(&dir.join("etags")), 0o700, "etags isn't widened");
     // What either writer makes takes the directory's default entries.
     std::fs::write(dir.join("made"), "").unwrap();
     std::fs::create_dir(dir.join("cache")).unwrap();
