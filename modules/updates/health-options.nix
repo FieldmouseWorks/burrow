@@ -18,14 +18,13 @@
         tells the owner about one that keeps failing. Checks in requiredHealth
         must always pass after a switch. Failure notices include bounded
         diagnostics from failed checks. burrow adds its own (sshd, the nix
-        daemon, the operator, burrow-events, ZFS, DNS, GitHub, Claude Code
-        and its login).
+        daemon, burrow-events, ZFS, DNS, GitHub, Claude Code and its login).
       '';
     };
     healthExplains = lib.mkOption {
       type = lib.types.attrsOf (lib.types.listOf lib.types.str);
       default = { };
-      example = { claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ]; };
+      example = { dns = [ "check:github" ]; };
       description = ''
         By health check: what can't pass while it fails, as the report says
         it (`check:NAME`, `unit:NAME` or `user-unit:NAME`, `*` standing for

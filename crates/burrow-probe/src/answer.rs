@@ -155,7 +155,6 @@ impl Machine<'_> {
             Query::Journal { unit, since, until } => {
                 system::journal(self, unit, since.at(self.now), until.at(self.now))
             }
-            Query::Rc => system::rc(self),
             Query::Queue => system::queue(self),
             Query::Why { issue } => system::why(self, issue),
             Query::Contains { repo, commit } => contains::answer(self, repo, commit),

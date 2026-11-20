@@ -68,7 +68,7 @@ pkgs.testers.runNixOSTest {
     users.users.dev = {
       isNormalUser = true;
       uid = 1001;
-      # Its user manager runs without a login, as the probe's `rc` reads it.
+      # Its user manager runs without a login, as the probe's `units` reads it.
       linger = true;
     };
     burrow.probe = {
@@ -94,8 +94,6 @@ pkgs.testers.runNixOSTest {
         script = "echo unlisted: the probe never reads this";
       };
     };
-    # A Remote Control server, as far as `rc` can tell.
-    systemd.user.services."claude-rc@".serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
     # What GitHub says until the test says otherwise: burrow-events' own
     # start runs a pass, which finds nothing to do.
     systemd.tmpfiles.rules = [
@@ -124,7 +122,6 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("user@1001.service")
     machine.succeed("systemctl start leaky.service unlisted.service")
-    machine.succeed("systemctl --user -M dev@ start claude-rc@web.service")
     # Structured coredump journal fixtures: exercise the real journalctl
     # selection without crashing a process or needing any core-file access.
     machine.succeed("logger --journald <<'EOF'\n"
@@ -150,7 +147,7 @@ pkgs.testers.runNixOSTest {
     with subtest("an author's probe is answered once, scrubbed, and closed"):
         github("repo", {"private": True})
         github("issues", [
-            issue(1, "sam", "journal leaky -1h now\njournal unlisted -1h now\ncrashes /bin/probe-example -1h\nmemory\nunits\nrc\ndeployed\noom\nqueue\nrm -rf /"),
+            issue(1, "sam", "journal leaky -1h now\njournal unlisted -1h now\ncrashes /bin/probe-example -1h\nmemory\nunits\ndeployed\noom\nqueue\nrm -rf /"),
             issue(2, "mallory", "journal leaky -1h now"),
         ])
         machine.succeed("systemctl start burrow-probe.service")
@@ -166,7 +163,6 @@ pkgs.testers.runNixOSTest {
         assert "the probe never reads this" not in body, body
         assert "RAM " in body and "The 20 cgroups holding the most" in body, body
         assert "dev's user manager, failed units:" in body, body
-        assert "1 Remote Control server " in body and " web " in body and "active/running" in body, body
         assert "Running: /nix/store/" in body, body
         assert "the kernel's OOM kills" in body, body
         assert "proj isn't on here" in body, body

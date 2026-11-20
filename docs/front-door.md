@@ -4,11 +4,10 @@ You talk to one claude.ai project chat. The work runs on the box, inside each
 project: its checkout, its agent instructions, its tools and logins. Nothing gets
 copied to the cloud and back.
 
-## Four doors, cheapest first
+## Three doors, cheapest first
 
 A thread takes the first door that fits. A probe and a run start no Claude on
-the box; a job or a session holds an agent, and its memory, for as long as it
-works.
+the box; a job holds an agent, and its memory, only for as long as it works.
 
 1. **Probe:** a fact about the box that only needs reading (its memory, a
    unit's log, what's deployed, the job queue), answered in seconds
@@ -22,14 +21,10 @@ works.
 3. **Job:** code or judgment in a project, handed over as an issue
    ([the inbox](#jobs-the-inbox-nothing-to-approve)). It waits for a slot,
    and holds no agent until it gets one.
-4. **Session:** work the owner steers live, or that can't wait for a slot:
-   Remote Control on the project's server
-   ([below](#sessions-remote-control-one-tap-per-thread)). It costs the owner
-   a tap, and holds a Claude while it's open.
 
 ```
-claude.ai project chat                   GitHub                  the box
-──────────────────────                   ──────                  ──────────────────────
+chat thread                              GitHub                  the box
+───────────                              ──────                  ──────────────────────
 thread ── issue labelled `probe` ───▶ the machine's repo ──▶ burrow-probe (on its webhook)
        ◀── answers, then closed ────
 
@@ -41,9 +36,6 @@ thread ── issue labelled `undo` ────▶ the machine's repo ──▶
 
 thread ── issue labelled `claude` ──▶ the project's repo ──▶ proj-inbox (on its webhook)
        ◀── answer as a comment ─────                     ──▶ proj run / proj reply
-
-thread ── Remote Control (one tap) ───────────────────────────▶ claude-rc@PROJECT
-       ◀── results, PRs, questions ────────────────────────────  (own worktree)
 ```
 
 ## Probes: facts with no Claude
@@ -67,7 +59,6 @@ own, say), in seconds and without starting a Claude.
     units on `probe.journal.units` (and `userUnits`) only. The system defaults
     include Renovate's full pass (`renovate.service`) and repository passes
     (`renovate@*.service`), so jobs can diagnose their failed runs.
-  - `rc`: each Remote Control server's state, memory and restarts
   - `queue`: `proj status`
   - `deployed`: the running and booted systems, the generation, the inputs'
     revisions, and what `HOST-update` last found live
@@ -356,63 +347,12 @@ live settings: see [settings](settings.md#engines-models-and-efforts-per-role).
    answer as a reply on the issue, and check back again.
 4. Close the issue when the owner has what they asked for.
 
-## Sessions: Remote Control, one tap per thread
-
-For work the owner wants to watch or steer live, a thread starts a Remote
-Control session on the project's server (`modules/remote-control.nix`): the
-project's Claude, in its own git worktree, in `burrow.remoteControl.permissionMode`
-(bypassPermissions alongside `burrow.claude`, so only the one-way doors ask).
-A session claude.ai puts in auto mode has a check in front of the rest; the
-standing-authority commands, `proj reply` among them, are allow rules that
-skip it (`burrow.claude`, in the README), and the one-way doors still ask.
-The owner's messages in the thread reach it directly. The catch: each thread
-shows the owner an approval card first, and a box with no desktop app can't be
-pre-approved.
-
-- Every project in `burrow.projectsDir`, a git checkout with an origin, has an
-  always-on `claude remote-control` server that trusts its folder by itself, so
-  it never sits at a prompt nobody can see. The machine's own flake always has
-  one. Any other folder, a linked git worktree included, gets none.
-- With `burrow.remoteControl.spawn = "worktree"` (the default) each session
-  started from claude.ai gets its own git worktree, so several threads can work
-  in one project at once. A server holds no session until one is asked for
-  (`burrow.remoteControl.idleSession`). The servers keep memory back when
-  the machine runs short (`burrow.remoteControl.memoryLow`), and each server
-  and its sessions have a backstop of half the machine
-  (`burrow.remoteControl.memoryMax`): a session that grows past it is killed
-  alone, and the thread can pick it up again from its transcript
-  (`tests/remote-control-memory.nix`).
-- A switch never restarts a server, since that would cut off the session
-  confirming it. `claude-rc-scan` (on a switch, when a session's status changes, and when the
-  quiet spell it's waiting on ends) restarts
-  any server still running an older tmux or `claude-rc-serve` (older Claude
-  Code or permission mode) once none of its sessions is working or has done anything
-  in the last 30 minutes; a session that's open but idle doesn't count
-  (`tests/remote-control.nix`).
-- What the owner has approved in advance goes in `burrow.claude.standingAuthority`:
-  a section of the machine CLAUDE.md, so no session asks them to approve it
-  again just because the instruction came through a thread or an issue.
-- A thread holds one Remote Control session at a time. To give it more to do
-  after it started, start Remote Control again from the same thread with new
-  instructions; they reach the running session.
-- The machine's own flake folder is the operator. Its sessions stay in the
-  folder itself, since that checkout is what `HOST-switch` builds.
-
 ## What's running
 
 - Inbox and other proj jobs: `proj status` and `proj-inbox status` on the box;
   open issues labelled `claude` on GitHub.
-- Remote Control: the chat's thread list; on the box, `tmux -L rc-NAME attach`
-  shows a project's server and its sessions.
 
-## Worktrees and untracked files
-
-A worktree has the tracked files only. If a project needs untracked ones to
-build (`.env`, a local config), list them in `.worktreeinclude` at the repo
-root and Claude Code copies them into each new Remote Control worktree.
-Dependencies (`node_modules`, `target/`) get rebuilt there; set
-`burrow.remoteControl.sameDir = [ "NAME" ]` for a project where that's too
-slow.
+## Job questions
 
 A job ending with `proj ask --default "TEXT" [--one-way]` sends its question through `burrow.tools.notify`
 when configured. The open-question state survives automated resumes (#549).

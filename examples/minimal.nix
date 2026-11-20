@@ -28,7 +28,6 @@
       };
     };
     proj.enable = true;
-    remoteControl.enable = true;
     agents.enable = true;
     toolbox.enable = true;
     rustCache.enable = true;

@@ -42,7 +42,7 @@ The modules, by job:
 
 - **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
   `heartbeat`, `robot`
-- **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
+- **Doing the work:** `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
 - **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`,
   `builds`
@@ -130,9 +130,8 @@ Each has an entry below, and each can be imported on its own.
   and the role settings every turn reads before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. A check that
   fails for its own reason excuses what can't pass without it
-  (`burrow.updates.healthExplains`): while `claude-login` says Claude Code
-  isn't logged in, the operator's check and the `claude-rc@` servers failing
-  after a switch don't revert it. Plus Renovate for every repo you
+  (`burrow.updates.healthExplains`), so a known cause already failing before a
+  switch doesn't revert a good deploy. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
   repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
@@ -147,17 +146,6 @@ Each has an entry below, and each can be imported on its own.
   stands comes back a day later, saying so. One opened `--handled` (its
   opener settles it, with a job of its own where there is one) is never
   sorted or drained by the inbox.
-- **`remote-control`** (`burrow.remoteControl`): An always-on `claude
-  remote-control` server for every project in `burrow.projectsDir` (a git
-  checkout with an origin), found by itself (a path unit rescans when folders
-  come and go) and trusted by itself, so none waits on a prompt. Sessions
-  started from claude.ai each get their own git worktree. The machine's own
-  flake checkout is one of them: that session is the operator. The servers
-  keep memory back when the machine runs short (`memoryLow`, 10% of it), and
-  each server and its sessions share a backstop for a runaway (`memoryMax`,
-  half the machine, or `servers.NAME.memoryMax`): past it the kernel kills the
-  biggest process there, the session that grew or a build it ran, and nothing
-  else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
   work to a headless agent inside that project (or the repo's own clone, for
   `proj run OWNER/NAME "task"`), as a systemd unit, and checks
@@ -174,7 +162,7 @@ Each has an entry below, and each can be imported on its own.
   them, though they leave everyone else one slot while one of theirs waits and
   none runs; an `--unstick` job, the one that takes what the pipeline is stuck
   on, waits in no line at all, in a slot of its own past `maxJobs`); every job
-  and every Remote Control server lives in `claude.slice`, which has no
+  lives in `claude.slice`, which has no
   ceiling of its own: the jobs are what the machine gives up first when it
   runs short (the kernel kills them first, and systemd-oomd watches their
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
@@ -247,7 +235,7 @@ Each has an entry below, and each can be imported on its own.
   set, so the settings can tune them; their engine label still picks
   the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
-  declared by the machine itself. Remote Control sessions and existing
+  declared by the machine itself. Interactive shells and existing
   proj jobs retain the roleless form for work an agent hands on.
   Jobs consume the
   [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
@@ -560,8 +548,8 @@ Each has an entry below, and each can be imported on its own.
   `watchdogIdentity`, the board's own one, whichever driver came up first, and
   a `HOST-health` check that it's the one armed), and systemd-oomd watching
   the whole machine: when swap is nearly full, or a slice is stalled on
-  memory, it kills the unit that's drowning it (never sshd, tailscaled or a
-  Remote Control server), long before the kernel's OOM killer would; and sshd,
+  memory, it kills the unit that's drowning it (never sshd or tailscaled),
+  long before the kernel's OOM killer would; and sshd,
   tailscaled, networkd, the journal and oomd itself keep memory back
   (`protect`), so you can still get in.
 - **`cpu`** (`burrow.cpu`): How the CPU is shared between repos and runners.
@@ -660,7 +648,6 @@ Each has an entry below, and each can be imported on its own.
               origin = "https://github.com/sam/homelab";
               checks = [ "rehearsal" ];  # your flake's VM tests
             };
-            remoteControl.enable = true;
             proj.enable = true;
             agents.enable = true;
             toolbox.enable = true;
@@ -695,11 +682,7 @@ own (`burrow.autoland.app`;
 [docs/repo-baseline.md](docs/repo-baseline.md#the-stewards-github-app) says
 how to make one).
 
-After the first boot, run `claude remote-control` by hand once, anywhere, to
-log in and enable Remote Control. Every project folder after that is trusted
-and served on its own.
-
-To run every project from one claude.ai project chat, see
+To run every project from one chat thread, see
 [docs/front-door.md](docs/front-door.md).
 
 ## Checks

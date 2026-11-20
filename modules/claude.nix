@@ -59,10 +59,7 @@ let
          `proofRuns` (burrow.autoland.repos), which the steward runs on each settled PR's head
          with no Claude. Never a job, or a `proofJobs` prompt, that only runs one command.''
     ++ lib.optional (config.burrow.proj.enable or false) ''
-      A job, for judgment in a project: `proj run`${lib.optionalString (config.burrow.proj.inbox.enable or false) ", or an issue labelled `${lib.concatStringsSep "`, `" (lib.attrNames config.burrow.proj.inbox.labels)}`"}.''
-    ++ lib.optional (config.burrow.remoteControl.enable or false) ''
-      A session, for work ${config.burrow.owner} steers live: theirs to open, on the project's own
-         Remote Control server.'';
+      A job, for judgment in a project: `proj run`${lib.optionalString (config.burrow.proj.inbox.enable or false) ", or an issue labelled `${lib.concatStringsSep "`, `" (lib.attrNames config.burrow.proj.inbox.labels)}`"}.'';
 in
 {
   imports = [ (import ./common.nix inputs) ./claude/etc.nix ];
@@ -131,9 +128,8 @@ in
       '' + lib.concatMapStrings (n: "${n}\n") (cfg.boxNotes ++ [
         ''
           - You are `${config.burrow.user}`.''
-      ] ++ lib.optional (config.burrow.remoteControl.enable or false) ''
-          - Projects live in ${config.burrow.projectsDir}. Each folder gets its own always-on Remote
-            Control session automatically.'')))
+        ''
+          - Projects live in ${config.burrow.projectsDir}.'' ])))
 
       (lib.mkIf (doors != [ ]) (lib.mkOrder 650 ''
         ## The cheapest door first

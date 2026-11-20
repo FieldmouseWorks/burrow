@@ -1,5 +1,5 @@
 //! What systemd, the journal, proj and the system's own links say: `units`,
-//! `journal`, `rc`, `queue`, `why`, `deployed` and `oom`.
+//! `journal`, `queue`, `why`, `deployed` and `oom`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -107,89 +107,6 @@ fn list(globs: &[String]) -> String {
     } else {
         globs.join(", ")
     }
-}
-
-/// `rc`: each Remote Control server's state, memory, restarts and how long
-/// it's been up, from the user's manager.
-pub fn rc(m: &Machine) -> Result<String, String> {
-    let ctl = &m.cfg.tools.systemctl;
-    let mut args = vec!["--user", "list-units", "claude-rc@*", "--all"];
-    args.extend(LIST);
-    let listed = m.output(ctl, &args, true, &[])?;
-    let units: Vec<&str> = listed
-        .lines()
-        .filter_map(|l| l.split_whitespace().next())
-        .filter(|u| u.starts_with("claude-rc@") && u.ends_with(".service"))
-        .collect();
-    if units.is_empty() {
-        return Ok("No Remote Control servers.\n".into());
-    }
-    let mut args = vec![
-        "--user",
-        "show",
-        "-p",
-        "Id,ActiveState,SubState,MemoryCurrent,MemoryPeak,NRestarts,ActiveEnterTimestamp",
-    ];
-    args.extend(&units);
-    let shown = m.output(ctl, &args, true, &[])?;
-    let mut out = format!(
-        "{} Remote Control server{} (state, memory now, peak, restarts, up since):\n",
-        units.len(),
-        if units.len() == 1 { "" } else { "s" }
-    );
-    for block in shown.split("\n\n") {
-        let p: BTreeMap<&str, &str> = block.lines().filter_map(|l| l.split_once('=')).collect();
-        let Some(id) = p.get("Id") else { continue };
-        let bytes = |k: &str| {
-            p.get(k)
-                .and_then(|v| v.parse::<u64>().ok())
-                .filter(|b| *b != u64::MAX)
-                .map_or("-".to_string(), super::size)
-        };
-        out += &format!(
-            "  {:<28} {:<18} {:>7} {:>7} {:>3}  {}\n",
-            server(id),
-            format!(
-                "{}/{}",
-                p.get("ActiveState").unwrap_or(&"?"),
-                p.get("SubState").unwrap_or(&"?")
-            ),
-            bytes("MemoryCurrent"),
-            bytes("MemoryPeak"),
-            p.get("NRestarts").unwrap_or(&"?"),
-            p.get("ActiveEnterTimestamp")
-                .filter(|t| !t.is_empty())
-                .unwrap_or(&"-"),
-        );
-    }
-    Ok(out)
-}
-
-/// claude-rc@NAME.service's NAME, unescaped (systemd-escape's `\xNN`).
-fn server(unit: &str) -> String {
-    let name = unit
-        .strip_prefix("claude-rc@")
-        .and_then(|n| n.strip_suffix(".service"))
-        .unwrap_or(unit);
-    let mut out = String::new();
-    let mut rest = name;
-    while let Some(i) = rest.find("\\x") {
-        out += &rest[..i];
-        match rest
-            .get(i + 2..i + 4)
-            .and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            Some(b) if b.is_ascii() => {
-                out.push(b as char);
-                rest = &rest[i + 4..];
-            }
-            _ => {
-                out += "\\x";
-                rest = &rest[i + 2..];
-            }
-        }
-    }
-    out + rest
 }
 
 /// `queue`: proj's jobs, as `proj status` lists them.

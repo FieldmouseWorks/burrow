@@ -1,6 +1,6 @@
 use super::{
     Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer, run,
-    run_with_cgroup, since_time, start, start_job,
+    since_time, start, start_job,
 };
 
 #[test]
@@ -21,30 +21,21 @@ fn id_names() {
 // other tests. Reaching project validation proves CLI admission succeeded,
 // without launching a real job or contacting systemd.
 #[test]
-fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
+fn roleless_starts_from_shells_and_jobs_reach_project_validation() {
     const CHILD: &str = "PROJ_ROLELESS_START_TEST";
     if let Ok(context) = std::env::var(CHILD) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = keyed(tmp.path(), "not-found");
         for flags in [vec![], vec!["--role", "flaky"]] {
             let job = context == "proj-project-123.service";
-            let machine = context != "shell" && !context.starts_with("claude-rc@") && !job;
+            let machine = context != "shell" && !job;
             let needs_role = machine && flags.is_empty();
             let args: Vec<String> = flags
                 .into_iter()
                 .chain(["missing-project", "task"])
                 .map(str::to_owned)
                 .collect();
-            let fail = if context == "shell" || job {
-                run(&cfg, false, &args)
-            } else {
-                // Kernel cgroup fixture: test the CLI parser and inherited
-                // environment without creating a real service.
-                let cgroup =
-                    format!("0::/user.slice/user@1001.service/claude-rc.slice/{context}\n");
-                run_with_cgroup(&cfg, false, &args, || Ok(cgroup))
-            }
-            .unwrap_err();
+            let fail = run(&cfg, false, &args).unwrap_err();
             if needs_role {
                 assert_eq!(fail.code, 2, "{context}: {:?}", fail.say);
                 assert_eq!(
@@ -68,17 +59,15 @@ fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
     }
     for unit in [
         None,
-        Some("claude-rc@project.service"),
         Some("proj-project-123.service"),
         Some("advisory-watch.service"),
-        Some("claude-rc-scan.service"),
         Some("proj-inbox.service"),
     ] {
         let mut child = burrow_test::command(std::env::current_exe().unwrap());
         child
             .args([
                 "--exact",
-                "cmd::run::tests::roleless_starts_from_sessions_and_jobs_reach_project_validation",
+                "cmd::run::tests::roleless_starts_from_shells_and_jobs_reach_project_validation",
                 "--nocapture",
             ])
             .env(CHILD, unit.unwrap_or("shell"))
@@ -409,10 +398,7 @@ fn join_needs_a_key() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = keyed(tmp.path(), "not-found");
     let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let fail = run_with_cgroup(&cfg, false, &args(&["--join", "p", "task"]), || {
-        Ok(String::new())
-    })
-    .unwrap_err();
+    let fail = run(&cfg, false, &args(&["--join", "p", "task"])).unwrap_err();
     assert_eq!(fail.code, 2);
 }
 
