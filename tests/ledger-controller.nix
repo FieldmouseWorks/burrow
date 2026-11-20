@@ -137,10 +137,15 @@ pkgs.testers.runNixOSTest {
         on.fail(f"runuser -u conary-flow -- test -w {ledger}/key")
         # The etags cache stays the writer's alone: the flow reads none.
         on.fail(f"runuser -u conary-flow -- ls {ledger}/etags")
+        # The directory stats as 775 (its ACL's mask): still nobody else's to write.
+        on.fail(f"runuser -u other -- touch {ledger}/x")
+        on.fail(f"runuser -u nobody -- touch {ledger}/x")
 
     start_all()
     on.wait_for_unit("multi-user.target")
     off.wait_for_unit("multi-user.target")
+    # Its ACL lines name files a ledger not set up yet doesn't have.
+    on.fail("systemctl is-failed systemd-tmpfiles-setup.service")
 
     with subtest("the controller is a user of its own, with state only it can read"):
         on.succeed("id conary-flow")
@@ -164,6 +169,7 @@ pkgs.testers.runNixOSTest {
         on.succeed("systemctl start burrow-ledger@sam-r.service")
         # The key the first sync made gets the controller's access at once.
         on.wait_until_succeeds(f"runuser -u conary-flow -- test -r {ledger}/key", timeout=60)
+        on.wait_for_unit("burrow-ledger-access.service")
         # So the flow makes the merge bases, and burrow.user appends to them.
         on.succeed(f"rm {ledger}/merge-bases")
         for op in ["train-join", "train-step", "evidence", "train-leave"]:

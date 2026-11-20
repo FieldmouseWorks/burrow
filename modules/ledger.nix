@@ -39,8 +39,9 @@ let
   # POSIX ACLs naming the controller user, never its group, which every
   # producer joins (flow.producer). The directory's default entries let
   # both writers append to and replace whatever the other made first.
-  # The key is read-only to it, and its owning group gets nothing however
-  # the key was made. The files are the ones Conary's writer opens in
+  # It can't write the key's contents (though, like any writer of the
+  # directory, it could replace the file), and the key's owning group gets
+  # nothing however the key was made. The files are the ones Conary's writer opens in
   # place (conary-core's log.rs, conary-github's bases.rs); the anchor and
   # key.pub are renamed in, and the flow reads no GitHub through `etags`,
   # which stays burrow.user's alone. Applied on each boot and switch, and
