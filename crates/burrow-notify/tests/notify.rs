@@ -6,7 +6,7 @@
 use std::fs;
 
 use burrow_github::{Api, Failed, Response};
-use burrow_notify::{Ask, Config, DAY, Journal, Priority, pending, run};
+use burrow_notify::{Ask, Config, DAY, Journal, Priority, handled, pending, run};
 use serde_json::{Value, json};
 
 const REPO: &str = "repos/sam/homelab/";
@@ -840,4 +840,36 @@ fn a_close_whose_answer_was_lost_is_not_taken_for_one_by_hand() {
     b.open("k15", NOW + 60);
     assert_eq!(b.github.open_titles(), ["[k15] Stuck"]);
     assert_eq!(b.github.issues[1].body, "It's stuck.");
+}
+
+// A `--handled` notice says so in its body, where the inbox reads it, and
+// one already open without it gets it on the next ask, once.
+#[test]
+fn a_handled_notice_says_so_in_its_body() {
+    let mut b = machine(Some("sam/homelab"));
+    b.open("k16", NOW);
+    assert!(!handled(&b.github.issues[0].body));
+    b.notify(
+        &["open", "--handled", "k16", "Stuck", "It's stuck."],
+        NOW + 60,
+    );
+    assert_eq!(b.github.issues.len(), 1);
+    let body = b.github.issues[0].body.clone();
+    assert!(handled(&body), "{body}");
+    assert!(body.starts_with("It's stuck.\n\n"), "{body}");
+    let edits = b.github.asked("PATCH", &format!("{REPO}issues/1"));
+    b.notify(
+        &["open", "--handled", "k16", "Stuck", "It's stuck."],
+        NOW + 120,
+    );
+    assert_eq!(b.github.asked("PATCH", &format!("{REPO}issues/1")), edits);
+    b.notify(&["ensure", "--handled", "k17", "Stuck", "It's stuck."], NOW);
+    assert!(handled(&b.github.issues[1].body));
+    // Only the mark on a line of its own counts.
+    for body in [
+        "It's stuck.",
+        "`<!-- burrow-notify: handled by its opener -->`",
+    ] {
+        assert!(!handled(body), "{body}");
+    }
 }

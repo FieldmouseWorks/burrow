@@ -4,8 +4,8 @@
 //! one comment a day, and it closes when the problem clears.
 //!
 //! ```text
-//! HOST-notify open KEY TITLE BODY
-//! HOST-notify ensure KEY TITLE BODY
+//! HOST-notify open [--handled] KEY TITLE BODY
+//! HOST-notify ensure [--handled] KEY TITLE BODY
 //! HOST-notify close KEY [WHAT FIXED IT]
 //! HOST-notify pending KEY
 //! ```
@@ -13,6 +13,11 @@
 //! `ensure` opens an absent notice without the daily reminder that `open`
 //! sends for a continuing problem. Both update an existing notice's title and
 //! body when the facts change. It is safe to retry after an ambiguous reply.
+//!
+//! `--handled` says its caller has the problem in hand: a Claude job of its
+//! own is on it, and the caller closes the notice once it clears. The issue
+//! is the record of that, not work to take: its body carries [`HANDLED`],
+//! and [`handled`] is how the inbox knows to leave it alone.
 //!
 //! A notice someone closed by hand while its problem still stands isn't
 //! posted again at once, or a closer that keeps closing it (a job ending
@@ -68,12 +73,14 @@ pub enum Ask {
         key: String,
         title: String,
         body: String,
+        handled: bool,
     },
     /// Open if absent, with no daily reminders on retries.
     Ensure {
         key: String,
         title: String,
         body: String,
+        handled: bool,
     },
     Close {
         key: String,
@@ -84,8 +91,25 @@ pub enum Ask {
     },
 }
 
-pub const USAGE: &str =
-    "open KEY TITLE BODY | ensure KEY TITLE BODY | close KEY [WHAT] | pending KEY";
+pub const USAGE: &str = "open [--handled] KEY TITLE BODY | ensure [--handled] KEY TITLE BODY | close KEY [WHAT] | pending KEY";
+
+/// What a `--handled` notice's body ends with: hidden where GitHub shows it.
+pub const HANDLED: &str = "<!-- burrow-notify: handled by its opener -->";
+
+/// Whether an issue's `body` is a `--handled` notice's: its problem has a
+/// job of its own and its opener closes it, so nothing hands it to another.
+pub fn handled(body: &str) -> bool {
+    body.lines().any(|l| l.trim() == HANDLED)
+}
+
+/// `body` as a notice's issue carries it.
+fn marked(body: &str, handled: bool) -> String {
+    if handled {
+        format!("{body}\n\n{HANDLED}")
+    } else {
+        body.to_owned()
+    }
+}
 
 impl Ask {
     /// The words after the config. A key names a file of its own, so it's
@@ -93,6 +117,14 @@ impl Ask {
     pub fn parse(args: &[String]) -> Result<Ask, String> {
         let usage = || format!("usage: {USAGE}");
         let (op, rest) = args.split_first().ok_or_else(usage)?;
+        let (handled, rest) = match rest.split_first() {
+            Some((flag, rest))
+                if flag == "--handled" && ["open", "ensure"].contains(&op.as_str()) =>
+            {
+                (true, rest)
+            }
+            _ => (false, rest),
+        };
         let (key, rest) = rest.split_first().ok_or_else(usage)?;
         if key.is_empty() || key == "." || key == ".." || key.contains('/') {
             return Err(format!("{key:?} can't be a notice's key: {}", usage()));
@@ -104,11 +136,13 @@ impl Ask {
                 key,
                 title: title.clone(),
                 body: body.clone(),
+                handled,
             }),
             ("ensure", [title, body]) if nonempty(title) && nonempty(body) => Ok(Ask::Ensure {
                 key,
                 title: title.clone(),
                 body: body.clone(),
+                handled,
             }),
             ("close", []) => Ok(Ask::Close {
                 key,
@@ -171,9 +205,12 @@ pub fn pending(cfg: &Config, key: &str) -> bool {
 pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal, now: u64) {
     let Some(repo) = cfg.repo.as_deref().filter(|r| !r.is_empty()) else {
         let words = match ask {
-            Ask::Open { key, title, body } | Ask::Ensure { key, title, body } => {
-                vec![key.as_str(), title, body]
+            Ask::Open {
+                key, title, body, ..
             }
+            | Ask::Ensure {
+                key, title, body, ..
+            } => vec![key.as_str(), title, body],
             Ask::Close { key, what } => vec![key.as_str(), what],
             Ask::Pending { key } => vec![key.as_str()],
         };
@@ -189,8 +226,18 @@ pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal
     };
     let notices = Notices { cfg, repo, api };
     let done = match ask {
-        Ask::Open { key, title, body } => notices.open(key, title, body, now, true),
-        Ask::Ensure { key, title, body } => notices.open(key, title, body, now, false),
+        Ask::Open {
+            key,
+            title,
+            body,
+            handled,
+        } => notices.open(key, title, &marked(body, *handled), now, true),
+        Ask::Ensure {
+            key,
+            title,
+            body,
+            handled,
+        } => notices.open(key, title, &marked(body, *handled), now, false),
         Ask::Close { key, what } => notices.close(key, what),
         Ask::Pending { .. } => Ok(()),
     };
@@ -372,7 +419,23 @@ mod tests {
             Ok(Ask::Open {
                 key: "k".into(),
                 title: "Stuck".into(),
-                body: "It's stuck.".into()
+                body: "It's stuck.".into(),
+                handled: false,
+            })
+        );
+        assert_eq!(
+            Ask::parse(&words(&[
+                "ensure",
+                "--handled",
+                "k",
+                "Stuck",
+                "It's stuck."
+            ])),
+            Ok(Ask::Ensure {
+                key: "k".into(),
+                title: "Stuck".into(),
+                body: "It's stuck.".into(),
+                handled: true,
             })
         );
         for close in [&["close", "k"][..], &["close", "k", ""]] {
@@ -404,6 +467,8 @@ mod tests {
             &["open", "k", "", "body"],
             &["open", "k", "Stuck", ""],
             &["open", "k", "Stuck", "body", "more"],
+            &["open", "--handled", "k", "Stuck"],
+            &["pending", "--handled", "k"],
             &["close", "k", "Fixed.", "more"],
             &["pending", "k", "more"],
             &["shout", "k"],
