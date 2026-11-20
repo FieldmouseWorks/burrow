@@ -35,7 +35,8 @@ fn pr() -> Value {
 }
 
 /// The connector's summary comment for HEAD, at `at`.
-fn summary(status: &str, findings: bool, at: &str) -> Value {
+fn summary(status: &str, findings: impl Into<Option<bool>>, at: &str) -> Value {
+    let findings = findings.into();
     let state = json!({"code_review": {"commit_sha": HEAD, "status": status, "has_any_findings": findings}});
     json!({"author": connector(), "body": format!("<!-- codex-review-state:v1 {state} -->"), "updatedAt": at, "reactionGroups": []})
 }
@@ -289,6 +290,35 @@ fn only_when_unreviewed_or_answered() {
             HEAD
         ),
         Outcome::Posted { at: T + 120 }
+    );
+}
+
+// A summary that ended with no word on findings (burrow#1321: Conary#511's
+// said completed, its findings null) is nothing said of the head: it's
+// asked, once, keyed as a head Codex has said nothing of.
+#[test]
+fn a_review_ended_with_no_word_is_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut p = pr();
+    p["comments"]["nodes"] = json!([summary("completed", None, "2026-01-01T00:00:00Z")]);
+    let mut gh = github(p.clone(), 201);
+    assert_eq!(
+        ask(&mut gh, &cfg(dir.path()), T, "sam/r", 5, HEAD),
+        Outcome::Posted { at: T }
+    );
+    assert_eq!(posted(&gh).len(), 1);
+    let asked = record(dir.path());
+    assert_eq!((asked.len(), asked[0].said), (1, 0));
+    assert_eq!(
+        ask(
+            &mut github(p, 201),
+            &cfg(dir.path()),
+            T + 60,
+            "sam/r",
+            5,
+            HEAD
+        ),
+        Outcome::Asked { at: T }
     );
 }
 

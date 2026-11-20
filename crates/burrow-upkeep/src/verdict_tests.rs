@@ -99,6 +99,33 @@ fn a_review_under_way_is_running() {
 }
 
 #[test]
+fn a_review_ended_with_no_word_on_findings_says_nothing() {
+    // The bug this guards (burrow#1321): Conary#511's summary said
+    // completed with its findings null, and calling that running held the
+    // PR as under review, and kept the owner's door from asking, until a
+    // person asked by hand.
+    for status in ["completed", "failed", "cancelled", "skipped"] {
+        assert_eq!(
+            of(vec![], vec![summary(connector(), HEAD, status, None, T1)]),
+            (Verdict::None, 0.0, 0),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_review_ended_with_no_word_leaves_a_receipts_findings_standing() {
+    let (v, at, rounds) = of(
+        vec![receipt(connector(), HEAD, &HEAD[..10], T0)],
+        vec![summary(connector(), HEAD, "completed", None, T1)],
+    );
+    assert_eq!(
+        (v, at, rounds),
+        (Verdict::Findings, crate::ts(T0).unwrap(), 1)
+    );
+}
+
+#[test]
 fn a_clean_review_of_another_commit_says_nothing_of_the_head() {
     assert_eq!(
         of(
