@@ -27,6 +27,7 @@ members = [
     "burrow-house",
     "burrow-judge",
     "burrow-keep",
+    "burrow-ledger-access",
     "burrow-ledger-door",
     "burrow-notify",
     "burrow-probe",

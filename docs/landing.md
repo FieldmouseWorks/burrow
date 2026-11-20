@@ -44,6 +44,11 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
 - conaryd reads its events file. It lists the repos the record gives
   conaryd whose automated work is allowed, and no others.
 
+conaryd runs as the flow's user, the controller where there is one
+(`burrow.ledger.controllerUser`). A flow configuration with a train or
+evidence has it sign the ledger, and the ledger module gives the controller
+that, as its option says.
+
 ## A handover
 
 A handover has two steps, so the steward and conaryd never land in a repo
@@ -118,11 +123,6 @@ a pause, and a pause doesn't move ownership:
 - conaryd reads one flow configuration for every repo it lands. Any repos
   given to one conaryd must therefore render the same one, and a build that
   breaks this is refused.
-- conaryd runs as the flow's user. A flow configuration with a train or
-  evidence has it sign the ledger, so that user needs the ledger's key.
-  With no `burrow.ledger.controllerUser`, the flow's user is
-  `burrow.user`, which holds the key. With a controller, nothing gives the
-  controller the key yet.
 - The overlay's `landing` entry is new. A burrow from before it refuses an
   overlay that has one. Hand every repo back to the steward
   (`settings landing OWNER/REPO steward`) before rolling back past it.
