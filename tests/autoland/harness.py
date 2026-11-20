@@ -551,7 +551,7 @@ def judgment(v, n=6, sha=head, base="main", body="", on=None):
 
 
 def swept(v, n=8, sha=head, base="main"):
-    """renovate-sweep's verdict line, sealed as major-seal seals it."""
+    """renovate-sweep's verdict line, sealed as it seals it."""
     return f"<!-- major-verdict: {v} {sha} on {base} {C.seal('sam/r', n, 'major-verdict', v, sha, base)} -->"
 
 

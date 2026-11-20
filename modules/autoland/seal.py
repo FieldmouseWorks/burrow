@@ -3,7 +3,8 @@ job a verdict is asked of is given a way to make. Every Claude job posts as
 the same login, so without it a job quoting PR text that holds a
 well-formed marker would pass for the verdict. Shared by the autoland
 steward's judges (common.py) and renovate-sweep's verdicts on
-majors (../updates/major-seal.py), each with a key of its own."""
+majors (crates/burrow-renovate's src/sweep/seal.rs, which seals as this
+does), each with a key of its own."""
 
 import hashlib
 import hmac
