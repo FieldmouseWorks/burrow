@@ -182,12 +182,34 @@ fn repo(dir: &Path, w: &World) {
     std::fs::write(work.join("AGENTS.md"), "Anything goes.\n").unwrap();
     // A link to what the look's user could read, which it never follows.
     std::os::unix::fs::symlink("/proc/self/environ", work.join("leak")).unwrap();
+    // A file LFS keeps, which stays its pointer.
+    std::fs::write(work.join(".gitattributes"), "*.bin filter=lfs -text\n").unwrap();
+    std::fs::write(
+        work.join("big.bin"),
+        "version https://git-lfs.github.com/spec/v1\n",
+    )
+    .unwrap();
     git(&["add", "."]);
     git(&["commit", "-qm", "head"]);
     let head = git(&["rev-parse", "HEAD"]);
     let bare = dir.join("github").join(format!("{REPO}.git"));
     std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
     git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+    // The producer's mirror, with an LFS filter as the App's environment
+    // names one (github.nix): it fails as git-lfs does with no endpoint to
+    // fetch from, unless told to leave pointers be.
+    let mirror = dir.join("state/git").join(format!("{REPO}.git"));
+    std::fs::create_dir_all(&mirror).unwrap();
+    git(&["init", "-q", "--bare", mirror.to_str().unwrap()]);
+    for (key, value) in [
+        (
+            "filter.lfs.smudge",
+            r#"sh -c 'test -n "$GIT_LFS_SKIP_SMUDGE" && exec cat; exit 1'"#,
+        ),
+        ("filter.lfs.required", "true"),
+    ] {
+        git(&["--git-dir", mirror.to_str().unwrap(), "config", key, value]);
+    }
     w.with(|p| {
         p.head = head;
         p.base_sha = base;

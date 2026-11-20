@@ -344,6 +344,10 @@ pub fn lay(
             .arg(commit)
             .args(["--", "."])
             .env("GIT_INDEX_FILE", &index)
+            // LFS files stay their pointers: the look judges text, and the
+            // mirror, fetched by URL, names no endpoint for LFS to fetch
+            // their objects from.
+            .env("GIT_LFS_SKIP_SMUDGE", "1")
             .stdin(Stdio::null())
             .output()
             .map_err(|e| format!("git: {e}"))?;
