@@ -25,8 +25,9 @@
   # "spent" is refused as Claude Code refuses a run once the plan's usage is
   # spent, while /tmp/spent holds how many seconds on its limit resets (with
   # /tmp/spent-stray, leaving work behind that ignores TERM); told
-  # it was refused, it keeps what it was told in /tmp/told-spent, and how it
-  # was run in /tmp/spent-args, and answers.
+  # it was refused, it keeps what it was told in /tmp/told-spent, how it
+  # was run in /tmp/spent-args and the API key's descriptor it was handed
+  # (or "none") in /tmp/spent-key, and answers.
   # "scratch" makes a worktree of web, with a file in it, in its scratch and
   # says where that is in /tmp/scratch; "scratch ask" then asks.
   # As a job, it says what comes next before it answers (proj done, or proj
@@ -129,6 +130,7 @@
       "Your last run was refused"*)
         printf '%s' "$prompt" >/tmp/told-spent
         echo "$args" >/tmp/spent-args
+        echo "''${CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR-none}" >/tmp/spent-key
         proj done >/dev/null ;;
       ask) proj ask --default "continue" >/dev/null ;;
       scratch*)

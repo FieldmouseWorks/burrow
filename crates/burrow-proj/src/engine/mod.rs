@@ -16,6 +16,7 @@ mod claude_limit;
 mod command;
 mod handoff;
 mod machine;
+mod route;
 mod stream;
 pub use command::{LONG, NEXT, exec_claude, spawn};
 pub use handoff::first_prompt;
@@ -98,7 +99,7 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
 
 /// The request's role, scoped to the repository its admission bound (not
 /// its project's origin, which the job's git metadata grant reaches), with
-/// `pinned` for the engine.
+/// `pinned` for the engine, in the sandbox the request names or here.
 pub(crate) fn requested(
     cfg: &Config,
     job: &Job,
@@ -111,24 +112,30 @@ pub(crate) fn requested(
     } else {
         crate::policy::repository(job)
     };
-    resolve(cfg, role, repo.as_deref(), pinned)
+    resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())
 }
 
-/// Turn startup and drain admission share role scopes and pins.
-/// The model and effort follow the engine it ends on.
+/// Turn startup, a refused run's retry and drain admission share role
+/// scopes, pins and routes: the engine is where the role's route runs a
+/// turn now ([`route`]), from the pinned engine on when the route names it,
+/// and the model and effort follow the engine it ends on.
 pub(crate) fn resolve(
     cfg: &Config,
     role: &str,
     repo: Option<&str>,
     pinned: Option<&str>,
+    sandboxed: bool,
 ) -> Result<Choice, String> {
     // One version of the settings: the engine and its tuning can't come
     // from either side of an `engines use`.
     let settings = cfg.role_settings()?;
-    let mut engine = Config::engine_in(&settings, role, repo)?;
-    if let Some(e) = pinned {
-        engine = Engine::parse(e)?;
-    }
+    let pinned = pinned.map(Engine::parse).transpose()?;
+    let meters = route::Live {
+        cfg,
+        sandboxed,
+        now: crate::now(),
+    };
+    let engine = route::engine(settings.route(role, repo), pinned, &meters)?;
     let tuning = settings.tuning(role, repo, engine.name());
     let choice = Choice {
         engine,
@@ -136,6 +143,20 @@ pub(crate) fn resolve(
         effort: tuning.effort,
     };
     Ok(choice)
+}
+
+/// Where the job's route runs its turn now, when that moves the turn from
+/// `from` to another engine of the same conversation: what a run refused
+/// for usage, or for the credit, takes before it runs again. A move to
+/// another conversation is a new turn's to make, with its handoff
+/// ([`first_prompt`]), never a retry's.
+pub(crate) fn reroute(cfg: &Config, job: &Job, from: &Choice) -> Result<Option<Choice>, String> {
+    let request = crate::job::Request::load(job)?;
+    let next = requested(cfg, job, &request, request.engine.map(Engine::name))?;
+    Ok(
+        (next.engine != from.engine && next.engine.conversation() == from.engine.conversation())
+            .then_some(next),
+    )
 }
 
 /// Normalized terminal records let the job lifecycle and log reader share outcomes.
@@ -214,7 +235,7 @@ mod tests {
                 "role work claude-api",
             ],
         );
-        let chosen = resolve(&cfg, "work", None, None).unwrap();
+        let chosen = resolve(&cfg, "work", None, None, false).unwrap();
         assert_eq!(
             chosen,
             Choice {
@@ -224,10 +245,13 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve(&cfg, "other", None, None).unwrap().model.as_deref(),
+            resolve(&cfg, "other", None, None, false)
+                .unwrap()
+                .model
+                .as_deref(),
             Some("sub-model")
         );
-        let pinned = resolve(&cfg, "work", None, Some("claude")).unwrap();
+        let pinned = resolve(&cfg, "work", None, Some("claude"), false).unwrap();
         assert_eq!(pinned.engine, Engine::Claude);
         assert_eq!(pinned.model.as_deref(), Some("sub-model"));
         let saved = serde_json::to_string(&chosen).unwrap();
@@ -243,7 +267,7 @@ mod tests {
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         set(&mut cfg, tmp.path(), &[]);
         assert_eq!(
-            resolve(&cfg, "planner", None, None).unwrap(),
+            resolve(&cfg, "planner", None, None, false).unwrap(),
             Choice::default()
         );
         set(
@@ -254,7 +278,7 @@ mod tests {
                 "model planner claude selected",
             ],
         );
-        let chosen = resolve(&cfg, "planner", None, None).unwrap();
+        let chosen = resolve(&cfg, "planner", None, None, false).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }

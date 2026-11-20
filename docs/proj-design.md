@@ -345,7 +345,12 @@ it went. The two keep their jobs:
   `claude-api` (`N.engine`), so their cost is the credit's alone. Its
   refusals (no key, no room, a key or credit the API refused, a spent
   budget) end the turn in words of their own and hold no plan's turn,
-  and no plan's hold but the owner's pause holds its turns. A ready issue
+  and no plan's hold but the owner's pause holds its turns, unless the
+  role's route goes on from it. Routing: a role's route is an ordered
+  chain (`claude over 95 claude-api`, `engine/route.rs`), walked from the
+  meters and holds each time a turn starts and again before a refused run
+  runs once more; a refused run moves only within its conversation, its
+  move kept as the turn's identity, and the plugin keeps that. A ready issue
   routed to it finding no room books the drain's next pass for when the
   meter says the clock gives some back (the next UTC midnight for a spent
   day, the renewal for a spent credit, `Meter::opens`), since neither is

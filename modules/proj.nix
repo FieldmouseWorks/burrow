@@ -688,7 +688,8 @@ in
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
       Which engine, model and effort runs each role are settings: `proj settings
-      show` has them and their declared defaults, `proj settings role ROLE ENGINE`,
+      show` has them and their declared defaults, `proj settings role ROLE ENGINE
+      [over PCT ENGINE]...` (where its turns go on to when an engine is short),
       `model ROLE ENGINE MODEL|- [EFFORT]` and `offer ENGINE models|efforts ...`
       change them, and `proj engines save|use NAME|use back` keeps named sets of
       them. A model or effort must be one its engine offers. `ROLE@OWNER/REPO`

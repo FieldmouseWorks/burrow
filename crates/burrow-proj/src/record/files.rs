@@ -128,6 +128,9 @@ pub enum TurnFile {
     Cut,
     Effort,
     Engine,
+    /// The engine turn N ran on before its route first moved it onto the
+    /// credit (Job::record_engine).
+    EngineBefore,
     Execution,
     GithubAwaits,
     GithubLimit,
@@ -173,6 +176,7 @@ impl TurnFile {
             TurnFile::Cut => "cut",
             TurnFile::Effort => "effort",
             TurnFile::Engine => "engine",
+            TurnFile::EngineBefore => burrow_settings::credit::ENGINE_BEFORE,
             TurnFile::Execution => "execution",
             TurnFile::GithubAwaits => "github-awaits",
             TurnFile::GithubLimit => "github-limit",

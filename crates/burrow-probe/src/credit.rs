@@ -1,7 +1,13 @@
 //! The API credit meter as the machine stands: burrow-settings' credit
 //! setting and meter, over the cycle's [`ENGINE`] run costs that proj
 //! recorded in its jobs, each run of a turn at its own start, decoded by the same accounting the usage answer
-//! uses (answer/usage/accounting.rs). The probe's `usage` answer shows it,
+//! uses (answer/usage/accounting.rs). A run is the credit's when its marker
+//! names [`ENGINE`] (an older marker names none: its run was on the engine
+//! its turn was on before its route first moved it onto the credit, which
+//! proj keeps in N.[`credit::ENGINE_BEFORE`], or else its turn's engine), so
+//! a turn its route moved between the subscription and the credit is
+//! charged for its credit runs alone; proj keeps such a turn's engine
+//! [`ENGINE`] once it has been on the credit, which is how its job is found. The probe's `usage` answer shows it,
 //! and proj's admission of every [`ENGINE`] run reads the same [`meter`]
 //! (burrow-proj's engine/api.rs).
 //!
@@ -125,8 +131,14 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         .collect();
     turns.sort_unstable();
     let mut engines = BTreeMap::new();
+    // Each turn's engine, and the one its runs from before markers named
+    // theirs ran on: the engine it was on before it moved onto the credit,
+    // if it did.
+    let mut older = BTreeMap::new();
     for n in &turns {
         let engine = text(dir, &format!("{n}.engine"))?.unwrap_or_else(|| "claude".into());
+        let before = text(dir, &format!("{n}.{}", credit::ENGINE_BEFORE))?;
+        older.insert(*n, before.as_deref().unwrap_or(&engine) == ENGINE);
         engines.insert(*n, engine);
     }
     if !engines.values().any(|e| e == ENGINE) {
@@ -148,7 +160,7 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
             continue;
         }
         let report = decode(records.into_iter(), &mut sessions, &format!("{label}/{n}"));
-        decoded.push((n, engine == ENGINE, report));
+        decoded.push((n, older[&n], report));
     }
     let recovered: BTreeSet<&String> = decoded.iter().flat_map(|(_, _, r)| &r.recovered).collect();
     let mut gaps = BTreeSet::new();
@@ -157,6 +169,9 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         // turn's first start in N.started and writes its own in its marker.
         let mut started = None;
         for run in &report.invocations {
+            // A run on the engine its marker names; an older marker's, on
+            // the engine its turn was on before it moved.
+            let api = &run.engine.as_deref().map_or(*api, |e| e == ENGINE);
             let charged = *api || run.recovered.iter().any(|id| gaps.contains(id));
             if !charged {
                 continue;

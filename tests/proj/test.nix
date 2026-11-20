@@ -60,6 +60,9 @@ pkgs.testers.runNixOSTest {
         # telling the watchdog; over 20s on a loaded host), so that job
         # never goes ahead for having waited.
         maxWait = 45;
+        # The API credit's key, which proj-usage writes when it routes a
+        # turn on to the credit; absent, the engine has no room.
+        claudeApi.keyFile = "/tmp/api-key";
         inherit gh;
         inbox = {
           # The shared lifecycle suite covers the supported planning-off

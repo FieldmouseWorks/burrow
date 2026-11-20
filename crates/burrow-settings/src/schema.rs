@@ -37,8 +37,11 @@ pub enum Kind {
     List(&'static Kind),
     /// Any keys, each with a value of the kind.
     Map(&'static Kind),
-    /// These fields, every one of them, and no other.
+    /// These fields, every one of them but those [`Kind::Omitted`] may leave
+    /// out, and no other.
     Record(&'static [Field]),
+    /// A record's field that may be left out, and is the kind when it's there.
+    Omitted(&'static Kind),
     /// A JSON object the schema doesn't look inside (a per-repo override's
     /// settings, which its own module checks).
     Object,
@@ -144,10 +147,26 @@ const SLOTS: Kind = Kind::Count { min: 1 };
 const ENGINE: Kind = Kind::OneOf(crate::roles::ENGINES);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
-const ROUTE: Kind = Kind::Record(&[Field {
-    name: "engine",
-    kind: &ENGINE,
-}]);
+const HOPS: Kind = Kind::Omitted(&Kind::List(&Kind::Record(&[
+    Field {
+        name: "pct",
+        kind: &Kind::Percent,
+    },
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+])));
+const ROUTE: Kind = Kind::Record(&[
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+    Field {
+        name: "over",
+        kind: &HOPS,
+    },
+]);
 const ROLES: Kind = Kind::Map(&ROUTE);
 const TUNING: Kind = Kind::Record(&[
     Field {
@@ -524,7 +543,7 @@ pub static SETTINGS: &[Setting] = &[
         &ROLES,
         r#"{"*": {"engine": "claude"}}"#,
         ROLES_OVERLAY,
-        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO). The closest key wins: a named role over *, a repo's over the bare one.",
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engines a turn moves on to, in order (over: once the engine before has used pct percent of its meter, or is out of usage, the turn takes the first after it with room). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
@@ -576,12 +595,17 @@ impl Kind {
             Kind::OneOf(words) => json!({"enum": words}),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
+            Kind::Omitted(kind) => kind.schema(),
             Kind::List(kind) => json!({"type": "array", "items": kind.schema()}),
             Kind::Map(kind) => json!({"type": "object", "additionalProperties": kind.schema()}),
             Kind::Record(fields) => json!({
                 "type": "object",
                 "properties": fields.iter().map(|f| (f.name.to_owned(), f.kind.schema())).collect::<Map<_, _>>(),
-                "required": fields.iter().map(|f| f.name).collect::<Vec<_>>(),
+                "required": fields
+                    .iter()
+                    .filter(|f| !matches!(f.kind, Kind::Omitted(_)))
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>(),
                 "additionalProperties": false,
             }),
             Kind::Object => json!({"type": "object"}),
@@ -612,6 +636,7 @@ impl Kind {
             (Kind::Repo, Value::String(s)) if repo(s) => Ok(()),
             (Kind::Maybe(_), Value::Null) => Ok(()),
             (Kind::Maybe(kind), v) => kind.check(v),
+            (Kind::Omitted(kind), v) => kind.check(v),
             (Kind::List(kind), Value::Array(items)) => items
                 .iter()
                 .enumerate()
@@ -625,6 +650,7 @@ impl Kind {
                 }
                 fields.iter().try_for_each(|f| match items.get(f.name) {
                     Some(v) => f.kind.check(v).map_err(|e| format!("{}: {e}", f.name)),
+                    None if matches!(f.kind, Kind::Omitted(_)) => Ok(()),
                     None => Err(format!("{}: missing", f.name)),
                 })
             }
@@ -643,6 +669,7 @@ impl Kind {
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),
+            Kind::Omitted(kind) => kind.describe(),
             Kind::List(kind) => format!("a list of {}", kind.describe()),
             Kind::Map(_) | Kind::Record(_) | Kind::Object => "an object".into(),
         }

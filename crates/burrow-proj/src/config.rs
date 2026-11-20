@@ -366,18 +366,9 @@ impl Config {
         Ok(self.role_view()?.in_force)
     }
 
-    /// The engine a turn of ROLE in REPO runs on: the closest role key's.
+    /// The engine ROLE in REPO's route starts on: the closest role key's.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
-        Self::engine_in(&self.role_settings()?, role, repo)
-    }
-
-    /// The same, from settings already read.
-    pub(crate) fn engine_in(
-        settings: &burrow_settings::roles::InForce,
-        role: &str,
-        repo: Option<&str>,
-    ) -> Result<Engine, String> {
-        Engine::parse(&settings.route(role, repo).engine)
+        Engine::parse(&self.role_settings()?.route(role, repo).engine)
     }
 
     /// Validate the turn-start configuration without starting a job: the

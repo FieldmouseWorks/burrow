@@ -87,11 +87,26 @@ pub(crate) fn holds_machine(said: &str, sandboxed: bool) -> bool {
     !(sandboxed && is(said))
 }
 
+/// What a retry keeps as said when its run's refusal (`said`) moved the turn
+/// to `engine` ([`crate::engine::reroute`]): not a wait for usage to come
+/// back, so its next run is told the move instead ([`resumed`]).
+pub(crate) fn moved(engine: crate::engine::Engine, said: &str) -> String {
+    format!("{MOVED}{}: {said}", engine.name())
+}
+
+const MOVED: &str = "moved to ";
+
 /// What a turn refused on `said` is told when it runs again, before its
-/// prompt: what it was refused for, and that it's back.
+/// prompt: what it was refused for, and that it's back, or where the turn
+/// moved to.
 pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
     if is(said) {
         return RESUMED.to_owned();
+    }
+    if let Some((engine, why)) = said.strip_prefix(MOVED).and_then(|m| m.split_once(": ")) {
+        return format!(
+            "Your last run was refused before it finished ({why}), so this turn carries on on {engine}, the same Claude Code in the same conversation. Carry on from where you left off: see what had already finished before you run anything again. What you were asked this turn:"
+        );
     }
     format!("{}\n\n{said}. {}", crate::turn::SPENT, policy(cfg))
 }

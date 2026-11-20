@@ -2,7 +2,7 @@
 // 2026-11-16: held like a spent plan, and the owner told to log in.
 
 use crate::engine::claude::LOGGED_OUT;
-use crate::usage::login::{holds_machine, resumed};
+use crate::usage::login::{holds_machine, moved, resumed};
 use crate::usage::tests::{rig, told};
 use crate::usage::*;
 
@@ -63,6 +63,34 @@ fn the_refused_turn_is_told_its_login_was_gone() {
             policy(&cfg)
         )
     );
+}
+
+/// A refused run whose route moved its turn to another engine is told the
+/// move and why, not that usage is back, nor to wait for it.
+#[test]
+fn the_moved_turn_is_told_where_it_went() {
+    let (_d, cfg) = rig();
+    let said = moved(
+        crate::engine::Engine::ClaudeApi,
+        "Claude reached its weekly allowance",
+    );
+    let told = resumed(&cfg, &said);
+    assert!(
+        told.starts_with("Your last run was refused before it finished (Claude reached its weekly allowance), so this turn carries on on claude-api, "),
+        "{told}"
+    );
+    assert!(
+        !told.contains("It's back now") && !told.contains(policy(&cfg)),
+        "{told}"
+    );
+    let back = resumed(
+        &cfg,
+        &moved(
+            crate::engine::Engine::Claude,
+            "claude-api refused: its credit has no room: today's allowance spent",
+        ),
+    );
+    assert!(back.contains("(claude-api refused: its credit has no room: today's allowance spent), so this turn carries on on claude, "), "{back}");
 }
 
 /// A hold says what its reset is from: a login gone once a limit's hold

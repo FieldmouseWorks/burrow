@@ -201,6 +201,19 @@ pub fn room(cfg: &Config) -> bool {
         .is_some_and(|s| meter(cfg, &s.credit_file(), crate::now()).is_ok_and(|m| m.room()))
 }
 
+/// Whether the credit is short at `pct` now, as a route reads it
+/// ([`super::route`]): no room (none set, a meter that can't be read, the
+/// reserve or today's allowance reached), or `pct` percent of its cycle's
+/// budget spent.
+pub fn short(cfg: &Config, pct: f64, now: i64) -> bool {
+    let Some(settings) = cfg.settings.as_ref() else {
+        return true;
+    };
+    meter(cfg, &settings.credit_file(), now).map_or(true, |m| {
+        !m.room() || m.spent as f64 * 100.0 >= pct * m.cycle.budget as f64
+    })
+}
+
 /// When the clock alone may give the credit room again, as an observer
 /// reads it ([`burrow_settings::credit::Meter::opens`]): what the drain books
 /// a pass for when it has none. None with no credit set or a meter that
