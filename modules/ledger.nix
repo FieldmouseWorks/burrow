@@ -41,19 +41,61 @@ let
   # both writers append to and replace whatever the other made first.
   # It can't write the key's contents (though, like any writer of the
   # directory, it could replace the file), and the key's owning group gets
-  # nothing however the key was made. The files are the ones Conary's writer opens in
-  # place (conary-core's log.rs, conary-github's bases.rs); the anchor and
-  # key.pub are renamed in, and the flow reads no GitHub through `etags`,
-  # which stays burrow.user's alone. Applied on each boot and switch, and
-  # by burrow-ledger-access once the first sync has made the key.
+  # nothing however the key was made. The files are the ones Conary's
+  # writer opens in place (conary-core's log.rs, conary-github's bases.rs);
+  # the anchor and key.pub are renamed in, and the flow reads no GitHub
+  # through `etags`, which stays burrow.user's alone.
+  #
+  # It says what the ledger's access is, not what to add to it: every
+  # top-level entry is burrow.user's, and names no one but the controller
+  # it has now, so a controller changed or turned off keeps nothing. A
+  # directory in it (etags) names no one. Run as root on each boot and
+  # switch (burrow-ledger-access), and once the first sync has made the
+  # key (burrow-ledger-access-key), which its default entries don't reach.
   writable = [ "lock" "ops.jsonl" "anchor" "merge-bases" ];
-  controllerAcl = lib.optionalAttrs (controller != null) ({
-    ${cfg.dir}."a+".argument =
-      "u:${controller}:rwx,d:u:${controller}:rwx,d:u:${user}:rwx";
-    "${cfg.dir}/key".a.argument = "u::rw,g::---,o::---,u:${controller}:r,m::r";
-  } // lib.genAttrs (map (f: "${cfg.dir}/${f}") writable) (_: {
-    "a+".argument = "u:${controller}:rw";
-  }));
+  access = pkgs.writeShellApplication {
+    name = "burrow-ledger-access";
+    runtimeInputs = [ pkgs.acl pkgs.coreutils pkgs.gnused ];
+    text = ''
+      dir=${lib.escapeShellArg cfg.dir}
+      user=${lib.escapeShellArg user}
+      controller=${lib.escapeShellArg (toString controller)}
+      [ -d "$dir" ] || exit 0
+      uid=$(id -u "$user")
+      cuid=""
+      [ -z "$controller" ] || cuid=$(id -u "$controller")
+
+      # Every named entry on $1 but the ones it may keep ($2: a regex of
+      # "default:user:UID" and "user:UID"), by number, so a user since
+      # removed is found too.
+      prune() {
+        local e
+        for e in $(getfacl -cpn -- "$1" | sed -nE 's/^(default:)?(user|group):([^:]+):.*/\1\2:\3/p'); do
+          [[ $e =~ ^($2)$ ]] || setfacl -x "''${e/#default:/d:}" -- "$1"
+        done
+      }
+
+      shopt -s nullglob dotglob
+      for f in "$dir" "$dir"/*; do
+        [ "$(stat -c %u -- "$f")" = "$uid" ] || chown -h "$user" -- "$f"
+        [ -L "$f" ] && continue
+        if [ -z "$cuid" ] || { [ -d "$f" ] && [ "$f" != "$dir" ]; }; then
+          [ -z "$(getfacl -cps -- "$f")" ] || setfacl -b -- "$f"
+        elif [ "$f" = "$dir" ]; then
+          prune "$f" "user:$cuid|default:user:($cuid|$uid)"
+        else
+          prune "$f" "user:$cuid"
+        fi
+      done
+      [ -n "$cuid" ] || exit 0
+
+      setfacl -m "u:$cuid:rwx,d:u:$cuid:rwx,d:u:$uid:rwx" -- "$dir"
+      [ ! -e "$dir/key" ] || setfacl --set "u::rw,g::---,o::---,u:$cuid:r,m::r" -- "$dir/key"
+      for f in ${lib.escapeShellArgs writable}; do
+        [ ! -e "$dir/$f" ] || setfacl -m "u:$cuid:rw" -- "$dir/$f"
+      done
+    '';
+  };
   # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
   # private to the controller.
   flowData = "${config.burrow.stateDir}/flow";
@@ -405,8 +447,8 @@ in
         ledger as everyone does, and writes and signs it as burrow.user's
         writers do (a flow with a train or evidence signs its ops), through
         POSIX ACLs on `dir` that name it: that directory's file system must
-        support them. Null, the default, runs the flow as burrow.user, as
-        before.
+        support them. A controller changed or turned off keeps none of it.
+        Null, the default, runs the flow as burrow.user, as before.
       '';
     };
 
@@ -640,11 +682,11 @@ in
       CONARY_ANCHOR_REPO = cfg.anchorRepo;
     } // lib.optionalAttrs cfg.daemon { CONARY_SOCKET = socket; };
 
-    systemd.tmpfiles.settings.burrow = lib.mkMerge [ controllerAcl ({
+    systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
       # With a controller, its mode is set only on creation: a chmod of a
       # directory with an ACL sets its mask, and would take the
-      # controller's write away until controllerAcl ran again.
+      # controller's write away until burrow-ledger-access ran again.
       ${cfg.dir}.d = {
         mode = if controller == null then "0755" else ":0755";
         inherit user; group = config.users.users.${user}.group;
@@ -655,7 +697,7 @@ in
       # Entered, not listed, by the controller's group alone; each producer
       # is let in to make its own directory there (flow.producer).
       ${producers}.d = { mode = "0710"; user = "root"; group = controller; };
-    }) ];
+    };
 
     users.users = lib.mkIf (controller != null) {
       ${controller} = {
@@ -717,9 +759,9 @@ in
       wantedBy = [ "paths.target" ];
       pathConfig.PathExists = "${cfg.dir}/key.pub";
     };
-    # The controller's access (controllerAcl) once the first sync has made
-    # the key, which boot and switch would otherwise only give it next time.
-    systemd.paths.burrow-ledger-access = lib.mkIf (controller != null) {
+    # The controller's access (`access`) once the first sync has made the
+    # key, which boot and switch would otherwise only give it next time.
+    systemd.paths.burrow-ledger-access-key = lib.mkIf (controller != null) {
       wantedBy = [ "paths.target" ];
       pathConfig.PathExists = "${cfg.dir}/key";
     };
@@ -733,8 +775,9 @@ in
         then "ledger: record every repo's PRs in Conary's ledger"
         else "ledger: record %I's PRs in Conary's ledger";
       # GitHub being unavailable isn't a failure: it books the repo's next
-      # pass (sync_repo).
-      after = [ "network-online.target" ];
+      # pass (sync_repo). After the ledger's access, so what a first sync
+      # makes takes the directory's default entries.
+      after = [ "network-online.target" "burrow-ledger-access.service" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
         Type = "oneshot";
@@ -745,15 +788,26 @@ in
         Nice = 10;
       };
     }) // {
-      burrow-ledger-access = lib.mkIf (controller != null) {
-        description = "ledger: let the flow's controller sign the ledger";
+      # With a controller or without: one turned off or changed keeps
+      # nothing. Run again at a switch that changes it.
+      burrow-ledger-access = {
+        description = "ledger: give the flow's controller, and no one else, the ledger's writing";
+        wantedBy = [ "multi-user.target" ];
         after = [ "systemd-tmpfiles-setup.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = lib.getExe access;
+        };
+      };
+      burrow-ledger-access-key = lib.mkIf (controller != null) {
+        description = "ledger: give the flow's controller the key the first sync made";
         serviceConfig = {
           Type = "oneshot";
           # Done once the key is there: a path unit whose service exits
           # would start it again at once.
           RemainAfterExit = true;
-          ExecStart = "${config.systemd.package}/bin/systemd-tmpfiles --create --prefix=${cfg.dir}";
+          ExecStart = lib.getExe access;
         };
       };
       burrow-ledger-door = lib.mkIf cfg.door.enable {

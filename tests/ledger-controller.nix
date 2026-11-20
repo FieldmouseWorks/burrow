@@ -8,7 +8,8 @@
 # burrow.user's writers do (a flow with a train or evidence signs its ops),
 # through ACLs naming it: on a ledger set up after it, and on one that was
 # burrow.user's alone before. Nobody else gets the key, a producer in the
-# controller's group included. With the option off nothing changes.
+# controller's group included, and a controller changed or turned off
+# keeps nothing. With the option off nothing changes.
 #
 # cn here is a stand-in that touches the ledger's files as Conary's writer
 # does (conary-core's log.rs, conary-github's bases.rs and etags.rs): it
@@ -96,11 +97,16 @@ let
     users.users.other = { isNormalUser = true; group = config.users.users.dev.group; };
     environment.systemPackages = [ pkgs.acl ];
     # A producer, as a user of its own, wired as a producer's unit is.
-    systemd.services.producer = lib.mkIf controller {
+    systemd.services.producer = lib.mkIf (config.burrow.ledger.controllerUser != null) {
       serviceConfig = config.burrow.ledger.flow.producer "test" // {
         User = "nobody";
         ExecStart = "${python} ${listen}";
       };
+    };
+    # The controller changed, and turned off.
+    specialisation = lib.mkIf controller {
+      moved.configuration.burrow.ledger.controllerUser = lib.mkForce "conary-flow2";
+      retired.configuration.burrow.ledger.controllerUser = lib.mkForce null;
     };
     # The flow signing an op (a train's join, leave or step, evidence), as
     # the flow's units run: as its user, on its state.
@@ -192,7 +198,8 @@ pkgs.testers.runNixOSTest {
     with subtest("on a ledger burrow.user had alone before, a switch lets the flow sign"):
         on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock")
         on.fail("systemctl start flow@before.service")
-        on.succeed("systemctl restart systemd-tmpfiles-resetup.service")
+        # As the first switch to it does.
+        on.succeed("systemctl restart burrow-ledger-access.service")
         on.succeed("systemctl start flow@after.service")
         on.succeed("systemctl start burrow-ledger@sam-r.service")
         on.succeed("systemctl start flow@again.service")
@@ -203,7 +210,37 @@ pkgs.testers.runNixOSTest {
         ], ops(on)
         nobody_else_reads_the_key()
 
+    def keeps_nothing(uid):
+        # Nothing names it, it owns nothing, and it can neither read the
+        # key nor write the ledger, by number, since its user may be gone.
+        for f in [ledger] + [f"{ledger}/{f}" for f in on.succeed(f"ls -A {ledger}").split()]:
+            assert f":{uid}:" not in on.succeed(f"getfacl -cpn {f}"), f
+        assert on.succeed(f"find {ledger} -maxdepth 1 -uid {uid}") == ""
+        as_it = f"setpriv --reuid={uid} --regid={uid} --clear-groups"
+        on.fail(f"{as_it} cat {ledger}/key")
+        on.fail(f"{as_it} sh -c 'echo x >>{ledger}/ops.jsonl'")
+        on.fail(f"{as_it} touch {ledger}/x")
+
+    with subtest("a controller changed or turned off keeps nothing"):
+        old = on.succeed("id -u conary-flow").strip()
+        # The flow renames the anchor in, so it's the flow's own.
+        on.succeed("systemctl start flow@last.service")
+        assert on.succeed(f"stat -c %U {ledger}/anchor").strip() == "conary-flow"
+        on.succeed("/run/booted-system/specialisation/moved/bin/switch-to-configuration test")
+        new = on.succeed("id -u conary-flow2").strip()
+        on.succeed("systemctl start flow@moved.service")
+        assert ops(on)[-1] == ["conary-flow2", "moved"], ops(on)
+        keeps_nothing(old)
+        on.succeed("/run/booted-system/specialisation/retired/bin/switch-to-configuration test")
+        on.succeed("systemctl start burrow-ledger@sam-r.service")
+        assert ops(on)[-1] == ["dev", "sam/r"], ops(on)
+        keeps_nothing(old)
+        keeps_nothing(new)
+        assert on.succeed(f"getfacl -cps {ledger} {ledger}/*") == ""
+        assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
+
     with subtest("with the option off, nothing changes"):
+        off.wait_for_unit("burrow-ledger-access.service")
         off.succeed("systemctl start burrow-ledger@sam-r.service")
         off.succeed("systemctl start flow@by-dev.service")
         assert [o[0] for o in ops(off)] == ["dev", "dev"], ops(off)
