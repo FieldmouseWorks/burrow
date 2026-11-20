@@ -30,8 +30,6 @@ pub enum Query {
         since: When,
         until: When,
     },
-    /// The Remote Control servers: each one's state and memory.
-    Rc,
     /// proj's jobs (`proj status`).
     Queue,
     /// Where an issue stands with proj's inbox, and its job's record
@@ -54,7 +52,7 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | rc | queue | why OWNER/REPO#N | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | queue | why OWNER/REPO#N | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -210,7 +208,6 @@ impl Query {
                     "`crashes` takes an absolute executable path and optional time ({VOCABULARY})"
                 )),
             },
-            "rc" => none(Query::Rc),
             "queue" => none(Query::Queue),
             "why" => match args {
                 [issue]
@@ -294,7 +291,6 @@ impl fmt::Display for Query {
             ),
             Query::Units => f.write_str("units"),
             Query::Crashes { exe, since } => write!(f, "crashes {exe} {}", show(*since)),
-            Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),
             Query::Why { issue } => write!(f, "why {issue}"),
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
@@ -353,7 +349,6 @@ mod tests {
     fn each_word() {
         assert_eq!(Query::parse("memory"), Ok(Query::Memory));
         assert_eq!(Query::parse("  Units "), Ok(Query::Units));
-        assert_eq!(Query::parse("rc"), Ok(Query::Rc));
         assert_eq!(Query::parse("queue"), Ok(Query::Queue));
         assert_eq!(
             Query::parse("why sam/box#7"),
@@ -393,8 +388,9 @@ mod tests {
             "journal",
             "journal remi-update -1h",
             "journal remi-update -1h now extra",
-            "journal 'claude-rc@*' -1h now",
-            "journal claude-rc@* -1h now",
+            "journal 'proj-*' -1h now",
+            "journal proj-* -1h now",
+            "rc",
             "journal -u -1h now",
             "journal --since=x -1h now",
             "journal a;b -1h now",
@@ -426,8 +422,8 @@ mod tests {
     #[test]
     fn unit_names() {
         assert_eq!(
-            Unit::parse(r"claude-rc@LoK\x2dweb").unwrap().as_str(),
-            r"claude-rc@LoK\x2dweb.service"
+            Unit::parse(r"autoland@LoK\x2dweb").unwrap().as_str(),
+            r"autoland@LoK\x2dweb.service"
         );
         assert_eq!(
             Unit::parse("nix-gc.timer").unwrap().as_str(),

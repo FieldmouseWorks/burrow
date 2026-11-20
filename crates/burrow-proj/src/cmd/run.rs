@@ -227,15 +227,6 @@ const KEY: &str = "proj run --key KEY (letters, digits and ._/:-, at most 200)";
 
 /// `proj run` and `proj reply`.
 pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
-    run_with_cgroup(cfg, reply, args, || fs::read_to_string("/proc/self/cgroup"))
-}
-
-fn run_with_cgroup(
-    cfg: &Config,
-    reply: bool,
-    args: &[String],
-    cgroup: impl FnOnce() -> io::Result<String>,
-) -> Result<(), Fail> {
     let mut new = New::default();
     let mut cutoff = None;
     let mut i = 0;
@@ -377,7 +368,7 @@ fn run_with_cgroup(
                 "proj run --join needs a --key: what it joins by",
             ));
         }
-        super::starter::check(new.role.as_deref(), cgroup)?;
+        super::starter::check(new.role.as_deref())?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
     put(&format!("{id}\n"));

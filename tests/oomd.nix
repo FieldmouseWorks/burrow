@@ -61,7 +61,7 @@ pkgs.testers.runNixOSTest {
         m.succeed("fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
 
     # Pressure on the root or user.slice is never watched: oomd would ignore a
-    # user's units' opt-outs there (tests/remote-control-oomd.nix).
+    # user's units' opt-outs there.
     with subtest("oomd watches swap on the root, and pressure on the system slice"):
         swap = monitored(guarded, "Swap Monitored CGroups")
         pressure = monitored(guarded, "Memory Pressure Monitored CGroups")

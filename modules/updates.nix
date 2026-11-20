@@ -673,8 +673,6 @@ in
         github = "curl -fsS -o /dev/null --max-time 15 https://github.com";
       } // lib.optionalAttrs config.services.openssh.enable {
         sshd = "systemctl -q is-active sshd.service";
-      } // lib.optionalAttrs (config.burrow.remoteControl.enable or false) {
-        operator = "systemctl --user -M ${user}@ -q is-active claude-rc@${project}.service";
       } // lib.optionalAttrs config.services.tailscale.enable {
         tailscale = "tailscale status --json | jq -e '.BackendState == \"Running\"'";
       } // lib.optionalAttrs config.burrow.events.enable {
@@ -707,8 +705,8 @@ in
         # Whether Claude Code can authenticate: a live reading of its usage
         # meter, which only an answer from its endpoint is (burrow-claude-login,
         # of crates/burrow-usage-reset; no model call, and the token never
-        # leaves Claude Code). An expired login fails every server and job turn
-        # at once, so this names it rather than its symptoms.
+        # leaves Claude Code). An expired login fails every job turn at once,
+        # so this names it rather than its symptoms.
         claude-login = let
           probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
           claude = lib.getExe' config.burrow.claude.package "claude";
@@ -720,15 +718,6 @@ in
           }
         '';
       });
-
-      # No Remote Control server starts while Claude Code is logged out, so
-      # a login gone before a switch explains the operator's check and the
-      # servers failing after it: the switch restarted them, it didn't break
-      # them.
-      burrow.updates.healthExplains = lib.mkIf
-        ((config.burrow.claude.enable or false) && (config.burrow.remoteControl.enable or false)) {
-          claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ];
-        };
 
       environment.systemPackages = [ updateTool healthTool ];
       burrow.tools.update = updateTool;

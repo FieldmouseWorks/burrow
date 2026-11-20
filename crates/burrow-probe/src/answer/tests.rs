@@ -63,7 +63,7 @@ fn config(state: &Path) -> Config {
         user: "dev".into(),
         journal: Journal {
             units: vec!["box-update.service".into(), "autoland-*.service".into()],
-            user_units: vec!["claude-rc@*.service".into()],
+            user_units: vec!["proj-*.service".into()],
         },
         state_dir: state.to_path_buf(),
         system_repo: None,
@@ -316,11 +316,11 @@ fn memory_lists_the_biggest_cgroups() {
         &format!("{cg}/system.slice/nix-daemon.service/memory.peak"),
         "2147483648\n",
     );
-    let rc = format!(
-        "{cg}/user.slice/user-1001.slice/user@1001.service/claude.slice/claude-rc.slice/claude-rc@web.service"
+    let job = format!(
+        "{cg}/user.slice/user-1001.slice/user@1001.service/claude.slice/claude-jobs.slice/proj-web-1.service"
     );
-    write(root, &format!("{rc}/memory.current"), "3221225472\n");
-    write(root, &format!("{rc}/memory.swap.current"), "0\n");
+    write(root, &format!("{job}/memory.current"), "3221225472\n");
+    write(root, &format!("{job}/memory.swap.current"), "0\n");
     let (cfg, fake) = (config(root), Fake::default());
     let out = machine(&cfg, root, &fake).answer(&Query::Memory).unwrap();
     assert!(
@@ -344,7 +344,7 @@ fn memory_lists_the_biggest_cgroups() {
             .starts_with("3.0G       -      0K  user.slice/"),
         "{out}"
     );
-    assert!(rows[0].ends_with("claude-rc@web.service"), "{out}");
+    assert!(rows[0].ends_with("proj-web-1.service"), "{out}");
     assert!(rows[1].ends_with("  system.slice"), "{out}");
     assert!(
         rows[2].contains("512M    2.0G       -  system.slice/nix-daemon.service"),
@@ -380,13 +380,13 @@ fn a_journal_on_the_allowlist() {
     );
     drop(asked);
     // A user unit, by its own glob.
-    m.answer(&Query::parse(r"journal claude-rc@LoK\x2dweb -1h -30m").unwrap())
+    m.answer(&Query::parse(r"journal proj-LoK\x2dweb -1h -30m").unwrap())
         .unwrap();
     assert_eq!(
         fake.asked.borrow()[1].1[..3],
         [
             "--user-unit".to_string(),
-            r"claude-rc@LoK\x2dweb.service".to_string(),
+            r"proj-LoK\x2dweb.service".to_string(),
             "--since".to_string(),
         ]
     );
@@ -423,7 +423,7 @@ fn a_journal_off_the_allowlist_is_never_read() {
     let m = machine(&cfg, dir.path(), &fake);
     for line in [
         "journal sshd -1h now",
-        "journal claude-rc@web.timer -1h now",
+        "journal proj-web.timer -1h now",
         "journal box-update -1h -2h",
     ] {
         let e = m.answer(&Query::parse(line).unwrap()).unwrap_err();
@@ -433,47 +433,6 @@ fn a_journal_off_the_allowlist_is_never_read() {
         );
     }
     assert!(fake.asked.borrow().is_empty());
-}
-
-#[test]
-fn rc_names_each_server() {
-    let dir = tempfile::tempdir().unwrap();
-    let list = "claude-rc@remi.service loaded active running remi\nclaude-rc@LoK\\x2dweb.service loaded failed failed LoK-web\n";
-    let show = "Id=claude-rc@remi.service\nActiveState=active\nSubState=running\nMemoryCurrent=1073741824\nMemoryPeak=2147483648\nNRestarts=0\nActiveEnterTimestamp=Sun 2026-11-01 13:05:01 UTC\n\nId=claude-rc@LoK\\x2dweb.service\nActiveState=failed\nSubState=failed\nMemoryCurrent=18446744073709551615\nMemoryPeak=[not set]\nNRestarts=3\nActiveEnterTimestamp=\n";
-    let (cfg, fake) = (
-        config(dir.path()),
-        Fake::default()
-            .on("systemctl", "list-units", 0, list)
-            .on("systemctl", "show", 0, show),
-    );
-    let out = machine(&cfg, dir.path(), &fake).answer(&Query::Rc).unwrap();
-    let lines: Vec<&str> = out.lines().collect();
-    assert!(lines[0].starts_with("2 Remote Control servers"), "{out}");
-    assert!(
-        lines[1]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .starts_with(&["remi", "active/running", "1.0G", "2.0G", "0"]),
-        "{out}"
-    );
-    assert_eq!(
-        lines[2].split_whitespace().collect::<Vec<_>>(),
-        ["LoK-web", "failed/failed", "-", "-", "3", "-"],
-        "{out}"
-    );
-    let asked = fake.asked.borrow();
-    assert!(
-        asked
-            .iter()
-            .all(|(_, args, user)| *user && args[0] == "--user")
-    );
-    assert_eq!(
-        asked[1].1[4..],
-        [
-            "claude-rc@remi.service".to_string(),
-            r"claude-rc@LoK\x2dweb.service".to_string()
-        ]
-    );
 }
 
 #[test]

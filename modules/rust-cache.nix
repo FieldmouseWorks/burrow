@@ -61,7 +61,7 @@ let
       --add-flags ${wrapperConfig}
   '';
   # What RUSTC_WRAPPER names. A process keeps the environment it started
-  # with, and a CI runner or a Remote Control session outlives many switches.
+  # with, and a CI runner or long-lived session outlives many switches.
   # Naming the wrapper itself would leave it on the one it started with, and
   # naming /etc/rust-cache/rustc-wrapper would leave it naming nothing after a
   # switch that turns the cache off, or back to a system from before it. So
@@ -141,9 +141,8 @@ in
     environment.etc."rust-cache/rustc-wrapper".source = lib.getExe wrapper;
 
     # Every way a process here gets its environment: logins and their shells,
-    # each user's systemd manager (and so proj's jobs and the Remote Control
-    # sessions), and the system manager, for its units (the CI runners) and
-    # the ones systemd-run starts alike.
+    # each user's systemd manager (and so proj's jobs), and the system manager,
+    # for its units (the CI runners) and the ones systemd-run starts alike.
     environment.sessionVariables.RUSTC_WRAPPER = exe;
     environment.etc."environment.d/60-rust-cache.conf".text = "RUSTC_WRAPPER=${exe}\n";
     systemd.settings.Manager.DefaultEnvironment = [ "RUSTC_WRAPPER=${exe}" ];

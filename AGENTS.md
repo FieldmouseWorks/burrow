@@ -4,7 +4,7 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
 
 - [README](README.md): each module, grouped by job, with its options.
 - [docs/front-door.md](docs/front-door.md): the doors into a machine (probe,
-  undo, inbox jobs, Remote Control) and how a chat thread uses them.
+  engines, undo, inbox jobs) and how a chat thread uses them.
 - [docs/repo-baseline.md](docs/repo-baseline.md): the steward, the PR flow and
   what every repo is held to.
 - [docs/gate-design.md](docs/gate-design.md): the CI gate's design (one build

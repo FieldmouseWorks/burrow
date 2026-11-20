@@ -26,10 +26,9 @@
 { self, pkgs }:
 import ./proj/test.nix { inherit self pkgs; } "proj" ''
 
-  with subtest("real machine units require roles while session and job units may omit them"):
+  with subtest("real machine units require roles while job units may omit them"):
       import shlex
       for starter_unit, role, job, expected in [
-          ("claude-rc@role-admission.service", False, False, 1),
           ("proj-role-admission-agent.service", False, True, 1),
           ("proj-role-admission-missing.service", False, False, 2),
           ("proj-role-admission-named.service", True, False, 1),

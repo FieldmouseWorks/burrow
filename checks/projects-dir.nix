@@ -1,16 +1,16 @@
 # burrow.projectsDir is made once, by common.nix, whatever else is on: with
-# Remote Control on or off, and with the folder, the user and their group
-# moved from the example's. Each machine has exactly one tmpfiles rule for
-# the folder (rules lines and settings entries alike), 0755 and the user's;
-# one whose burrow.user it doesn't declare has none, and still evaluates.
+# proj on or off, and with the folder, the user and their group moved from
+# the example's. Each machine has exactly one tmpfiles rule for the folder
+# (rules lines and settings entries alike), 0755 and the user's; one whose
+# burrow.user it doesn't declare has none, and still evaluates.
 { self, pkgs, nixpkgs, ... }:
 let
   inherit (nixpkgs) lib;
-  machine = rc: custom: extra: lib.nixosSystem {
+  machine = proj: custom: extra: lib.nixosSystem {
     modules = [
-      self.nixosModules.remote-control
+      self.nixosModules.proj
       ../examples/machine.nix
-      { burrow.remoteControl.enable = rc; }
+      { burrow.proj.enable = proj; }
       (lib.optionalAttrs custom {
         burrow = { projectsDir = "/srv/work"; user = "sam"; };
         users.users.sam = { isNormalUser = true; group = "crew"; };
@@ -30,15 +30,15 @@ let
         lib.mapAttrsToList (type: e: "${type} ${e.mode} ${e.user} ${e.group}") (paths.${dir} or { })) t.settings);
     in map (l: "${builtins.elemAt l 0} ${builtins.elemAt l 2} ${builtins.elemAt l 3} ${builtins.elemAt l 4}") lines ++ settings;
   cases = [
-    { name = "Remote Control on"; rc = true; custom = false; dir = "/data/dev/src"; want = [ "d 0755 dev dev" ]; }
-    { name = "Remote Control off"; rc = false; custom = false; dir = "/data/dev/src"; want = [ "d 0755 dev dev" ]; }
-    { name = "Remote Control on, own folder, user and group"; rc = true; custom = true; dir = "/srv/work"; want = [ "d 0755 sam crew" ]; }
-    { name = "Remote Control off, own folder, user and group"; rc = false; custom = true; dir = "/srv/work"; want = [ "d 0755 sam crew" ]; }
-    { name = "no such user"; rc = false; custom = false; dir = "/data/dev/src"; want = [ ]; extra = { burrow.user = "ghost"; }; }
+    { name = "proj on"; proj = true; custom = false; dir = "/data/dev/src"; want = [ "d 0755 dev dev" ]; }
+    { name = "proj off"; proj = false; custom = false; dir = "/data/dev/src"; want = [ "d 0755 dev dev" ]; }
+    { name = "proj on, own folder, user and group"; proj = true; custom = true; dir = "/srv/work"; want = [ "d 0755 sam crew" ]; }
+    { name = "proj off, own folder, user and group"; proj = false; custom = true; dir = "/srv/work"; want = [ "d 0755 sam crew" ]; }
+    { name = "no such user"; proj = false; custom = false; dir = "/data/dev/src"; want = [ ]; extra = { burrow.user = "ghost"; }; }
   ];
   failures = lib.concatMap (c:
     let
-      got = rules (machine c.rc c.custom (c.extra or { })).config c.dir;
+      got = rules (machine c.proj c.custom (c.extra or { })).config c.dir;
       show = rs: "[${lib.concatMapStringsSep ", " (r: "'${r}'") rs}]";
     in lib.optional (got != c.want) "${c.name}: rules for ${c.dir}: ${show got}, want ${show c.want}") cases;
 in pkgs.runCommand "projects-dir-check" { } ''
