@@ -14,10 +14,11 @@
 //! merges into main, which moved where the bump did (another PR moved the
 //! same pin). The steward settles only a green PR with every thread
 //! resolved, and takes one that goes red out of the train; one in conflict
-//! gets no check run at all and joins no train. So that head is in no
-//! candidate for a new one to stop, and it brings in a fresh bump as if none
-//! were open, which goes up as the same PR's new head (`replace`): only a
-//! whole one, though, that isn't the stuck head's very tree (`replaces`).
+//! gets no check run to go green on, so it's never settled. So that head is
+//! in no candidate for a new one to stop, and it brings in a fresh bump as
+//! if none were open, which goes up as the same PR's new head (`replace`):
+//! only a whole one, though, that isn't the stuck head's very tree
+//! (`replaces`).
 //!
 //! The head it pushed last is `proposed`, in its state dir: a head on its PR
 //! that isn't that one is someone else's, a fix, and what it holds hasn't

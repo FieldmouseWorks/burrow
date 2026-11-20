@@ -421,9 +421,9 @@ fn a_head_main_moved_under_is_stuck_as_red_is() {
         assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(None), "{merges}");
     }
     assert!(!m.has(&pr.head), "fetched a head that isn't stuck");
-    // Main moved where the bump did: no check ever runs on that head, and no
-    // reviewer reads it, so neither says it's stuck. It's fetched, for
-    // `replaces`, and a fresh bump on main goes up in its place.
+    // Main moved where the bump did: no check runs on that head, so none
+    // fails to say it's stuck. It's fetched, for `replaces`, and a fresh
+    // bump on main goes up in its place.
     let mut gh = merging(&pr.head, "CONFLICTING");
     assert_eq!(
         stuck(&m.cfg, m.t(), &mut gh, &pr),
