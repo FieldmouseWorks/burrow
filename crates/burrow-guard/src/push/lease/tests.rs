@@ -355,7 +355,28 @@ fn a_bare_lease_needs_force_if_includes_only_where_no_named_one_covers() {
             "git push --force-with-lease=pr:origin/pr --force-with-lease=pr:SHA origin pr",
             // The bare lease cleared, the named ones go with it.
             "git push --force-with-lease=pr:SHA --no-force-with-lease --force-with-lease origin pr",
+            // A source alone, which git's configuration maps elsewhere.
+            "git -c remote.origin.push=refs/heads/pr:refs/heads/other push --force-with-lease --force-with-lease=pr:SHA origin pr",
+            "git -c push.default=upstream push --force-with-lease --force-with-lease=pr:SHA origin pr",
+            "git -c push.default=tracking push --force-with-lease --force-with-lease=pr:SHA origin pr",
         ]),
+        Some(UNLEASED),
+    );
+    // Configuration that maps nothing this push names.
+    assert_each(
+        at,
+        &each(&[
+            "git -c remote.origin.push=refs/heads/pr:refs/heads/other push --force-with-lease --force-with-lease=pr:SHA origin HEAD:pr",
+            "git -c remote.fork.push=refs/heads/pr:refs/heads/other push --force-with-lease --force-with-lease=pr:SHA origin pr",
+            "git -c push.default=simple push --force-with-lease --force-with-lease=pr:SHA origin pr",
+        ]),
+        None,
+    );
+    // The repository's own configuration, as well as the command's.
+    git(at, &["config", "push.default", "upstream"]);
+    assert_each(
+        at,
+        &each(&["git push --force-with-lease --force-with-lease=pr:SHA origin pr"]),
         Some(UNLEASED),
     );
 }

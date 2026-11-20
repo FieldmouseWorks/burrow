@@ -190,6 +190,51 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
     );
 }
 
+/// A source alone, which git's configuration maps onto another branch: a
+/// named lease on the source doesn't cover it, and the bare one beside it
+/// lets the push force over that branch's fix.
+#[test]
+fn a_named_lease_doesnt_cover_a_branch_git_maps_its_source_onto() {
+    let root = tempfile::tempdir().unwrap();
+    let (local, fixer) = (root.path().join("local"), root.path().join("fixer"));
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    git(root.path(), &["clone", "-q", "remote.git", "local"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&local, &["push", "-q", "origin", "main", "main:other"]);
+    let base = git(&local, &["rev-parse", "HEAD"]);
+    git(
+        root.path(),
+        &["clone", "-q", "-b", "other", "remote.git", "fixer"],
+    );
+    git(&fixer, &["commit", "-q", "--allow-empty", "-m", "the fix"]);
+    git(&fixer, &["push", "-q", "origin", "other"]);
+    git(&local, &["fetch", "-q", "origin"]);
+    git(&local, &["checkout", "-q", "-b", "pr"]);
+    git(&local, &["commit", "-q", "--allow-empty", "-m", "rebuilt"]);
+    git(&local, &["branch", "-q", "--set-upstream-to=origin/other"]);
+
+    for config in [
+        "remote.origin.push=refs/heads/pr:refs/heads/other",
+        "push.default=upstream",
+    ] {
+        let cmd = format!(
+            "git -c {config} push --force-with-lease --force-with-lease=pr:{base} origin pr"
+        );
+        assert!(refusal(&cmd, &local).is_some(), "{cmd}");
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
+        let out = sh(&local, &dry);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("+\trefs/heads/pr:refs/heads/other"),
+            "{cmd} would not have forced over the fix: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// A delete beside `--tags` isn't a push that only deletes: git pushes
 /// every tag with it, forced over the remote's by `-f`.
 #[test]

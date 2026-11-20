@@ -6,7 +6,11 @@
 //! held; `--force-if-includes` adds that the remote-tracking tip is in the
 //! local branch's reflog, that is, was taken in. A lease naming the object
 //! it expects (`=BRANCH:SHA`, SHA a whole object id in the repository's
-//! format) is the head the pusher saw, said outright.
+//! format) is the head the pusher saw, said outright. git holds each ref
+//! to the first lease that names it and the bare one to the rest, so a
+//! bare lease needs `--force-if-includes` unless named ones cover every
+//! destination the push names, and git's configuration maps none of them
+//! elsewhere.
 //!
 //! What overrides any lease is read as git reads it: the force bit (`-f`,
 //! `--force`, `--mirror`), a `+` refspec, and a remote configured to force
@@ -116,8 +120,21 @@ impl Push {
             return Verdict::Unread;
         };
         let remote = self.positional.first().or(self.remote.as_ref());
-        if config.forces(remote.map(String::as_str), refspecs, &updates) {
+        let remote = remote.map(String::as_str);
+        if config.forces(remote, refspecs, &updates) {
             return Verdict::Refused(CONFIGURED);
+        }
+        // A source alone a named lease covers goes where git's
+        // configuration maps it, which may be a ref no lease names: there,
+        // the bare lease is git's.
+        let bare = lease.leases.iter().any(|e| e.refname.is_none());
+        if bare
+            && !rest
+            && !lease.if_includes
+            && updates.iter().any(|r| !r.contains(':'))
+            && config.maps(remote)
+        {
+            return Verdict::Refused(UNLEASED);
         }
         let objects: Vec<&String> = lease
             .leases
@@ -148,7 +165,8 @@ fn deletes(refspec: &str) -> bool {
 
 /// The destination `refspec` updates, as a lease names it, where git's own
 /// name for it holds whatever the refspec says: `DST` in `SRC:DST`, or
-/// `SRC` alone, which git pushes to the ref of the same name. None where
+/// `SRC` alone, which git pushes to the ref of the same name unless its
+/// configuration maps it elsewhere (see [`Config::maps`]). None where
 /// the destination is another's (`HEAD` and `@` are whatever is checked
 /// out) or several (git's wildcard `*`), or `SRC` is an object, not a ref.
 /// A ref git finds by the same name (`pr`, `refs/heads/pr`) is one a lease
@@ -218,29 +236,52 @@ impl Lease {
     }
 }
 
-/// A repository's push settings: each remote's `push` refspecs and
-/// `mirror`, as `git config` reports them, the command's `-c` included.
-struct Config(Vec<(String, String, Option<String>)>);
+/// A repository's push settings, as `git config` reports them, the
+/// command's `-c` included: each remote's `push` refspecs and `mirror`,
+/// and whether `push.default` pushes a branch to its upstream.
+struct Config {
+    remotes: Vec<(String, String, Option<String>)>,
+    upstream: bool,
+}
 
 impl Config {
+    /// Whether git may push a refspec of a source alone to `remote` under
+    /// another name (`refspec_append_mapped` in git's builtin/push.c): by
+    /// a `remote.NAME.push` refspec that maps it, or `push.default`
+    /// `upstream` (`tracking`), which pushes a branch to its upstream.
+    fn maps(&self, remote: Option<&str>) -> bool {
+        self.upstream
+            || self
+                .remotes
+                .iter()
+                .any(|(name, key, _)| applies(remote, name) && key == "push")
+    }
+
     /// Whether `remote`'s configuration (every remote's, where the push
     /// names none the guard reads) forces this push: a `+` push refspec
     /// where it names no destination of its own (git maps it, forcing,
     /// even onto a branch it names), or mirroring where it names none.
     fn forces(&self, remote: Option<&str>, refspecs: &[String], updates: &[&String]) -> bool {
-        let applies = |name: &str| remote.is_none_or(|r| unknown(r) || r == name);
         let mapped = refspecs.is_empty() || updates.iter().any(|r| !r.contains(':'));
-        let forced = self.0.iter().any(|(name, key, value)| {
-            applies(name) && key == "push" && value.as_deref().is_some_and(|v| v.starts_with('+'))
+        let forced = self.remotes.iter().any(|(name, key, value)| {
+            applies(remote, name)
+                && key == "push"
+                && value.as_deref().is_some_and(|v| v.starts_with('+'))
         });
         let mut mirrors: HashMap<&str, bool> = HashMap::new();
-        for (name, key, value) in &self.0 {
-            if key == "mirror" && applies(name) {
+        for (name, key, value) in &self.remotes {
+            if key == "mirror" && applies(remote, name) {
                 mirrors.insert(name, truthy(value.as_deref()));
             }
         }
         (forced && mapped) || (refspecs.is_empty() && mirrors.values().any(|&m| m))
     }
+}
+
+/// Whether the remote `name`'s settings apply to a push to `remote`: the
+/// one it names, or any where it names none the guard reads.
+fn applies(remote: Option<&str>, name: &str) -> bool {
+    remote.is_none_or(|r| unknown(r) || r == name)
 }
 
 /// A boolean setting as git reads it: a key with no value is true.
@@ -271,22 +312,31 @@ impl Repos<'_> {
                 "config",
                 "--null",
                 "--get-regexp",
-                r"^remote\..*\.(push|mirror)$",
+                r"^(remote\..*\.(push|mirror)|push\.default)$",
             ],
             "config",
         )?;
-        let entries = out
-            .split('\0')
-            .filter(|e| !e.is_empty())
-            .filter_map(|entry| {
-                let (key, value) = entry
-                    .split_once('\n')
-                    .map_or((entry, None), |(k, v)| (k, Some(v.to_owned())));
-                let (name, setting) = key.strip_prefix("remote.")?.rsplit_once('.')?;
-                Some((name.to_owned(), setting.to_owned(), value))
-            })
-            .collect();
-        Some(Config(entries))
+        let mut config = Config {
+            remotes: Vec::new(),
+            upstream: false,
+        };
+        for entry in out.split('\0').filter(|e| !e.is_empty()) {
+            let (key, value) = entry
+                .split_once('\n')
+                .map_or((entry, None), |(k, v)| (k, Some(v.to_owned())));
+            if key == "push.default" {
+                // Any of them, not only the last: the guard errs to asking
+                // for the stronger lease.
+                config.upstream |= matches!(value.as_deref(), Some("upstream" | "tracking"));
+            } else if let Some((name, setting)) =
+                key.strip_prefix("remote.").and_then(|k| k.rsplit_once('.'))
+            {
+                config
+                    .remotes
+                    .push((name.to_owned(), setting.to_owned(), value));
+            }
+        }
+        Some(config)
     }
 
     /// The lengths of a whole object id in the repository at `at`: its
