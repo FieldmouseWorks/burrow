@@ -8,10 +8,11 @@
 //! modules/updates.nix builds the config in, as `advisory-watch`.
 //!
 //! Plain code does the filtering (sources.rs): only findings it hasn't seen
-//! before, only for things that are really installed. What's left becomes a
-//! Claude job, in the machine's own project or in the project, which decides
-//! if it's real and fixes it, patching the machine ahead of the NixOS
-//! channel when it has to (task.rs). Each source's first pass, and a new
+//! before, only for things that are really installed (a crate only when
+//! cargo builds it), and no notice that has nothing to fix (an unmaintained
+//! crate). What's left becomes a Claude job, in the machine's own project
+//! or in the project, which decides if it's real and fixes it, patching the
+//! machine ahead of the NixOS channel when it has to (task.rs). Each source's first pass, and a new
 //! project's, only records what's there, so a fresh install doesn't start
 //! with a hundred jobs; Renovate's security PRs cover what was already open.
 //! A finding is seen once its job has started: one that couldn't be handed
@@ -49,12 +50,12 @@ impl Finding {
 
 /// Now, as `date -Is` wrote it, in the machine's time zone.
 pub fn stamp() -> String {
-    jiff::Zoned::now()
+    jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
 }
 
 /// Today, in the machine's time zone.
 pub fn today() -> String {
-    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
+    jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string()
 }

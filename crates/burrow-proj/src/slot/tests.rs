@@ -94,7 +94,7 @@ impl Drop for Kid {
 
 fn spawn_child(what: &str, jobs: &Path, max_jobs: usize, args: &[String]) -> Kid {
     admission::bind_fixture(jobs, max_jobs);
-    let child = Command::new(env::current_exe().unwrap())
+    let child = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::child",
@@ -124,18 +124,11 @@ fn child() {
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
-    if what == "codex-pool-release" {
-        pools::release_codex_pool();
-        return;
-    }
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if matches!(
-        what.as_str(),
-        "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
-    ) {
+    if matches!(what.as_str(), "hand-over" | "stay" | "paused-hand-over") {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         burrow_test::executable(
@@ -145,7 +138,7 @@ fn child() {
 case $1 in
   _handover_format) echo 1 ;;
   _retry_format) echo 4 ;;
-  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
+  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/.handed" && mv "{jobs}/$2/.handed" "{jobs}/$2/handed" ;;
 esac
 "#
             ),
@@ -156,33 +149,21 @@ esac
         if what.starts_with("paused-") {
             cfg.settings.as_mut().unwrap().allowed.clear();
             fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
-            let engine = if what == "paused-codex-hand-over" {
-                crate::engine::Engine::Codex
-            } else {
-                crate::engine::Engine::Claude
-            };
-            super::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap_err();
-        } else if what == "hand-over" {
-            take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
-        } else {
-            held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
-            fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
-        }
-    }
-    if what == "codex" {
-        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
-        held = Some(
             super::take_engine(
                 &cfg,
                 &id,
                 "1",
                 Class::Normal,
-                false,
-                crate::engine::Engine::Codex,
+                true,
+                crate::engine::Engine::Claude,
             )
-            .unwrap(),
-        );
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+            .unwrap_err();
+        } else if what == "hand-over" {
+            take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
+        } else {
+            held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
+            publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
+        }
     }
     if what == "soon" {
         cfg.max_wait = 4;
@@ -207,10 +188,18 @@ esac
                     .success()
             );
         }
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     let _ = std::io::stdin().read(&mut [0]);
     drop(held);
+}
+
+/// Writes what the child tells the test as a whole file or none: a temp file
+/// renamed into place, so a test that sees `path` exist never reads it empty.
+fn publish(path: &Path, content: &str) {
+    let tmp = path.with_file_name(format!(".{}", path.file_name().unwrap().to_string_lossy()));
+    fs::write(&tmp, content).unwrap();
+    fs::rename(&tmp, path).unwrap();
 }
 
 fn until(what: &str, mut done: impl FnMut() -> bool) {
@@ -271,7 +260,7 @@ fn line_of_size(tmp: &TempDir, jobs: &Path, n: usize) -> Kid {
 #[test]
 fn a_look_runs_git_once_a_project() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::counted_look",
@@ -475,8 +464,33 @@ fn waiters(jobs: &Path, tmp: &TempDir, ids: &[&str], max_jobs: usize) -> Vec<Kid
     kids
 }
 
-// Whole, with real processes: the line's head takes the free slot within
-// seconds of it coming free, with the rest of the line skipping their looks.
+/// How soon a free slot goes to the next in line: a look or two each, a pass
+/// apart, however loaded the runner, and well short of LOOK_EVERY, the
+/// fallback a waiter the note skips looks again by. A head that took the slot
+/// only then, not as it came free, would miss this.
+const SOON: Duration = Duration::from_secs(LOOK_EVERY as u64 / 2);
+
+/// Waits for each of `next` to take a slot, within SOON of `freed`, failing the
+/// moment any of `behind` takes one instead.
+fn only_next_take(jobs: &Path, freed: Instant, next: &[&str], behind: &[&str]) {
+    loop {
+        for w in behind {
+            assert_eq!(took(jobs, w), None, "{w} took a slot ahead of {next:?}");
+        }
+        if next.iter().all(|w| took(jobs, w).is_some()) {
+            return;
+        }
+        assert!(
+            freed.elapsed() < SOON,
+            "{next:?} not all in a slot {:?} after it freed",
+            freed.elapsed()
+        );
+        sleep(Duration::from_millis(20));
+    }
+}
+
+// Whole, with real processes: the line's head takes the free slot as it frees,
+// not at a later fallback, with the rest of the line skipping their looks.
 #[test]
 fn the_head_takes_a_slot_as_it_frees() {
     let tmp = TempDir::new().unwrap();
@@ -484,14 +498,11 @@ fn the_head_takes_a_slot_as_it_frees() {
     let held = File::create(jobs.join(".slots/1")).unwrap();
     held.try_lock().unwrap();
     let _kids = waiters(&jobs, &tmp, &["w0", "w1", "w2", "w3", "w4"], 1);
-    let freed = now();
+    let freed = Instant::now();
     held.unlock().unwrap();
-    until("the head of the line takes the slot", || {
-        took(&jobs, "w0").is_some()
-    });
-    let at = took(&jobs, "w0").unwrap();
-    assert!(at - freed <= 6, "took a free slot {}s after", at - freed);
-    for w in ["w1", "w2", "w3", "w4"] {
+    let behind = ["w1", "w2", "w3", "w4"];
+    only_next_take(&jobs, freed, &["w0"], &behind);
+    for w in behind {
         assert_eq!(took(&jobs, w), None, "{w} took a slot w0 holds");
     }
     until("w0's place goes", || in_queue(&jobs) == 4);
@@ -510,15 +521,12 @@ fn two_free_slots_both_go() {
     a.try_lock().unwrap();
     b.try_lock().unwrap();
     let _kids = waiters(&jobs, &tmp, &["w0", "w1", "w2", "w3", "w4"], 2);
-    let freed = now();
+    let freed = Instant::now();
     a.unlock().unwrap();
     b.unlock().unwrap();
-    for w in ["w0", "w1"] {
-        until("the next two take the slots", || took(&jobs, w).is_some());
-        let at = took(&jobs, w).unwrap();
-        assert!(at - freed <= 6, "{w} took a slot {}s after", at - freed);
-    }
-    for w in ["w2", "w3", "w4"] {
+    let behind = ["w2", "w3", "w4"];
+    only_next_take(&jobs, freed, &["w0", "w1"], &behind);
+    for w in behind {
         assert_eq!(took(&jobs, w), None, "{w} went ahead of the line");
     }
     until("their places go", || in_queue(&jobs) == 3);
@@ -612,16 +620,19 @@ fn max_wait_goes_by_when_it_came() {
     let since = now() - 7200;
     fs::create_dir_all(jobs.join("late")).unwrap();
     fs::write(jobs.join("late/since"), format!("{since}\n")).unwrap();
+    // Before it came, so a slow runner only lengthens what's measured: it goes
+    // among the --first ones once a whole-second now() is maxWait (4) past
+    // when it came, so more than 3s after this.
+    let started = Instant::now();
     let _late = waiter_to("soon", &jobs, &tmp, "late", 1);
     let normal = jobs.join(format!(".queue/2-{since}000000000-late"));
     let first = jobs.join(format!(".queue/1-{since}000000000-late"));
     until("late's place among the normal turns", || normal.exists());
-    let joined = Instant::now();
     until("late's place among the --first ones", || first.exists());
     assert!(
-        joined.elapsed() >= Duration::from_secs(2),
+        started.elapsed() >= Duration::from_secs(3),
         "among the --first ones after {:?}, not maxWait",
-        joined.elapsed()
+        started.elapsed()
     );
 }
 
@@ -656,7 +667,7 @@ fn a_place_left_by_a_hand_over() {
 #[test]
 fn who_is_handed_over_to() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::successors",
@@ -933,10 +944,6 @@ mod reset;
 mod usage;
 
 mod admission;
-
-mod codex;
-
-mod pools;
 
 mod github;
 

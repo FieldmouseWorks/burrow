@@ -37,6 +37,10 @@
 //! proj run --key KEY PROJECT "task"  what its starter knows it by before
 //!                             it has its id: one job a key, taken at once
 //!                             (a key a started job has is refused)
+//! proj run --key KEY --join PROJECT "task"  one job at work a key: while
+//!                             the key's job is at work, the run joins it
+//!                             (says its id, starts nothing); once it has
+//!                             ended, the key is the new job's
 //! proj reply [--first] ID "message"  continue that job's conversation
 //! proj reply --cut-off N ID "message"  so, if its turn N was cut off
 //!                             (else exit 3)
@@ -84,9 +88,8 @@
 //! proj done                   from inside a job: its work is finished
 //! ```
 //!
-//! Jobs run headless in their project: Claude under the managed settings,
-//! Codex in its sandbox (`engine::sandbox`) with its generated forbidden command rules. Neither
-//! asks mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
+//! Jobs run headless in their project, Claude under the managed settings,
+//! and never ask mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
 //! Everything a job said is kept in its folder in jobs ([`job`] has what's
 //! in it); what it builds goes in a scratch dir of its own, PROJ_SCRATCH,
 //! cleared once the job is over ([`scratch`]).
@@ -118,7 +121,9 @@
 //! in its own conversation and slot, twice a turn at most ([`turn`]). One
 //! Claude Code refuses because the plan's usage is spent puts the whole
 //! machine out of usage until the limit resets: no turn takes a slot till
-//! then, and the refused one waits in line and runs again ([`usage`]).
+//! then, and the refused one waits in line and runs again ([`usage`]). One
+//! it refuses because its login here expired holds every turn here the same
+//! way, until someone logs in again; a sandbox's runs on its own token.
 //!
 //! A turn ends at its answer. Claude -p stays up after it while anything it
 //! left in the background runs (a CI watch, say), holding a slot to do
@@ -154,8 +159,10 @@
 //! With --app every turn runs in that App's env (modules/github.nix), its
 //! file from apps, so git and gh act as the App: the machine's own work, not
 //! the user's. A turn whose App is gone fails rather than run as the user.
-//! A Codex turn with no --app runs in the machine's App's env (machinery),
-//! or not at all: its sandbox keeps the user's logins out ([`turn::github_app`]).
+
+// Tests build a job's folder by hand, its markers included, through the
+// by-name door (Job::path, Job::turn) the rest of the crate can't use.
+#![cfg_attr(test, allow(deprecated))]
 
 use std::fs;
 use std::io;
@@ -166,6 +173,7 @@ pub mod ask;
 pub mod cmd;
 pub mod config;
 pub mod engine;
+mod first;
 pub mod github;
 pub mod github_quota;
 pub mod guest;
@@ -176,9 +184,9 @@ pub mod pick;
 pub mod planning;
 pub mod probe;
 mod question;
+pub mod record;
 pub mod retry;
 pub mod scratch;
-pub mod select;
 pub mod settings;
 pub mod slot;
 pub mod snapshot;

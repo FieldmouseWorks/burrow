@@ -19,7 +19,7 @@ fn accepted_unreconciled_parked_answers_are_recovered_before_identity_validation
         // The launcher accepted a parked answer, but died before cleaning up.
         z.set_turns(2).unwrap();
         fs::write(z.path("prompt.2"), "first accepted answer").unwrap();
-        crate::policy::mark(&z, "queued", false).unwrap();
+        crate::policy::mark(&z, "queued", false, None).unwrap();
         fs::write(
             host_path(&z, "resume-2"),
             r#"{"through":1,"answered":true,"clear":true,"accepted":true,"applied":false}"#,
@@ -47,7 +47,7 @@ fn a_fixed_cohort_receives_one_answer_even_when_every_follower_is_parked() {
     let (_dir, cfg) = fixture();
     for id in ["a", "b", "c", "d"] {
         asks(&cfg, id, Some("subject"), false);
-        crate::policy::mark(&Job::new(&cfg, id), "done", false).unwrap();
+        crate::policy::mark(&Job::new(&cfg, id), "done", false, None).unwrap();
     }
     let cohort = ask::cohort(&Job::new(&cfg, "a")).unwrap();
     reply_answer(&cfg, "a", "yes", false).unwrap();

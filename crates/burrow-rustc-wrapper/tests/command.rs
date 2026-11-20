@@ -39,7 +39,7 @@ fn stand_ins() -> &'static Path {
             b.join("id"),
             "#!/bin/sh\n[ \"$1\" = -un ] && [ -n \"$WHO\" ] && echo \"$WHO\"\n",
         );
-        fs::write(b.join("not-runnable"), "#!/bin/sh\n").unwrap();
+        fs::write(b.join("not-runnable"), "not a program\n").unwrap();
         bin
     })
     .path()

@@ -13,6 +13,19 @@ impl Job<'_> {
         at: i64,
         start: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
+        self.start_budgeted_run(n, at, None, start)
+    }
+
+    /// [`Self::start_run`], its marker saying the most the run may spend in
+    /// micro-dollars when it has a budget (a `claude-api` run's admission,
+    /// engine/api.rs), which the credit's meter holds until its cost is in.
+    pub(crate) fn start_budgeted_run<T>(
+        &self,
+        n: &str,
+        at: i64,
+        budget: Option<i64>,
+        start: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         let dir = Dir::open(&self.dir)?;
         let mut stream = dir.append_file(&format!("{n}.jsonl"))?;
         let from = stream.metadata()?.len();
@@ -30,7 +43,13 @@ impl Job<'_> {
                 }
                 Err(e) => return Err(e),
             }
-            writeln!(stream, "{{\"type\":\"burrow.run\",\"at\":{at}}}")?;
+            match budget {
+                Some(b) => writeln!(
+                    stream,
+                    "{{\"type\":\"burrow.run\",\"at\":{at},\"budget\":{b}}}"
+                )?,
+                None => writeln!(stream, "{{\"type\":\"burrow.run\",\"at\":{at}}}")?,
+            }
             start()
         })();
         if let Err(error) = result {

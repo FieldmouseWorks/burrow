@@ -26,8 +26,7 @@
 //! isn't left waiting. A person's issue is work they asked for, so its job
 //! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
-//! one. A Codex turn, whoever's issue it is, acts as an App all the same
-//! (`turn::github_app`).
+//! one (`turn::github_app`).
 //!
 //! Discovery uses REST; text is read with its edit history through GraphQL.
 
@@ -41,7 +40,6 @@ use serde_json::Value;
 
 use crate::cmd::{New, start_job};
 use crate::config::{Config, Inbox};
-use crate::github::every;
 use crate::job::Job;
 use crate::pick::origin;
 use crate::{Fail, io_fail, now, read, swap};
@@ -56,7 +54,7 @@ const FORGET_WAIT: Duration = Duration::from_secs(600);
 /// What a turn cut off before it answered (proj reply --cut-off) is told.
 const CUT_OFF: &str = "Your last turn was cut off before you answered: its whole unit was killed (out of memory, as a rule), and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
-/// `proj-inbox [status | forget OWNER/REPO | OWNER/REPO]`.
+/// `proj-inbox [status | forget OWNER/REPO | drain | OWNER/REPO]`.
 pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     let inbox = cfg
         .inbox
@@ -88,11 +86,11 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
         }
-        let _permit = resumption::Permit::new(pass);
+        let _permit = resumption::Permit::pass(pass);
         return forget(cfg, &inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
-    let pass = resumption::Permit::new(pass);
+    let pass = resumption::Permit::pass(pass);
     let mut p = Pass {
         cfg,
         inbox,
@@ -101,39 +99,112 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         unreached: Vec::new(),
         looked: Vec::new(),
         observe: false,
-        scope: if only.is_empty() { None } else { told() },
+        scope: if only.is_empty() || only == "drain" {
+            None
+        } else {
+            told()
+        },
+        drain_at: None,
+        skipped: Vec::new(),
     };
-    let result = p.run(only).and_then(|()| p.finish(only));
-    drop(pass);
-    crate::policy::wake(cfg);
+    // `drain`: the drain's own pass, from the saved ready lists alone.
+    let result = if only == "drain" {
+        p.drain_once()
+    } else {
+        p.run(only)
+    }
+    .and_then(|()| p.finish(only));
+    release_parked(cfg, pass);
     result
+}
+
+/// What's parked waits for capacity this pass may have freed, and for the
+/// lock the pass holds; passes run back to back, so the policy unit's own
+/// try for that lock almost never finds it free (#1009). So the pass, still
+/// holding it, releases them itself, in the policy's own order and under the
+/// same capacity count (`resumption::admission` sees the permit), and only
+/// then lets go. Should that fail, the policy unit takes its turn after.
+fn release_parked(cfg: &Config, pass: resumption::Permit) {
+    let released = crate::policy::reconcile(cfg);
+    drop(pass);
+    if let Err(error) = released {
+        eprintln!("proj-inbox: releasing parked work: {error}");
+        crate::policy::wake(cfg);
+    }
 }
 
 /// Which issue is which job.
 fn status(cfg: &Config, inbox: &Inbox) {
-    for d in dirs(&inbox.state, "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let issue = read(&d.join("issue")).unwrap_or_default();
+    for (issue, id) in record::observer(cfg, inbox).kept_jobs() {
         let st = Job::new(cfg, &id).state();
         println!("{issue:<40} {st:<8} {id}");
     }
-    for d in dirs(&inbox.state.join(".triage"), "") {
-        let Some(id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
-            continue;
-        };
-        let name = d
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let issue = name
-            .rsplit_once('-')
-            .map(|(k, n)| format!("{}#{n} (sorting)", k.replacen('_', "/", 1)))
-            .unwrap_or(name);
-        let st = Job::new(cfg, &id).state();
-        println!("{issue:<40} {st:<8} {id}");
+}
+
+/// `proj plan done OWNER/REPO#N PR-URL`: one of the inbox's authors, on the
+/// host and never from a job, records the merged PR that landed a task
+/// list's child, and the list moves on at its repo's next pass. The author
+/// is the GitHub account the caller's own gh answers as.
+pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+    let [done, child, pr] = args else {
+        return Err(Fail::new(2, plans::PLAN_USAGE));
+    };
+    if done != "done" {
+        return Err(Fail::new(2, plans::PLAN_USAGE));
     }
+    if std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty()) {
+        return Err(Fail::new(
+            2,
+            "proj plan done is the host's, for an author: a job never records a landed PR",
+        ));
+    }
+    let inbox = cfg
+        .inbox
+        .as_ref()
+        .filter(|i| i.planning)
+        .ok_or_else(|| Fail::new(1, "proj plan done: inbox planning isn't on here"))?;
+    let caller = crate::github::reported(burrow_github::call_repeating(
+        &mut burrow_github::Gh::default(),
+        "GET",
+        "user",
+        None,
+    ))
+    .and_then(|r| r.json().ok())
+    .and_then(|v| v["id"].as_u64());
+    // Under the pass lock, as passes and `forget` are: the child's place on
+    // its list and the record land together, with no pass writing beside it.
+    let lock = PathBuf::from(format!("{}.lock", inbox.wake.display()));
+    let held = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&lock)
+        .map_err(|e| io_fail(&lock, e))?;
+    if !lock_within(&held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+        return Err(Fail::new(
+            1,
+            "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
+        ));
+    }
+    let permit = resumption::Permit::pass(held);
+    let p = Pass {
+        cfg,
+        inbox,
+        project: projects(cfg),
+        wake: BTreeMap::new(),
+        unreached: Vec::new(),
+        looked: Vec::new(),
+        observe: false,
+        scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
+    };
+    let repo = p.plan_done(child, pr, caller)?;
+    drop(permit);
+    crate::job::kick(cfg, [format!("proj-inbox/{repo}")]);
+    println!(
+        "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
+    );
+    Ok(())
 }
 
 mod dirs;
@@ -141,12 +212,22 @@ use dirs::dirs;
 mod forget;
 use forget::{forget, lock_within};
 mod scope;
+use record::files::{self, File};
 use scope::told;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
 /// folder itself, never a linked worktree of it (.git is a file there) or a
 /// second clone. A hidden folder counts only when it's named for its repo
 /// (o/.github in .github), and a plain one goes first.
+/// The folder of `repo`'s own clone among the projects, by [`projects`]'
+/// rule, the repo's name compared as GitHub does, without case.
+pub(crate) fn project_of(cfg: &Config, repo: &str) -> Option<String> {
+    projects(cfg)
+        .into_iter()
+        .find(|(r, _)| r.eq_ignore_ascii_case(repo))
+        .map(|(_, folder)| folder)
+}
+
 fn projects(cfg: &Config) -> BTreeMap<String, String> {
     let mut all: Vec<(String, PathBuf)> = fs::read_dir(&cfg.projects)
         .map(|d| {
@@ -252,6 +333,13 @@ struct Pass<'a> {
     /// the repo's issues, and what it keeps of the others stays as it is.
     /// None: every one, listed.
     scope: Option<BTreeSet<u64>>,
+    /// When the drain's own pass is wanted, as this pass works out
+    /// (drain.rs): written to the drain's wake file as it ends.
+    drain_at: Option<i64>,
+    /// Repos this pass looked at in part, leaving the listing of every
+    /// open issue to a later pass (scope.rs): it says nothing of whether
+    /// that listing reaches GitHub again.
+    skipped: Vec<String>,
 }
 
 impl Pass<'_> {
@@ -388,7 +476,7 @@ impl Pass<'_> {
             .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
-    /// A Codex label takes precedence when an issue has both labels.
+    /// The engine its label selects; the first, by name, when it has more.
     fn engine(&self, issue: &Value) -> Option<crate::engine::Engine> {
         let labels = issue["labels"].as_array()?;
         self.inbox
@@ -400,7 +488,7 @@ impl Pass<'_> {
                     .any(|l| l["name"].as_str() == Some(name.as_str()))
             })
             .map(|(_, engine)| *engine)
-            .max_by_key(|e| *e == crate::engine::Engine::Codex)
+            .next()
     }
 
     /// Whether an issue's job waits in no line (proj run --unstick): it has
@@ -467,12 +555,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// its `input`, the [`Pass::issue_text`] it was last given. A record
     /// without one (made before inputs were kept) wasn't handed it.
     pub(super) fn handed(d: &Path, now: &str) -> bool {
-        fs::read_to_string(d.join("input")).is_ok_and(|kept| kept == now)
+        files::input(d).is_ok_and(|kept| kept == now)
     }
 
     /// Kept in the job's record (`d`): what it's been handed of its issue now.
     pub(super) fn hand(d: &Path, input: &str) -> Result<(), Fail> {
-        fs::write(d.join("input"), input).map_err(|e| io_fail(&d.join("input"), e))
+        files::mark(d, File::Input).put(input)
     }
 
     /// Each job works in a worktree of its own, in its own scratch (proj's
@@ -591,6 +679,9 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 
     fn run(&mut self, only: &str) -> Result<(), Fail> {
+        // The machine's own bookkeeping first, before GitHub is asked
+        // anything: a dry quota can't keep a finished sorting job's slot.
+        self.settle();
         self.prune_planner_waits()?;
         let repos: Vec<(String, String)> = self
             .project
@@ -633,21 +724,30 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             self.jobs(&repo, &p, &open)?;
             if self.inbox.triage.is_some() {
-                let Some(all) = all.or_else(|| {
-                    every(
-                        self.cfg,
-                        &format!("repos/{repo}/issues?state=open&per_page=100"),
-                    )
-                }) else {
-                    self.miss(&repo);
-                    continue;
+                // Every open issue, listed at most once a gap: a pass sooner
+                // than that leaves triage and the ready list to the pass it
+                // books for the gap's end (scope.rs).
+                let all = match all {
+                    Some(all) => all,
+                    None => {
+                        if let Some(due) = self.listing_due(&repo) {
+                            self.book(&repo, due);
+                            self.skipped.push(repo.clone());
+                            continue;
+                        }
+                        let Some(all) = self.list_all(&repo)? else {
+                            self.miss(&repo);
+                            continue;
+                        };
+                        all
+                    }
                 };
                 self.triage(&repo, &all)?;
                 self.sequence(&repo, &all);
                 self.note_ready(&repo, &all)?;
             }
         }
-        self.drain()
+        self.drain_once()
     }
 
     /// Whether an agent may read the issue: one of the authors opened it,
@@ -680,8 +780,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// An issue passed over (its opener not one of the authors, or its text
     /// from outside them): said on the issue once, or tried again next pass.
     fn refuse(&mut self, repo: &str, n: &str, said: &str, d: &Path) -> Result<(), Fail> {
-        let refused = d.join("refused");
-        if refused.exists() {
+        if files::refused(d) {
             return Ok(());
         }
         if !self.post(repo, n, said) {
@@ -689,7 +788,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             return Ok(());
         }
         fs::create_dir_all(d).map_err(|e| io_fail(d, e))?;
-        fs::write(&refused, "").map_err(|e| io_fail(&refused, e))
+        files::mark(d, File::Refused).put("")
     }
 
     /// The wake-ups, in place of the ones the repos looked at had; who's out
@@ -720,19 +819,26 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         let text = serde_json::to_string_pretty(&at)
             .map_err(|e| Fail::new(1, format!("proj-inbox: {e}")))?;
         swap(wake, &format!("{text}\n")).map_err(|e| io_fail(wake, e))?;
+        self.wake_drain(now)?;
 
-        // Since when each repo has been out of reach, until a pass reaches it
-        // again in full: a scoped success hasn't verified the failed work.
-        let gone = self.inbox.state.join(".unreached");
+        // Since when each repo has been out of reach (the drain's misses
+        // too, whatever pass it ran in), until a pass reaches it again in
+        // full: a scoped success, or a pass that left the listing to a later
+        // one, hasn't verified the failed work.
+        let gone = record::files::unreached(&self.inbox.state);
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
-        for repo in &self.looked {
+        for repo in &self.unreached {
             let f = gone.join(key(repo));
-            if self.unreached.contains(repo) {
-                if !f.exists() {
-                    fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
-                }
-            } else if self.scope.is_none() {
-                let _ = fs::remove_file(&f);
+            if !f.exists() {
+                fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
+            }
+        }
+        for repo in &self.looked {
+            if self.scope.is_none()
+                && !self.unreached.contains(repo)
+                && !self.skipped.contains(repo)
+            {
+                let _ = fs::remove_file(gone.join(key(repo)));
             }
         }
         let left = || -> Vec<(String, PathBuf)> {
@@ -807,6 +913,25 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 }
 
+impl Pass<'_> {
+    /// The drain's wake file, {"": epoch}, for burrow-events to run its pass
+    /// then: the soonest of what it had still to come and this pass's
+    /// [`Pass::drain_at`].
+    fn wake_drain(&self, now: i64) -> Result<(), Fail> {
+        let Some(want) = self.drain_at else {
+            return Ok(());
+        };
+        let f = &self.inbox.drain_wake;
+        let had = fs::read(f)
+            .ok()
+            .and_then(|t| serde_json::from_slice::<BTreeMap<String, Value>>(&t).ok())
+            .and_then(|m| m.get("").and_then(Value::as_i64))
+            .filter(|at| *at > now);
+        let at = had.map_or(want, |had| had.min(want));
+        swap(f, &format!("{}\n", serde_json::json!({ "": at }))).map_err(|e| io_fail(f, e))
+    }
+}
+
 /// What proj would have said on stderr about a command that didn't work.
 fn say(f: Fail) {
     if let Some(s) = f.say {
@@ -823,10 +948,12 @@ mod jobs;
 mod plans;
 pub(crate) mod resumption;
 mod retirement;
+pub(crate) mod settle;
 mod written;
 
-pub(crate) use drain::WAITING;
+pub(crate) use drain::DRAIN_KICK;
 mod planner_waits;
+pub(crate) mod record;
 mod sorting_questions;
 mod triage;
 mod write;
@@ -838,11 +965,19 @@ mod enrollment_review_tests;
 #[cfg(test)]
 mod handed_tests;
 #[cfg(test)]
+mod once_tests;
+#[cfg(test)]
 mod parking_tests;
+#[cfg(test)]
+mod pass_release_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]
+mod record_tests;
+#[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod settle_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]

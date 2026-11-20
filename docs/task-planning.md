@@ -4,9 +4,8 @@
 triage is disabled. In that case only enrolled, ready and tracker issues
 enter the planning queue; unrelated unlabelled issues remain untouched.
 Planning uses a new job on the `planner` role, independently of the
-implementation engine label. This role defaults to Codex. Its model and
-effort come from the role configuration; a Claude selection requires an
-explicit small model, so it cannot fall through to the Claude default.
+implementation engine label. Its model and effort come from the role
+configuration like any other role's, Claude's own where none is set.
 Host planning jobs are required;
 enabling planning with `inbox.vm` is rejected at configuration time.
 
@@ -33,9 +32,51 @@ normal event pass makes only the first unfinished child `ready`. The normal
 drain and worker admission both check the parent list. A child is offered
 once; a later deferral is retained instead of repeatedly paying to replan
 unchanged work. A manually applied
-engine label cannot admit a later child. Completion requires a merged PR,
-not merely a closed issue. Nested splits complete through their own lists.
-Issue, PR and turn-completion events advance the list without a parent job.
+engine label cannot admit a later child. Nested splits complete through
+their own lists. Issue, PR and turn-completion events advance the list
+without a parent job.
+
+A child is done when a merged PR is tied to it, whatever the PR's body
+said. Tied means a merged PR from any repository that closes it by a
+closing reference, a merged PR the child's own job awaited (`proj await`)
+before it ended with its own `proj done`, or one an author recorded. The
+job's awaits are kept in the child's plan folder (`.plans/OWNER_REPO-N/
+awaited`) only once the child is closed on an accepted completion (the
+checks that close an issue with its finished job, a `done` that isn't a
+one-way question's timeout, no owner's answer owed), and bound to that
+closure: when it closed, and the title and body it closed with. A child
+reopened, edited or closed again doesn't inherit them, whether or not a
+pass saw it open. The inbox closes an open child (repair-lane children
+included) once one of its awaited PRs has merged, and keeps them in that
+pass, on the closure GitHub answers the close with, before the job is let
+go; a child closed first, by hand say, keeps them the same way before the
+job's record goes. Either way the closure's text must be the text the
+completion was checked against. An awaited PR counts whenever it
+merges, a pass looking again hourly, and a source GitHub can't answer for
+never vetoes another that proves the child done. A closed child with
+nothing tied is not done: a hand close stays a no-op, but the checklist
+says once that the list waits on it, and the owner's notice is ensured
+every pass, and hourly, while the list waits, then closed until the
+notifier confirms it, whether or not the parent is still open; a pass
+scoped to other issues leaves it be. When the work provably landed some
+other way, an author records it from the host with `proj plan done
+OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
+pass lock. It refuses inside a job, a GitHub account outside
+`inbox.authors`, a repo that isn't one of the machine's projects and a PR
+that hasn't merged; the next pass advances the list and closes the child
+if it's still open. A child whose work went on in another issue hands
+its place to that issue: an author comments on the closed child with a
+line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
+newest comment with such a line counts, and only as `written` verifies it,
+every writer and editor an author. The successor must be an issue in one
+of the machine's projects, and not the parent or a child on the same list.
+The list then waits on it, its checklist saying "continued as" it, with no
+notice and nothing to record by hand, looking again hourly. The child is
+done when the successor is, by the same rules as a child, or when the
+successor is a PR, once it merges. A successor
+closed without that passes the place on to the one it names in turn; with
+none, one that's gone, or one that can't be followed, the child waits as a
+hand close does.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes

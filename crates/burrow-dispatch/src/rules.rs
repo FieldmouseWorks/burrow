@@ -31,11 +31,12 @@ pub enum Move {
         state: String,
         why: String,
     },
-    /// Cancel a push run that hasn't started, that a later one of its
-    /// workflow on the same branch has made moot.
+    /// Cancel a push run that hasn't finished, that a later one of its
+    /// workflow on the same branch (`later`) has made moot.
     Cancel {
         repo: String,
         run: u64,
+        later: u64,
         url: String,
         why: String,
     },
@@ -213,6 +214,7 @@ pub fn decide(
         // Its last attempt failed without saying so (killed, timed out, a
         // command's error): what the run before it said no longer holds.
         let behind = snap.behind.filter(|_| update.state != "failed");
+        let off_main = snap.off_main.filter(|_| update.state != "failed");
         for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
             if let Some(why) = snap.unknown.get(repo) {
@@ -232,6 +234,7 @@ pub fn decide(
                     said,
                     snap.progress,
                     behind,
+                    off_main,
                     what,
                     why,
                     since,
@@ -255,6 +258,7 @@ pub fn decide(
                             said,
                             snap.progress,
                             behind,
+                            off_main,
                             it,
                             since,
                             now,
@@ -289,6 +293,7 @@ pub fn decide(
                 said,
                 snap.progress,
                 behind,
+                off_main,
                 what,
                 &waiting,
                 b.oldest,
@@ -315,7 +320,14 @@ pub fn decide(
 /// stalled. Otherwise on HOST-update, which
 /// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
-/// after it lands and has a wait of its own with the steward.
+/// after it lands and has a wait of its own with the steward, and not before
+/// `off_main`, when the owner hears that the box runs changes that aren't on
+/// main: held for those, it waits on whoever switched to them (their PR in
+/// the train, say), not on HOST-update. Nor is it due while a run that
+/// started before it is at work: that run hasn't got it, and no other can
+/// start (a kick of HOST-update does nothing) till it ends, so the wait is
+/// behind it as a wait on a run is, the watchdog refreshing first, and falls
+/// to HOST-update at its own deadline once the run has ended or gone quiet.
 #[allow(clippy::too_many_arguments)]
 fn going_live(
     dep: &Deploy,
@@ -323,6 +335,7 @@ fn going_live(
     said: &str,
     progress: Option<f64>,
     behind: Option<u64>,
+    off_main: Option<f64>,
     what: String,
     waiting: &str,
     since: f64,
@@ -330,11 +343,13 @@ fn going_live(
     any: bool,
     refresh: &str,
 ) -> Item {
-    match update.since {
-        Some(start) if update.state == "activating" && (any || start >= since) => Item {
+    let running = update.since.filter(|_| update.state == "activating");
+    let wrote = |start: f64| progress.filter(|p| *p > start);
+    if let Some(start) = running.filter(|start| any || *start >= since) {
+        return Item {
             repo: None,
             what,
-            phase: match progress.filter(|p| *p > start) {
+            phase: match wrote(start) {
                 Some(p) => format!(
                     "{} has been putting it live since {}, its last output at {}",
                     dep.unit,
@@ -348,34 +363,67 @@ fn going_live(
                 ),
             },
             since: start,
-            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
+            due: wrote(start).unwrap_or(start) + dep.run,
             link,
             kick: Some(refresh.to_owned()),
             line: false,
             unstick: false,
             claude: false,
             refresh: true,
-        },
-        _ => Item {
-            repo: None,
-            what,
-            phase: match behind {
-                Some(pr) => format!(
-                    "{waiting}; behind {}'s own PR #{pr}, until that lands; its last run: {said}",
-                    dep.unit
-                ),
-                None => format!("{waiting}; {}'s last run: {said}", dep.unit),
-            },
-            since,
-            due: since + behind.map_or(dep.after, |_| dep.ride),
-            link,
-            kick: Some(dep.handler.clone()),
-            line: false,
-            unstick: false,
-            claude: false,
-            refresh: false,
-        },
+        };
     }
+    let phase = match (behind, off_main) {
+        (Some(pr), _) => format!(
+            "{waiting}; behind {}'s own PR #{pr}, until that lands; its last run: {said}",
+            dep.unit
+        ),
+        (None, Some(at)) => format!(
+            "{waiting}; {}'s last run: {said}; the owner hears of it at {} if it still does",
+            dep.unit,
+            clock(at)
+        ),
+        (None, None) => format!("{waiting}; {}'s last run: {said}", dep.unit),
+    };
+    let due = (since + behind.map_or(dep.after, |_| dep.ride)).max(off_main.unwrap_or(0.0));
+    // An earlier run in its way, while it's at work.
+    let ahead = running.map(|start| (start, wrote(start)));
+    Item {
+        repo: None,
+        what,
+        phase: match ahead {
+            Some((start, Some(p))) => format!(
+                "{phase}; the run under way since {} started before it, its last output at {}",
+                clock(start),
+                clock(p)
+            ),
+            Some((start, None)) => format!(
+                "{phase}; the run under way since {} started before it",
+                clock(start)
+            ),
+            None => phase,
+        },
+        since,
+        due: ahead.map_or(due, |(start, p)| due.max(p.unwrap_or(start) + dep.run)),
+        link,
+        kick: Some(ahead.map_or(dep.handler.as_str(), |_| refresh).to_owned()),
+        line: false,
+        unstick: false,
+        claude: false,
+        refresh: ahead.is_some(),
+    }
+}
+
+/// What a wait on HOST-update (going_live's phase) waited for: the phase
+/// up to what it says of HOST-update.
+fn waited_for<'a>(phase: &'a str, unit: &str) -> Option<&'a str> {
+    [
+        format!("; behind {unit}'s own PR #"),
+        format!("; {unit}'s last run: "),
+    ]
+    .iter()
+    .filter_map(|m| phase.find(m.as_str()))
+    .min()
+    .map(|at| &phase[..at])
 }
 
 /// A wait the pass couldn't read (GitHub or the live record failed), as the
@@ -389,12 +437,16 @@ fn retained(
     said: &str,
     progress: Option<f64>,
     behind: Option<u64>,
+    off_main: Option<f64>,
     was: &Item,
     since: Option<f64>,
     now: f64,
     cfg: &Config,
 ) -> Item {
-    let was_run = was.kick.as_deref() == Some(cfg.handler.as_str());
+    // A wait behind an earlier run is kicked as a run's is, but it's still
+    // on HOST-update: its phase says what it waited for.
+    let was_run = was.kick.as_deref() == Some(cfg.handler.as_str())
+        && waited_for(&was.phase, &dep.unit).is_none();
     // Its run is the one it waited on, or a later one: any run at work that
     // started no earlier than the wait, or than the run the wait was on.
     let ours = update
@@ -402,7 +454,26 @@ fn retained(
         .filter(|_| update.state == "activating")
         .is_some_and(|start| start >= was.since);
     if !ours && !was_run {
-        return was.clone();
+        // Waiting on HOST-update: what it waited for and since when are as
+        // the last pass saw them, but its deadline follows what HOST-update
+        // says now (behind its PR, held for a switch not on main, failed).
+        let Some(waiting) = waited_for(&was.phase, &dep.unit) else {
+            return was.clone();
+        };
+        return going_live(
+            dep,
+            update,
+            said,
+            progress,
+            behind,
+            off_main,
+            was.what.clone(),
+            waiting,
+            was.since,
+            was.link.clone(),
+            false,
+            &cfg.handler,
+        );
     }
     going_live(
         dep,
@@ -410,6 +481,7 @@ fn retained(
         said,
         progress,
         behind,
+        off_main,
         was.what.clone(),
         if was_run {
             "its commits aren't live yet"
@@ -522,19 +594,19 @@ fn runner(
     }
 }
 
-/// A push run on the default branch that no job of has started, and that a
-/// later one of its workflow on that branch (queued, next in line, or under
-/// way) checks past, is moot: it's cancelled, so the later one gets its
-/// place. One that has started is left to finish, so the branch always gets
-/// a result, and so is one someone ran again. Each run is tried once in
-/// RECENT, whatever came of it.
+/// A push run on the default branch that hasn't finished (queued, next in
+/// line, or under way), and that a later one of its workflow on that branch,
+/// also unfinished, checks past, is moot: it's cancelled, so the later one
+/// gets its place, and the branch gets its result from that one. Having
+/// started protects nothing: a run that can no longer matter is ended by the
+/// machine (docs/gate-design.md). One someone ran again is theirs. Each run
+/// is tried once in RECENT, whatever came of it.
 fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
-    for r in runs
-        .iter()
-        .filter(|r| r.status == "queued" && r.attempt == 1)
-    {
+    let live = |r: &&Run| r.status != "completed";
+    for r in runs.iter().filter(live).filter(|r| r.attempt == 1) {
         let Some(later) = runs
             .iter()
+            .filter(live)
             .find(|l| l.id != r.id && l.workflow == r.workflow && l.at > r.at)
         else {
             continue;
@@ -547,11 +619,17 @@ fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
         d.moves.push(Move::Cancel {
             repo: repo.to_owned(),
             run: r.id,
+            later: later.id,
             url: r.url.clone(),
             why: format!(
-                "it checks {} on {} and hasn't started, and {} checks {}, which came after it",
+                "it checks {} on {} and {}, and {} checks {}, which came after it",
                 short(&r.sha),
                 r.branch,
+                match r.status.as_str() {
+                    "queued" => "hasn't started",
+                    "pending" => "is next in line",
+                    _ => "is under way",
+                },
                 later.url,
                 short(&later.sha)
             ),

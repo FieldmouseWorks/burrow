@@ -49,7 +49,7 @@ fn full() -> Snapshot {
         issue: Some("https://github.com/sam/box/issues/7".into()),
         role: Some("inbox".into()),
         class: Some("lead".into()),
-        engine: Some(Engine::Codex),
+        engine: Some(Engine::Claude),
         model: Some("small".into()),
         effort: Some("high".into()),
         awaits: vec!["sam/box#8".into()],
@@ -57,7 +57,6 @@ fn full() -> Snapshot {
     let kinds = [
         SlotKind::Claude,
         SlotKind::Unstick,
-        SlotKind::Codex,
         SlotKind::Drain,
         SlotKind::Sorting,
         SlotKind::Heavy,
@@ -131,7 +130,7 @@ fn full() -> Snapshot {
             },
             triage: Some(
                 serde_json::from_value(serde_json::json!({
-                    "drain": "codex",
+                    "drain": "claude",
                     "drainJobs": 3,
                     "sortingAtOnce": 2,
                 }))
@@ -141,6 +140,7 @@ fn full() -> Snapshot {
         jobs: vec![JobRow {
             id: "j1".into(),
             state: "done".into(),
+            parked_for: Some("a drain slot".into()),
             vm: vec!["vm-1".into()],
             apps: vec!["workers".into()],
             demoted: Some("not pipeline work".into()),
@@ -189,8 +189,8 @@ fn an_idle_machine() {
     let meters = tmp.path().join("meters");
     fs::create_dir_all(&meters).unwrap();
     fs::write(
-        meters.join("codex.json"),
-        r#"{"credits":true,"read_at":1000.0,"windows":{"10080m":{"resets_at":5000.0,"used":100.0},"300m":{"resets_at":2000.0,"used":3.0}}}"#,
+        meters.join("claude.json"),
+        r#"{"credits":true,"read_at":1000.0,"windows":{"seven_day":{"resets_at":5000.0,"used":100.0},"five_hour":{"resets_at":2000.0,"used":3.0}}}"#,
     )
     .unwrap();
     cfg.meters = Some(meters);
@@ -224,8 +224,6 @@ fn an_idle_machine() {
             (Claude, Idle),
             (Claude, Idle),
             (Unstick, Idle),
-            (Codex, Idle),
-            (Codex, Idle),
             (Heavy, Idle),
             (Heavy, Busy),
             (Heavy, Unknown),
@@ -233,28 +231,24 @@ fn an_idle_machine() {
     );
     // Heavy records nothing of when it was taken: its age is unknown, not
     // the lock file's.
-    let busy = &snap.slots[8];
+    let busy = &snap.slots[6];
     assert_eq!((busy.since, busy.age), (None, None), "{busy:?}");
     let Meter::Engine(claude) = &snap.meters[0] else {
         panic!("missing Claude meter")
     };
-    assert_eq!(claude.reading, None, "no Claude reading");
-    let Meter::Engine(codex) = &snap.meters[1] else {
-        panic!("missing Codex meter")
-    };
-    let codex = codex.reading.as_ref().unwrap();
+    let reading = claude.reading.as_ref().unwrap();
     assert_eq!(
         (
-            codex.five_hour.as_ref().unwrap().used,
-            codex.weekly.as_ref().unwrap().used
+            reading.five_hour.as_ref().unwrap().used,
+            reading.weekly.as_ref().unwrap().used
         ),
         (3.0, 100.0)
     );
     assert!(
-        codex.credits && !codex.fresh,
+        reading.credits && !reading.fresh,
         "an old reading is shown, as old"
     );
-    assert_eq!(codex.age, snap.at - 1000);
+    assert_eq!(reading.age, snap.at - 1000);
     assert!(snap.queue.is_empty() && snap.line.is_empty() && snap.jobs.is_empty());
     assert_eq!(snap.status(), "");
 }
@@ -317,13 +311,10 @@ fn held_slots_say_whose_and_since_when() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
-    let codex = cfg.jobs.join(".codex-slots");
-    fs::create_dir_all(&codex).unwrap();
-    for i in 1..=cfg.codex_slots {
-        let f = codex.join(i.to_string());
-        fs::write(&f, "").unwrap();
-        burrow_test::permissions(&f, 0o000);
-    }
+    // Slot 1's lock can't be looked at.
+    let unreadable = lock_path(1);
+    fs::write(&unreadable, "").unwrap();
+    burrow_test::permissions(&unreadable, 0o000);
     let snap = Snapshot::take(&cfg, 0).unwrap();
     for r in &mut runners {
         let _ = r.kill();
@@ -347,20 +338,12 @@ fn held_slots_say_whose_and_since_when() {
     assert_eq!(four.state, SlotState::Starting, "{four:?}");
     assert_eq!(four.holder.as_ref().unwrap().job.as_deref(), Some("j2"));
     // Unreadable as the owner too only when the owner isn't root.
-    if fs::File::open(codex.join("1")).is_err() {
-        let states: Vec<_> = snap
-            .slots
-            .iter()
-            .filter(|s| s.kind == SlotKind::Codex)
-            .map(|s| s.state)
-            .collect();
-        assert!(
-            states.iter().all(|s| *s == SlotState::Unknown),
-            "{states:?}"
-        );
-        assert!(
-            !crate::slot::room(&cfg, Engine::Codex),
-            "an unknown slot was room"
+    if fs::File::open(&unreadable).is_err() {
+        assert_eq!(
+            snap.slots[0].state,
+            SlotState::Unknown,
+            "{:?}",
+            snap.slots[0]
         );
     }
 }
@@ -373,7 +356,6 @@ fn all_physical_pools_require_a_live_acquirer_with_the_lock() {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.jobs = tmp.path().join("jobs");
     cfg.max_jobs = 1;
-    cfg.codex_slots = 1;
     cfg.heavy_dir = Some(tmp.path().join("heavy"));
     cfg.heavy_slots = 1;
     cfg.tools.systemctl = tmp.path().join("systemctl");
@@ -381,7 +363,6 @@ fn all_physical_pools_require_a_live_acquirer_with_the_lock() {
     for (kind, path) in [
         (SlotKind::Claude, cfg.jobs.join(".slots/1")),
         (SlotKind::Unstick, cfg.jobs.join(".slots/unstick")),
-        (SlotKind::Codex, cfg.jobs.join(".codex-slots/1")),
         (
             SlotKind::Heavy,
             burrow_heavy::config::slot_file(cfg.heavy_dir.as_ref().unwrap(), 1),
@@ -424,7 +405,6 @@ fn all_physical_pools_require_a_live_acquirer_with_the_lock() {
         let key = match kind {
             SlotKind::Claude => "1",
             SlotKind::Unstick => "unstick",
-            SlotKind::Codex => "codex-1",
             SlotKind::Heavy => "",
             _ => unreachable!(),
         };

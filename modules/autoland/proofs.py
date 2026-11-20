@@ -2,7 +2,9 @@
 or running at once, for proofs that take the whole machine (the rest would
 only wait out their timeout). The others wait their turn, the PRs labelled
 `first` (labels.first) ahead of the rest and the oldest first within each,
-and the end of a job's turn kicks the repo's pass, which starts the next.
+among those the pass looks at in the same round (batch.due: every open PR's
+look before any one's second), and the end of a job's turn kicks the repo's
+pass, which starts the next.
 
 What a slot is held by is a build: a running proof job with store paths
 still to build that the jobs started before it aren't building (its
@@ -60,10 +62,13 @@ already. Then the steward brings it up to date instead of building it
 A job holds what it holds until it ends, whatever its PR does meanwhile
 (marked a draft, say), but for a new head: a verdict on a head the PR no
 longer has proves nothing, so the steward stops it (superseded), unless
-it's building what the new head's proof wants. A turn in the line is only
-this pass's: a PR is ahead while it's waiting in the same pass (they go in
-their line's order, place), so one held, drafted or done since holds
-nobody up."""
+it's building what the new head's proof wants. A PR is ahead in the line
+while its last look had it waiting its turn (turn): this pass's look, once
+the pass has taken it, so one held, drafted or done since holds nobody up,
+else the one before, kept in its state. A pass needn't take the line in
+its order, nor every PR in it: a batch takes those it hasn't looked at
+first, and leaves out those unchanged since, so a slot freed meanwhile
+isn't taken past one still waiting."""
 
 import os
 import re
@@ -75,12 +80,13 @@ import time
 import urllib.parse
 
 import common as C
-import reviewers as V
+import mirror as M
 from common import CFG, STATE, load, log, save
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
+LOOKED = {}  # the PRs of each repo this pass has settled, waiting or not
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
@@ -99,12 +105,14 @@ def begin(repo, numbers, first=()):
     OPEN[repo] = set(numbers)
     FIRST[repo] = set(first)
     WAITING[repo] = set()
+    LOOKED[repo] = set()
 
 
 def place(repo, n):
     """Where PR n stands in its repo's line this pass: one labelled first
     ahead of every one that isn't, and the oldest first within each. The
-    pass takes the PRs in this order, so a slot goes to the first in line."""
+    pass takes the PRs due a look this round in this order (batch.due), so
+    a slot goes to the first in line among them."""
     return n not in FIRST.get(repo, ()), n
 
 
@@ -201,7 +209,7 @@ def outputs(repo, pr, checks, st):
     key = output_key(repo, pr, checks)
     drvs = paths = None
     try:
-        mirror = V.fetch(repo, pr=pr)
+        mirror = M.fetch(repo, pr=pr)
         drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
         paths = paths or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
@@ -230,7 +238,7 @@ def merged(repo, pr, checks, st, tip):
         return None
     paths, failed = None, True
     try:
-        mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
+        mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
         up = subprocess.run(["git", "-C", mirror, "merge-base", "--is-ancestor", tip, head], capture_output=True, text=True)
         # 0: the head has the tip already; 1: it doesn't; else git can't say
         # (a tip that moved on again before the fetch, say).
@@ -245,9 +253,9 @@ def merged(repo, pr, checks, st, tip):
                 raise RuntimeError(f"git merge-tree: {tree.stderr.strip()[-300:]}")
         if tree and tree.returncode == 0:
             who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
-            rev = V.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
+            rev = M.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
                         "-m", f"#{n} brought up to date with {base}").decode().strip()
-            V.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
+            M.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
             paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
         failed = False
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
@@ -321,12 +329,17 @@ def ahead(repo, n, st, slots, outs=None):
                 for rec in [state.get("proofPaths", {}).get(j) or {}]]
 
     jobs_now = held(st, live(st))
+    # This pass's look at the PRs it has taken, whether or not their state
+    # was saved; the kept one at those it hasn't.
+    turns = {k for k in WAITING.get(repo, ()) if repo not in OPEN or k in OPEN[repo]}
     mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
     for f in os.listdir(STATE):
         m = re.fullmatch(mine, f)
-        if m and int(m[1]) != n and (repo not in OPEN or int(m[1]) in OPEN[repo]):
+        if m and (k := int(m[1])) != n and (repo not in OPEN or k in OPEN[repo]):
             other = load(f, {})
             jobs_now += held(other, [j for j in jobs(other) if running(j)])
+            if k not in LOOKED.get(repo, ()) and other.get("proofTurn"):
+                turns.add(k)
     todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(outs or ()))
     # In the order they started: a job is a build when it has paths still
     # to build that those before it aren't building, or when they're
@@ -336,7 +349,7 @@ def ahead(repo, n, st, slots, outs=None):
         rest = todo.intersection(ps) if ps is not None else None
         builds += rest is None or not rest <= building
         building |= rest or set()
-    waiting = sum(place(repo, other) < place(repo, n) for other in WAITING.get(repo, ()))
+    waiting = sum(place(repo, k) < place(repo, n) for k in turns - {n})
     if builds + waiting < slots:
         return None
     if outs is not None and todo.intersection(outs) <= building:
@@ -499,7 +512,7 @@ def start(jid, build_json, what, starter=None):
     """The proof's folder, with what it is (build.json), then its unit: a
     build's runs run(); a run's, starter (its command line, the folder
     after it) starts. Its id, or None when it wouldn't start."""
-    if C.paused(build_json["repo"]):
+    if C.held(build_json["repo"]):
         return None
     prune()
     here = os.path.join(STATE, "builds", jid)
@@ -557,7 +570,7 @@ def run(jid):
     restoring = os.path.join(here, "policy-restoring")
     resumed = os.path.exists(restoring)
     b = load(f"builds/{jid}/build.json", None)
-    if C.paused(b["repo"]):
+    if C.held(b["repo"]):
         return
     if resumed:
         os.unlink(restoring)
@@ -731,9 +744,17 @@ def still(st, said, rc):
     return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}
 
 
-def wait(repo, n):
-    """PR n waits its turn this pass: the ones after it wait behind it."""
-    WAITING.setdefault(repo, set()).add(n)
+def turn(repo, n, st, waiting):
+    """PR n's look this pass ends: waiting its turn or not, which the ones
+    after it in line wait behind, this pass and, kept in its state (st),
+    later ones that don't look at it again."""
+    LOOKED.setdefault(repo, set()).add(n)
+    if waiting:
+        WAITING.setdefault(repo, set()).add(n)
+        st["proofTurn"] = True
+    else:
+        WAITING.get(repo, set()).discard(n)
+        st.pop("proofTurn", None)
 
 
 def started(st, outs=None):

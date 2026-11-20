@@ -51,11 +51,14 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         st.baselined("vulnix")?;
     }
 
-    // 3. Every project's lockfiles.
+    // 3. Every project's lockfiles. A Cargo.lock's crate counts only when
+    // cargo builds it; one it doesn't isn't recorded as seen, so a feature
+    // that turns it on later still gets it a job.
     for (p, dir) in projects(&cfg.src) {
         if let Some(osv) = osv(cfg, &dir) {
             let source = format!("osv-{p}");
-            found.extend(st.offer(&source, sources::osv_findings(&osv, &p))?);
+            let built = built(cfg, &osv, &p, &st);
+            found.extend(st.offer(&source, built)?);
             st.baselined(&source)?;
         }
     }
@@ -226,6 +229,74 @@ fn osv(cfg: &Config, dir: &Path) -> Option<Osv> {
     read(&format!("osv-scanner {}", dir.display()), out, |text| {
         serde_json::from_slice(text)
     })
+}
+
+/// osv-scanner's findings in project `p` that cargo builds: one from a
+/// Cargo.lock is left out when `cargo tree` ran there and didn't list its
+/// crate. cargo runs only for findings not already known, once a lockfile.
+fn built(cfg: &Config, osv: &Osv, p: &str, st: &State) -> Vec<Finding> {
+    let found = sources::osv_findings(osv, p);
+    let locks: BTreeSet<String> = found
+        .iter()
+        .filter(|f| !st.known(&f.finding.key))
+        .filter_map(|f| f.cargo.as_ref().map(|c| c.lock.clone()))
+        .collect();
+    let trees: BTreeMap<String, BTreeSet<(String, String)>> = locks
+        .into_iter()
+        .filter_map(|lock| {
+            let tree = cargo_tree(cfg, Path::new(&lock))?;
+            Some((lock, tree))
+        })
+        .collect();
+    found
+        .into_iter()
+        .filter(|f| {
+            let Some(c) = &f.cargo else { return true };
+            trees
+                .get(c.lock.as_str())
+                .is_none_or(|t| t.contains(&(c.name.clone(), c.version.clone())))
+        })
+        .map(|f| f.finding)
+        .collect()
+}
+
+/// Every crate the workspace a Cargo.lock belongs to builds, on any
+/// target, with every feature, as the user. cargo never rewrites the
+/// lockfile (`--locked`) or fetches (`--offline`); none when it can't say,
+/// and then every finding in it counts.
+fn cargo_tree(cfg: &Config, lock: &Path) -> Option<BTreeSet<(String, String)>> {
+    let manifest = lock.with_file_name("Cargo.toml");
+    // From /, never the checkout: cargo reads the .cargo/config.toml of
+    // where it runs, and runs the rustc that names (`build.rustc`) even for
+    // `tree`. The scan reaches every directory in a checkout, so that's
+    // code no one looked at. A project's own sources (vendored, say) are
+    // then unknown, and cargo failing leaves every finding counting.
+    let out = as_user(cfg, &cfg.tools.cargo)
+        .current_dir("/")
+        .args(["tree", "--workspace", "--edges", "normal,build,dev"])
+        .args(["--target", "all", "--all-features"])
+        .args(["--prefix", "none", "--format", "{p}"])
+        .args(["--locked", "--offline", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            Some(sources::crates_built(&String::from_utf8_lossy(&o.stdout)))
+        }
+        Ok(o) => {
+            eprintln!(
+                "advisory-watch: cargo tree {}: {}; its findings all count",
+                manifest.display(),
+                o.status
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("advisory-watch: {}: {e}", cfg.tools.cargo.display());
+            None
+        }
+    }
 }
 
 /// What a source printed, read: none when it printed nothing and failed,

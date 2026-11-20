@@ -7,12 +7,16 @@
 //! - vulnix on the running system (NVD): CVSS 7 and up, the kernel aside
 //!   (its fixes arrive with every LTS bump, and the exploited ones are on
 //!   CISA's list).
-//! - osv-scanner over a project's checkout (crates, npm, PyPI, Go...).
+//! - osv-scanner over a project's checkout (crates, npm, PyPI, Go...),
+//!   RustSec's notices with nothing to fix left out (unmaintained, unsound
+//!   with no fixed version), and a Cargo.lock's crates only when `cargo
+//!   tree` builds them (pass.rs runs it).
 //!
 //! Every field a key or a text is made of is written as jq's @tsv wrote it
 //! (`tsv`), so the keys the shell version recorded as seen still match.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -156,7 +160,15 @@ pub struct Osv {
 #[derive(Debug, Deserialize)]
 struct OsvResult {
     #[serde(default)]
+    source: Option<OsvSource>,
+    #[serde(default)]
     packages: Option<Vec<OsvPackage>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OsvSource {
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +176,8 @@ struct OsvPackage {
     package: OsvName,
     #[serde(default)]
     groups: Option<Vec<OsvGroup>>,
+    #[serde(default)]
+    vulnerabilities: Option<Vec<OsvAdvisory>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +186,8 @@ struct OsvName {
     name: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    ecosystem: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,26 +197,131 @@ struct OsvGroup {
     max_severity: Option<String>,
 }
 
+/// One advisory, as OSV writes it: only what tells a notice from a fix.
+#[derive(Debug, Deserialize)]
+struct OsvAdvisory {
+    id: String,
+    #[serde(default)]
+    affected: Option<Vec<OsvAffected>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OsvAffected {
+    #[serde(default)]
+    ranges: Option<Vec<OsvRange>>,
+    #[serde(default)]
+    database_specific: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OsvRange {
+    #[serde(default)]
+    events: Option<Vec<BTreeMap<String, Value>>>,
+}
+
+impl OsvAdvisory {
+    /// A notice with nothing to do: RustSec's informational advisories
+    /// (unmaintained, unsound, notice) name no vulnerability, and one with
+    /// no fixed version has no upgrade to make either. An informational one
+    /// with a fix is still a job: its fix is the upgrade.
+    fn notice_only(&self) -> bool {
+        let affected = self.affected.iter().flatten();
+        let informational = affected.clone().any(|a| {
+            a.database_specific
+                .as_ref()
+                .and_then(|d| d.get("informational"))
+                .and_then(Value::as_str)
+                .is_some_and(|i| !i.is_empty())
+        });
+        let fixed = affected
+            .flat_map(|a| a.ranges.iter().flatten())
+            .flat_map(|r| r.events.iter().flatten())
+            .any(|e| e.contains_key("fixed"));
+        informational && !fixed
+    }
+}
+
+/// A crate an osv-scanner finding is for, and the Cargo.lock it was read
+/// from: a lockfile can list a crate that nothing builds (an optional
+/// dependency no feature turns on), which `cargo tree` leaves out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Crate {
+    pub lock: String,
+    pub name: String,
+    pub version: String,
+}
+
+/// One of osv-scanner's findings, and the crate it's for when it came
+/// from a Cargo.lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsvFinding {
+    pub finding: Finding,
+    pub cargo: Option<Crate>,
+}
+
 /// osv-scanner's findings in project `p`, one for each group of IDs (an
-/// advisory and its aliases) in each package.
-pub fn osv_findings(osv: &Osv, p: &str) -> Vec<Finding> {
+/// advisory and its aliases) in each package. A group whose every advisory
+/// is a notice with nothing to do (`notice_only`) is left out.
+pub fn osv_findings(osv: &Osv, p: &str) -> Vec<OsvFinding> {
     let mut found = Vec::new();
     for r in osv.results.iter().flatten() {
+        let path = r.source.as_ref().and_then(|s| s.path.as_deref());
+        let lock = path.filter(|l| Path::new(l).file_name() == Some("Cargo.lock".as_ref()));
         for k in r.packages.iter().flatten() {
+            let advisories: Vec<&OsvAdvisory> = k.vulnerabilities.iter().flatten().collect();
+            let notice_only = |id: &String| {
+                advisories
+                    .iter()
+                    .find(|a| &a.id == id)
+                    .is_some_and(|a| a.notice_only())
+            };
+            let cargo = match (lock, &k.package) {
+                (
+                    Some(lock),
+                    OsvName {
+                        name: Some(name),
+                        version: Some(version),
+                        ecosystem: Some(eco),
+                    },
+                ) if eco == "crates.io" => Some(Crate {
+                    lock: lock.to_owned(),
+                    name: name.clone(),
+                    version: version.clone(),
+                }),
+                _ => None,
+            };
             for g in k.groups.iter().flatten() {
+                if !g.ids.is_empty() && g.ids.iter().all(notice_only) {
+                    continue;
+                }
                 let ids = tsv(&g.ids.join(","));
                 let pkg = tsv(k.package.name.as_deref().unwrap_or(""));
                 let ver = tsv(k.package.version.as_deref().unwrap_or(""));
                 let sev = g.max_severity.as_deref().map_or("?".to_owned(), tsv);
-                found.push(Finding {
-                    project: p.to_owned(),
-                    key: format!("osv:{p}:{ids}:{pkg}"),
-                    text: format!("{ids} in {pkg} {ver} (severity {sev})"),
+                found.push(OsvFinding {
+                    finding: Finding {
+                        project: p.to_owned(),
+                        key: format!("osv:{p}:{ids}:{pkg}"),
+                        text: format!("{ids} in {pkg} {ver} (severity {sev})"),
+                    },
+                    cargo: cargo.clone(),
                 });
             }
         }
     }
     found
+}
+
+/// The crates `cargo tree --prefix none --format '{p}'` printed, by name
+/// and version: each line's first word and its second without the `v`.
+pub fn crates_built(tree: &str) -> BTreeSet<(String, String)> {
+    tree.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let (name, version) = (words.next()?, words.next()?);
+            Some((name.to_owned(), version.strip_prefix('v')?.to_owned()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -321,8 +442,15 @@ mod tests {
             {},
         ]}))
         .unwrap();
+        let found = osv_findings(&osv, "app");
+        let rustls = Crate {
+            lock: "/src/app/Cargo.lock".into(),
+            name: "rustls".into(),
+            version: "0.23.1".into(),
+        };
+        assert!(found.iter().all(|f| f.cargo.as_ref() == Some(&rustls)));
         assert_eq!(
-            osv_findings(&osv, "app"),
+            findings(found),
             vec![
                 Finding::new(
                     "app",
@@ -343,5 +471,76 @@ mod tests {
         );
         let none: Osv = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(osv_findings(&none, "app").is_empty());
+    }
+
+    fn findings(found: Vec<OsvFinding>) -> Vec<Finding> {
+        found.into_iter().map(|f| f.finding).collect()
+    }
+
+    /// An advisory as OSV writes RustSec's: `informational` names a notice,
+    /// and a `fixed` event the version that fixes it.
+    fn advisory(id: &str, informational: Option<&str>, fixed: Option<&str>) -> serde_json::Value {
+        let mut events = vec![serde_json::json!({"introduced": "0.0.0-0"})];
+        events.extend(fixed.map(|f| serde_json::json!({"fixed": f})));
+        serde_json::json!({"id": id, "affected": [{
+            "ranges": [{"type": "SEMVER", "events": events}],
+            "database_specific": {"categories": [], "cvss": null, "informational": informational},
+        }]})
+    }
+
+    #[test]
+    fn osv_leaves_out_notices_with_nothing_to_fix() {
+        let osv: Osv = serde_json::from_value(serde_json::json!({"results": [
+            {"source": {"path": "/src/app/web/package-lock.json"}, "packages": [
+                {"package": {"name": "chrono", "version": "0.4.45", "ecosystem": "crates.io"},
+                 "groups": [
+                    {"ids": ["RUSTSEC-2026-0543"], "max_severity": ""},
+                    {"ids": ["RUSTSEC-UNSOUND-FIXED"], "max_severity": ""},
+                    {"ids": ["RUSTSEC-VULN"], "max_severity": "5.9"},
+                    {"ids": ["RUSTSEC-NOTICE", "RUSTSEC-UNLISTED"], "max_severity": ""},
+                    {"ids": ["RUSTSEC-NOTICE", "RUSTSEC-UNSOUND"], "max_severity": ""},
+                 ],
+                 "vulnerabilities": [
+                    advisory("RUSTSEC-2026-0543", Some("unmaintained"), None),
+                    advisory("RUSTSEC-UNSOUND-FIXED", Some("unsound"), Some("0.4.46")),
+                    advisory("RUSTSEC-VULN", None, None),
+                    advisory("RUSTSEC-NOTICE", Some("notice"), None),
+                    advisory("RUSTSEC-UNSOUND", Some("unsound"), None),
+                 ]},
+            ]},
+        ]}))
+        .unwrap();
+        let found = osv_findings(&osv, "app");
+        // Not a Cargo.lock: nothing for cargo to say.
+        assert!(found.iter().all(|f| f.cargo.is_none()));
+        let keys: Vec<String> = findings(found).into_iter().map(|f| f.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "osv:app:RUSTSEC-UNSOUND-FIXED:chrono",
+                "osv:app:RUSTSEC-VULN:chrono",
+                "osv:app:RUSTSEC-NOTICE,RUSTSEC-UNLISTED:chrono",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_crates_cargo_tree_builds_are_its_names_and_versions() {
+        let tree = "burrow-proj v0.1.0 (/src/burrow/crates/burrow-proj)\n\
+            serde v1.0.229\n\
+            serde_derive v1.0.229 (proc-macro)\n\
+            serde v1.0.229 (*)\n\
+            \n\
+            conary-github v0.0.0 (https://github.com/o/Conary?rev=2#2)\n";
+        let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
+        assert_eq!(
+            crates_built(tree),
+            BTreeSet::from([
+                pair("burrow-proj", "0.1.0"),
+                pair("serde", "1.0.229"),
+                pair("serde_derive", "1.0.229"),
+                pair("conary-github", "0.0.0"),
+            ])
+        );
     }
 }

@@ -16,6 +16,7 @@
 //! things anyway.
 
 pub mod answer;
+pub mod credit;
 pub mod pass;
 pub mod query;
 pub mod scrub;

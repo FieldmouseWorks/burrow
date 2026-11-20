@@ -2,12 +2,16 @@
 //! hands over GraphQL nodes and gets one verdict; all remote reads and
 //! reruns use its inherited App token. GitHub's run_attempt is the only
 //! retry store, shared across PRs, process restarts and uncertain writes.
+//! A run GitHub reruns for no one (event `dynamic`: a default setup's, as
+//! CodeQL's) comes back on a new head instead: the PR's branch brought up
+//! to date with its base, a merge its reviewers' looks carry over
+//! (carry.rs), and the head it leaves is the store.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use burrow_github::{Error, call, pages};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::ci_runs::{self, cancelled, suite, workflow_name};
 use crate::pass::Pass;
@@ -65,11 +69,16 @@ fn rerun_key(c: &Value) -> Option<String> {
 #[derive(Default)]
 struct Recovery {
     runs: BTreeMap<String, Run>,
-    refused: BTreeSet<String>,
+    /// What GitHub said, by run, when it wouldn't run one again.
+    refused: BTreeMap<String, String>,
     lookup: BTreeSet<String>,
     // A never-started run needs the whole workflow; cancellations need
     // only failed jobs, preserving successful independent jobs.
     due: BTreeMap<String, &'static str>,
+    /// A dynamic run wants a new head: the branch brought up to date.
+    fresh: bool,
+    /// How the ask to bring it up to date went: taken, or GitHub's words.
+    updated: Option<Result<(), String>>,
     /// Check runs GitHub stopped for running past their timeout.
     timed_out: BTreeSet<u64>,
 }
@@ -79,12 +88,50 @@ struct Run {
     run_attempt: u64,
     status: String,
     conclusion: Option<String>,
+    /// What started it. GitHub refuses every rerun of a `dynamic` one
+    /// ("This workflow run cannot be retried"), whoever asks.
+    #[serde(default)]
+    event: String,
+}
+
+impl Run {
+    fn dynamic(&self) -> bool {
+        self.event == "dynamic"
+    }
+}
+
+impl Recovery {
+    /// Why a run waits to be run again, when it's more than that it will
+    /// be: GitHub won't rerun it, or said no to the last ask, in its words.
+    fn again(&self, key: &str) -> Option<String> {
+        if self.runs.get(key).is_some_and(Run::dynamic) {
+            return Some(match &self.updated {
+                None => "GitHub reruns no dynamic run: its branch is to be updated".into(),
+                Some(Ok(())) => "GitHub reruns no dynamic run: its branch is being updated".into(),
+                Some(Err(said)) => {
+                    format!("GitHub reruns no dynamic run; updating its branch said {said}")
+                }
+            });
+        }
+        self.refused
+            .get(key)
+            .map(|said| format!("not run again: {said}"))
+    }
+}
+
+/// GitHub's own words in a write's error: its status and message, without
+/// the method and path before them.
+fn quoted(e: &Error) -> String {
+    e.why
+        .find("HTTP ")
+        .map_or(e.why.as_str(), |at| &e.why[at..])
+        .to_owned()
 }
 
 /// Read a complete verdict, recover each eligible workflow once, and read
 /// its current attempt back. An unanswered read/write fails the step with
 /// its typed retry classification intact; a refused write is retried on
-/// the next pass, with Actions permission failures visible in the verdict.
+/// the next pass, with what GitHub said quoted in the verdict.
 pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     let commit = &ask.pr["commits"]["nodes"][0]["commit"];
     let contexts = &commit["statusCheckRollup"]["contexts"];
@@ -139,7 +186,7 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
         &runs,
         &mut recovery,
     );
-    if p.dry || recovery.due.is_empty() {
+    if p.dry || (recovery.due.is_empty() && !recovery.fresh) {
         return Ok(got);
     }
     for (key, action) in &recovery.due {
@@ -151,12 +198,13 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
             ),
             Err(e) if e.unanswered => return Err(e),
             Err(e) => {
-                if e.why.contains("403") || e.why.contains("not accessible") {
-                    recovery.refused.insert(key.clone());
-                }
-                eprintln!("{}: run {key} not run again: {e}", p.repo);
+                eprintln!("{}: run {key} not run again: {}", p.repo, e.why);
+                recovery.refused.insert(key.clone(), quoted(&e));
             }
         }
+    }
+    if recovery.fresh {
+        recovery.updated = Some(update(p, ask)?);
     }
     recovery.lookup = recovery.runs.keys().cloned().collect();
     read(p, &mut recovery)?;
@@ -169,6 +217,32 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
         &runs,
         &mut recovery,
     ))
+}
+
+/// Ask GitHub to merge the base into the PR's branch, at the head the
+/// verdict is of (so never onto a head pushed since): a new head, whose
+/// workflows run afresh. Ok(Err) is GitHub's no, in its words, for the
+/// verdict to quote; the next pass asks again.
+fn update(p: &mut Pass, ask: &Ask) -> Result<Result<(), String>, Error> {
+    let (Some(n), Some(head)) = (ask.pr["number"].as_u64(), text(&ask.pr["headRefOid"])) else {
+        return Ok(Err("nothing: the PR's number or head wasn't given".into()));
+    };
+    let path = format!("repos/{}/pulls/{n}/update-branch", p.repo);
+    let body = json!({"expected_head_sha": head});
+    match call(p.api, "PUT", &path, Some(&body), None).map_err(|e| p.noted(e)) {
+        Ok(_) => {
+            eprintln!(
+                "{}#{n}: a dynamic run was cancelled, which GitHub won't rerun: bringing it up to date",
+                p.repo
+            );
+            Ok(Ok(()))
+        }
+        Err(e) if e.unanswered => Err(e),
+        Err(e) => {
+            eprintln!("{}#{n}: not brought up to date: {}", p.repo, e.why);
+            Ok(Err(quoted(&e)))
+        }
+    }
 }
 
 fn read(p: &mut Pass, recovery: &mut Recovery) -> Result<(), Error> {
@@ -191,6 +265,7 @@ fn classify(
     recovery: &mut Recovery,
 ) -> Verdict {
     recovery.due.clear();
+    recovery.fresh = false;
     let proofs = if runs.docs { &[][..] } else { &ask.proofs };
     let spelled: BTreeMap<_, _> = proofs
         .iter()
@@ -219,14 +294,17 @@ fn classify(
     for s in crate::ci_unstarted::suites(suites, &runs.stale, contexts, base, p.now) {
         seen += 1;
         let name = text(&s["workflowRun"]["workflow"]["name"]).unwrap_or("a workflow");
-        pending.push(format!("{name} (never started, to be run again)"));
-        if ask.recover
-            && let Some(key) = suite_run_id(s)
-        {
+        let key = if ask.recover { suite_run_id(s) } else { None };
+        match key.as_deref().and_then(|k| recovery.again(k)) {
+            Some(why) => pending.push(format!("{name} (never started; {why})")),
+            None => pending.push(format!("{name} (never started, to be run again)")),
+        }
+        if let Some(key) = key {
             match recovery.runs.get(&key) {
                 None => {
                     recovery.lookup.insert(key);
                 }
+                Some(r) if r.run_attempt == 1 && r.dynamic() => recovery.fresh = true,
                 Some(r) if r.run_attempt == 1 => {
                     recovery.due.insert(key, "rerun");
                 }
@@ -269,13 +347,30 @@ fn classify(
                 let info = key.as_ref().and_then(|k| recovery.runs.get(k));
                 match key {
                     None => pending.push(format!("{name} (cancelled, to be run again)")),
-                    Some(k) if recovery.refused.contains(&k) => pending.push(format!("{name} (cancelled; the App may not run it again, which needs Actions write)")),
                     Some(k) => match info {
-                        None => { recovery.lookup.insert(k); pending.push(format!("{name} (cancelled, to be run again)")); }
-                        Some(r) if r.status != "completed" || r.conclusion.as_deref() != Some("cancelled") => pending.push(format!("{name} (cancelled, run again)")),
-                        Some(r) if r.run_attempt >= 2 => red.push(format!("{name} (cancelled again after a rerun)")),
-                        Some(_) => { cancelled_jobs.insert(Some(k)); pending.push(format!("{name} (cancelled, to be run again)")); }
-                    }
+                        None => {
+                            recovery.lookup.insert(k);
+                            pending.push(format!("{name} (cancelled, to be run again)"));
+                        }
+                        Some(r)
+                            if r.status != "completed"
+                                || r.conclusion.as_deref() != Some("cancelled") =>
+                        {
+                            pending.push(format!("{name} (cancelled, run again)"))
+                        }
+                        Some(r) if r.run_attempt >= 2 => {
+                            red.push(format!("{name} (cancelled again after a rerun)"))
+                        }
+                        Some(_) => {
+                            match recovery.again(&k) {
+                                Some(why) => pending.push(format!("{name} (cancelled; {why})")),
+                                None => {
+                                    pending.push(format!("{name} (cancelled, to be run again)"))
+                                }
+                            }
+                            cancelled_jobs.insert(Some(k));
+                        }
+                    },
                 }
             } else if !["SUCCESS", "NEUTRAL", "SKIPPED"]
                 .iter()
@@ -311,13 +406,17 @@ fn classify(
             }
         }
     }
-    recovery.due.extend(
-        cancelled_jobs
-            .difference(&broken)
-            .filter(|k| !going.contains(*k))
-            .flatten()
-            .map(|key| (key.clone(), "rerun-failed-jobs")),
-    );
+    for key in cancelled_jobs
+        .difference(&broken)
+        .filter(|k| !going.contains(*k))
+        .flatten()
+    {
+        if recovery.runs.get(key).is_some_and(Run::dynamic) {
+            recovery.fresh = true;
+        } else {
+            recovery.due.insert(key.clone(), "rerun-failed-jobs");
+        }
+    }
     let named: BTreeSet<_> = contexts
         .iter()
         .filter_map(|c| {

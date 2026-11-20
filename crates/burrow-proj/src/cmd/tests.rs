@@ -2,8 +2,6 @@ use std::fs;
 
 use std::env;
 
-use std::process::Command;
-
 use super::{baselines, left_be};
 use crate::config::Config;
 use crate::job::Job;
@@ -64,7 +62,7 @@ fn an_await_needs_every_baseline() {
 // slot::tests' stand-in git is.
 #[test]
 fn an_await_on_what_is_over_is_refused() {
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "cmd::tests::awaits_against_a_stand_in_gh",
@@ -172,7 +170,7 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         return;
     }
     for kind in ["0-held", "1-held", "2-held", "2-none", "2-expired"] {
-        let out = Command::new(env::current_exe().unwrap())
+        let out = burrow_test::command(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "cmd::tests::usage_is_one_json_value_with_zero_one_or_multiple_github_readings",
@@ -203,5 +201,48 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         );
         let count = kind[..1].parse::<usize>().unwrap();
         assert_eq!(value["github"].as_array().map_or(0, Vec::len), count);
+    }
+}
+
+// A job's id holds its project's name verbatim, `#` and all: `proj why`
+// still reads such a job's record, and only OWNER/REPO#N is an issue.
+#[test]
+fn why_reads_a_job_whose_id_holds_a_hash() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().to_str().unwrap().into();
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    let id = "api#2-20261118-151628-kcdb";
+    fs::create_dir(tmp.path().join(id)).unwrap();
+    let why = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        super::dispatch_as(&cfg, &args, crate::host_jobs::View::Owner).map_err(|f| f.code)
+    };
+    assert_eq!(why(&["why", id]), Ok(()));
+    assert_eq!(why(&["why", id, "--json"]), Ok(()));
+    assert_eq!(
+        why(&["why", "api#3-20261118-151628-none"]),
+        Err(1),
+        "no such job"
+    );
+    for issue in ["sam/box#7", "Sam/Box#12"] {
+        assert_eq!(
+            crate::inbox::record::issue_target(issue).map(|(r, n)| (r.to_owned(), n.to_owned())),
+            issue
+                .rsplit_once('#')
+                .map(|(r, n)| (r.to_owned(), n.to_owned())),
+            "{issue}"
+        );
+    }
+    for not in [
+        id,
+        "api#2",
+        "sam/box#",
+        "sam/box#x",
+        "/box#7",
+        "sam/#7",
+        "a/b/c#7",
+    ] {
+        assert_eq!(crate::inbox::record::issue_target(not), None, "{not}");
     }
 }

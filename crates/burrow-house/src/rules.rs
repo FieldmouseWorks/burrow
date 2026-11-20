@@ -28,10 +28,13 @@ pub enum Rule {
     /// The head isn't under Renovate's branch prefix unless Renovate opened
     /// the PR: Renovate takes every branch there as its own.
     Branch,
+    /// The title and body never write the review connector's mention: the
+    /// connector reads one that does as a task, and doesn't review the head.
+    Mention,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 7] = [
+    pub const ALL: [Rule; 8] = [
         Rule::Title,
         Rule::RustFirst,
         Rule::Timers,
@@ -39,6 +42,7 @@ impl Rule {
         Rule::GuideSize,
         Rule::ModelNames,
         Rule::Branch,
+        Rule::Mention,
     ];
 
     /// Its name in its status's context, `house/NAME (#N)`.
@@ -51,13 +55,14 @@ impl Rule {
             Rule::GuideSize => "guide-size",
             Rule::ModelNames => "model-names",
             Rule::Branch => "branch",
+            Rule::Mention => "mention",
         }
     }
 
     /// The line a PR's body says why on, for a rule that takes one.
     pub fn line(self) -> Option<&'static str> {
         match self {
-            Rule::Title | Rule::Branch => None,
+            Rule::Title | Rule::Branch | Rule::Mention => None,
             Rule::RustFirst => Some("Why not Rust"),
             Rule::Timers => Some("Why a timer"),
             Rule::FileSize => Some("Why not split"),
@@ -122,6 +127,25 @@ pub const RENOVATE_MARK: &str = "<!--renovate-debug:";
 /// being Renovate's PR.
 pub fn renovate_claims(head: &str, body: &str) -> bool {
     head.starts_with(RENOVATE_PREFIX) && !body.lines().any(|l| l.starts_with(RENOVATE_MARK))
+}
+
+/// The mention that calls Codex's GitHub connector, the start of the
+/// steward's own ask (burrow-review-ask's `ASK`, which a test holds this to).
+pub const MENTION: &str = "@codex";
+
+/// Whether a PR's title or body writes the connector's mention, as GitHub
+/// reads a login: in any case, not inside an email or a longer login. Code
+/// spans and blocks count: the connector reads the text as written, and of
+/// the owner's PRs whose bodies wrote it only in backticks, none got a
+/// review of its own (burrow#1293).
+pub fn mentions(text: &str) -> bool {
+    static MENTIONS: LazyLock<Regex> = LazyLock::new(|| {
+        re(&format!(
+            "(?i)(?:^|[^A-Za-z0-9_]){}(?:$|[^A-Za-z0-9-])",
+            regex::escape(MENTION)
+        ))
+    });
+    MENTIONS.is_match(text)
 }
 
 /// How few words a reason may have: a reason says why in a sentence, and
@@ -347,6 +371,30 @@ mod tests {
         ));
         for head in ["renovate-run/x", "jobs/renovate", "deps/renovate/x", "main"] {
             assert!(!renovate_claims(head, ""), "{head}");
+        }
+    }
+
+    #[test]
+    fn mentions_the_connector() {
+        for text in [
+            "@codex review",
+            "Ask with `@codex review` once a head.",
+            "posted ```\n@codex review\n``` as the App",
+            "cc @Codex.",
+            "(@CODEX)",
+            "first line\n@codex",
+        ] {
+            assert!(mentions(text), "{text}");
+        }
+        for text in [
+            "the connector's bare review mention",
+            "Codex reviews every push",
+            "mail ops@codex.example",
+            "@codex-bot is another login",
+            "@codexes",
+            "",
+        ] {
+            assert!(!mentions(text), "{text}");
         }
     }
 

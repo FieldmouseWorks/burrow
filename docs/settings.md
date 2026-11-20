@@ -70,9 +70,14 @@ The host's `settings` command and `proj settings` share the write door:
 settings show
 settings pause OWNER/REPO
 settings allow OWNER/REPO
+settings land OWNER/REPO#N HEAD
+settings landing OWNER/REPO steward|conaryd
 proj usage hold UNIX_TIMESTAMP --only pipeline
 proj usage back
 ```
+
+`landing` says who lands the repo's PRs, the steward or conaryd
+([landing.md](landing.md) owns the subject).
 
 Pipeline scope intersects the effective allow list with `pipelineRepos`
 (including `leadRepos`). It expires at the deadline, or
@@ -99,9 +104,9 @@ first option set in `burrow-settings`; other operational settings join the
 same tracked document, loader and overlay rather than acquiring another
 store.
 
-A pause vacates running turns, native reviews and proofs through an independent settings
-reconciler. It kills their complete service groups, releasing job, Codex,
-proof and inherited heavy locks. Queued turns, questions and awaits are
+A pause vacates running turns and proofs through an independent settings
+reconciler. It kills their complete service groups, releasing job, proof
+and inherited heavy locks. Queued turns, questions and awaits are
 parked without holding admission capacity or producing stall alerts.
 Job scratch, worktrees, native sessions, conversations and proof checkpoints
 remain. On release, queued turns return at their original order and priority;
@@ -114,10 +119,89 @@ wakes reconciliation immediately, scope expiry books its own wake, and a
 short recovery timer handles a machine restart or interrupted reconciliation.
 Turn completions and inbox admission changes also wake control directly.
 
+### Handing one PR to the steward
+
+`settings land OWNER/REPO#N HEAD` (or the door's `land OWNER/REPO#N HEAD`)
+hands one PR, at its full head commit id, to the steward while its
+repository stays paused: the sanctioned way for a session to have a PR in a
+paused repo merged, since the steward is what merges. It is the same
+authority as `allow` (the machine user, or the door's authors), scoped to
+far less, and logged with its actor like every write. The handoff admits
+that PR's own steward pass and its landing at that head, and nothing else:
+
+- every landing requirement still holds: a clean review of the change on
+  that head, every thread resolved, CI green, proofs passed, no hold or
+  owner label, a judge's verdict where one is owed, and the train's own
+  checks where the repo has one;
+- whatever it still needs is paused with the repository: no Claude job
+  (a fix, a judge, a proof job), no proof build or run and no review starts
+  for it, so a PR missing any of them keeps waiting, its status saying so;
+- another head isn't the one handed, so a push since keeps it paused; a new
+  request for the new head replaces the old one;
+- in a train repo it may join the train, and the train steps only while
+  every PR in it is handed, so no other PR lands with it;
+- it is one-shot: the steward spends it once the PR has merged, and on the
+  repo's next pass after the PR has closed or the train landed it, so a
+  redelivered request (a door receipt answers again without writing),
+  duplicate event or restarted steward finds nothing to reuse;
+- a `pause OWNER/REPO` written after it revokes every handoff in the repo.
+
+`settings show` lists the outstanding handoffs, and `decision OWNER/REPO`
+gives them (`handed`) to the steward
+([admission.py](../modules/autoland/admission.py)).
+
 Automation binds its repository identity in host-owned control state before
 launch. A missing identity fails closed; deliberately local automated work
 uses `proj run --local-work`. A worker cannot evade policy by changing its
 project or role metadata, or by making its Git remote unreadable.
+
+## The API credit
+
+`proj.apiCredit` is the expiring API credit the `claude-api` engine may
+spend; the [reference](settings-reference.md) gives its fields and the room
+rule. It's kept in a file of its own beside the admission overlay, under the
+same lock and log, so a generation from before it still reads that overlay,
+and only the write door changes it:
+
+```
+settings credit BUDGET_USD RENEWS_YYYY-MM-DD MONTHLY_USD RESERVE_USD
+settings credit off
+```
+
+`BUDGET_USD` is the balance read now: the write records the time as `since`,
+the cycle's start, and counts spend from then. Writing the same balance again
+before it renews (a repeat, or a new reserve or monthly amount) keeps the
+earlier `since`, so what the cycle spent still counts.
+
+`burrow_settings::credit` is the meter: given the setting, the time and the
+turns' costs, it works out the cycle (renewals are stepped from `renews`' own
+day of the month, so several missed ones still leave one month's credit),
+the spend, today's allowance and whether there's room, in whole
+micro-dollars. `burrow_probe::credit::meter` reads it on the machine: the
+setting, and each `claude-api` turn's cost from proj's job records, decoded by
+the usage answer's accounting with every Claude Code turn of a job in order,
+so a session carried over from the subscription is charged only its own part.
+Each run of a turn (its first and every retry) counts at its own start, from
+its `burrow.run` marker, so a retry after midnight or a renewal is that
+day's and that cycle's spend.
+The probe's `usage` answer shows it, and proj admits every `claude-api` run
+(a turn's first and each retry) through the same function, under one lock
+for the machine ([`engine/api.rs`](../crates/burrow-proj/src/engine/api.rs)):
+the run is given the room left (above the reserve, and of today's allowance,
+whichever is less) as its `--max-budget-usd`, and its `burrow.run` marker
+records that budget before the lock goes. Until its cost is recorded, the
+meter counts the run at that budget, so runs going at once never spend the
+same room twice, and one stopped before its result holds no more than it
+was allowed until a later run of its session accounts for it. Claude Code
+stops a run past its budget after the call that took it there, so a run can
+go one call over: the reserve absorbs that, and the Console's spend limit on
+the key's workspace is the backstop past it. Anything the meter can't read
+is no room, and so is a run whose marker gives no budget (one from before
+admission wrote them) until its cost is in. A new balance read from the
+Console (`settings credit` with a different `BUDGET_USD`) starts counting
+afresh.
+`renews` is a day, so the renewed credit counts from 00:00 UTC on it: set
+it to the first day the new credit is surely there.
 
 ## Engines, models and efforts per role
 
@@ -125,7 +209,7 @@ Which engine, model and effort runs each kind of job are live settings in
 the same overlay, changed through the same door and logged the same way:
 
 ```
-proj settings role ROLE ENGINE [over PCT ENGINE]   which engine runs ROLE
+proj settings role ROLE ENGINE                      which engine runs ROLE
 proj settings role ROLE unset                      back to the declared default
 proj settings model ROLE ENGINE MODEL|- [EFFORT|-] its model and effort on ENGINE
 proj settings model ROLE ENGINE unset
@@ -135,25 +219,14 @@ proj engines [save NAME [--replace] | use NAME | use back]
 
 A role key is `ROLE`, `ROLE@OWNER/REPO`, `*` (every role) or
 `*@OWNER/REPO`; the closest one wins: a named role over `*`, a repo's key
-over the bare one, the repo matched case-insensitively. Engines are
-`claude` and `codex`. `over PCT ENGINE` (PCT any number from 0 to 100)
-moves a turn to that engine when its own is short: any window on its meter
-(the five-hour session or the week) at PCT with no credits to carry on,
-or, for Claude, the machine already out of Claude's usage. It moves only
-when the other engine's meter has room: credits, or no window used up.
-Missing readings, or readings an hour old, move nothing.
-`burrow.usageReset` supplies both meters. Each engine keeps its own
-conversation when a role moves between them. A steward judge follows its
-role like any other.
+over the bare one, the repo matched case-insensitively. The one engine is
+`claude`. A steward judge follows its role like any other.
 
 Nothing is an implicit fallback: the schema declares each default and
-`proj settings show` shows it as one. Every role runs on Claude (`*`)
-but the planner, on Codex, which needs an explicit model to run on Claude;
-a role with no model runs at its engine's own (`* claude`, `* codex`,
-model and effort null): for Claude, the job user's
-`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`;
-for Codex, the job user's `.codex/config.toml`. The tuning for the engine a
-turn ends on applies, overflow included. New sandbox
+`proj settings show` shows it as one. Every role runs on Claude (`*`); a
+role with no model runs at Claude's own (`* claude`, model and effort
+null): the job user's `~/.claude/settings.json` `model` and the machine's
+`burrow.claude.effort`. New sandbox
 guests (`agent new`, `proj run --vm`) copy the user's Claude `model` and its
 `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE`
 at creation.
@@ -178,8 +251,8 @@ answers with it.
 
 They're kept beside the admission overlay, in `overlay.roles.json`, under
 the same lock and log, so a generation from before them still reads its
-overlay after a rollback. A turn reads them once: its engine, overflow,
-model and effort come from one version of them, and so does `settings show`.
+overlay after a rollback. A turn reads them once: its engine, model and
+effort come from one version of them, and so does `settings show`.
 
 `proj check-config` reads the role settings as each turn does; the update's
 health checks require a durable migration after every switch. proj's old files

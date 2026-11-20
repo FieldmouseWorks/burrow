@@ -7,9 +7,10 @@
 //! runs again, or is reset, and a crash older than the window, leave the
 //! file, and the stall clears with them.
 //!
-//! A pass starts when a unit fails or a program dumps core (its watcher
-//! follows the journal for systemd's and systemd-coredump's word of it,
-//! and asks its burrow-events handler), and on the hourly catch-up: no
+//! A pass starts when a unit fails, a unit in the watch file recovers or a
+//! program dumps core (its watcher follows the journal for systemd's and
+//! systemd-coredump's word of it, and asks its burrow-events handler), and on
+//! the hourly catch-up: no
 //! timer of its own, and no unit's own settings touched.
 
 use std::collections::BTreeMap;
@@ -43,6 +44,11 @@ pub struct Found<'a> {
     pub cleared: &'a BTreeMap<String, f64>,
 }
 
+/// The watch file's key for the failed unit NAME.
+pub fn unit_key(name: &str) -> String {
+    format!("unit:{name}")
+}
+
 /// The watch file's items for what was FOUND: one a failed unit
 /// (`unit:NAME`) and one a program that crashed (`core:EXE`, its crashes
 /// counted), leaving out what IGNORE's globs match (a unit's name, or a
@@ -71,7 +77,7 @@ pub fn items(
     let cleared = |exe: &str| found.cleared.get(exe).copied().unwrap_or(f64::NEG_INFINITY);
     let mut out = BTreeMap::new();
     for f in found.failed.iter().filter(|f| !ignored(&f.unit)) {
-        let key = format!("unit:{}", f.unit);
+        let key = unit_key(&f.unit);
         let phase = format!("failed ({})", f.result);
         let since = since(&key, &phase, f.since, f64::NEG_INFINITY);
         out.insert(

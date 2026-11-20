@@ -277,7 +277,7 @@ pub fn hostname() -> String {
 
 /// Now, as `date -Is` writes it, in the machine's time zone.
 pub fn stamp() -> String {
-    jiff::Zoned::now()
+    jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
 }

@@ -12,20 +12,11 @@ fn opt_in_and_pipeline_scope_gate_the_real_drain() {
         ..Default::default()
     };
     b.cfg.settings = Some(settings.clone());
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-    assert!(
-        b.pass()
-            .pick_ready(&t, std::slice::from_ref(&game))
-            .is_none()
-    );
+    assert!(b.pass().pick_ready(std::slice::from_ref(&game)).is_none());
     settings
         .command(&["allow".into(), "sam/game".into()], "test")
         .unwrap();
-    assert!(
-        b.pass()
-            .pick_ready(&t, std::slice::from_ref(&game))
-            .is_some()
-    );
+    assert!(b.pass().pick_ready(std::slice::from_ref(&game)).is_some());
     let until = crate::now() + 3600;
     settings
         .command(&["pipeline".into(), until.to_string()], "test")
@@ -37,14 +28,14 @@ fn opt_in_and_pipeline_scope_gate_the_real_drain() {
         held.wake.values().any(|t| *t == until),
         "scope expiry books a pass with no eligible candidates"
     );
-    assert!(!b.log().contains("labels[]=codex"));
+    assert!(!b.log().contains("labels[]=claude"));
     b.pass()
         .note_ready("sam/box", std::slice::from_ref(&pipeline))
         .unwrap();
     on_github(&b, &pipeline);
     b.pass().drain().unwrap();
     assert!(
-        b.log().contains("issues/8/labels -f labels[]=codex"),
+        b.log().contains("issues/8/labels -f labels[]=claude"),
         "{}",
         b.log()
     );

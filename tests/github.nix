@@ -723,7 +723,7 @@ pkgs.testers.runNixOSTest {
           # The call read as gh reads it, with gh's help: the command, aliases
           # and flags before it too, which flags take a value (that value is
           # data), and what each argument is.
-          for call in ["issue -R sam/r comment 5 --body https://github.com/eve/x", "repo ls --limit 5 sam", "api -- repos/sam/r", "pr view 5 -R=sam/r", "search issues https://github.com/eve/x --owner sam"]:
+          for call in ["issue -R sam/r comment 5 --body https://github.com/eve/x", "repo ls --limit 5 sam", "api -- repos/sam/r", "pr view 5 -R=sam/r", "search issues https://github.com/eve/x --owner sam", "repo list sam --no-archived --limit 5 --json name", "pr merge 5 -R sam/r --squash --delete-branch"]:
               assert machine.succeed(dev(f"gh-token gh ${show} {call}")).strip() == f"token=ghs_1 args={call}"
           # gh's help read plain, whatever colours the call asks for.
           out = machine.succeed(dev("CLICOLOR_FORCE=1 GH_FORCE_TTY=1 gh-token gh ${show} pr view 5 -R sam/r")).strip()

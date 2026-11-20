@@ -1,0 +1,19 @@
+[package]
+name = "burrow-flow-files"
+description = "Reads the files a machine's build renders for Conary (each repo's flow config, the class policy, conaryd's events file, the producers file) with Conary's own loaders, so a check or the build can refuse what the machine's cn would, and prints a role's execution choice for the flow config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-producer = { path = "../burrow-producer" }
+burrow-settings = { path = "../burrow-settings" }
+serde_json.workspace = true
+# Conary's own types and loaders, never a copy of their keys. Pinned with the
+# kit's by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+
+[lints]
+workspace = true
