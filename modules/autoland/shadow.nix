@@ -14,11 +14,47 @@
 # seal keys stay out of it: they're secrets, and a config is a store path.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
-{ lib, pkgs, cfg, settings, ledger, steward, credentials }:
+#
+# Each enabled plugin (burrow.autoland.plugins) is in it: its executable in
+# `plugins`, what it's asked to run with in `execution`, and, where the repo
+# has evidence, its producer in the producers file `evidence.producers`
+# names, trusted for its checks there alone (none, and it's left out). With
+# none enabled, none of the three is. A role's choice is the one the
+# settings source declares, since a build reads no live settings: a role
+# set live (`proj settings role` or `model`) to anything else has its jobs
+# refuse the flow's choice, rebuilt or not (burrow#1274).
+{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles }:
 let
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
   stewardLogin = "${cfg.app.slug}[bot]";
+  # The plugins turned on, by the kind the flow knows each by.
+  enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix judge proof; };
+  # The producers a repo's evidence trusts, and the checks each may attest
+  # (Conary's docs/m6-plugins.md, "Who produces what"): the judge its
+  # judgment, the proof producer the repo's proofs. One with none there
+  # (the proof producer, in a repo with no proofs, as every train's is yet)
+  # isn't trusted there at all.
+  producers = proofs: lib.filter (p: p.checks != [ ]) (lib.optional (enabled ? judge) {
+      name = enabled.judge.producer;
+      key = enabled.judge.publicKey;
+      checks = [ "conary/judgment" ];
+    } ++ lib.optional (enabled ? proof) {
+      name = enabled.proof.producer;
+      key = enabled.proof.publicKey;
+      checks = lib.attrNames proofs;
+    });
+  # Read by Conary's own loader as it's built, since `cn flow settings`
+  # doesn't open the file the config names: a producer it would refuse (a
+  # key that isn't one, or one another producer holds) fails the machine's
+  # build.
+  producersFile = list: pkgs.runCommand "autoland-producers.json" {
+    producers = builtins.toJSON list;
+    passAsFile = [ "producers" ];
+  } ''
+    ${flowFiles}/bin/burrow-flow-files producers "$producersPath"
+    cp "$producersPath" "$out"
+  '';
   # A repo's overrides, however `repos` spells its name: GitHub's names
   # don't care about case.
   overrides = repo: lib.foldl' (acc: k: acc // lib.optionalAttrs (lib.toLower k == lib.toLower repo) cfg.repos.${k})
@@ -28,17 +64,23 @@ let
       own = overrides repo;
       rc = settings.defaults // own;
       codex = rc.codex;
+      proofs = lib.mapAttrs (_: j: { Job = j; }) rc.proofJobs
+        // lib.mapAttrs (_: c: { Run = [ settings.bash "-c" c ]; }) rc.proofRuns
+        // lib.mapAttrs (_: a: { Build = a; }) rc.proofBuilds;
+      trusted = producers proofs;
     in {
       # Whose PRs are the steward's authors': its people, and the bots
       # (their REST logins) whose PRs it lands too.
       trusted_authors = cfg.authors ++ map (b: "${b}[bot]") settings.bots;
-      plugins = { };
+      plugins = lib.mapAttrs (_: p: "${p.plugin}") enabled;
       evidence =
         if rc.trainNegative != null then {
           signer = ledger.signerWorkflow;
           fresh = ledger.env.CONARY_FRESH_RUNNERS or null;
           require = rc.trainRequire;
           negative = rc.trainNegative;
+        } // lib.optionalAttrs (trusted != [ ]) {
+          producers = producersFile trusted;
         } else null;
     } // lib.optionalAttrs (cfg.askAsOwner.door != null) {
       # Where the connector takes no App's ask, the flow asks for a late
@@ -80,9 +122,7 @@ let
         owner_label = cfg.labels.owner;
         people = lib.filter (a: !bot a) cfg.authors;
         require_ci = rc.requireCi;
-        proofs = lib.mapAttrs (_: j: { Job = j; }) rc.proofJobs
-          // lib.mapAttrs (_: c: { Run = [ settings.bash "-c" c ]; }) rc.proofRuns
-          // lib.mapAttrs (_: a: { Build = a; }) rc.proofBuilds;
+        inherit proofs;
         settle_delay = minutes rc.settleDelay;
         handoff_after = minutes rc.handoffAfter;
         session_handoff_after = minutes rc.sessionHandoffAfter;
@@ -106,10 +146,26 @@ let
   # of the wrong type, so a burrow and a Conary out of step on the flow's
   # settings fail the machine's build, rather than every shadow once it's
   # live.
-  flowFile = repo: pkgs.runCommand "autoland-shadow.json" {
-    config = builtins.toJSON (flowConfig repo);
+  #
+  # Each enabled plugin's choice (`execution`) is its own command's, run
+  # here: a role's is read from the settings source, as its jobs read it.
+  flowFile = repo: let
+    kinds = lib.attrNames enabled;
+    rendered = flowConfig repo;
+  in pkgs.runCommand "autoland-shadow.json" {
+    config = builtins.toJSON rendered;
     passAsFile = [ "config" ];
+    nativeBuildInputs = lib.optional (kinds != [ ]) pkgs.jq;
+    # The producers its evidence trusts, as rendered, before Conary's loader
+    # reads them: for a check to hold the loader to them.
+    passthru.producers = rendered.evidence.producers or null;
   } ''
+    ${lib.optionalString (kinds != [ ]) ''
+      ${lib.concatMapStrings (k: "${enabled.${k}.choice} > choice-${k}.json\n") kinds}
+      jq -cS ${lib.concatMapStrings (k: "--slurpfile ${k} choice-${k}.json ") kinds} \
+        '. + {execution: {${lib.concatMapStringsSep ", " (k: "${k}: $" + k + "[0]") kinds}}}' "$configPath" > config.json
+      configPath=config.json
+    ''}
     HOME=$TMPDIR ${ledger.package}/bin/cn flow settings --config "$configPath" >/dev/null
     cp "$configPath" "$out"
   '';

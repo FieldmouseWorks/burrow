@@ -296,7 +296,10 @@ let
   # token.rs), and the steward's token.
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
-  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward credentials; };
+  shadow = import ./autoland/shadow.nix {
+    inherit lib pkgs cfg settings ledger steward credentials;
+    flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
+  };
 in
 {
   imports = [
@@ -669,7 +672,8 @@ in
       description = ''
         Each shadowed repo's flow configuration, at OWNER/NAME.json
         lowercased (autoland/shadow.nix), rendered from the steward's
-        settings: the flow's only one, where its plugins read its settings
+        settings and its enabled plugins (their executables, choices and
+        producers): the flow's only one, where its plugins read its settings
         (a proof's recipe). One set by hand (CONARY_FLOW_CONFIG) is refused
         (burrow.ledger).
       '';

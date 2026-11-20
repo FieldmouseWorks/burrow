@@ -30,6 +30,45 @@ fn the_plugin_offers_what_the_fixing_roles_engine_offers() {
     );
 }
 
+/// The choice the flow's configuration is rendered with (its `execution`)
+/// is the fixing role's, with no repo's own, since conaryd reads one
+/// configuration for every repo: exactly what a job in a repo the role isn't
+/// set apart for is held to, and refused in one it is. One the engine
+/// doesn't offer is refused, as a job on it would be.
+#[test]
+fn the_flows_choice_is_the_fixing_roles() {
+    use burrow_producer::jobs::{choice, offered, runnable};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = route(
+        dir.path(),
+        json!({"models": {
+            "fix claude": {"model": "a-model", "effort": "high"},
+            "fix@sam/other claude": {"model": "a-model"},
+        }}),
+    );
+    let chosen = choice(&cfg, "fix").unwrap();
+    assert_eq!(
+        (
+            chosen.engine.as_str(),
+            chosen.model.as_deref(),
+            chosen.effort.as_deref()
+        ),
+        ("claude", Some("a-model"), Some("high"))
+    );
+    let offer = offered(&cfg, "fix").unwrap();
+    runnable(&cfg, "fix", REPO, &offer, Some(&chosen)).unwrap();
+    let err = runnable(&cfg, "fix", "sam/other", &offer, Some(&chosen)).unwrap_err();
+    assert!(err.contains("the flow chose"), "{err}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let unoffered = route(
+        dir.path(),
+        json!({"models": {"fix claude": {"model": "b-model"}}}),
+    );
+    let err = choice(&unoffered, "fix").unwrap_err();
+    assert!(err.contains("doesn't offer that model"), "{err}");
+}
+
 const REPO: &str = "sam/box";
 const HEAD: &str = "1111111111111111111111111111111111111111";
 const PUSHED: &str = "2222222222222222222222222222222222222222";
