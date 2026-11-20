@@ -85,6 +85,31 @@ fn string(c: Command) -> Result<String> {
 fn run(mut c: Command) -> Result<bool> {
     Ok(c.status()?.success())
 }
+/// A command whose stderr goes where its stdout does: one pipe, in the
+/// order it said them.
+fn merged(p: &str, args: &[&str]) -> Command {
+    let mut c = cmd("bash", &["-c", "exec \"$@\" 2>&1", "bash", p]);
+    c.args(args);
+    c
+}
+/// Run it, copying each line it says to this stdout and to `also` as it
+/// comes, so a long build is watched as it goes and its log kept whole; its
+/// exit code.
+fn tee(mut c: Command, also: &mut dyn Write) -> Result<i32> {
+    use std::io::BufRead;
+    let mut child = c.stdout(Stdio::piped()).spawn()?;
+    let mut pipe = io::BufReader::new(child.stdout.take().ok_or_else(|| err("no pipe"))?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if pipe.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        also.write_all(&line)?;
+        io::stdout().write_all(&line)?;
+    }
+    Ok(exit_code(child.wait()?))
+}
 fn show(o: &Output) -> Result<()> {
     io::stdout().write_all(&o.stdout)?;
     io::stderr().write_all(&o.stderr)?;
@@ -255,42 +280,19 @@ fn main() {
         if mode != "gate" && mode != "negative" {
             return Err(err("expected gate or negative"));
         }
-        use std::io::Read;
         let mut log = fs::File::create(temp().join(if mode == "gate" {
             "flake.log"
         } else {
             "negative.log"
         }))?;
-        let mut child = cmd(
-            "bash",
-            &[
-                "-c",
-                "exec \"$@\" 2>&1",
-                "bash",
-                s(&env::current_exe()?),
-                "--worker",
-                &mode,
-            ],
-        )
+        let mut c = merged(s(&env::current_exe()?), &["--worker", &mode]);
         // Every build the worker starts, its own and the nix and heavy
         // processes it runs, reads this; a caller's settings come first.
-        .env(
+        c.env(
             "NIX_CONFIG",
             worker_config(&var("NIX_CONFIG"), builds::writes()),
-        )
-        .stdout(Stdio::piped())
-        .spawn()?;
-        let mut pipe = child.stdout.take().unwrap();
-        let mut buf = [0; 8192];
-        loop {
-            let n = pipe.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            log.write_all(&buf[..n])?;
-            io::stdout().write_all(&buf[..n])?;
-        }
-        Ok(exit_code(child.wait()?))
+        );
+        tee(c, &mut log)
     })();
     match result {
         Ok(code) => std::process::exit(code),
