@@ -322,6 +322,59 @@ fn a_pr_of_its_own_held_by_a_finding_gets_a_fresh_bump_as_its_head() {
 }
 
 #[test]
+fn a_pr_of_its_own_main_moved_under_gets_a_fresh_bump_as_its_head() {
+    // Main moved where the bump did while it waited (another PR moved the
+    // same pin), so its head no longer merges: no check runs on such a head
+    // and no reviewer reads it, so it would wait for the train for good. A
+    // fresh bump on main goes up in its place.
+    let (m, stale) = proposed();
+    let live = m.running();
+    m.upstream("nixpkgs", &sha('d'));
+    let conflicting = || {
+        let mut said = checked(&stale, &[], false);
+        said["data"]["repository"]["pullRequest"]["mergeable"] = json!("CONFLICTING");
+        ok(200, said, &[])
+    };
+    let mut gh = Fake::default();
+    takes_labels(&mut gh);
+    gh.on(
+        "GET",
+        "repos/sam/homelab/pulls?",
+        vec![ok(
+            200,
+            listed(&[(8, stale.clone(), json!("sam/homelab"))]),
+            &[],
+        )],
+    );
+    gh.on("POST", "graphql", vec![conflicting(), conflicting()]);
+    gh.on(
+        "PATCH",
+        "repos/sam/homelab/pulls/8",
+        vec![ok(
+            200,
+            json!({"html_url": "https://github.com/sam/homelab/pull/8"}),
+            &[],
+        )],
+    );
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    let head = m.origin(&["rev-parse", &format!("refs/heads/{BRANCH}")]);
+    assert_ne!(head, stale);
+    assert_eq!(head, m.head());
+    assert_eq!(
+        said(&m),
+        (
+            "ok".into(),
+            format!(
+                "tested, not live (it goes live after it lands): nixpkgs aaaaaaa -> ddddddd (up as https://github.com/sam/homelab/pull/8, in place of its head {}, which was in conflict with main)",
+                &stale[..7]
+            )
+        )
+    );
+    assert_eq!(m.running(), live);
+    assert_eq!(gh.asked("PATCH").len(), 1);
+}
+
+#[test]
 fn a_fresh_bump_its_pr_wont_take_changes_nothing_live() {
     let (m, red_head) = proposed();
     let live = m.running();

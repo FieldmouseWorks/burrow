@@ -10,12 +10,14 @@
 //! the box. The train's candidate is where it is proven before that.
 //!
 //! Unless the steward won't land a head it pushed itself as it is (`stuck`):
-//! a check failed on it, or a reviewer's finding on it is open. The steward
-//! settles only a green PR with every thread resolved, and takes one that
-//! goes red out of the train, so that head is in no candidate for a new one
-//! to stop. So it brings in a fresh bump as if none were open, which goes up
-//! as the same PR's new head (`replace`): only a whole one, though, that
-//! isn't the stuck head's very tree (`replaces`).
+//! a check failed on it, a reviewer's finding on it is open, or it no longer
+//! merges into main, which moved where the bump did (another PR moved the
+//! same pin). The steward settles only a green PR with every thread
+//! resolved, and takes one that goes red out of the train; one in conflict
+//! gets no check run at all and joins no train. So that head is in no
+//! candidate for a new one to stop, and it brings in a fresh bump as if none
+//! were open, which goes up as the same PR's new head (`replace`): only a
+//! whole one, though, that isn't the stuck head's very tree (`replaces`).
 //!
 //! The head it pushed last is `proposed`, in its state dir: a head on its PR
 //! that isn't that one is someone else's, a fix, and what it holds hasn't
@@ -103,6 +105,8 @@ pub enum Stuck {
     Red,
     /// A reviewer's finding on it is open (`found`).
     Finding,
+    /// It no longer merges into main, which moved where the bump did.
+    Conflict,
 }
 
 impl std::fmt::Display for Stuck {
@@ -110,6 +114,7 @@ impl std::fmt::Display for Stuck {
         f.write_str(match self {
             Stuck::Red => "red",
             Stuck::Finding => "held by an open finding on it",
+            Stuck::Conflict => "in conflict with main",
         })
     }
 }
@@ -119,8 +124,11 @@ impl std::fmt::Display for Stuck {
 /// isn't, or when the head is anyone else's. Red is
 /// CI as the steward reads it (ci_state in modules/autoland/prs.py, whose
 /// rules these are), in `failing`; a finding is a review thread on that
-/// head, in `found`. Fails, saying why, when GitHub doesn't say, or the head
-/// moved since `pr` was listed.
+/// head, in `found`; in conflict is GitHub's CONFLICTING for the PR, and
+/// nothing less (while it hasn't worked that out, UNKNOWN, the head isn't
+/// stuck: asking is what makes GitHub work it out, so the next run reads
+/// it). Fails, saying why, when GitHub doesn't say, or the head moved since
+/// `pr` was listed.
 pub fn stuck(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<Option<Stuck>, String> {
     if proposed(cfg).as_deref() != Some(pr.head.as_str()) {
         return Ok(None);
@@ -138,7 +146,9 @@ pub fn stuck(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<Opti
             pr.number, pr.head
         ));
     }
-    let why = if failing(t, &p["commits"]["nodes"][0]["commit"]) {
+    let why = if p["mergeable"] == "CONFLICTING" {
+        Stuck::Conflict
+    } else if failing(t, &p["commits"]["nodes"][0]["commit"]) {
         Stuck::Red
     } else if found(&p["reviewThreads"], &pr.head) {
         Stuck::Finding
@@ -149,10 +159,10 @@ pub fn stuck(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<Opti
     Ok(Some(why))
 }
 
-/// A PR's head commit's checks, as `failing` reads them, and its review
-/// threads, as `found` does.
+/// Whether a PR merges into its base, its head commit's checks, as `failing`
+/// reads them, and its review threads, as `found` does.
 const CHECKS: &str = "query($owner: String!, $name: String!, $n: Int!) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
+  repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid mergeable
     reviewThreads(first: 100) { nodes { isResolved
       comments(first: 1) { nodes { originalCommit { oid } } }
     } }
@@ -337,7 +347,7 @@ pub fn said(cfg: &Config) -> Result<(String, String), String> {
     let title = cfg.git(&["log", "-1", "--format=%s"])?;
     let did = cfg.git(&["log", "-1", "--format=%b"])?;
     let body = format!(
-        "{did}\n\nIt is not live: {} runs main. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it. Only main goes live: {} deploys this after it lands.",
+        "{did}\n\nIt is not live: {} runs main. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it, a finding on it is left open or it stops merging into main: then a fresh bump replaces it. Only main goes live: {} deploys this after it lands.",
         cfg.host, cfg.update, cfg.update
     );
     Ok((title, body))

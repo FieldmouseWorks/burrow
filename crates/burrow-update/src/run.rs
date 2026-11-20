@@ -13,7 +13,7 @@
 //! VM-tested but never switched to: only main goes live, so a bump is live
 //! after it lands, like any other change, and one held for a finding never
 //! strands the box. While that PR is open it brings in nothing newer, unless
-//! a check fails on it: then a fresh bump replaces its head.
+//! its head is stuck (train.rs says when): then a fresh bump replaces it.
 //!
 //! Its steps, in order: this file's, to the build; vm_tests.rs, the VM
 //! tests; live.rs, live and confirmed; and this file's again, put up.
