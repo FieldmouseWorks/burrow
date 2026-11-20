@@ -21,9 +21,9 @@ pub type Lines = Arc<BTreeMap<String, Line>>;
 pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request) -> u16 {
     let event = req.header("X-GitHub-Event").unwrap_or("");
     if req.body.is_empty() || !signed(secret, &req.body, req.header("X-Hub-Signature-256")) {
-        // GitHub's secret and this one differ (a forgery, or a secret
-        // changed and not yet restarted for): say so.
-        eprintln!("a {event} delivery whose signature isn't the hook secret's; turned away");
+        // A forgery, a probe, or a hook whose secret isn't this one: say
+        // which, and whose, so it can be found at its owner.
+        eprintln!("{}", turned_away(|n| req.header(n), req.body.is_empty()));
         return 401;
     }
     let Ok(payload) = serde_json::from_slice::<Value>(&req.body) else {
@@ -48,6 +48,73 @@ pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request)
         }
     }
     202
+}
+
+/// The line for a delivery turned away: its event, the hook that sent it
+/// (GitHub names it in X-GitHub-Hook-ID and the installation target headers;
+/// a request without them is no hook's, with its User-Agent to say whose),
+/// and why: an empty body, no signature, or another secret's. Every value is
+/// the sender's and unchecked, so each is held to what GitHub sends.
+fn turned_away<'a>(header: impl Fn(&str) -> Option<&'a str>, empty: bool) -> String {
+    let event = match header("X-GitHub-Event") {
+        Some(e) => format!("a {} delivery", word(e, 40)),
+        None => "a delivery with no X-GitHub-Event".into(),
+    };
+    let from = match header("X-GitHub-Hook-ID") {
+        Some(id) => {
+            let mut from = format!("from hook {}", digits(id));
+            if let Some(kind) = header("X-GitHub-Hook-Installation-Target-Type") {
+                let target =
+                    header("X-GitHub-Hook-Installation-Target-ID").map_or("?".into(), digits);
+                from += &format!(" ({} {target})", word(kind, 40));
+            }
+            if let Some(guid) = header("X-GitHub-Delivery") {
+                from += &format!(", delivery {}", word(guid, 40));
+            }
+            from
+        }
+        None => format!(
+            "from no GitHub hook (no X-GitHub-Hook-ID; User-Agent {})",
+            header("User-Agent").map_or("none".into(), printable)
+        ),
+    };
+    let why = if empty {
+        "an empty body"
+    } else if header("X-Hub-Signature-256").is_none() {
+        "no signature"
+    } else {
+        "a signature that isn't the hook secret's"
+    };
+    format!("{event} {from}, with {why}; turned away")
+}
+
+/// An ID GitHub sends: digits, or "(garbled)".
+fn digits(v: &str) -> String {
+    if !v.is_empty() && v.len() <= 20 && v.bytes().all(|b| b.is_ascii_digit()) {
+        v.into()
+    } else {
+        "(garbled)".into()
+    }
+}
+
+/// A name or GUID GitHub sends (an event, a target type, a delivery): up to
+/// MAX letters, digits, `_`, `-` and `:`, or "(garbled)".
+fn word(v: &str, max: usize) -> String {
+    let ok = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':');
+    if !v.is_empty() && v.len() <= max && v.bytes().all(ok) {
+        v.into()
+    } else {
+        "(garbled)".into()
+    }
+}
+
+/// A free-form value (a User-Agent), quoted: its printable ASCII, cut at 80.
+fn printable(v: &str) -> String {
+    let kept: String = v.chars().filter(|c| matches!(c, ' '..='~')).collect();
+    match kept.char_indices().nth(80) {
+        Some((cut, _)) => format!("{:?}...", &kept[..cut]),
+        None => format!("{kept:?}"),
+    }
 }
 
 /// POST /kick/HANDLER[/OWNER/REPO], from this machine. A repo the handler
@@ -79,7 +146,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Handlers, Lines, delivery, kick};
+    use super::{Handlers, Lines, delivery, kick, turned_away};
     use crate::handler::{Handler, Pushes};
     use crate::http::listen;
     use crate::http::tests::{post, sign};
@@ -321,6 +388,86 @@ mod tests {
                 ]
             ),
             404
+        );
+    }
+
+    fn line(headers: &[(&str, &str)], empty: bool) -> String {
+        turned_away(
+            |n| {
+                headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                    .map(|(_, v)| *v)
+            },
+            empty,
+        )
+    }
+
+    // A hook's delivery names the hook, its target and the delivery, so a
+    // stale secret can be found at its owner.
+    #[test]
+    fn turned_away_names_the_hook() {
+        assert_eq!(
+            line(
+                &[
+                    ("X-GitHub-Event", "ping"),
+                    ("X-GitHub-Hook-ID", "512345678"),
+                    ("X-GitHub-Hook-Installation-Target-Type", "integration"),
+                    ("X-GitHub-Hook-Installation-Target-ID", "1046020"),
+                    ("X-GitHub-Delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958"),
+                    ("X-Hub-Signature-256", "sha256=00"),
+                    ("User-Agent", "GitHub-Hookshot/044aadd"),
+                ],
+                false
+            ),
+            "a ping delivery from hook 512345678 (integration 1046020), \
+             delivery 72d3162e-cc78-11e3-81ab-4c9367dc0958, \
+             with a signature that isn't the hook secret's; turned away"
+        );
+    }
+
+    // A request no hook sent (a probe by hand) says so, and whose it is.
+    #[test]
+    fn turned_away_names_no_hook() {
+        assert_eq!(
+            line(
+                &[("X-GitHub-Event", "ping"), ("User-Agent", "curl/8.23.0")],
+                false
+            ),
+            "a ping delivery from no GitHub hook (no X-GitHub-Hook-ID; \
+             User-Agent \"curl/8.23.0\"), with no signature; turned away"
+        );
+        assert_eq!(
+            line(&[("X-Hub-Signature-256", "sha256=00")], true),
+            "a delivery with no X-GitHub-Event from no GitHub hook \
+             (no X-GitHub-Hook-ID; User-Agent none), with an empty body; turned away"
+        );
+    }
+
+    // The sender's values are held to what GitHub sends: nothing it makes
+    // up reaches the journal as a line of its own or as a lie.
+    #[test]
+    fn turned_away_holds_the_sender_to_form() {
+        let said = line(
+            &[
+                ("X-GitHub-Event", "push\nforged line"),
+                ("X-GitHub-Hook-ID", "12; rm"),
+                ("X-GitHub-Hook-Installation-Target-Type", "repository"),
+                ("X-GitHub-Delivery", &"a".repeat(41)),
+            ],
+            false,
+        );
+        assert_eq!(
+            said,
+            "a (garbled) delivery from hook (garbled) (repository ?), \
+             delivery (garbled), with no signature; turned away"
+        );
+        let ua = format!("x\u{1b}[31m\n{}", "y".repeat(100));
+        let said = line(&[("User-Agent", &ua)], false);
+        assert!(!said.contains(['\n', '\u{1b}']), "{said}");
+        assert!(
+            said.contains(&format!("\"x[31m{}\"...", "y".repeat(75))),
+            "{said}"
         );
     }
 }
