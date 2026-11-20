@@ -95,6 +95,21 @@ pub enum Outcome {
     Failed { why: String },
 }
 
+impl Outcome {
+    /// Its exit: 0 only once the head is asked (posted now, or before), as
+    /// Conary's flow reads it (its `review_ask`: anything else, and a later
+    /// pass asks again), so a no that may not last (the day's cap, a hold,
+    /// a draft) isn't taken for an ask; 2 for that no, 1 for a failure. The
+    /// steward reads the JSON line instead.
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::Posted { .. } | Self::Asked { .. } => 0,
+            Self::Failed { .. } => 1,
+            Self::Declined { .. } => 2,
+        }
+    }
+}
+
 const PR: &str = "query($owner: String!, $name: String!, $n: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $n) {
