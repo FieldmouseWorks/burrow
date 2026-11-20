@@ -34,6 +34,8 @@ pub struct Pr {
     pub number: u64,
     /// Its head when it was listed.
     pub head: String,
+    /// Whether it carried the train's `first` label then.
+    pub first: bool,
 }
 
 /// Its open PR, None when there's none. Fails when GitHub doesn't say. Only
@@ -61,15 +63,36 @@ pub fn open(t: &Train, api: &mut dyn Api) -> Result<Option<Pr>, String> {
     });
     let Some(p) = ours else { return Ok(None) };
     let head = p["head"]["sha"].as_str().unwrap_or("");
+    let first = t.first.as_deref().is_some_and(|l| {
+        p["labels"]
+            .as_array()
+            .is_some_and(|ls| ls.iter().any(|x| x["name"] == l))
+    });
     match p["number"].as_u64() {
         Some(number) if is_commit(head) => Ok(Some(Pr {
             number,
             head: head.to_string(),
+            first,
         })),
         _ => Err(format!(
             "GET {path}: a PR that isn't one ({} {head})",
             p["number"]
         )),
+    }
+}
+
+/// Its PR goes first in the landing line: the `first` label on it, unless
+/// it has it already. It's the only way the burrow and Conary fixes the
+/// pipeline waits on reach the machine. Best effort, and every run that
+/// finds its PR open asks again: a label GitHub didn't take never holds the
+/// bump back.
+pub fn first(t: &Train, api: &mut dyn Api, pr: &Pr) {
+    let Some(label) = t.first.as_deref().filter(|_| !pr.first) else {
+        return;
+    };
+    let path = format!("repos/{}/issues/{}/labels", t.repo, pr.number);
+    if let Err(e) = call(api, "POST", &path, Some(&json!({"labels": [label]})), None) {
+        eprintln!("its PR #{} didn't get its {label} label: {e}", pr.number);
     }
 }
 
@@ -294,6 +317,14 @@ pub fn propose(cfg: &Config, t: &Train, api: &mut dyn Api) -> Result<String, Str
         None,
     )?
     .json()?;
+    if let Some(number) = made["number"].as_u64() {
+        let pr = Pr {
+            number,
+            head: String::new(),
+            first: false,
+        };
+        first(t, api, &pr);
+    }
     made["html_url"]
         .as_str()
         .map(String::from)

@@ -130,6 +130,8 @@ let
     train = if train then {
       repo = githubRepo; branch = update; settled = vars.SETTLED;
       context = config.burrow.ledger.trainContext; steward = autoland.app.slug;
+      # Its PR is how pipeline fixes reach the machine: first in the line.
+      first = autoland.labels.first;
     } else null;
     inherit (cfg) origin checks;
     flake = config.burrow.flake;

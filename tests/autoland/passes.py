@@ -223,11 +223,24 @@ kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handl
 S.R.discover = lambda: [{"repo": f"sam/{x}", "default": "main"} for x in "rqp"]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
-# #7 is stacked on #5's branch; #6 is into a branch no open PR has.
+# #7 is stacked on #5's branch; #6 is into a branch no open PR has; #8
+# fixes a red main.
 S.open_prs = lambda owner, name: (info, [mkpr(), mkpr(number=6, sha="b" * 40, branch="fix", base="release"),
-                                         mkpr(number=7, sha="c" * 40, branch="next", base="feat")])
+                                         mkpr(number=7, sha="c" * 40, branch="next", base="feat"),
+                                         mkpr(number=8, sha="d" * 40, branch="autoland/red-dddddddddddd")])
 below = {}
 S.step.handle = lambda repo, pr, info, digest, held, under: below.setdefault(pr["number"], under)
+# The proof line each repo's pass begins: which PRs go first in it.
+began, kept_begin = {}, S.P.begin
+
+
+def begin(repo, numbers, first):
+    began[repo] = set(first)
+    return kept_begin(repo, numbers, first)
+
+
+S.P.begin = begin
+WROTE.clear()
 
 
 def watch_default(r, *a):
@@ -240,9 +253,14 @@ sys.argv = ["steward"]
 S.main()
 sys.argv = argv
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, S.R.watch_default = kept_fns
-assert below == {5: None, 6: None, 7: 5}, below
+S.P.begin = kept_begin
+assert below == {5: None, 6: None, 7: 5, 8: None}, below
 assert len(published) == 1, published
 print("stacked bases: ok")
+# A red main's fix goes first, in the proof line and, labelled, in Conary's flow.
+assert began["sam/r"] == {8}, began
+assert "pr edit 8 -R sam/r --add-label first" in WROTE, WROTE
+print("red fixes first: ok")
 
 # A repo that can't be started over as new, though it was remade, is left
 # alone that pass, its dashboard and flaky tests too: nothing of the deleted

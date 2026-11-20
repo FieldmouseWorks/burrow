@@ -354,6 +354,7 @@ pub fn train() -> Train {
         settled: "review-settled".into(),
         context: "conary/train".into(),
         steward: "sams-steward".into(),
+        first: Some("first".into()),
     }
 }
 
@@ -570,6 +571,16 @@ pub fn sha(c: char) -> String {
 }
 
 /// GitHub's list of open PRs: each one's number, head and head's repo.
+/// GitHub taking the train's label on any of its PRs (`train::first`).
+pub fn takes_labels(gh: &mut burrow_github::fake::Fake) {
+    gh.on(
+        "POST",
+        "repos/sam/homelab/issues/",
+        vec![burrow_github::fake::ok(200, json!([]), &[])],
+    );
+}
+
+/// Its open PRs, as GitHub lists them: none labelled.
 pub fn listed(prs: &[(u64, String, Value)]) -> Value {
     prs.iter()
         .map(|(n, sha, repo)| {

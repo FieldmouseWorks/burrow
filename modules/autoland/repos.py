@@ -173,6 +173,34 @@ def retire_checkouts(repo, k):
             raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
 
 
+def first_fixes(r, prs):
+    """The fixes for a red default branch (tasks.red_fix) among its open
+    PRs, by number: every PR is built on the red branch until one lands, so
+    each goes first, in this pass's proof line and, with the first label
+    put on it, in Conary's flow (priority_labels). Best effort: a label
+    GitHub didn't take is asked for again by the next pass. One PR that
+    can't be read mustn't stop the rest: it fails in its own step."""
+    repo, default = r["repo"], r["default"]
+    undos = (load(f"repo-{repo.replace('/', '_')}.json", {}).get("red") or {}).get("undos", ())
+    label = CFG["labels"]["first"]
+    fixes = set()
+    for pr in prs:
+        try:
+            if not red_fix(pr, default, undos):
+                continue
+            nodes = pr["labels"]["nodes"]
+        except (KeyError, TypeError):
+            continue
+        fixes.add(pr["number"])
+        if label in {x.get("name") for x in nodes}:
+            continue
+        if C.write("pr", "edit", str(pr["number"]), "-R", repo, "--add-label", label, check=False) is not None:
+            nodes.append({"name": label})
+        elif not DRY:
+            log(f"{repo}#{pr['number']}: GitHub didn't take its {label} label")
+    return fixes
+
+
 def watch_default(r, info, prs, digest):
     """A red default branch: CI failed on what's merged, and every PR is
     built on it. With no merge queue (docs/repo-baseline.md), this is how

@@ -5,7 +5,7 @@
 use burrow_github::fake::ok;
 
 use super::*;
-use crate::testing::{BRANCH, checked, listed};
+use crate::testing::{BRANCH, checked, listed, takes_labels};
 
 #[test]
 fn in_a_train_main_goes_live_with_nothing_put_up() {
@@ -14,6 +14,7 @@ fn in_a_train_main_goes_live_with_nothing_put_up() {
     let main = merged(&m);
     let none = || {
         let mut gh = Fake::default();
+        takes_labels(&mut gh);
         gh.on(
             "GET",
             "repos/sam/homelab/pulls?",
@@ -44,6 +45,7 @@ fn a_pr_put_live_before_it_landed_goes_on_to_the_main_past_it() {
     m.cfg.train = Some(train());
     let none = || {
         let mut gh = Fake::default();
+        takes_labels(&mut gh);
         gh.on(
             "GET",
             "repos/sam/homelab/pulls?",
@@ -91,6 +93,7 @@ fn proposed() -> (Machine, String) {
     m.cfg.train = Some(train());
     m.upstream("nixpkgs", &sha('c'));
     let mut gh = Fake::default();
+    takes_labels(&mut gh);
     gh.on(
         "GET",
         "repos/sam/homelab/pulls?",
@@ -131,6 +134,7 @@ fn proposed() -> (Machine, String) {
 /// asked, and its PATCH answered.
 fn open_at(head: &str, red: &[bool]) -> Fake {
     let mut gh = Fake::default();
+    takes_labels(&mut gh);
     gh.on(
         "GET",
         "repos/sam/homelab/pulls?",
@@ -209,6 +213,7 @@ fn a_held_bump_never_holds_main_and_the_box_never_runs_a_pin_main_lacks() {
     m.landed("system.nix", "unrelated");
     let main = m.main();
     let mut gh = Fake::default();
+    takes_labels(&mut gh);
     open(&mut gh);
     gh.on("POST", "graphql", vec![found()]);
     // The held PR is stuck, but main isn't live yet: main deploys first.
@@ -227,7 +232,10 @@ fn a_held_bump_never_holds_main_and_the_box_never_runs_a_pin_main_lacks() {
     );
     assert!(!running_lock(&m).contains(&sha('d')));
     assert_eq!(m.recorded("deployed-main"), Some(main));
-    assert!(gh.asked("PATCH").is_empty() && gh.asked("POST").len() == 1);
+    // Its PR goes first in the landing line, and is otherwise untouched.
+    let posts: Vec<_> = gh.asked("POST").iter().map(|a| a.1.as_str()).collect();
+    assert_eq!(posts, ["repos/sam/homelab/issues/8/labels", "graphql"]);
+    assert!(gh.asked("PATCH").is_empty());
     assert_eq!(
         m.origin(&["rev-parse", &format!("refs/heads/{BRANCH}")]),
         held,
@@ -275,6 +283,7 @@ fn a_pr_of_its_own_held_by_a_finding_gets_a_fresh_bump_as_its_head() {
         ok(200, said, &[])
     };
     let mut gh = Fake::default();
+    takes_labels(&mut gh);
     gh.on(
         "GET",
         "repos/sam/homelab/pulls?",
@@ -403,6 +412,7 @@ fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
         );
         let _ = fs::remove_file(m.path("calls"));
         let mut gh = Fake::default();
+        takes_labels(&mut gh);
         gh.on(
             "GET",
             "repos/sam/homelab/pulls?",
@@ -441,6 +451,7 @@ fn a_main_deployment_whose_history_was_rewritten_keeps_the_downgrade_check() {
     fs::write(m.cfg.state.join("deployed-main"), format!("{bump}\n")).unwrap();
     m.landed("system.nix", "unrelated");
     let mut gh = Fake::default();
+    takes_labels(&mut gh);
     gh.on(
         "GET",
         "repos/sam/homelab/pulls?",

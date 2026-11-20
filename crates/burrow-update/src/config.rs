@@ -107,6 +107,11 @@ pub struct Train {
     pub context: String,
     /// The steward's App, as GraphQL names its bot.
     pub steward: String,
+    /// The steward's label that takes a PR first in the landing line
+    /// (burrow.autoland.labels.first): its PR carries it, being the one way
+    /// a fix to the pipeline or the machine reaches it.
+    #[serde(default)]
+    pub first: Option<String>,
 }
 
 impl Config {

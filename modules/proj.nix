@@ -56,6 +56,8 @@ let
     askTimeout = cfg.askTimeout;
     waitingOwnerLabel = "waiting: ${config.burrow.owner}";
     needsOwnerLabel = config.burrow.autoland.labels.owner or cfg.inbox.triage.ownerLabel;
+    # What a first job's own awaited PR gets (crates/burrow-proj/src/first.rs).
+    firstLabel = if config.burrow.autoland.enable or false then config.burrow.autoland.labels.first else null;
     probe = config.burrow.probe.settings;
     unitsClearSocket = if config.burrow.watchdog.units.enable or false
       then config.burrow.watchdog.units.clearSocket else null;
@@ -106,6 +108,8 @@ let
       bash = "${pkgs.bashInteractive}/bin/bash";
       flock = "${pkgs.util-linux}/bin/flock";
       gh = lib.getExe cfg.gh;
+      # gh as the jobs run it, for what proj does on GitHub as a job.
+      jobGh = lib.getExe (config.burrow.tools.gh or pkgs.gh);
       git = lib.getExe config.programs.git.package;
       systemctl = "${pkgs.systemd}/bin/systemctl";
       systemdRun = "${pkgs.systemd}/bin/systemd-run";
