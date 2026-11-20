@@ -142,8 +142,8 @@ Each has an entry below, and each can be imported on its own.
   one GitHub issue per problem in `burrow.notify.repo`, commented at most
   daily and closed when it clears. One closed by hand while its problem
   stands comes back a day later, saying so. One opened `--handled` (its
-  opener has a job on it and closes it) is never sorted or drained by the
-  inbox.
+  opener settles it, with a job of its own where there is one) is never
+  sorted or drained by the inbox.
 - **`remote-control`** (`burrow.remoteControl`): An always-on `claude
   remote-control` server for every project in `burrow.projectsDir` (a git
   checkout with an origin), found by itself (a path unit rescans when folders

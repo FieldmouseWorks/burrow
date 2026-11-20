@@ -14,9 +14,9 @@
 //! sends for a continuing problem. Both update an existing notice's title and
 //! body when the facts change. It is safe to retry after an ambiguous reply.
 //!
-//! `--handled` says its caller has the problem in hand: a Claude job of its
-//! own is on it, and the caller closes the notice once it clears. The issue
-//! is the record of that, not work to take: its body carries [`HANDLED`],
+//! `--handled` says its caller has the problem in hand: it closes the notice
+//! once it clears, with a Claude job of its own on it where there is one.
+//! The issue is the record of that, not work to take: its body carries [`HANDLED`],
 //! and [`handled`] is how the inbox knows to leave it alone.
 //!
 //! A notice someone closed by hand while its problem still stands isn't
@@ -96,8 +96,9 @@ pub const USAGE: &str = "open [--handled] KEY TITLE BODY | ensure [--handled] KE
 /// What a `--handled` notice's body ends with: hidden where GitHub shows it.
 pub const HANDLED: &str = "<!-- burrow-notify: handled by its opener -->";
 
-/// Whether an issue's `body` is a `--handled` notice's: its problem has a
-/// job of its own and its opener closes it, so nothing hands it to another.
+/// Whether an issue's `body` is a `--handled` notice's: its opener settles
+/// it, with a job of its own where there is one, so nothing hands it to
+/// another.
 pub fn handled(body: &str) -> bool {
     body.lines().any(|l| l.trim() == HANDLED)
 }

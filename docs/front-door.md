@@ -277,7 +277,8 @@ With `inbox.triage.enable`, an issue doesn't need a label to get done. Every
 open issue one of `inbox.authors` opened, with none of the labels below, an
 engine's or one in `triage.skip` (probe, undo, flaky: other machinery's), and
 no machine notice no job is handed (a question's, below, or one its opener
-marked `--handled`: HOST-update's, whose problem has its own job already), is
+marked `--handled`: HOST-update's, which it settles itself, with a job of its
+own where it has one), is
 sorted by a job of its own: the `triage` role's engine reads the issue and the
 repo, changes nothing, and answers with a verdict the inbox carries out.
 

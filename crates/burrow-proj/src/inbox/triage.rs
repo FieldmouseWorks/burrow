@@ -677,9 +677,9 @@ pub(super) enum Step {
 ///
 /// - a proj question's: it waits on a person. A job's reply isn't an answer,
 ///   and its `proj done` closing the notice only gets it posted again.
-/// - one its opener has `--handled` (HOST-notify's mark): a job of the
-///   opener's own is on its problem, and the opener closes it once it
-///   clears. A second job would only redo the first's work.
+/// - one its opener has `--handled` (HOST-notify's mark): the opener closes
+///   it once its problem clears, with a job of its own on it where there is
+///   one. A second job would only redo the first's work.
 pub(super) fn notice(issue: &Value) -> bool {
     crate::question::is_notice(issue) || issue["body"].as_str().is_some_and(burrow_notify::handled)
 }
