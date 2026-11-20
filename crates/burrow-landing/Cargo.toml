@@ -1,0 +1,24 @@
+[package]
+name = "burrow-landing"
+description = "Moves a repository's landing between the steward and conaryd as its setting says, once the one letting go has nothing left at work there"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-settings = { path = "../burrow-settings" }
+# Conary's own types: conaryd's events file, the flow's repository lock and
+# its workers. Pinned with burrow-flow-files' by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

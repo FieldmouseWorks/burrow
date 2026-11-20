@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
 
-const USAGE: &str =
-    "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]\n";
+const USAGE: &str = "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]\n";
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
@@ -779,4 +778,41 @@ fn an_abort_reverts_at_once() {
     let m = Machine::switched(false);
     m.set("stays-one", "");
     assert_eq!(said(&m.switch(&["--abort"])).0, Some(1));
+}
+
+#[test]
+fn a_switch_told_unless_pending_leaves_a_pending_one_be() {
+    // Pending as it takes the lock (gone pending while it built, say): it
+    // exits 4 having touched nothing, even when it's the system that runs.
+    let m = Machine::switched(false);
+    let (one, two, three) = (m.sys("one"), m.sys("two"), m.system("three", Some(300)));
+    for system in [&three, &two] {
+        let out = m.switch(&["--unless-pending", "--toplevel", system]);
+        assert_eq!(
+            said(&out),
+            refused(
+                4,
+                &format!("{two} is pending; not switching over it (it's someone's, mid-change)\n")
+            ),
+            "{system}"
+        );
+        assert_eq!(m.running(), two);
+        assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+        assert_eq!(m.state("prev"), Some(format!("{one}\n")));
+        for f in [
+            "systemctl",
+            "systemd-run",
+            "switch-to-configuration",
+            "journal",
+        ] {
+            assert_eq!(m.fake(f), "", "{f}");
+        }
+    }
+    // With nothing pending, it switches as any switch does.
+    let m = Machine::new(false);
+    let two = m.sys("two");
+    let out = m.switch(&["--toplevel", &two, "--unless-pending"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out).2);
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
 }

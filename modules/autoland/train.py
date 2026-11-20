@@ -82,14 +82,18 @@ def admitted(action, repo, *args):
     """Whether the train may take this write now, admission read afresh. In
     a paused repo: a join only of a PR handed to the steward at the head it
     joins at, and a step only while every PR in the train is one, so a
-    handoff never lands another PR with it."""
-    if not C.paused(repo):
+    handoff never lands another PR with it. None at all where the steward
+    doesn't land the repo (admission.held)."""
+    d = C.decision(repo)
+    if d is None or not C.lands(d["landing"]):
+        return False
+    if d["allowed"]:
         return True
     if action == "join":
         head = args[args.index("--head") + 1] if "--head" in args[:-1] else None
-        return bool(args and args[0].isdigit() and head) and not C.paused(repo, {"number": int(args[0]), "headRefOid": head})
+        return bool(args and args[0].isdigit() and head) and not C.held(repo, {"number": int(args[0]), "headRefOid": head})
     t = TRAINS.get(repo)
-    handed = {h["pr"] for h in (C.decision(repo) or {}).get("handed", ())}
+    handed = {h["pr"] for h in d.get("handed", ())}
     return bool(t and t["joined"]) and all(m["pr"] in handed for m in t["joined"])
 
 
@@ -209,7 +213,7 @@ def ride(repo, pr, st, desc, settle, strike, said, reviewed):
     (step.py); said is what GitHub said when it refused its merge, as the
     train's status on the head has it; reviewed, whether its reviewers had
     a round on it (join)."""
-    if C.paused(repo, pr):
+    if C.held(repo, pr):
         raise C.JobPaused(f"{repo}: repository work paused before train admission")
     n, head = pr["number"], pr["headRefOid"]
     if C.queued(pr) and not C.unland(repo, pr):

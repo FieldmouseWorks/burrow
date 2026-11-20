@@ -26,7 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
-from admission import decision, handed, spend, spend_closed  # noqa: F401 (the steward's, as C.*)
+from admission import decision, handed, held, landing, lands, spend, spend_closed  # noqa: F401 (the steward's, as C.*)
 import proof_state
 from proof_state import build_unit, user_systemctl, build_state
 
@@ -854,8 +854,8 @@ def at_work(jid, key=None, snapshot=None):
     """Whether job jid (or a proof build) is still at work: queued, running,
     nothing can say, or its turn is over but it holds something open
     (job_lifecycle)."""
-    state, held = job_lifecycle(jid, key, snapshot)
-    return state != "parked" and (state in (None, "queued", "running") or held is not None)
+    state, holds = job_lifecycle(jid, key, snapshot)
+    return state != "parked" and (state in (None, "queued", "running") or holds is not None)
 
 
 def holding(lines, key):

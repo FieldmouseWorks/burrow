@@ -27,6 +27,9 @@ mod inputs;
 /// Which new tests count as having passed on the old code: those a check
 /// that passed runs.
 mod runs;
+/// A check that never ends on the old code: built once, under a timeout,
+/// and caught where it passes on the head.
+mod timeouts;
 
 /// t's derivation once its test wants 2, which fails it.
 const WANTS_2: &str = r#""want":"2\n""#;
@@ -339,20 +342,21 @@ fn a_test_that_catches_its_change_fails_on_the_old_code() {
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     assert_eq!(ran.list("tests"), ["tests/want.txt"]);
     assert_eq!(ran.list("checks"), ["t"]);
-    // Built, then what it's built from, then the base's, then again on
-    // its own: its own builder's failure, on what the new tests change.
+    // What it's built from, then it on its own, then the same for the
+    // base's: its own builder's failure, on what the new tests change,
+    // built once.
     let builds = ran.builds();
     assert_eq!(builds.len(), 4, "{builds:?}");
+    assert!(builds[0].contains("-dep.drv^out"), "{builds:?}");
     assert!(
-        builds[0].contains("-t.drv^*") && !builds[0].contains("-other.drv"),
+        builds[1].contains("-t.drv^*") && !builds[1].contains("-other.drv"),
         "{builds:?}"
     );
-    assert!(builds[1].contains("-dep.drv^out"), "{builds:?}");
+    assert_eq!(builds[2], builds[0], "{builds:?}");
     assert!(
-        builds[2].contains("-t.drv^*") && builds[2] != builds[0],
+        builds[3].contains("-t.drv^*") && builds[3] != builds[1],
         "{builds:?}"
     );
-    assert_eq!(builds[3], builds[0], "{builds:?}");
     // The negative tree: the base's code, the head's tests.
     let tree = ran.found.as_ref().unwrap()["tree"]
         .as_str()

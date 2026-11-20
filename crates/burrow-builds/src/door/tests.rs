@@ -263,3 +263,26 @@ fn a_long_reason_is_cut_to_fit_nginxs_head() {
     );
     assert!(header.contains("too long"), "{header}");
 }
+
+/// A client that has gone away: nothing it's sent is read, and nothing a
+/// door writes to it lands.
+struct Gone;
+
+impl std::io::Write for Gone {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+#[test]
+fn a_client_gone_before_its_answer_is_not_a_failed_door() {
+    // nginx restarts mid-upload when a switch reloads it: the upload is in
+    // the store (or refused) before the answer, and the door has no one to
+    // tell. Its unit must not fail for it.
+    let d = door();
+    let (req, _) = request(Some("public"), &[], &[]);
+    serve(&d.cfg, &mut Cursor::new(req), &mut Gone).unwrap();
+}

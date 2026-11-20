@@ -5,14 +5,14 @@
 #   nix build .#checks.x86_64-linux.agents -L
 { self, pkgs }:
 let
-  # How long burrow-agent itself gives a sandbox: BOOT to boot, BANNER for
-  # sshd's banner (crates/burrow-agent/src/ssh.rs). The test waits on a
+  # How long burrow-agent itself gives a sandbox to answer, booting or
+  # running: BOOT (crates/burrow-agent/src/ssh.rs). The test waits on a
   # nested boot as long as the agent does, never less: on a loaded machine
   # one takes minutes, and a shorter wait only fails the test for it.
   agentSecs = name: pkgs.lib.toInt (builtins.head (builtins.match
     ".*pub const ${name}: Duration = Duration::from_secs\\(([0-9]+)\\);.*"
     (builtins.readFile ../crates/burrow-agent/src/ssh.rs)));
-  boot = agentSecs "BOOT" + agentSecs "BANNER";
+  boot = agentSecs "BOOT";
 in
 pkgs.testers.runNixOSTest {
   name = "agents";
@@ -29,12 +29,12 @@ pkgs.testers.runNixOSTest {
       name = "Test";
       email = "test@example.com";
     };
-    # While its home has .slow-banner, a sandbox's sshd sends its banner
-    # 15s late, past the old 5s wait, as one on a loaded machine did.
+    # While its home has .slow-banner, a sandbox's sshd sends its banner as
+    # many seconds late as the file says, as one on a loaded machine did.
     slowBanner = { pkgs, ... }: {
       systemd.services."sshd-vsock@" = {
         overrideStrategy = "asDropin";
-        serviceConfig.ExecStartPre = "${pkgs.bash}/bin/bash -c 'for h in /home/*; do [ ! -e \"$$h/.slow-banner\" ] || exec sleep 15; done'";
+        serviceConfig.ExecStartPre = "${pkgs.bash}/bin/bash -c 'for h in /home/*; do [ ! -e \"$$h/.slow-banner\" ] || exec sleep \"$$(cat \"$$h/.slow-banner\")\"; done'";
       };
     };
   in {
@@ -167,9 +167,13 @@ pkgs.testers.runNixOSTest {
         vm(a, "test -c /dev/kvm && test -w /dev/kvm")
 
     with subtest("a sandbox slow to answer, as on a loaded machine, is waited for, and brought up"):
-        vm(a, "touch ~/.slow-banner")
+        # Running, it answers 75s late: past the 60s the agent once gave a
+        # running sandbox's banner, which a stalled nested one overran.
+        vm(a, "echo 75 >~/.slow-banner")
         assert vm(a, "echo up").strip() == "up"
         # Stopped, agent sh starts it again and waits for it to be ready.
+        # (Its home, from the host: through the sandbox would wait 75s more.)
+        host.succeed(f"echo 15 >/agents/{a}/home/.slow-banner")
         dev(f"agent stop {a}")
         assert vm(a, "echo up").strip() == "up"
         vm(a, "rm ~/.slow-banner")

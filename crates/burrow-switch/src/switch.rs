@@ -21,11 +21,16 @@ use std::process::{Command, Stdio};
 
 use rustix::fs::{Access, FlockOperation, access, flock};
 
-use crate::{Broke, Config, canonical, complain, exit_of, ran, say};
+use crate::{Broke, Config, as_recorded, canonical, complain, exit_of, ran, say};
 
 /// What a switch exits with when it refuses a downgrade, before anything
 /// changed (HOST-update tells it by this).
 pub const DOWNGRADE: u8 = 3;
+
+/// What a switch told `--unless-pending` exits with when a switch is
+/// pending, and a confirm or an abort told the system it means when what's
+/// pending is another: it changed nothing (HOST-update holds by it).
+pub const PENDING: u8 = 4;
 
 /// What switch-to-configuration exits with when someone else holds its
 /// lock: it changed nothing.
@@ -39,15 +44,20 @@ const KEEP: &str = "--property=ManagedOOMPreference=omit";
 #[derive(Debug, PartialEq, Eq)]
 pub enum Word {
     /// Put a system live: built from a flake (the machine's, unless one's
-    /// named), or one already built (`--toplevel`).
+    /// named), or one already built (`--toplevel`). Told
+    /// `--unless-pending`, it doesn't when another switch is pending as it
+    /// takes the lock: that one is someone's, mid-change.
     Switch {
         system: System,
         allow_downgrade: bool,
+        unless_pending: bool,
     },
     /// What's pending.
     Status,
-    /// A pending switch reverted now instead of waiting.
-    Abort,
+    /// A pending switch reverted now instead of waiting. Told the system
+    /// it means, it doesn't when what's pending is another: a switch that
+    /// replaced that one is someone's, mid-change.
+    Abort(Option<PathBuf>),
     /// What the revert's units run: the confirmed system put back.
     RevertTo(PathBuf),
     /// What the activation's unit runs as it stops, with the system it was
@@ -61,24 +71,28 @@ pub enum System {
     Toplevel(PathBuf),
 }
 
-/// Its words, `--allow-downgrade` anywhere among them: nothing when they
-/// aren't.
+/// Its words, `--allow-downgrade` and `--unless-pending` anywhere among
+/// them: nothing when they aren't.
 pub fn parse(words: &[String]) -> Option<Word> {
-    let allow_downgrade = words.iter().any(|w| w == "--allow-downgrade");
+    let flag = |f: &str| words.iter().any(|w| w == f);
+    let (allow_downgrade, unless_pending) = (flag("--allow-downgrade"), flag("--unless-pending"));
     let words: Vec<&str> = words
         .iter()
         .map(String::as_str)
-        .filter(|w| *w != "--allow-downgrade")
+        .filter(|w| !matches!(*w, "--allow-downgrade" | "--unless-pending"))
         .collect();
     let path = |p: &str| (!p.is_empty()).then(|| PathBuf::from(p));
     let switch = |system| Word::Switch {
         system,
         allow_downgrade,
+        unless_pending,
     };
     Some(match words[..] {
         [] => switch(System::Flake(None)),
         ["--status"] => Word::Status,
-        ["--abort"] => Word::Abort,
+        ["--abort"] => Word::Abort(None),
+        // The system it means, as a path from the root.
+        ["--abort", p] if p.starts_with('/') => Word::Abort(Some(p.into())),
         ["--toplevel", p] => switch(System::Toplevel(path(p)?)),
         ["--revert-to", p] => Word::RevertTo(path(p)?),
         ["--activation-stopped", p] => Word::ActivationStopped(path(p)?),
@@ -112,9 +126,10 @@ pub fn run(cfg: &Config, me: &Me, within: &str, word: &Word) -> Result<u8, Broke
         Word::Switch {
             system,
             allow_downgrade,
-        } => switch(cfg, me, within, system, *allow_downgrade),
+            unless_pending,
+        } => switch(cfg, me, within, system, *allow_downgrade, *unless_pending),
         Word::Status => status(cfg),
-        Word::Abort => abort(cfg, me),
+        Word::Abort(mine) => abort(cfg, me, mine.as_deref()),
         Word::RevertTo(prev) => revert_to(cfg, prev),
         Word::ActivationStopped(new) => activation_stopped(cfg, new),
     }
@@ -126,6 +141,7 @@ fn switch(
     within: &str,
     system: &System,
     allow_downgrade: bool,
+    unless_pending: bool,
 ) -> Result<u8, Broke> {
     // As systemd reads the window, before anything: the revert's timer and
     // the activation's deadline both come from it.
@@ -144,6 +160,23 @@ fn switch(
         complain(&format!("not a NixOS system: {}", new.display()));
         return Ok(1);
     }
+    // Told `--unless-pending`, it decides under the lock it then holds
+    // through the switch, so a switch that went pending while this one
+    // built (someone's, mid-change) is seen and left be: not even said to
+    // be "already running", which would have its caller confirm it.
+    let held = if unless_pending {
+        let lock = cfg.lock()?;
+        if let Some(pending) = cfg.recorded("pending")? {
+            complain(&format!(
+                "{} is pending; not switching over it (it's someone's, mid-change)",
+                pending.display()
+            ));
+            return Ok(PENDING);
+        }
+        Some(lock)
+    } else {
+        None
+    };
     if new == cfg.running()? {
         say(&format!("already running {}", new.display()));
         return Ok(0);
@@ -159,7 +192,10 @@ fn switch(
         return Ok(DOWNGRADE);
     }
 
-    let _lock = cfg.lock()?;
+    let _lock = match held {
+        Some(lock) => lock,
+        None => cfg.lock()?,
+    };
     // The last *confirmed* system, even if an earlier switch is still
     // pending: read under the lock, as a confirm may have just moved it.
     let prev = canonical(&cfg.profile)?;
@@ -435,11 +471,22 @@ fn status(cfg: &Config) -> Result<u8, Broke> {
     Ok(0)
 }
 
-fn abort(cfg: &Config, me: &Me) -> Result<u8, Broke> {
+fn abort(cfg: &Config, me: &Me, mine: Option<&Path>) -> Result<u8, Broke> {
     let _lock = cfg.lock()?;
-    if cfg.recorded("pending")?.is_none() {
+    let Some(pending) = cfg.recorded("pending")? else {
         say("nothing pending");
         return Ok(0);
+    };
+    // Decided under the lock, which a switch holds as it writes `pending`.
+    if let Some(mine) = mine.map(as_recorded)
+        && pending != mine
+    {
+        complain(&format!(
+            "{} is pending, not {}; leaving it be (it's someone's, mid-change)",
+            pending.display(),
+            mine.display()
+        ));
+        return Ok(PENDING);
     }
     cfg.systemctl_quiet(&["stop", &cfg.timer()]);
     // A revert that already fired finishes on its own.
@@ -454,7 +501,11 @@ fn abort(cfg: &Config, me: &Me) -> Result<u8, Broke> {
             cfg.file("prev").display()
         )));
     };
-    Ok(u8::try_from(exit_of(revert_now(cfg, me, &prev))).unwrap_or(1))
+    // The revert's own exit, but never one that reads as the refusal.
+    Ok(match u8::try_from(exit_of(revert_now(cfg, me, &prev))) {
+        Ok(PENDING) | Err(_) => 1,
+        Ok(rc) => rc,
+    })
 }
 
 /// The revert, now, in a unit of its own: it outlives whatever started it,
@@ -577,6 +628,7 @@ mod tests {
             Some(Word::Switch {
                 system,
                 allow_downgrade,
+                unless_pending: false,
             })
         };
         assert_eq!(parsed(&[]), switch(System::Flake(None), false));
@@ -601,8 +653,25 @@ mod tests {
             parsed(&["--allow-downgrade"]),
             switch(System::Flake(None), true)
         );
+        assert_eq!(
+            parsed(&[
+                "--unless-pending",
+                "--toplevel",
+                "/nix/store/x",
+                "--allow-downgrade"
+            ]),
+            Some(Word::Switch {
+                system: System::Toplevel("/nix/store/x".into()),
+                allow_downgrade: true,
+                unless_pending: true,
+            })
+        );
         assert_eq!(parsed(&["--status"]), Some(Word::Status));
-        assert_eq!(parsed(&["--abort"]), Some(Word::Abort));
+        assert_eq!(parsed(&["--abort"]), Some(Word::Abort(None)));
+        assert_eq!(
+            parsed(&["--abort", "/nix/store/n"]),
+            Some(Word::Abort(Some("/nix/store/n".into())))
+        );
         assert_eq!(
             parsed(&["--revert-to", "/nix/store/p"]),
             Some(Word::RevertTo("/nix/store/p".into()))
@@ -616,7 +685,10 @@ mod tests {
             &["--toplevel", ""],
             &["--revert-to"],
             &["--status", "now"],
-            &["--abort", "/etc/nixos"],
+            &["--abort", ""],
+            &["--abort", "--status"],
+            &["--abort", "result"],
+            &["--abort", "/nix/store/n", "/nix/store/m"],
             &["-f"],
             &["--force"],
             &["a", "b"],

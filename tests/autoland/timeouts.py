@@ -26,9 +26,10 @@ with tempfile.TemporaryDirectory() as tmp:
              lambda: C.fresh('private-path'),
              lambda: C.limited('rate limit', {}),
              lambda: T.cn('train', 'step', 'sam/r')]
-    # Admission is covered by paused.py; these calls must reach the remote
-    # operation so each one's production deadline is exercised.
-    with patch.object(C, 'paused', return_value=False), patch.object(C, 'gh_env', return_value={}), patch.object(C.subprocess, 'run', side_effect=stalled):
+    # Admission is covered by paused.py and landing.py; these calls must
+    # reach the remote operation so each one's production deadline is
+    # exercised.
+    with patch.object(T, 'admitted', return_value=True), patch.object(C, 'gh_env', return_value={}), patch.object(C.subprocess, 'run', side_effect=stalled):
         for call in calls:
             C.LIMITED.clear()
             try:

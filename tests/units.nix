@@ -1,5 +1,6 @@
 # burrow-units, for real: its watcher follows the journal and asks for a
-# pass each time a unit fails, recovers or a program dumps core, touching no
+# pass each time a unit fails, a unit in its watch file recovers or a
+# program dumps core (not each time any unit starts), touching no
 # unit's own OnFailure= (a service whose failure isolates a target still loads).
 # A unit that fails, and a program that dumps core, whoever ran it, land in
 # its watch file and kick the watchdog (a stand-in here, noting each kick);
@@ -54,6 +55,11 @@ pkgs.testers.runNixOSTest {
       Type = "oneshot";
       ExecStart = "${broken}";
     };
+    # A healthy unit, as a timer's service is every few seconds.
+    systemd.services.fine.serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.coreutils}/bin/true";
+    };
     # Its failure isolates a target, which allows it no other OnFailure=.
     systemd.services.isolating = {
       onFailure = [ "rescue.target" ];
@@ -102,6 +108,19 @@ pkgs.testers.runNixOSTest {
         assert item["phase"] == "failed (exit-code)", item
         assert item["due"] == item["since"] + 600, item
         machine.wait_until_succeeds(f"[ $(wc -l </var/lib/watchdog-kicks/kicks) -gt {before} ]", timeout=60)
+
+    with subtest("a unit that wasn't failed starting and succeeding asks for no pass"):
+        def asked():
+            return int(machine.succeed("journalctl -b -u burrow-units-watch.service -o cat | grep -c 'asked for a pass' || true").strip())
+        # What the failure's pass set off (the watchdog's kick) settles first.
+        machine.succeed("sleep 5")
+        before, asks = json.loads(machine.succeed(f"cat {watch_file}"))["at"], asked()
+        machine.succeed("systemctl start fine.service")
+        machine.succeed("sleep 5")
+        machine.succeed("systemctl start fine.service")
+        machine.succeed("sleep 5")
+        assert asked() == asks, (asks, asked())
+        assert json.loads(machine.succeed(f"cat {watch_file}"))["at"] == before
 
     with subtest("a program that dumps core is in it too, whoever ran it"):
         dev_crash()

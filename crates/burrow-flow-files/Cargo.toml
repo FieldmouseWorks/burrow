@@ -1,6 +1,6 @@
 [package]
 name = "burrow-flow-files"
-description = "Reads the files a machine's build renders for Conary (each repo's flow config, the class policy) with Conary's own loaders, so a check can refuse what the machine's cn would"
+description = "Reads the files a machine's build renders for Conary (each repo's flow config, the class policy, conaryd's events file) with Conary's own loaders, so a check can refuse what the machine's cn would"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

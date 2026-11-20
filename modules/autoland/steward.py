@@ -72,6 +72,7 @@ import sys
 
 import common as C
 from batch import Batch
+import landing as L
 import proofs as P
 import repos as R
 import mirror as M
@@ -320,6 +321,15 @@ def run_pass(kick, continuing=False):
                 elif new and not CFG["baselineJobs"]:
                     known.add(repo)
                 waits.passed(repo, op)
+                if not L.lands(repo):
+                    # Its PRs are conaryd's to land, or on their way to it
+                    # (landing.py): none is seen to, watched or woken for.
+                    waits.read(repo, [])
+                    upkeep(repo, mine)
+                    waits.passed(repo, "upkeep")
+                    batch.finish(repo)
+                    deferred.discard(repo)
+                    continue
                 op = "PRs"
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
