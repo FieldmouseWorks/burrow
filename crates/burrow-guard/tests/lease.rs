@@ -126,9 +126,14 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
         "git push --force-with-lease=pr:origin/pr origin pr",
         "git push --force-with-lease --force-if-includes -f origin pr",
         "git push --force-with-lease --force-if-includes origin +pr",
+        // Its remote configured to force, which overrides the lease.
+        "git -c remote.origin.push=+refs/heads/pr:refs/heads/pr push --force-with-lease --force-if-includes origin pr",
+        // A force the guard can't read, or one among words from input.
+        "git push $(printf -- -f) origin pr",
+        "printf '%s\\n' pr | xargs git push -f origin",
     ] {
         assert!(refusal(cmd, &stale).is_some(), "{cmd}");
-        let dry = cmd.replacen("git push", "git push --dry-run --porcelain", 1);
+        let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
         let out = sh(&stale, &dry);
         assert!(
             out.status.success()

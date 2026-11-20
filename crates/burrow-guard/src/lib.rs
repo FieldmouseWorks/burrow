@@ -12,7 +12,7 @@
 //!
 //! And it refuses outright, with nobody asked, a
 //! force-push of any branch with no lease on the head its pusher saw
-//! (push.rs's `unleased`): the leased spelling does the same work, and
+//! (push/lease.rs): the leased spelling does the same work, and
 //! keeps it from dropping what another job pushed since.
 //!
 //! The command is read as text, line by line, so one nested in quotes
@@ -70,7 +70,7 @@ impl Guard<'_> {
             .as_ref()
             .and_then(|i| i.command.as_deref())
             .unwrap_or_default();
-        push::unleased(cmd, &cwd(hook))
+        push::unleased(cmd, &cwd(hook), &self.config.git)
     }
 
     /// What the hook says about `hook`'s command: `None` lets it run, a
