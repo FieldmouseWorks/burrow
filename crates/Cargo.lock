@@ -843,12 +843,14 @@ dependencies = [
  "burrow-process",
  "burrow-settings",
  "burrow-test",
+ "conary-github",
  "jiff 1.0.1",
  "md-5",
  "regex",
  "rustix",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
 ]
 

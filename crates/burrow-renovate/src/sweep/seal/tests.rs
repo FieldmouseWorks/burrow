@@ -60,15 +60,29 @@ fn it_seals_as_seal_py_did() {
         "<!-- major-verdict: ok 0000000000000000000000000000000000000001 on main 61fd5bc62f736dc75e10d05aec24fce6 -->"
     );
     assert_eq!(
-        v("Sam/R", "3", "held", &three, "release").marker(&st).unwrap(),
+        v("Sam/R", "3", "held", &three, "release")
+            .marker(&st)
+            .unwrap(),
         "<!-- major-verdict: held 0000000000000000000000000000000000000003 on release aa684489b31dad88304889f62a4653c6 -->"
     );
     let k2 = "0123456789abcdef".repeat(4);
     let (_d, st2) = state(Some(&k2));
     let head = "deadbeef".repeat(5);
     for (repo, n, verdict, base, want) in [
-        ("FieldmouseWorks/Burrow", "1234", "ok", "main", "9c3a24e563c5e30267a9e6567f989355"),
-        ("fieldmouseworks/burrow", "1234", "held", "release/1.x", "76db532a9ac56525af1f4f73709f5747"),
+        (
+            "FieldmouseWorks/Burrow",
+            "1234",
+            "ok",
+            "main",
+            "9c3a24e563c5e30267a9e6567f989355",
+        ),
+        (
+            "fieldmouseworks/burrow",
+            "1234",
+            "held",
+            "release/1.x",
+            "76db532a9ac56525af1f4f73709f5747",
+        ),
     ] {
         let verdict = v(repo, n, verdict, &head, base);
         assert_eq!(mac_of(&verdict.marker(&st2).unwrap()), want, "{repo} {n}");
@@ -110,15 +124,27 @@ fn a_check_takes_its_own_seal_and_nothing_else() {
 fn a_check_never_makes_a_key() {
     let one = sha(1);
     let (_d, st) = state(None);
-    assert!(!sealed(&st, &v(REPO, "1", "ok", &one, "main"), &"0".repeat(32)));
+    assert!(!sealed(
+        &st,
+        &v(REPO, "1", "ok", &one, "main"),
+        &"0".repeat(32)
+    ));
     assert!(!st.join(KEY).exists());
     let (_d, st) = state(Some("abc"));
-    assert!(!sealed(&st, &v(REPO, "1", "ok", &one, "main"), &"0".repeat(32)));
+    assert!(!sealed(
+        &st,
+        &v(REPO, "1", "ok", &one, "main"),
+        &"0".repeat(32)
+    ));
     assert_eq!(fs::read_to_string(st.join(KEY)).unwrap(), "abc");
     // And one it can't read is a failure, not a pass.
     let (_d, st) = state(None);
     fs::create_dir(st.join(KEY)).unwrap();
-    assert!(v(REPO, "1", "ok", &one, "main").sealed(&st, &"0".repeat(32)).is_err());
+    assert!(
+        v(REPO, "1", "ok", &one, "main")
+            .sealed(&st, &"0".repeat(32))
+            .is_err()
+    );
 }
 
 /// A key it makes when there's none is one a check takes after: the
@@ -128,17 +154,29 @@ fn a_seal_makes_a_key_when_there_is_none() {
     let one = sha(1);
     let (_d, st) = state(None);
     let marker = v(REPO, "1", "held", &one, "main").marker(&st).unwrap();
-    assert!(sealed(&st, &v(REPO, "1", "held", &one, "main"), mac_of(&marker)));
+    assert!(sealed(
+        &st,
+        &v(REPO, "1", "held", &one, "main"),
+        mac_of(&marker)
+    ));
     let path = st.join(KEY);
     let made = fs::read_to_string(&path).unwrap();
-    assert!(made.len() == 64 && made.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(
+        made.len() == 64
+            && made
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
     assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
     // No temporary left beside it, and the next seal keeps it.
     assert_eq!(fs::read_dir(&st).unwrap().count(), 1);
     v(REPO, "2", "ok", &sha(2), "main").marker(&st).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), made);
     // One made meanwhile wins over its own: linked only if absent.
-    assert_eq!(key(&path, true).unwrap().unwrap(), super::parse(made.as_bytes()).unwrap());
+    assert_eq!(
+        key(&path, true).unwrap().unwrap(),
+        super::parse(made.as_bytes()).unwrap()
+    );
 }
 
 /// A damaged key (empty, short, upper case, not text) is replaced whole by
@@ -146,14 +184,24 @@ fn a_seal_makes_a_key_when_there_is_none() {
 #[test]
 fn a_damaged_key_is_replaced() {
     let one = sha(1);
-    for damaged in [&b""[..], b"abc", AB[..63].as_bytes(), AB.to_uppercase().as_bytes(), b"\xff\xfe"] {
+    for damaged in [
+        &b""[..],
+        b"abc",
+        &AB.as_bytes()[..63],
+        AB.to_uppercase().as_bytes(),
+        b"\xff\xfe",
+    ] {
         let (_d, st) = state(None);
         let path = st.join(KEY);
         fs::write(&path, damaged).unwrap();
         let marker = v(REPO, "1", "ok", &one, "main").marker(&st).unwrap();
         let made = fs::read(&path).unwrap();
         assert!(made.len() == 64 && made != damaged, "{damaged:?}");
-        assert!(sealed(&st, &v(REPO, "1", "ok", &one, "main"), mac_of(&marker)));
+        assert!(sealed(
+            &st,
+            &v(REPO, "1", "ok", &one, "main"),
+            mac_of(&marker)
+        ));
         assert_eq!(fs::read_dir(&st).unwrap().count(), 1);
     }
     // A key with whitespace around it is still the key.
@@ -178,13 +226,21 @@ fn it_seals_only_what_a_marker_can_name() {
         v(REPO, "+1", "ok", &one, "main"),
         v(REPO, "1", "maybe", &one, "main"),
         v(REPO, "1", "ok", "abc", "main"),
-        v(REPO, "1", "ok", &one.to_uppercase(), "main"),
+        v(REPO, "1", "ok", &"ABCDEF0123".repeat(4), "main"),
         v(REPO, "1", "ok", &one, "a>b"),
         v(REPO, "1", "ok", &one, "a b"),
         v(REPO, "1", "ok", &one, ""),
     ] {
         let (_d, st) = state(None);
-        assert!(bad.marker(&st).is_err(), "{} {} {} {} {}", bad.repo, bad.n, bad.verdict, bad.head, bad.base);
+        assert!(
+            bad.marker(&st).is_err(),
+            "{} {} {} {} {}",
+            bad.repo,
+            bad.n,
+            bad.verdict,
+            bad.head,
+            bad.base
+        );
         assert!(!st.join(KEY).exists());
     }
 }

@@ -23,7 +23,8 @@ const NAME: &str = "major-verdict";
 /// The key, in the sweep's state dir.
 const KEY: &str = "verdict.key";
 
-static REPO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[^\s/]+/[^\s/]+\z").expect("a regex"));
+static REPO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A[^\s/]+/[^\s/]+\z").expect("a regex"));
 static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[1-9][0-9]*\z").expect("a regex"));
 static HEAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[0-9a-f]{40}\z").expect("a regex"));
 static BASE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[^\s>]+\z").expect("a regex"));
@@ -130,7 +131,8 @@ fn key(path: &Path, create: bool) -> io::Result<Option<SealKey>> {
     let mut bytes = [0u8; 32];
     let mut filled = 0;
     while filled < bytes.len() {
-        filled += rustix::rand::getrandom(&mut bytes[filled..], rustix::rand::GetRandomFlags::empty())?;
+        filled +=
+            rustix::rand::getrandom(&mut bytes[filled..], rustix::rand::GetRandomFlags::empty())?;
     }
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let mut f = OpenOptions::new()
