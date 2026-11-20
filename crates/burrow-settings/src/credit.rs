@@ -327,6 +327,28 @@ impl Meter {
             .max(0)
     }
 
+    /// When the clock alone may give it room again, when it has none: spent
+    /// down to the reserve, at the cycle's expiry, when it renews; today's
+    /// allowance spent, at the next UTC midnight (the expiry is one, after
+    /// now, so never before it; and on the last day the allowance is all
+    /// that's left, so spending it is the reserve's case).
+    /// None while it has room, or while only a run whose spend is pending
+    /// holds it: that run's turn ending is what brings it back, not a time.
+    /// Always after [`Meter::now`], so a wake-up booked for it never finds
+    /// the same time to book again.
+    pub fn opens(&self) -> Option<i64> {
+        if self.room() {
+            return None;
+        }
+        if self.spent + self.reserve >= self.cycle.budget {
+            return Some(self.cycle.expires);
+        }
+        if self.today >= self.allowance {
+            return Some(midnight(utc_day(self.now).ok()?).ok()? + DAY);
+        }
+        None
+    }
+
     /// Why it has none, when it hasn't.
     pub fn short(&self) -> Option<String> {
         if self.spent + self.reserve >= self.cycle.budget {

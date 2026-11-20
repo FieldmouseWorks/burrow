@@ -201,6 +201,18 @@ pub fn room(cfg: &Config) -> bool {
         .is_some_and(|s| meter(cfg, &s.credit_file(), crate::now()).is_ok_and(|m| m.room()))
 }
 
+/// When the clock alone may give the credit room again, as an observer
+/// reads it ([`burrow_settings::credit::Meter::opens`]): what the drain books
+/// a pass for when it has none. None with no credit set or a meter that
+/// can't be read (fixing either is an event of its own), or while only a
+/// run going holds it (its turn's end kicks the drain).
+pub fn opens(cfg: &Config) -> Option<i64> {
+    let settings = cfg.settings.as_ref()?;
+    meter(cfg, &settings.credit_file(), crate::now())
+        .ok()?
+        .opens()
+}
+
 /// Why a finished run was refused, when the API refused it (its key, its
 /// credit or its budget): `last` is its result, `records` its stream. Any
 /// other error is the turn's own, ended like any other.

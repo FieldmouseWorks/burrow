@@ -345,7 +345,11 @@ it went. The two keep their jobs:
   `claude-api` (`N.engine`), so their cost is the credit's alone. Its
   refusals (no key, no room, a key or credit the API refused, a spent
   budget) end the turn in words of their own and hold no plan's turn,
-  and no plan's hold but the owner's pause holds its turns.
+  and no plan's hold but the owner's pause holds its turns. A ready issue
+  routed to it finding no room books the drain's next pass for when the
+  meter says the clock gives some back (the next UTC midnight for a spent
+  day, the renewal for a spent credit, `Meter::opens`), since neither is
+  an event.
 
 proj does not become part of Conary, and issues do not become Conary
 intents here. Either may be right later; neither is needed to stop the
