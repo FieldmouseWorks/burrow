@@ -131,10 +131,22 @@ pub(crate) fn write<D: Document>(
     )
     .map_err(|e| e.to_string())?;
     log.sync_all().map_err(|e| e.to_string())?;
+    publish(
+        path,
+        &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+    )?;
+    Ok(Some(answer))
+}
+
+/// BODY as the file at PATH, world-readable, by a synced atomic rename: a
+/// reader sees the old file or the new one, whole.
+pub(crate) fn publish(path: &Path, body: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or("a settings file needs a parent directory")?;
     let pending = path.with_extension("pending");
     let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-    file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    file.write_all(body).map_err(|e| e.to_string())?;
     // Readers include the isolated reviewer account. This overlay holds
     // public operational policy, regardless of the writer's umask.
     #[cfg(unix)]
@@ -147,6 +159,5 @@ pub(crate) fn write<D: Document>(
     fs::rename(pending, path).map_err(|e| e.to_string())?;
     File::open(parent)
         .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
-    Ok(Some(answer))
+        .map_err(|e| e.to_string())
 }

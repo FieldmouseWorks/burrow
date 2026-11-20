@@ -140,9 +140,9 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 
 /// Whether the move is still called for, looked at again just before it's
 /// made: what the pass saw may have moved on while it read the rest. A
-/// runner may have taken a job, or a switch begun; a run may have started,
-/// or been run again; a runner registered again. What can't be read again
-/// isn't moved on.
+/// runner may have taken a job, or a switch begun; a run may have finished,
+/// been run again, or lost the run after it; a runner registered again.
+/// What can't be read again isn't moved on.
 fn still(cfg: &Config, world: &dyn World, m: &Move) -> Result<(), String> {
     match m {
         Move::Halt { unit, reg, .. } => halt::still(cfg, world, unit, reg),
@@ -171,17 +171,43 @@ fn still(cfg: &Config, world: &dyn World, m: &Move) -> Result<(), String> {
                 Ok(())
             }
         }
-        Move::Cancel { repo, run, .. } => {
+        // Started or not, a run still unfinished on its first attempt is
+        // cancelled; one that finished, or was run again, is left. So is one
+        // whose later run was cancelled meanwhile: it's the branch's result
+        // again. The later run is read first, so the run itself is read
+        // last, right before the cancel: a read can wait out GitHub's
+        // retries, and the run may finish and be run again meanwhile, when
+        // the cancel would take its new attempt.
+        Move::Cancel {
+            repo, run, later, ..
+        } => {
+            let l = world.github(&format!("repos/{repo}/actions/runs/{later}"))?;
+            let status = l.get("status").and_then(Value::as_str).unwrap_or("");
+            let conclusion = l.get("conclusion").and_then(Value::as_str);
+            if status.is_empty() {
+                return Err(format!("the run after it, {later}, has no status"));
+            }
+            if status == "completed" && conclusion == Some("cancelled") {
+                return Err(format!("the run after it, {later}, was cancelled"));
+            }
             let r = world.github(&format!("repos/{repo}/actions/runs/{run}"))?;
             let status = r.get("status").and_then(Value::as_str).unwrap_or("");
-            if status != "queued" {
-                Err(format!("it's {status} now"))
+            if status.is_empty() || status == "completed" {
+                Err(format!("it's {} now", or_unread(status)))
             } else if r.get("run_attempt").and_then(Value::as_u64) != Some(1) {
                 Err("someone ran it again".into())
             } else {
                 Ok(())
             }
         }
+    }
+}
+
+fn or_unread(status: &str) -> &str {
+    if status.is_empty() {
+        "without a status"
+    } else {
+        status
     }
 }
 
@@ -341,6 +367,13 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
                 clock(b.oldest)
             ),
         };
+    }
+    for (repo, commit) in cfg.deploy.iter().flat_map(|d| &d.held) {
+        let _ = writeln!(
+            out,
+            "{repo}: held at {} by the flake's own rev, so its default branch isn't going live",
+            commit.get(..7).unwrap_or(commit)
+        );
     }
     for (repo, why) in &snap.unknown {
         let _ = writeln!(out, "{repo}: not known to be live: {why}");
@@ -611,10 +644,12 @@ pub(crate) mod tests {
         w
     }
 
-    // A moot run, still queued and on its first attempt when looked at
-    // again, is cancelled and logged, and tried once, even when GitHub
-    // refuses. One that has started, or been run again, since the pass's
-    // look, or that can't be looked at again, isn't.
+    // A moot run, still unfinished and on its first attempt when looked at
+    // again, with the run after it not cancelled meanwhile, is cancelled and
+    // logged, and tried once, even when GitHub refuses: whether it's still
+    // queued, has started, or is next in line. One that has finished, or
+    // been run again, since the pass's look, whose later run was cancelled,
+    // or either of which can't be looked at again, isn't.
     #[test]
     fn cancel() {
         let dir = tempfile::tempdir().unwrap();
@@ -636,32 +671,81 @@ pub(crate) mod tests {
         );
         let t = 1_793_293_200.0;
         let one = "repos/sam/r/actions/runs/1";
+        let two = "repos/sam/r/actions/runs/2";
+        let first = |status: &str, attempt: u64| json!({"status": status, "run_attempt": attempt});
+        let pending = json!({"status": "pending", "conclusion": null});
 
-        for (now, result) in [
+        for (now, later, result) in [
             (
-                json!({"status": "in_progress", "run_attempt": 1}),
-                "not made: it's in_progress now",
+                Some(json!({"status": "completed", "conclusion": "success", "run_attempt": 1})),
+                Some(pending.clone()),
+                "not made: it's completed now",
             ),
             (
-                json!({"status": "queued", "run_attempt": 2}),
+                Some(first("queued", 2)),
+                Some(pending.clone()),
                 "not made: someone ran it again",
             ),
+            (
+                Some(json!({"run_attempt": 1})),
+                Some(pending.clone()),
+                "not made: it's without a status now",
+            ),
+            (
+                None,
+                Some(pending.clone()),
+                "not made: GET repos/sam/r/actions/runs/1: HTTP 404",
+            ),
+            (
+                Some(first("in_progress", 1)),
+                Some(json!({"status": "completed", "conclusion": "cancelled"})),
+                "not made: the run after it, 2, was cancelled",
+            ),
+            (
+                Some(first("in_progress", 1)),
+                None,
+                "not made: GET repos/sam/r/actions/runs/2: HTTP 404",
+            ),
         ] {
-            w.github.insert(one.into(), Ok(now));
+            for (path, v) in [(one, now), (two, later)] {
+                match v {
+                    Some(v) => w.github.insert(path.into(), Ok(v)),
+                    None => w.github.remove(path),
+                };
+            }
             run(&cfg, &w, t).unwrap();
             assert!(w.did.borrow().is_empty(), "{result}");
             let st: State = load(dir.path(), "state.json");
             assert!(st.cancels.is_empty(), "{result}");
             assert_eq!(st.log.last().unwrap().result, result);
         }
-        w.github.remove(one);
-        run(&cfg, &w, t).unwrap();
-        assert!(w.did.borrow().is_empty());
 
-        w.github.insert(
-            one.into(),
-            Ok(json!({"status": "queued", "run_attempt": 1})),
-        );
+        // Moved on since the look, from queued to started or next in line,
+        // and the run after it under way or done: still moot.
+        for (i, (now, later)) in [
+            (first("in_progress", 1), json!({"status": "in_progress"})),
+            (
+                first("pending", 1),
+                json!({"status": "completed", "conclusion": "failure"}),
+            ),
+            (first("queued", 1), pending.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = cfg.clone();
+            cfg.state_dir = dir.path().to_owned();
+            w.github.insert(one.into(), Ok(now));
+            w.github.insert(two.into(), Ok(later));
+            w.did.borrow_mut().clear();
+            run(&cfg, &w, t).unwrap();
+            assert_eq!(*w.did.borrow(), ["cancel sam/r#1"], "{i}");
+            let st: State = load(dir.path(), "state.json");
+            assert_eq!(st.log.last().unwrap().result, "ok", "{i}");
+        }
+
+        w.did.borrow_mut().clear();
         w.fails = Some("HTTP 403: Resource not accessible by integration".into());
         run(&cfg, &w, t).unwrap();
         assert_eq!(*w.did.borrow(), ["cancel sam/r#1"]);
@@ -680,5 +764,180 @@ pub(crate) mod tests {
 
         run(&cfg, &w, t + 60.0).unwrap();
         assert_eq!(*w.did.borrow(), ["cancel sam/r#1"]);
+    }
+
+    // A run that finishes, or finishes and is run again, while the run after
+    // it is read (a read that may wait out GitHub's retries) isn't cancelled,
+    // whether it was queued, next in line or under way when the pass looked:
+    // the cancel would take its new attempt.
+    #[test]
+    fn cancel_moved_during_later_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        let one = "repos/sam/r/actions/runs/1";
+        let two = "repos/sam/r/actions/runs/2";
+        let t = 1_793_293_200.0;
+        for was in ["queued", "pending", "in_progress"] {
+            for (became, result) in [
+                (
+                    json!({"status": "completed", "conclusion": "success", "run_attempt": 1}),
+                    "not made: it's completed now",
+                ),
+                (
+                    json!({"status": "queued", "run_attempt": 2}),
+                    "not made: someone ran it again",
+                ),
+            ] {
+                let mut w = repo();
+                w.github.insert(
+                    page(&format!("repos/sam/r/actions/runs?status={was}"), 1),
+                    Ok(json!({"workflow_runs": [push(1, 7, "main", "a1", was, "2026-10-29T16:00:00Z")]})),
+                );
+                let pending = page("repos/sam/r/actions/runs?status=pending", 1);
+                let mut listed = w.github[&pending].clone().unwrap();
+                listed["workflow_runs"].as_array_mut().unwrap().push(push(
+                    2,
+                    7,
+                    "main",
+                    "b2",
+                    "pending",
+                    "2026-10-29T16:10:00Z",
+                ));
+                w.github.insert(pending, Ok(listed));
+                w.github.insert(
+                    page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+                    Ok(json!({"jobs": []})),
+                );
+                w.github
+                    .insert(one.into(), Ok(json!({"status": was, "run_attempt": 1})));
+                w.github.insert(
+                    two.into(),
+                    Ok(json!({"status": "pending", "conclusion": null})),
+                );
+                w.moves.insert(two.into(), (one.into(), became));
+                run(&cfg, &w, t).unwrap();
+                assert!(w.did.borrow().is_empty(), "{was}: {result}");
+                let st: State = load(dir.path(), "state.json");
+                assert!(st.cancels.is_empty(), "{was}: {result}");
+                assert_eq!(st.log.last().unwrap().result, result, "{was}");
+            }
+        }
+    }
+
+    // An input the flake holds at a commit: status says so, where a watched
+    // one says how far behind live it is, and no wait is kept for it. One
+    // that was watched, and behind, when the flake took hold of it (remi's
+    // Conary, FieldmouseWorks/remi#1404) loses the wait it had.
+    #[test]
+    fn held_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        let mut w = Fake::default();
+        w.units.insert(
+            "box-update".into(),
+            Unit {
+                state: "inactive".into(),
+                ..Unit::default()
+            },
+        );
+        w.github.insert(
+            "repos/sam/pin".into(),
+            Ok(json!({"default_branch": "main"})),
+        );
+        w.github.insert(
+            "repos/sam/pin/compare/dddddddddddd...main".into(),
+            Ok(json!({"ahead_by": 1, "commits": [
+                {"sha": "c1", "commit": {"committer": {"date": "2026-11-14T08:00:00Z"}}}]})),
+        );
+        let t = 1_794_656_000.0;
+        let waits = |cfg: &crate::config::Config| {
+            run(cfg, &w, t).unwrap();
+            let (_, items) = watch::read(&dir.path().join("watch.json")).unwrap();
+            items.into_keys().any(|k| k.contains("sam/pin"))
+        };
+        let deploy = cfg.deploy.as_mut().unwrap();
+        let held = std::mem::take(&mut deploy.held);
+        deploy.running.extend(held.clone());
+        assert!(waits(&cfg), "watched and behind, it waits to go live");
+        let deploy = cfg.deploy.as_mut().unwrap();
+        deploy.running.remove("sam/pin");
+        deploy.held = held;
+        assert!(!waits(&cfg), "held, nothing waits on it");
+        let said = super::status(&cfg, &w, t);
+        assert!(
+            said.contains(
+                "sam/pin: held at ddddddd by the flake's own rev, so its default branch isn't going live\n"
+            ),
+            "{said}"
+        );
+    }
+
+    // burrow's main on 2026-11-14 (#1108), replayed: flake's push runs for
+    // 9c6ad02 and fceda93 both under way, the first stuck in a gate leg for
+    // hours. The pass cancels the first for the second, and nothing else:
+    // not the second, not code-scanning's runs (another workflow, the
+    // earlier one finished), not a push to another branch, and not a PR's
+    // run.
+    #[test]
+    fn cancel_running_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        let mut w = repo();
+        let flake = 394_634_593;
+        let scan = 417_777_930;
+        let (stuck, next) = (43_577_282_863_u64, 43_584_281_458_u64);
+        let pr = json!({"id": 43_584_000_001_u64, "event": "pull_request", "workflow_id": flake,
+                        "head_branch": "main", "head_sha": "e5e5e5e", "status": "in_progress",
+                        "created_at": "2026-11-14T08:00:00Z", "run_attempt": 1});
+        w.github.insert(
+            page("repos/sam/r/actions/runs?status=in_progress", 1),
+            Ok(json!({"workflow_runs": [
+                pr,
+                push(43_576_000_002, flake, "fix", "f6f6f6f", "in_progress", "2026-11-14T08:30:00Z"),
+                push(stuck, flake, "main", "9c6ad0248c58f0fe1d5fcc6bc6d97f72361502b9", "in_progress", "2026-11-14T08:45:03Z"),
+                push(43_584_281_400, scan, "main", "fceda93f1e45e7377abf370b750178ac78eef56f", "in_progress", "2026-11-14T10:13:51Z"),
+                push(next, flake, "main", "fceda93f1e45e7377abf370b750178ac78eef56f", "in_progress", "2026-11-14T10:13:51Z"),
+                push(43_590_000_003, flake, "fix", "a7a7a7a", "in_progress", "2026-11-14T10:20:00Z"),
+            ]})),
+        );
+        for id in [
+            43_584_000_001_u64,
+            43_576_000_002,
+            stuck,
+            43_584_281_400,
+            next,
+            43_590_000_003,
+        ] {
+            w.github.insert(
+                page(
+                    &format!("repos/sam/r/actions/runs/{id}/jobs?filter=latest"),
+                    1,
+                ),
+                Ok(json!({"jobs": []})),
+            );
+            w.github.insert(
+                format!("repos/sam/r/actions/runs/{id}"),
+                Ok(json!({"status": "in_progress", "run_attempt": 1})),
+            );
+        }
+        let t = 1_794_656_000.0;
+        run(&cfg, &w, t).unwrap();
+        assert_eq!(*w.did.borrow(), [format!("cancel sam/r#{stuck}")]);
+        let st: State = load(dir.path(), "state.json");
+        assert_eq!(
+            st.cancels.keys().collect::<Vec<_>>(),
+            [&format!("sam/r#{stuck}")]
+        );
+        assert_eq!(
+            st.log.last().unwrap().why,
+            format!(
+                "it checks 9c6ad02 on main and is under way, and \
+                 https://github.com/sam/r/actions/runs/{next} checks fceda93, which came after it"
+            )
+        );
     }
 }

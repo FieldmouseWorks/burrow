@@ -252,10 +252,10 @@ impl World for Real<'_> {
     }
 
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
-        // Once, whatever comes back, even a 429: `still` read the run queued
-        // on its first attempt just before, and after a wait it could have
-        // started or been run again, which a cancel must never touch. The
-        // next pass reads it again.
+        // Once, whatever comes back, even a 429: `still` read the run
+        // unfinished on its first attempt just before, and after a wait it
+        // could have finished or been run again, which a cancel must never
+        // touch. The next pass reads it again.
         let path = format!("repos/{repo}/actions/runs/{run}/cancel");
         call_once(&mut Gh::default(), "POST", &path, None)?;
         Ok(())

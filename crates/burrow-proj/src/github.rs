@@ -8,6 +8,7 @@ use std::time::Instant;
 use serde_json::{Map, Value, json};
 
 use crate::config::Config;
+use crate::record::{JobFile, TurnFile};
 thread_local! {
     static LIMITED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -24,8 +25,8 @@ pub(crate) fn for_job<T>(job: &crate::job::Job, op: impl FnOnce() -> T) -> T {
         }
     }
     let paths = (
-        job.path("github"),
-        job.turn(&job.turns().unwrap_or_default(), "github-refusals"),
+        job.file(JobFile::Github),
+        job.turn_file(&job.turns().unwrap_or_default(), TurnFile::GithubRefusals),
     );
     let _restore = Restore(EVIDENCE.replace(Some(paths)));
     op()
@@ -293,7 +294,7 @@ mod tests {
             assert!(super::pages_until(&cfg, "repos/sam/r/issues", None).is_none());
             return;
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = burrow_test::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "github::tests::review_final_diagnostics_are_visible",

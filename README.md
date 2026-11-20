@@ -27,7 +27,8 @@ You talk to one Claude session, the operator, from the Claude app or
 claude.ai. It changes the machine through the machine's own flake checkout,
 and hands project work to Claude jobs inside each project (`proj`), or to a
 microVM when a task should be fenced off (`agents`). Work lands as pull
-requests: the steward (`autoland`) has Codex review each one, has Claude jobs
+requests: Codex reviews each one through its GitHub connector, the steward
+(`autoland`) has Claude jobs
 fix every finding and red check, and merges once the head's own change is
 reviewed clean and the head is green. A merge to the machine's flake goes live through
 `HOST-update`, behind the dead man's switch (`switch`) and a health check, and
@@ -43,7 +44,8 @@ The modules, by job:
   `heartbeat`, `robot`
 - **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
-- **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`
+- **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`,
+  `builds`
 - **Keeping it current:** `updates`, `house`, `notify`
 
 Each has an entry below, and each can be imported on its own.
@@ -54,11 +56,17 @@ Each has an entry below, and each can be imported on its own.
   `bypassPermissions`, set in `/etc/claude-code/managed-settings.json` so no
   project can override it. The only prompts are `permissions.ask` rules for
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
-  deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
+  deleting remote data, force-pushing `main`). The standing-authority
+  commands in `modules/claude/standing.nix` (`proj reply`, `settings land`,
+  taking a label off, `gh run rerun`) are `permissions.allow` rules, so a
+  session whose mode puts Claude Code's auto-mode check in front of its
+  commands doesn't have that check refuse them; the one-way doors still ask
+  first. A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch; `proj` makes the same guard Codex's managed hook for its Codex jobs
-  (`/etc/codex/requirements.toml`), on their commands and apply_patch, refusing
-  where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  branch. It refuses any branch's force-push with no lease on the head its
+  pusher saw (`--force-with-lease --force-if-includes`, or one naming the
+  commit), so a job can't drop what another pushed to the same PR. Also
+  writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.
@@ -80,7 +88,17 @@ Each has an entry below, and each can be imported on its own.
   default; unless confirmed within 10 minutes the old one comes back by
   itself. So a change that cuts off SSH, the network or Claude undoes itself.
   An activation that hangs is killed before the window expires to let the
-  revert run. Enabled services must have bounded stop timeouts (including the
+  revert run. One never waits on a job queued behind a run already going (a
+  sweep ordered after a two-hour renovate): switch-to-configuration is
+  patched to leave it queued, to run after that run
+  ([held.rs](patches/switch-to-configuration-ng/held.rs)). The setup
+  sysinit-reactivation.target reruns is still waited for, as the rest counts
+  on it. A user manager is re-executed only when it may need it (another
+  systemd binary, or a config source changed since the re-execution last
+  seen): a re-execution refuses every `systemctl --user` and
+  `systemd-run --user` until it's done
+  ([user_reexec.rs](patches/switch-to-configuration-ng/user_reexec.rs)).
+  Enabled services must have bounded stop timeouts (including the
   manager default and `TimeoutSec`): the module rejects zero, infinity and
   time spans it cannot establish as positive integer seconds, minutes, hours
   or days within systemd's microsecond range. Boolean and list values are
@@ -89,7 +107,8 @@ Each has an entry below, and each can be imported on its own.
   stop timeout when empty. This also covers stopping a start that ignores
   SIGTERM. Finite
   stops can still delay the revert; existing generations and hand-written
-  unit files need the same discipline. `--abort` reverts at once; with `flakeInputs` it refuses a system
+  unit files need the same discipline. `--abort` reverts at once. `HOST-confirm SYSTEM` and `--abort SYSTEM` act only on that
+  system, and exit 4 when another switch has replaced it, as `HOST-update` uses them. With `flakeInputs` it refuses a system
   built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a
   new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last
@@ -109,15 +128,25 @@ Each has an entry below, and each can be imported on its own.
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
   and the role settings every turn reads before confirmation. Failed
-  checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
+  checks include stderr diagnostics in the rollback notice. A check that
+  fails for its own reason excuses what can't pass without it
+  (`burrow.updates.healthExplains`): while `claude-login` says Claude Code
+  isn't logged in, the operator's check and the `claude-rc@` servers failing
+  after a switch don't revert it. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
-  repo, and all of them run hourly), `advisory-watch` (CISA KEV, vulnix,
+  repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
+  the machinery's App unless it names one of its own, so its GitHub allowance
+  stalls only Renovate, and its commits are that App's bot, whose PRs the
+  steward knows as Renovate's), `advisory-watch` (CISA KEV, vulnix,
   osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check`
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
   one GitHub issue per problem in `burrow.notify.repo`, commented at most
-  daily and closed when it clears.
+  daily and closed when it clears. One closed by hand while its problem
+  stands comes back a day later, saying so. One opened `--handled` (its
+  opener settles it, with a job of its own where there is one) is never
+  sorted or drained by the inbox.
 - **`remote-control`** (`burrow.remoteControl`): An always-on `claude
   remote-control` server for every project in `burrow.projectsDir` (a git
   checkout with an origin), found by itself (a path unit rescans when folders
@@ -130,7 +159,8 @@ Each has an entry below, and each can be imported on its own.
   biggest process there, the session that grew or a build it ran, and nothing
   else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
-  work to a headless agent inside that project, as a systemd unit, and checks
+  work to a headless agent inside that project (or the repo's own clone, for
+  `proj run OWNER/NAME "task"`), as a systemd unit, and checks
   on it later (`status`, `log`, `reply`, `stop`; `proj state --json` is the
   live snapshot those print from: the ready queue, every slot and what holds
   it, the meters and holds, its schema in `crates/burrow-proj/state.schema.json`). At most `maxJobs` Claude turns run at
@@ -148,7 +178,7 @@ Each has an entry below, and each can be imported on its own.
   ceiling of its own: the jobs are what the machine gives up first when it
   runs short (the kernel kills them first, and systemd-oomd watches their
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
-  default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
+  default). With `inbox.enable`, an issue labelled `claude` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it; `proj done` closes its issue.
   Automated admission and runtime pauses use [the settings source](docs/settings.md).
@@ -185,11 +215,11 @@ Each has an entry below, and each can be imported on its own.
   `proj usage hold UNTIL [--reason TEXT]` starts a fresh owner pause until a
   future Unix timestamp, even after a previous release. Successful turns and
   fresh meters cannot release an owner pause; `proj usage back` can.
-  A plain budget hold lets running turns continue and keeps Codex eligible.
-  Add `--only pipeline` to vacate and park every excluded repository across
-  both engines, reviews and proofs; [runtime settings](docs/settings.md) own
+  A plain budget hold lets running turns continue.
+  Add `--only pipeline` to vacate and park every excluded repository's jobs
+  and proofs; [runtime settings](docs/settings.md) own
   the allow list and independent off switch.
-  `burrow.proj.inbox.planning` defaults on: a fresh Codex
+  `burrow.proj.inbox.planning` defaults on: a fresh
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist
   updated when each child's PR lands. Durable creation receipts admit
@@ -198,10 +228,9 @@ Each has an entry below, and each can be imported on its own.
   [task planning](docs/task-planning.md) for the state and retry protocol.
   After a reset, `burrow.proj.usageTrickle` caps concurrent Claude
   turns while the pre-reset queue drains, including pipeline turns. The emergency
-  `--unstick` slot and Codex remain independent; ordinary concurrency returns
+  `--unstick` slot stays independent; ordinary concurrency returns
   once no pre-reset turn remains queued.
-  Each role's engine (`claude` or `codex`, with an overflow to the other
-  when its own is short), model and effort are live settings
+  Each role's model and effort are live settings
   ([settings](docs/settings.md#engines-models-and-efforts-per-role)).
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
@@ -220,21 +249,15 @@ Each has an entry below, and each can be imported on its own.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.
-  Both engines consume the
+  Jobs consume the
   [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
   project and scratch, job state (`proj await`, `ask`, `done`), host facts (`proj probe`),
   git metadata,
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and
-  the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
-  capability probes inside a job on each engine and removes a Codex grant to
-  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`)
-  and command sandbox; log it in with `autoland-codex-login job`, separately
-  from `autoland-codex-login review`. A turn on a different engine receives
-  the preceding turns' questions and answers.
-  The deliberate authorship exception: a Codex-written head is judged by
-  Claude, so its author never grades its own head.
+  the network and login/App environment. A turn whose conversation is lost
+  receives the preceding turns' questions and answers.
   Local jobs inspect and recover other host jobs with the ordinary
   `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
   commands through a per-turn host socket. The broker keeps host paths,
@@ -270,7 +293,7 @@ Each has an entry below, and each can be imported on its own.
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
-  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `why OWNER/REPO#N`, `deployed`,
   `oom [SINCE]`, one a line, above any `---` rule (a signature under it is
   left be). No shell, journals only of the units on its allowlist, every
   answer through a secret scrubber before it's posted, and only `authors` get
@@ -285,13 +308,18 @@ Each has an entry below, and each can be imported on its own.
   pushes to the default branch, only the other events about some branches, and
   only the issue events about issues with some titles; one told issues has an
   issue's event's pass look at that issue alone (`issueNumbers`, the inbox's),
-  rather than list every one. A turn ending, a review
-  coming back and the passes' own wake-ups (a settle delay, a reviewer's
-  timeout) kick them locally, and so does a switch that changes a handler's
+  rather than list every one. A repo's pass runs beside its handler's full
+  pass, never folded into it (the steward's full pass yields after a slice),
+  and a handler can yield to another (`yieldTo`, the steward's
+  continuations), starting nothing while that one is busy, which in turn waits
+  out a pass of the yielder's that runs. A turn ending and the
+  passes' own wake-ups (a settle delay, a review that hasn't come) kick them
+  locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never
   resends and repos too new to have a hook.
 - **`autoland`** (`burrow.autoland`): The PR steward for every repo you own:
-  Codex reviews each ready PR, Claude jobs settle every finding, red check and
+  Codex reviews each ready PR through its GitHub connector (on the owner's
+  ChatGPT account, set up once per repo), Claude jobs settle every finding, red check and
   conflict with its base (what a job says it did goes up only once its push is
   the PR's head, and one whose PR someone else pushes to stands down), and
   once Codex finds nothing in the head's own change and CI is green on the
@@ -313,6 +341,37 @@ Each has an entry below, and each can be imported on its own.
   Conary's landing flow, the steward's replacement, decide beside each pass
   without acting (`cn flow compare`, in `autoland-shadow@`'s journal after
   each pass), showing where the two part before a repo switches over.
+  A shadowed repo in `burrow.landing.conaryd` switches with one live
+  setting, `settings landing OWNER/REPO conaryd` (and back with `steward`):
+  burrow-landing hands it over once the one letting go has nothing at work
+  there, and the two never land it at once
+  ([docs/landing.md](docs/landing.md)).
+  `plugins.fix.enable` (off) runs Conary's fix plugin and its broker
+  (crates/burrow-fix): the flow's fixes run as proj jobs on the fixing role
+  (`plugins.fix.role`), one live fix a PR, stopped when the flow's request
+  is; it needs `burrow.ledger.controllerUser`. `plugins.proof.enable` (off)
+  runs Conary's proof plugin and its producer (crates/burrow-proof): a
+  check's recipe from the repo's flow settings, run as a program on the
+  exact commit, each run as a user systemd makes for it, and its verdict
+  signed with the producer's own key (`plugins.proof.keyFile`) and posted
+  as a check run; it needs `burrow.ledger.controllerUser` too.
+  `plugins.judge.enable` (off) runs Conary's judge plugin and its producer
+  (crates/burrow-judge): each request held to the PR's head, base,
+  description and discussion on GitHub, judged in a look of the producer's
+  own: Claude Code on the judging role's model (`plugins.judge.role`), in
+  a fresh session, as a user systemd makes for it, reading a checkout the
+  producer fetched, with its own login (`plugins.judge.claudeTokenFile`)
+  and no network but Anthropic's API, none of it burrow.user's; then
+  published by the producer, a user of its own, as the sealed comment
+  (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
+  key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.
+  Each enabled plugin is in a shadowed repo's flow config
+  (autoland/shadow.nix): its executable, its role's choice as the settings
+  source declares it (a build reads no live settings, so a role set live to
+  anything else refuses the flow's choice), and, where the repo has
+  evidence, its producer's public key (`plugins.proof.publicKey`,
+  `plugins.judge.publicKey`) in the producers file, trusted for the repo's
+  proofs or `conary/judgment` alone.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every
@@ -341,7 +400,8 @@ Each has an entry below, and each can be imported on its own.
   watches. With `units.enable` (on with the watchdog), what's broken on the
   machine itself is a source too (`burrow-units`): a failed unit, and a
   program that dumped core, whoever ran it, is a stall `units.graceMinutes`
-  after it's seen, and a crash counts for `units.crashHours`; `units.ignore`
+  after it's seen (but a crash in a Nix build, or in a proj job's slice,
+  `units.ownedSlices`, which what ran it sees for itself), and a crash counts for `units.crashHours`; `units.ignore`
   takes globs of the units and programs that fail by design. A watcher
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
@@ -363,10 +423,10 @@ Each has an entry below, and each can be imported on its own.
   never restarted, and stopped with the `UNIT.path` that would start it
   again, since it exits as it starts (anything else that starts it is named
   in its wait, not stopped); it's registered again by hand. A push run on a runner repo's default
-  branch that hasn't started is cancelled once a later run of its workflow on
-  that branch is live, so the later one takes its place (a run that has
-  started finishes, so the branch always gets a result; this takes Actions:
-  read and write on the machinery's App). With `fresh.enable`, each job queued
+  branch that hasn't finished, started or not, is cancelled once a later run
+  of its workflow on that branch is live, so the later one takes its place
+  and gives the branch its result (a run someone ran again is left; this
+  takes Actions: read and write on the machinery's App). With `fresh.enable`, each job queued
   in `fresh.repos` that asks for `fresh.label` and nothing else gets a runner
   of its own: registered for that one job with the organization `fresh.owner`
   (GitHub's JIT config, which takes the organization's Self-hosted runners
@@ -382,8 +442,8 @@ Each has an entry below, and each can be imported on its own.
   system's stamp can lag, since `HOST-update` doesn't switch to a system that
   differs only in the commit it's stamped with). Both are stall watchdog
   sources, so a runner still idle after that, a commit not live after
-  `deploy.afterMinutes`, or a run of `HOST-update` quiet in its logs past
-  `deploy.runMinutes`,
+  `deploy.afterMinutes` with no run of `HOST-update` at work, or a run quiet in
+  its logs past `deploy.runMinutes`,
   goes up the watchdog's ladder like any other stall. Its passes start on the
   runner repos' job events, the watched repos' pushes, `HOST-update` starting
   and ending, and its own wake-ups, at most one every two minutes. It never
@@ -403,11 +463,37 @@ Each has an entry below, and each can be imported on its own.
   network, and every Claude of `burrow.user` gets them, and `why`, as the
   `conary` MCP server. With `door`, an issue labelled `undo` in the probe's
   repo asks for a `cn undo` with no Claude in between
-  ([front door](docs/front-door.md#undo-with-no-claude)). `policy` is
+  ([front door](docs/front-door.md#undo-with-no-claude)). With `gateReuse`,
+  a conaryd of its own, as `burrow.user` with the ledger's GitHub tokens,
+  answers flake-check.yml's gate-reuse lookups on `listen` (loopback, for
+  this machine's runners), and over HTTPS at `path` on the events host for
+  GitHub's (Conary's docs/gate-reuse.md); the socket's conaryd stays as it
+  is. `policy` is
   Conary's class policy, which the steward asks for every PR it settles
   (`cn class`): which paths make a change R2 (CODEOWNERS and secrets by
   default), which are documentation (a change to them alone gets no review
-  round, unless it's R2), and which repos go live when they land.
+  round, unless it's R2), and which repos go live when they land. With
+  `controllerUser`, Conary's flow (its passes, workers and plugins) runs as a
+  user of its own that no authoring job, sandbox or proj run shares, on state
+  only it reads,
+  and only it may reach a producer's socket under `/run/conary-producers`.
+  It signs the ledger as burrow.user does, through ACLs on `dir` naming it,
+  so its file system must support POSIX ACLs.
+- **`builds`** (`burrow.builds`): The machine's build store
+  ([gate design](docs/gate-design.md#2-one-build-store-written-by-whoever-may-sign)):
+  a Nix binary cache nginx serves at `https://HOST/PATH`, signed with a key
+  the machine makes on first start and never hands out (its public half at
+  `PATH/public-key`). A run writes it through the door
+  ([crates/burrow-builds](crates/burrow-builds)) at `PATH/upload`: its
+  manifest, NARs and its job's OIDC token, whose audience names the
+  manifest. The door asks Conary's `cn attest job` whether the job may sign
+  (from the request's head first, before nginx takes the body, so a client
+  without a job's token can't make nginx buffer an upload; then for the
+  manifest's audience), takes only a public repo in `repos`, writes each NAR only once its hash is
+  the manifest's, and past `maxSize` drops what nginx served longest ago.
+  flake-check.yml writes it, in shadow for now, once a repo's or its
+  organization's Actions variables name it: `BURROW_BUILDS_URL`
+  (`https://HOST/PATH`) and `BURROW_BUILDS_PUBLIC_KEY` (`PATH/public-key`).
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no
@@ -471,10 +557,8 @@ Each has an entry below, and each can be imported on its own.
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
   It books its own next look, sooner the faster the week is going, and never
-  more than 15 minutes on: no timer. Each pass also keeps the engines' meters
-  for proj's role overflow: Claude's five-hour session and week, and, with
-  proj's Codex, Codex's windows and whether it has credits (read through its
-  app-server's `account/rateLimits/read`). Each fresh reading replaces
+  more than 15 minutes on: no timer. Each pass also keeps Claude's meters,
+  its five-hour session and week, for proj's usage holds. Each fresh reading replaces
   `meters/ENGINE.json` and appends to `meters/log` in its state dir.
 
 - **`ops`** (`burrow.ops`): perf, bpftrace, bcc, strace, gdb, tcpdump,

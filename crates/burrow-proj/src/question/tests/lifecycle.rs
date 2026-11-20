@@ -272,12 +272,12 @@ fn paused_inbox(kind: &str) -> Fixture {
         "sam_r-7"
     });
     fs::create_dir_all(&record).unwrap();
-    fs::write(record.join("job"), "j1").unwrap();
+    fs::write(record.join(crate::inbox::record::File::Job), "j1").unwrap();
     if matches!(kind, "ordinary" | "drained") {
-        fs::write(record.join("issue"), "sam/r#7").unwrap();
+        fs::write(record.join(crate::inbox::record::File::Issue), "sam/r#7").unwrap();
     }
     if kind == "drained" {
-        fs::write(record.join("drained"), "sam/r#7").unwrap();
+        fs::write(record.join(crate::inbox::record::File::Drained), "sam/r#7").unwrap();
     }
     // Sorting records intentionally have no source metadata, as on old jobs.
     if kind == "planner" {
@@ -301,7 +301,7 @@ fn paused_inbox_kinds_preserve_all_automatic_waits() {
                 question(&f, false, crate::now() - 10);
             } else {
                 f.ending(1, "await");
-                fs::write(f.job().turn("1", "engine"), "codex").unwrap();
+                fs::write(f.job().turn("1", "engine"), "claude").unwrap();
                 let text = if wait == "usage" {
                     format!("usage-limit\t1000\t{}\n", crate::now() - 1)
                 } else {

@@ -2,10 +2,15 @@
 //! now on. With trial boots, HOST-boot makes it the boot default: a new
 //! kernel or initrd boots once on trial first.
 
-use crate::{Broke, Config, complain, say};
+use std::path::Path;
 
-/// What it exits with, or why it broke.
-pub fn confirm(cfg: &Config) -> Result<u8, Broke> {
+use crate::switch::PENDING;
+use crate::{Broke, Config, as_recorded, canonical, complain, say};
+
+/// What it exits with, or why it broke. Told the system it means (`mine`),
+/// it confirms only that: another pending in its place replaced it, and is
+/// someone's, mid-change and unchecked.
+pub fn confirm(cfg: &Config, mine: Option<&Path>) -> Result<u8, Broke> {
     // Any switch held off until this is done.
     let _lock = cfg.lock()?;
     let activating = |c: &Config| c.show(&c.service(), "ActiveState") == "activating";
@@ -13,7 +18,24 @@ pub fn confirm(cfg: &Config) -> Result<u8, Broke> {
         complain("too late: the revert is already running");
         return Ok(1);
     }
-    let Some(new) = cfg.recorded("pending")? else {
+    let pending = cfg.recorded("pending")?;
+    // Decided under the lock, which a switch holds as it writes `pending`.
+    if let Some(mine) = mine.map(as_recorded)
+        && pending.as_ref() != Some(&mine)
+    {
+        // Nothing pending: someone confirmed it already, or it's gone.
+        if pending.is_none() && canonical(&cfg.profile)? == mine {
+            say(&format!("already confirmed: {}", mine.display()));
+            return Ok(0);
+        }
+        let what = pending.map_or("nothing is".into(), |p| format!("{} is", p.display()));
+        complain(&format!(
+            "{} isn't pending ({what}); not confirming it",
+            mine.display()
+        ));
+        return Ok(PENDING);
+    }
+    let Some(new) = pending else {
         say("nothing pending");
         return Ok(0);
     };

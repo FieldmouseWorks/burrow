@@ -22,7 +22,11 @@ impl Machine {
         self.origin(&["branch", "-f", BRANCH, "main"]);
         let head = self.pushed("before", BRANCH, "flake.lock", text);
         self.propose_was(&head);
-        Pr { number: 7, head }
+        Pr {
+            number: 7,
+            head,
+            first: false,
+        }
     }
 
     /// What HOST-update remembers it pushed last.
@@ -90,6 +94,7 @@ fn its_pr_is_its_own_branchs_open_one() {
     let pr = Some(Pr {
         number: 7,
         head: sha('a'),
+        first: false,
     });
     let mut gh = on(ok(200, listed(std::slice::from_ref(&ours)), &[]));
     assert_eq!(open(&t, &mut gh), Ok(pr.clone()));
@@ -106,6 +111,11 @@ fn its_pr_is_its_own_branchs_open_one() {
     ] {
         assert_eq!(open(&t, &mut on(ok(200, listed(&prs), &[]))), Ok(said));
     }
+    // Its label, as listed.
+    let mut labelled = listed(&[(7, sha('a'), json!("sam/homelab"))]);
+    labelled[0]["labels"] = json!([{"name": "first"}]);
+    let first = open(&t, &mut on(ok(200, labelled, &[])));
+    assert_eq!(first.unwrap().map(|p| p.first), Some(true));
     // GitHub down, or an answer that isn't a list of PRs: a failure, never
     // "none open".
     let e = open(&t, &mut on(down())).unwrap_err();
@@ -130,7 +140,7 @@ fn its_pr_says_what_the_commit_passed_and_that_its_not_live() {
         body,
         "Pushed by box-update after the build and the VM tests passed.\n\n\
          It is not live: box runs main. The steward settles this PR and the merge train lands it; until then \
-         box-update brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it. Only main goes live: box-update deploys this after it lands."
+         box-update brings in nothing newer, unless a check fails on it, a finding on it is left open or it stops merging into main: then a fresh bump replaces it. Only main goes live: box-update deploys this after it lands."
     );
 }
 
@@ -147,7 +157,12 @@ fn proposing_puts_head_up_as_a_new_pr() {
     gh.on(
         "POST",
         "repos/sam/homelab/pulls",
-        vec![ok(201, json!({"html_url": url}), &[])],
+        vec![ok(201, json!({"html_url": url, "number": 7}), &[])],
+    );
+    gh.on(
+        "POST",
+        "repos/sam/homelab/issues/7/labels",
+        vec![ok(200, json!([]), &[])],
     );
     assert_eq!(propose(&m.cfg, m.t(), &mut gh).as_deref(), Ok(url));
     let head = m.head();
@@ -155,14 +170,23 @@ fn proposing_puts_head_up_as_a_new_pr() {
     assert_eq!(m.proposed().as_deref(), Some(head.as_str()));
     assert_ne!(m.main(), head);
     let (title, body) = said(&m.cfg).unwrap();
+    // Opened, it goes first in the landing line.
     assert_eq!(
         gh.asked,
-        vec![(
-            "POST".into(),
-            "repos/sam/homelab/pulls".into(),
-            Some(json!({"title": title, "head": BRANCH, "base": "main", "body": body})),
-            None
-        )]
+        vec![
+            (
+                "POST".into(),
+                "repos/sam/homelab/pulls".into(),
+                Some(json!({"title": title, "head": BRANCH, "base": "main", "body": body})),
+                None
+            ),
+            (
+                "POST".into(),
+                "repos/sam/homelab/issues/7/labels".into(),
+                Some(json!({"labels": ["first"]})),
+                None
+            )
+        ]
     );
 
     // GitHub refusing it: a failure, with the branch pushed and remembered,
@@ -269,6 +293,7 @@ fn red_says_nothing_of_a_head_it_didnt_push_and_fails_when_it_cant_tell() {
     let theirs = Pr {
         number: 7,
         head: m.main(),
+        first: false,
     };
     let mut gh = github(&theirs.head, &failed);
     assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &theirs), Ok(None));
@@ -344,6 +369,7 @@ fn a_finding_left_open_on_its_own_head_holds_it_as_red_does() {
     let theirs = Pr {
         number: 7,
         head: older.clone(),
+        first: false,
     };
     let mut gh = reviewed(&older, &[], &[thread(false, &older)]);
     assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &theirs), Ok(None));
@@ -372,6 +398,52 @@ fn a_finding_left_open_on_its_own_head_holds_it_as_red_does() {
         Err("its PR #7 isn't stuck any more, so it stays as it is".into())
     );
     assert_eq!(m.branch(), pr.head);
+}
+
+/// A GitHub that says whether `head`'s PR merges into main: no check has run
+/// on it and no thread is open.
+fn merging(head: &str, mergeable: &str) -> Fake {
+    let mut said = checked(head, &[], false);
+    said["data"]["repository"]["pullRequest"]["mergeable"] = json!(mergeable);
+    let mut gh = Fake::default();
+    gh.on("POST", "graphql", vec![ok(200, said, &[])]);
+    gh
+}
+
+#[test]
+fn a_head_main_moved_under_is_stuck_as_red_is() {
+    let m = Machine::new();
+    let pr = m.pushed_before("v2");
+    // It merges, or GitHub hasn't worked out whether it does (the next run
+    // reads it again): it's ridden.
+    for merges in ["MERGEABLE", "UNKNOWN"] {
+        let mut gh = merging(&pr.head, merges);
+        assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(None), "{merges}");
+    }
+    assert!(!m.has(&pr.head), "fetched a head that isn't stuck");
+    // Main moved where the bump did: no check runs on that head, so none
+    // fails to say it's stuck. It's fetched, for `replaces`, and a fresh
+    // bump on main goes up in its place.
+    let mut gh = merging(&pr.head, "CONFLICTING");
+    assert_eq!(
+        stuck(&m.cfg, m.t(), &mut gh, &pr),
+        Ok(Some(Stuck::Conflict))
+    );
+    assert!(m.has(&pr.head), "didn't fetch the head in conflict");
+    let mut gh = merging(&pr.head, "CONFLICTING");
+    let url = "https://github.com/sam/homelab/pull/7";
+    gh.on(
+        "PATCH",
+        "repos/sam/homelab/pulls/7",
+        vec![ok(200, json!({"html_url": url}), &[])],
+    );
+    assert_eq!(
+        replace(&m.cfg, m.t(), &mut gh, &pr),
+        Ok(format!(
+            "{url}, in place of its head {}, which was in conflict with main",
+            &pr.head[..7]
+        ))
+    );
 }
 
 #[test]
@@ -527,4 +599,37 @@ fn replacing_leaves_a_head_gone_green_or_fixed_or_unread() {
         Err("GitHub didn't say how its PR #7's checks stand; its PR #7 stays as it is".into())
     );
     assert_eq!(m.branch(), pr.head);
+}
+
+#[test]
+fn its_pr_goes_first_once_and_only_with_a_label_to_carry() {
+    let pr = |first| Pr {
+        number: 7,
+        head: sha('a'),
+        first,
+    };
+    let path = "repos/sam/homelab/issues/7/labels";
+    let mut gh = Fake::default();
+    gh.on("POST", path, vec![ok(200, json!([]), &[])]);
+    first(&train(), &mut gh, &pr(false));
+    assert_eq!(
+        gh.asked,
+        vec![(
+            "POST".into(),
+            path.into(),
+            Some(json!({"labels": ["first"]})),
+            None
+        )]
+    );
+    // Labelled already, or no label to carry: GitHub isn't asked.
+    let mut gh = Fake::default();
+    first(&train(), &mut gh, &pr(true));
+    let mut none = train();
+    none.first = None;
+    first(&none, &mut gh, &pr(false));
+    assert!(gh.asked.is_empty());
+    // GitHub refusing it: said, never a failure.
+    let mut gh = Fake::default();
+    gh.on("POST", path, vec![down()]);
+    first(&train(), &mut gh, &pr(false));
 }

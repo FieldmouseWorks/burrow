@@ -138,15 +138,29 @@ jq -r --arg who "$1" '.[][] | select(.user.login == $who) | .body'
     ),
     (
         // A job, kept whether or not it starts (FAKE/proj-fails), that
-        // starts once FAKE/proj-blocks is gone. FAKE/proj-held-lock says it
-        // was handed the sweep's lock. ls says nothing on stderr, which the
-        // sweep passes on: a descriptor that closes while it lists them
-        // (one the shell had for a moment) is no failure of the sweep's.
+        // starts once FAKE/proj-blocks is gone, as id-N (the Nth to start),
+        // the job its --key finds (FAKE/key-KEY, `/` as `+`) once it has. FAKE/proj-held-lock
+        // says it was handed the sweep's lock. ls says nothing on stderr,
+        // which the sweep passes on: a descriptor that closes while it lists
+        // them (one the shell had for a moment) is no failure of the
+        // sweep's. A job's lifecycle is FAKE/life-ID, or done; with
+        // FAKE/life-fails nothing can say.
         "proj",
-        r#"n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
+        r#"case "$1" in
+find) echo "proj find $2" >>"$FAKE/log"
+  cat "$FAKE/key-$(printf %s "$2" | tr / +)" 2>/dev/null; exit 0 ;;
+lifecycle) echo "proj lifecycle $2" >>"$FAKE/log"
+  [ ! -e "$FAKE/life-fails" ] || exit 1
+  cat "$FAKE/life-$2" 2>/dev/null || echo done; exit 0 ;;
+esac
+n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
 if ls -l /proc/$$/fd 2>/dev/null | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
 while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
 [ ! -e "$FAKE/proj-fails" ] || exit 3
+echo >>"$FAKE/ids"; id=id-$(wc -l <"$FAKE/ids")
+key=; was=; for a; do [ "$was" != --key ] || key=$a; was=$a; done
+[ -z "$key" ] || echo "$id" >"$FAKE/key-$(printf %s "$key" | tr / +)"
+echo "$id"
 "#,
     ),
     (
@@ -162,6 +176,8 @@ struct Machine {
     root: PathBuf,
     /// The machine's own App, as its name and its bot's login.
     app: Option<(&'static str, &'static str)>,
+    /// Renovate's own bot, as REST spells it, when it acts as an App.
+    renovate: Option<&'static str>,
     /// The steward's repos.json, once there's one.
     covered: Option<PathBuf>,
 }
@@ -250,6 +266,7 @@ impl Machine {
             _dir: dir,
             root,
             app: None,
+            renovate: None,
             covered: None,
         };
         m.project("r", "https://github.com/sam/r.git");
@@ -259,7 +276,16 @@ impl Machine {
     fn as_app() -> Machine {
         Machine {
             app: Some(("workers", "sam-workers")),
+            renovate: Some("sam-workers[bot]"),
             ..Machine::new()
+        }
+    }
+
+    /// The jobs as the machinery's App, Renovate as an App of its own.
+    fn renovate_apart() -> Machine {
+        Machine {
+            renovate: Some("sam-renovate[bot]"),
+            ..Machine::as_app()
         }
     }
 
@@ -336,7 +362,8 @@ impl Machine {
         let config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
-            "renovateRun": 7200,
+            "renovate": self.renovate,
+            "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "seal": b.join("major-seal"),
                       "lockWait": b.join("lock-wait")},

@@ -76,21 +76,16 @@ fn read_as(hub: &mut Hub, ask: &Ask) -> Result<Read, String> {
     .1
 }
 
-fn whole(codex: bool, edited: bool) -> Result<Read, String> {
-    Ok(Read::Whole { codex, edited })
+fn whole(edited: bool) -> Result<Read, String> {
+    Ok(Read::Whole { edited })
 }
 
 #[test]
 fn a_pr_past_250_commits_is_read_whole() {
-    for (message, codex) in [
-        ("deps: bump\n\nEngine: codex\n", true),
-        ("deps: bump", false),
-    ] {
-        let mut hub = Hub::default();
-        compare(&mut hub, &bumps(251, message), None);
-        assert_eq!(read_as(&mut hub, &ask()), whole(codex, false), "{message}");
-        assert_eq!(hub.paths(), [page(1), page(2), page(3)]);
-    }
+    let mut hub = Hub::default();
+    compare(&mut hub, &bumps(251, "deps: bump"), None);
+    assert_eq!(read_as(&mut hub, &ask()), whole(false));
+    assert_eq!(hub.paths(), [page(1), page(2), page(3)]);
 }
 
 #[test]
@@ -155,25 +150,6 @@ fn a_read_that_doesnt_hold_together_is_no_answer() {
 }
 
 #[test]
-fn only_the_whole_engine_trailer_marks_a_codex_job() {
-    for (message, codex) in [
-        ("change\n\nEngine: codex\n", true),
-        ("change\n\neNgInE: codex\n", true),
-        ("change\n\nOriginal-engine: codex\n", false),
-        ("change\n\nNote: Engine: codex is an example\n", false),
-        ("change\n\nEngine: codex, once\n", false),
-        (
-            "change\n\nEngine: codex\n\nThat was a quoted line.\n",
-            false,
-        ),
-    ] {
-        let mut hub = Hub::default();
-        compare(&mut hub, &bumps(2, message), None);
-        assert_eq!(read_as(&mut hub, &ask()), whole(codex, false), "{message}");
-    }
-}
-
-#[test]
 fn a_missing_address_is_no_bots() {
     let co = |line: &str| format!("deps: bump\n\n{line}\n");
     for (message, author, committer, edited) in [
@@ -229,7 +205,7 @@ fn a_missing_address_is_no_bots() {
         a.committers.push(String::new());
         assert_eq!(
             read_as(&mut hub, &a),
-            whole(false, edited),
+            whole(edited),
             "{message} {author} {committer}"
         );
     }

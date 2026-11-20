@@ -64,7 +64,7 @@ mod tests {
             "host": "boxhost", "channel": "nixos-26.05", "update": "box-update", "flake": "/src/box",
             "owner": "Sam", "notify": "box-notify", "boot": boot, "train": train,
             "checks": ["rehearsal", "sandbox"], "system": "x86_64-linux", "app": null, "kev": [],
-            "tools": {"sudo": "/s", "runuser": "/r", "nixStore": "/n", "vulnix": "/v", "osvScanner": "/o", "proj": "/p"},
+            "tools": {"sudo": "/s", "runuser": "/r", "nixStore": "/n", "vulnix": "/v", "osvScanner": "/o", "cargo": "/c", "proj": "/p"},
         }))
         .unwrap()
     }

@@ -13,7 +13,7 @@ import subprocess
 import time
 
 import common as C
-import reviewers as V
+import mirror as M
 from common import CFG, DRY, load, log, save
 import claims
 from tasks import RED_BRANCH, UNDO_BRANCH, red_default_task, red_fix
@@ -103,11 +103,10 @@ def reset(r, k, known, failed):
     aside, proj-inbox forgets its issues and its Claude jobs are stopped
     (they'd push its history to the new one, or answer the new one's
     issues), and all the steward kept about it goes: its PRs' state (so a new
-    PR doesn't take on an old one's of the same number), their reviews,
-    snapshots and the reviewers' sessions (so no look at a new PR resumes
-    an old one's), its dashboard's and quarantine's, and the reviewers'
-    clone of it. The name is out of known, and of failed, so the new one's
-    baseline job starts straight away.
+    PR doesn't take on an old one's of the same number), its dashboard's
+    and quarantine's, and the steward's clone of it. The name is out of
+    known, and of failed, so the new one's baseline job starts straight
+    away.
 
     Its settings (repo-K.json) are what says it was remade, so they go
     last: a pass that fails partway leaves them, and the next one does it
@@ -121,12 +120,7 @@ def reset(r, k, known, failed):
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     retire_checkouts(repo, k)
-    # The repo as its state spells it: an owner's name has no `_`.
-    left = V.sweep(k.replace("_", "/", 1), set())
-    if left:
-        raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
-                           "that couldn't be marked gone")
-    mirrors = os.path.join(C.STATE, V.GIT)
+    mirrors = os.path.join(C.STATE, M.GIT)
     for x in sorted(os.listdir(mirrors)) if os.path.isdir(mirrors) else []:
         if x.lower() == f"{repo.replace('/', '__')}.git".lower():
             shutil.rmtree(os.path.join(mirrors, x))
@@ -177,6 +171,34 @@ def retire_checkouts(repo, k):
     for jid, project, repos in C.jobs():
         if (repo.lower() in repos or (not repos and project in ours)) and not C.stop_job(jid):
             raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
+
+
+def first_fixes(r, prs):
+    """The fixes for a red default branch (tasks.red_fix) among its open
+    PRs, by number: every PR is built on the red branch until one lands, so
+    each goes first, in this pass's proof line and, with the first label
+    put on it, in Conary's flow (priority_labels). Best effort: a label
+    GitHub didn't take is asked for again by the next pass. One PR that
+    can't be read mustn't stop the rest: it fails in its own step."""
+    repo, default = r["repo"], r["default"]
+    undos = (load(f"repo-{repo.replace('/', '_')}.json", {}).get("red") or {}).get("undos", ())
+    label = CFG["labels"]["first"]
+    fixes = set()
+    for pr in prs:
+        try:
+            if not red_fix(pr, default, undos):
+                continue
+            nodes = pr["labels"]["nodes"]
+        except (KeyError, TypeError):
+            continue
+        fixes.add(pr["number"])
+        if label in {x.get("name") for x in nodes}:
+            continue
+        if C.write("pr", "edit", str(pr["number"]), "-R", repo, "--add-label", label, check=False) is not None:
+            nodes.append({"name": label})
+        elif not DRY:
+            log(f"{repo}#{pr['number']}: GitHub didn't take its {label} label")
+    return fixes
 
 
 def watch_default(r, info, prs, digest):
@@ -262,7 +284,7 @@ def watch_default(r, info, prs, digest):
     others = [pr for pr in fixes if pr["number"] not in red.get("undos", ())]
     if (not working and (red.get("job") or (red.get("named") and (red.get("undos") or not others)))
             and not (red.get("asked") or red.get("refused"))):
-        booked = undo_red(repo, red)
+        booked = undo_red(repo, red, default, target)
         save(key, st)
         if booked:
             return {}
@@ -306,6 +328,23 @@ clock = time.time
 UNDO_NAMED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})")
 # The line an undo's PR carries in its body (Conary's undo.rs, Marker).
 UNDO_MARKER = "<!-- conary-undo: "
+# How a check run ends, and a status stands, when it turns the tip red.
+RED_RUN = ("FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED", "ACTION_REQUIRED")
+RED_STATUS = ("FAILURE", "ERROR")
+# The most failed checks a reason names, and the most of its error line.
+REASON_CHECKS, REASON_LINE = 10, 300
+# An Actions log line's timestamp, and a terminal's colours.
+LOG_STAMP = re.compile(r"^\ufeff?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A line that opens with an error, after a nix build's `NAME> `: an Actions
+# error, a compiler's or a tool's `error:` (`error[E0061]:` too), an
+# exception's, a Rust panic. Not one that only mentions an error
+# (libgpg-error, "failed with error -2").
+ERROR_LINE = re.compile(r"^(?:[\w.+-]+> )?(?:##\[error\]|(?:error|Error|ERROR|[A-Z]\w*Error)(?:\[\w+\])?:"
+                        r"|thread '[^']*' panicked at )")
+# The line Actions ends any step that exited non-zero with: no error of the
+# step's own, which is the last thing the step printed before it.
+EXITED = "##[error]Process completed with exit code"
 
 
 def landed_alone(repo, default, target):
@@ -337,6 +376,73 @@ def landed_alone(repo, default, target):
     return f"{repo}#{pr['number']}"
 
 
+def red_reason(repo, default, target):
+    """Why the steward asks the ledger to undo what turned the default
+    branch red: cn's --reason, which the undo keeps and its PR opens with
+    (Conary's docs/DESIGN.md, section 5). The red tip, the URL of each run
+    a check failed in, the checks that failed, and the first error line of
+    the first one to fail (an aggregate of the others' fails last): all of
+    it from what the pass read of the tip (prs.TIP), but that line, which
+    an Actions job keeps in its log, read now. Raises C.Unavailable when GitHub didn't give the log; one it
+    refuses (gone, say) leaves the reason saying so, since the undo stands
+    on the red, not on its words. Nothing in it is the steward's own: a
+    secret in a log is masked by Actions before it's written."""
+    sha = target.get("oid") or "?"
+    nodes = [c for c in (((target.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes") or []) if c]
+    failed = sorted((c for c in nodes if c.get("conclusion") in RED_RUN or c.get("state") in RED_STATUS),
+                    key=lambda c: (c.get("conclusion") != "FAILURE" and c.get("state") not in RED_STATUS,
+                                   c.get("completedAt") or c.get("createdAt") or "~"))
+    if not failed:
+        return f"{default} is red at {sha}, and GitHub names no failed check on it"
+    names = list(dict.fromkeys(map(check_name, failed)))
+    more = f" and {len(names) - REASON_CHECKS} more" if len(names) > REASON_CHECKS else ""
+    urls = list(dict.fromkeys(u for u in map(run_url, failed) if u))
+    return (f"{default} is red at {sha}. Red run: {', '.join(urls) or 'none linked'}. "
+            f"Failing checks: {', '.join(names[:REASON_CHECKS])}{more}. "
+            f"First error: {first_error(repo, failed[0])}")
+
+
+def check_name(c):
+    """A failed check as GitHub shows it: WORKFLOW / JOB for an Actions
+    job, a check run's or a status's own name otherwise."""
+    if "context" in c:
+        return c["context"] or "a status"
+    workflow = ((((c.get("checkSuite") or {}).get("workflowRun") or {}).get("workflow")) or {}).get("name")
+    name = c.get("name") or "a check run"
+    return f"{workflow} / {name}" if workflow else name
+
+
+def run_url(c):
+    """The run a check failed in: its Actions run, or the link it gives."""
+    return ((c.get("checkSuite") or {}).get("workflowRun") or {}).get("url") or c.get("detailsUrl") or c.get("targetUrl")
+
+
+def first_error(repo, c):
+    """The first error line of a failed check: an Actions job's from its
+    log, any other's from what it says of itself."""
+    if not ((c.get("checkSuite") or {}).get("workflowRun") and c.get("databaseId")):
+        return clipped(c.get("title") or c.get("description") or "") or "it gives none"
+    try:
+        # Its colours too, which gh won't print without being told to.
+        text = C.gh("api", f"repos/{repo}/actions/jobs/{c['databaseId']}/logs", "--allow-escape-sequences")
+    except C.Unavailable:
+        raise
+    except RuntimeError as e:
+        return f"its log couldn't be read ({clipped(C.said(e))})"
+    lines = [ANSI.sub("", LOG_STAMP.sub("", x)).strip() for x in (text if isinstance(text, str) else json.dumps(text)).splitlines()]
+    line = next((x for x in lines if ERROR_LINE.match(x) and not x.startswith(EXITED)), None)
+    if line is None:
+        end = next((i for i, x in enumerate(lines) if x.startswith(EXITED)), len(lines))
+        line = next((x for x in reversed(lines[:end]) if x and not x.startswith("##[")), None)
+    return clipped(line.removeprefix("##[error]")) if line else "none in its log"
+
+
+def clipped(text):
+    """One line of text, cut to REASON_LINE."""
+    text = " ".join(text.split())
+    return text if len(text) <= REASON_LINE else text[:REASON_LINE - 1] + "…"
+
+
 def undo_asked(repo, jid):
     """The PR a red's job named to undo, as REPO#N, from its answers file
     (tasks.undo): None when it named none, or one that isn't the repo's
@@ -355,10 +461,10 @@ def undo_asked(repo, jid):
     return f"{repo}#{m[2]}"
 
 
-def undo_red(repo, red):
+def undo_red(repo, red, default, target):
     """The undo the red's ended job named, or the steward named itself
-    (landed_alone), run by the ledger's writer cn
-    (CFG["undo"]). A PR it opened for this red, or opened and stopped
+    (landed_alone), run by the ledger's writer cn (CFG["undo"]), with
+    the red tip's reason (red_reason). A PR it opened for this red, or opened and stopped
     before recording, is kept in the red's undos, the red's fix from now on
     (tasks.red_fix); one it found open already is only if it was this red's
     already (a run that stopped before), and anyone else's (the door's,
@@ -382,17 +488,26 @@ def undo_red(repo, red):
         C.wake(repo, red["retryAt"])  # ends: retryAt, UNDO_TRIES
         return True
     if DRY:
-        log(f"  would: cn undo {asked}")
+        log(f"  would: cn undo {asked} --reason=(the red run's URL, failing checks and first error line)")
         return True
     # The writer's own token, never the steward's: its PR is the machinery's.
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "CONARY_TOKEN_COMMAND")}
     try:
-        p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True, timeout=600)
-        rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
-    except subprocess.TimeoutExpired as e:
-        # What it printed before then counts all the same: a PR it opened.
-        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        rc, said = None, "it ran past ten minutes"
+        reason = red_reason(repo, default, target)
+    except C.Unavailable as e:
+        # Asked again, as when cn stops for GitHub: no undo without its reason.
+        reason, rc, out, said = None, None, "", f"GitHub didn't give the red run's log: {C.said(e)[:200]}"
+    if reason is not None:
+        log(f"{repo}: cn undo {asked}: {reason}")
+        try:
+            # --reason=: a reason is one argument whatever it opens with.
+            p = subprocess.run([CFG["undo"], "undo", asked, f"--reason={reason}"], env=env, capture_output=True,
+                               text=True, timeout=600)
+            rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
+        except subprocess.TimeoutExpired as e:
+            # What it printed before then counts all the same: a PR it opened.
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            rc, said = None, "it ran past ten minutes"
     url = f"https://github.com/{repo}/pull/".lower()
     ours, theirs, rows = set(red.get("undos", [])), set(red.get("theirs", [])), []
     for row in out.splitlines():
@@ -456,7 +571,7 @@ def hooks(repos):
 # pipeline's own trouble (a job that keeps failing, a review that won't run,
 # a merge GitHub won't take, a PR stuck a day, a branch it couldn't
 # archive), which a Claude job on this machine takes when proj's inbox is on.
-OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
+OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
           "No reviewer can review it", "Flaky tests someone else quarantined", "Jobs waiting for the owner")
 
 
@@ -465,6 +580,16 @@ OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
 # stuck issue is a turn of its Claude job, and a day-old PR's every step
 # through its reviews and CI was one that found nothing to do (remi#210).
 MOVING = ("Open over a day",)
+
+
+def known_by(why, line, desc):
+    """What a digest entry is known by, so what's news: the whole entry, so a
+    PR listed again for something else, or for the same thing with another
+    diagnosis, is news too; but a kind whose words are the PR's own status
+    (MOVING) by its kind and PR alone. Each new one is a comment, and a turn
+    of the stuck issue's job: so an entry's words say what is stuck and why,
+    and since when, never for how long (burrow#1228)."""
+    return f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else "")
 
 
 def job_questions():
@@ -523,7 +648,7 @@ def stuck_brief():
     who = CFG["notify"]["assignee"] or "the owner"
     stalls = " (and `burrow-watchdog status` for what stalled past its deadline)" if CFG["watch"] else ""
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
-one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
+one, find out why: `journalctl -u autoland` here, and the steward's state in \
 {CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
 this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
 repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
@@ -550,12 +675,7 @@ def issue(key, title, label, assignee, intro, digest, done, also="", immutable=F
     for why, line, desc in digest:
         groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
     body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
-    # What's news, by what it's known by: the whole entry, so a PR listed
-    # again for something else, or for the same thing with another
-    # diagnosis, is news too; but a kind whose words are the PR's own status
-    # (MOVING) by its kind and PR alone.
-    news = {f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else ""):
-            f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
+    news = {known_by(why, line, desc): f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
     entries = sorted(news)
     if DRY or not nrepo:
         log(f"--- {title} ---\n" + (body or "(nothing)"))

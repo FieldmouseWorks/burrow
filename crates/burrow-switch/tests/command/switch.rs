@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
 
-const USAGE: &str =
-    "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]\n";
+const USAGE: &str = "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]\n";
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
@@ -386,7 +385,10 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
     assert_eq!(m.fake("switch-to-configuration"), "one test\n");
     assert_eq!(
         m.fake("journal"),
-        format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
+        format!(
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n"
+        )
     );
     nothing_pending(&m, &one);
     // One that doesn't get back says so, as a revert does.
@@ -401,7 +403,8 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
     assert_eq!(
         m.fake("journal"),
         format!(
-            "-t box-switch -p err REVERT FAILED (exit 0): still running the unconfirmed {two}\n"
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p err REVERT FAILED (exit 0): still running the unconfirmed {two}\n"
         )
     );
     // And one that can't start.
@@ -594,7 +597,10 @@ fn the_revert_puts_the_confirmed_system_back() {
     assert_eq!(m.fake("switch-to-configuration"), "one test\n");
     assert_eq!(
         m.fake("journal"),
-        format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
+        format!(
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n"
+        )
     );
     assert_eq!(
         said(&m.switch(&["--status"])),
@@ -613,7 +619,7 @@ fn the_revert_puts_the_confirmed_system_back() {
         (
             Some(0),
             String::new(),
-            format!("not confirmed, reverted to {one} (activation exit 0)\n")
+            format!("reverting to {one}\nnot confirmed, reverted to {one} (activation exit 0)\n")
         )
     );
 }
@@ -629,6 +635,13 @@ fn the_revert_waits_out_switch_to_configurations_lock() {
         m.fake("switch-to-configuration"),
         "one test\none test\none test\n"
     );
+    // It says when it began once, however often it was refused.
+    let journal = m.fake("journal");
+    assert!(
+        journal.starts_with(&format!("-t box-switch -p notice reverting to {one}\n")),
+        "{journal}"
+    );
+    assert_eq!(journal.matches("reverting to").count(), 1, "{journal}");
     // And held: it waits for the activation holding it.
     let m = Machine::switched(false);
     let lock = File::create(m.path("s2c.lock")).unwrap();
@@ -640,9 +653,16 @@ fn the_revert_waits_out_switch_to_configurations_lock() {
     thread::sleep(Duration::from_millis(500));
     assert!(revert.try_wait().unwrap().is_none(), "it didn't wait");
     assert_eq!(m.running(), m.sys("two"));
+    // Held off, it hasn't begun: its journal line marks the end of the wait.
+    assert_eq!(m.fake("journal"), "");
     drop(lock);
     assert!(revert.wait().unwrap().success());
     assert_eq!(m.running(), one);
+    let journal = m.fake("journal");
+    assert!(
+        journal.starts_with(&format!("-t box-switch -p notice reverting to {one}\n")),
+        "{journal}"
+    );
 }
 
 #[test]
@@ -658,7 +678,8 @@ fn a_revert_that_doesnt_get_back_says_so_and_status_too() {
     assert_eq!(
         m.fake("journal"),
         format!(
-            "-t box-switch -p err REVERT FAILED (exit 1): still running the unconfirmed {two}\n"
+            "-t box-switch -p notice reverting to {one}\n\
+             -t box-switch -p err REVERT FAILED (exit 1): still running the unconfirmed {two}\n"
         )
     );
     let out = m.switch(&["--status"]);
@@ -757,4 +778,41 @@ fn an_abort_reverts_at_once() {
     let m = Machine::switched(false);
     m.set("stays-one", "");
     assert_eq!(said(&m.switch(&["--abort"])).0, Some(1));
+}
+
+#[test]
+fn a_switch_told_unless_pending_leaves_a_pending_one_be() {
+    // Pending as it takes the lock (gone pending while it built, say): it
+    // exits 4 having touched nothing, even when it's the system that runs.
+    let m = Machine::switched(false);
+    let (one, two, three) = (m.sys("one"), m.sys("two"), m.system("three", Some(300)));
+    for system in [&three, &two] {
+        let out = m.switch(&["--unless-pending", "--toplevel", system]);
+        assert_eq!(
+            said(&out),
+            refused(
+                4,
+                &format!("{two} is pending; not switching over it (it's someone's, mid-change)\n")
+            ),
+            "{system}"
+        );
+        assert_eq!(m.running(), two);
+        assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+        assert_eq!(m.state("prev"), Some(format!("{one}\n")));
+        for f in [
+            "systemctl",
+            "systemd-run",
+            "switch-to-configuration",
+            "journal",
+        ] {
+            assert_eq!(m.fake(f), "", "{f}");
+        }
+    }
+    // With nothing pending, it switches as any switch does.
+    let m = Machine::new(false);
+    let two = m.sys("two");
+    let out = m.switch(&["--toplevel", &two, "--unless-pending"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out).2);
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
 }

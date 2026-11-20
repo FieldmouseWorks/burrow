@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 burrow-process = { path = "../burrow-process" }
+burrow-settings = { path = "../burrow-settings" }
 burrow-door = { path = "../burrow-door" }
 burrow-events = { path = "../burrow-events" }
 burrow-github = { path = "../burrow-github" }

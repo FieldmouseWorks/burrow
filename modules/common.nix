@@ -145,13 +145,19 @@ inputs:
             type = types.lines;
             default = "";
             description = ''
-              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude and
-              the job user's .codex/AGENTS.md for Codex when proj is on.
+              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude.
               burrow's modules fill in their sections at lib.mkOrder 600 to 1400;
               put an intro in lib.mkBefore (500) and an ending in lib.mkAfter (1500).
             '';
           };
         };
+
+        # The projects' folder, made here and nowhere else: Remote Control,
+        # proj and the steward all work in it, whichever of them are on. It's
+        # the user's, so a machine without that account (one that runs only
+        # burrow.ops, say) has no folder to make.
+        config.systemd.tmpfiles.rules = lib.optional (config.users.users ? ${config.burrow.user})
+          "d ${config.burrow.projectsDir} 0755 ${config.burrow.user} ${config.users.users.${config.burrow.user}.group} -";
 
         # tmux for the Claudes that run in one (Remote Control servers, the
         # usage watcher's Claude Code). Not tmux's usual build: that one moves

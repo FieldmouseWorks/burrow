@@ -105,9 +105,10 @@ class Actions:
             train = self.ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in self.ci_names)
             before = claims.unposted(self.st, kind, at)
             red_negative = negative(self.ci_names) if self.ci == "red" and not conflict else None
-            if self.started(
+            started = self.started(
                 kind, fix_task(self.repo, self.pr, why, proofs, train, self.tested, before, red_negative, describe), at, bool(how)
-            ):
+            )
+            if started:
                 if retry:
                     if not how:
                         self.st[kind + "Again"] = at
@@ -115,6 +116,8 @@ class Actions:
                 if kind == "handed":
                     eyes(self.repo, self.pr)
                 who = f"a Claude job has it since {clock(C.NOW)}" + ("; the last one's answers didn't go up" if before else "")
+            elif started is None:
+                who = "a Claude job takes it once the last one on the branch has stood down"
             else:
                 self.digest.append(("Couldn't start a Claude job to fix it", self.line, why))
                 who = "no Claude job could start"
@@ -327,7 +330,11 @@ class Actions:
         have room for it (one started again too), or a build has nothing
         new to build; a build in line builds what it's built from first,
         outside the line (proofs.prebuild); with nothing to build at all,
-        none: the verdicts are taken from the store (proofs.py)."""
+        none: the verdicts are taken from the store (proofs.py). A PR
+        handed to the steward in a paused repo has its proofs paused with
+        the repo: it lands only on what was proved already."""
+        if C.held(self.repo):
+            raise C.JobPaused(f"{self.repo}: proofs paused")
         builds = [c for c in self.ci_names if c in self.rc["proofBuilds"]]
         runs = [] if builds else [c for c in self.ci_names if c in self.rc["proofRuns"]]
         beside = [c for c in self.ci_names if c not in self.machine]  # CI still running
@@ -470,11 +477,11 @@ class Actions:
             return
         if ahead is not None:
             if ahead != P.FREE:
-                P.wait(self.repo, self.n)
                 self.settle(
                     "pending",
                     f"Settled; waiting its turn to {'build' if builds else 'run'} {names} ({ahead} ahead)"[:140],
                     stage=S.PROOF_SLOT,
+                    turn=True,
                 )
                 return
             free = True

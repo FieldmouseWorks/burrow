@@ -69,8 +69,8 @@ change nothing else in the same PR.
   threads resolved, CODEOWNERS honoured, and the `review-settled` status
   required from the steward's App (in a repo with its merge train on, the
   train's `conary/train` too, from the same App). Repo admins can still
-  merge past it from the PR page, except with the train on: there no one
-  bypasses it, so only the train lands. A repo whose
+  merge past it from the PR page, with the train on too: the owner's way to
+  land a fix by hand when the pipeline itself is stuck. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. A `baseline` that lacks one of these gets it the next time the settings
   are kept, whenever it was made. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
@@ -147,17 +147,29 @@ root only.
    It leaves a PR stacked on another open PR's branch alone too, until it's
    retargeted (GitHub does that when the PR below merges): merged first, it
    would fold into the PR below.
-2. The machine's reviewer (`burrow.autoland.reviewers`) reviews the head:
-   Codex, through the codex CLI on the owner's ChatGPT plan. The steward
-   takes a snapshot of the change with secrets paths left out; the agent
-   reads it read-only, with no GitHub login, and the steward posts its
-   findings, as its App, as review threads marked as Codex's. A look at a head the PR has since moved past still
-   finishes, and its findings are posted on the commit it read, so they go
-   into the next push. Codex keeps one session per PR: every look
-   resumes the one before, told which head it last read, and still judges
-   the whole change at the new head. A PR's sessions are deleted for good
-   once it merges or closes. While its usage is spent, or it's logged out,
-   PRs wait for it, and it comes back on its own. A change to documentation
+2. Codex reviews the head, through its GitHub connector (the ChatGPT Codex
+   Connector App, on the owner's ChatGPT account, set to review every push in
+   each repo). It posts its findings as review threads and a summary comment
+   naming the commit it reviewed; the steward reads its verdict from those
+   (`chatgpt-codex-connector[bot]`'s posts only). A head it hasn't reviewed
+   half an hour after its push is asked for once, and after two hours (and
+   half an hour after the ask) the owner's digest says so. The connector
+   takes that ask only from the owner, never from an App, so in the repos
+   `burrow.autoland.askAsOwner.repos` lists the owner's door,
+   [burrow-review-ask](../crates/burrow-review-ask/src/lib.rs), posts the
+   bare `@codex review` as the machine user's own gh login, once a head: the
+   one thing the steward does as the owner. Conary's flow asks through the
+   same door in a repo conaryd lands (its flow config's `review_ask`).
+   Elsewhere nothing is asked.
+   Codex's word binds only the commit:
+   nothing it posts says which base or description it read, or when a review
+   began. So a PR retargeted onto another base, or whose description is
+   edited, after its head was pushed (as GitHub dates both) isn't Codex's to
+   settle: clean, it's judged (step 6), and the judge's verdict binds the base
+   and description too. A
+   repo can turn the wait off (its `codex` override, in the
+   [settings reference](settings-reference.md)), and then nothing settles it
+   but the owner. A change to documentation
    alone (Conary's class policy, `burrow.ledger.policy`'s `docs`) gets no
    review round, unless it's R2: it lands once CI is green and nothing is
    open on it.
@@ -168,9 +180,10 @@ root only.
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
    as on a hold, until proj resumes the job to bring the fix in.
-4. The reviewers look again, until none of them finds anything on the head, or
-   on an earlier one whose own change was the same: a merge of the base that
-   leaves the PR's lines alone isn't looked at again, while CI still runs on it.
+4. Codex looks again at each push, and the steward asks it to (through the
+   owner's door, as in step 2) when every finding was answered without one,
+   until it finds nothing on the head. A look that isn't asked for, or
+   doesn't come, goes to the owner's digest.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. A check run cancelled with nothing run through since
@@ -188,8 +201,8 @@ root only.
    that judges it: an R2 one (Conary's class policy, `burrow.ledger.policy`:
    CODEOWNERS, secrets, by default), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
-   nothing to test), an R2 dependency update, and a
-   Dependabot major. The job lands anything a revert or a follow-up can undo,
+   nothing to test), one retargeted or edited after its push (step 2), an R2
+   dependency update, and a Dependabot major. The job lands anything a revert or a follow-up can undo,
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a
    comment ending `<!-- autoland-judgment: land|owner|failed SHA SEAL -->`,
@@ -229,7 +242,10 @@ root only.
    With the ledger on (burrow.ledger), a revert of one PR's merge is that
    PR's undo instead: the job names the PR in its answers file and opens
    nothing, and once it has ended the steward has the ledger's writer `cn
-   undo` it, as the door does. That undo's PR (`conary/undo/...`, the
+   undo` it, as the door does, with the red tip's reason: the URL of each
+   run a check failed in, the checks that failed and the first error line
+   of the first one's log, which the undo keeps and its PR opens with (no
+   undo without it: GitHub not giving the log is a stop, tried again). That undo's PR (`conary/undo/...`, the
    machinery's) is the red's fix from then on, waiting and closed like the
    rest. An undo anyone else asked for (the door's, say) isn't one: found
    open, it only keeps another job from starting while it's open. If the
@@ -246,6 +262,12 @@ root only.
    is closed, saying so, instead of landing as an empty commit. Dependency
    updates close the same way: their bot need not run again to retire work
    already present on the base, and they are never cleared to merge.
+
+A repo whose automated work is paused (docs/settings.md) has its PRs wait
+too, the steward posting why; one PR can still land through it when a
+trusted request hands it over at its head
+([Handing one PR to the steward](settings.md#handing-one-pr-to-the-steward)),
+on every check above and nothing more.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
@@ -277,6 +299,14 @@ owner, since nothing else merges it.
   describes: a `flake.nix` from burrow's template, the workflow that calls
   `nix flake check`, and the template's house workflow beside it. Jobs
   the flake can't hold stay alongside it.
+- **Code scanning** in a public repo: a `code-scanning.yml` like
+  [burrow's](../.github/workflows/code-scanning.yml) (its triggers and
+  `concurrency` included) that calls the shared
+  [`codeql.yml`](../.github/workflows/codeql.yml) with the repo's CodeQL
+  languages, and GitHub's default setup off (the two can't both upload). A
+  PR scans the languages its changed paths might be input to, and all of
+  them for a path nothing classifies; a push to the default branch scans
+  them all ([which, and how](../crates/burrow-codeql/src/lib.rs)).
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.

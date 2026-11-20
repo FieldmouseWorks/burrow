@@ -24,7 +24,7 @@ pub fn run(cfg: &Config) -> Result<(), Broke> {
         .unwrap_or_else(unknown);
     let (host, notify, owner) = (&cfg.host, &cfg.notify, &cfg.owner);
     let hints = &cfg.review_hints;
-    let today = jiff::Zoned::now().strftime("%F").to_string();
+    let today = jiff::ZonedDateTime::now().strftime("%F").to_string();
     let task = format!(
         "Monthly firmware review. Don't flash or change anything; look and report.
 {host}: board {board}, BIOS {bios} ({bios_date}), NVMe: {nvme}. CPU: {cpu}. fwupd's view: `fwupdmgr get-devices` and `fwupdmgr get-updates`.

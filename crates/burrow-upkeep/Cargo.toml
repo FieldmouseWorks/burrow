@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+burrow-brief = { path = "../burrow-brief" }
 burrow-process = { path = "../burrow-process" }
 burrow-github = { path = "../burrow-github" }
-burrow-review = { path = "../burrow-review" }
 flaky = { path = "../flaky" }
 gh-token = { path = "../gh-token" }
 jiff.workspace = true

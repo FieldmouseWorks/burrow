@@ -1,0 +1,13 @@
+[package]
+name = "burrow-brief"
+description = "The review, fix and judge briefs' policy text, in one place: the library burrow-upkeep renders the review brief with, and the CLI the steward's tasks read the fix job's and the judge's from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

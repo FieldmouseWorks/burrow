@@ -11,7 +11,6 @@ use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 use burrow_usage_reset::claude::ClaudeCode;
-use burrow_usage_reset::codex;
 use burrow_usage_reset::meter::{METERED, Meter};
 use burrow_usage_reset::now;
 use burrow_usage_reset::pass::{FAILED, Notice, State, pass};
@@ -30,8 +29,6 @@ struct Config {
     state_dir: PathBuf,
     /// Where each engine's meter is kept (meter.rs).
     meters: PathBuf,
-    /// The `codex` whose meter is read each pass too, or null for none.
-    codex: Option<PathBuf>,
     /// HOST-notify, or "" for the journal only.
     notify: String,
 }
@@ -94,13 +91,6 @@ fn run() -> Result<(), String> {
     );
 
     save(&state_file, &outcome.state)?;
-    // Codex's meter, for routing alone: a failed read leaves the last one to
-    // go stale, and a stale meter moves nothing.
-    if let Some(bin) = &cfg.codex
-        && let Err(e) = codex::read(bin, now).and_then(|s| s.record(&cfg.meters, "codex"))
-    {
-        eprintln!("couldn't read Codex's meter: {e}");
-    }
     write(
         &cfg.state_dir.join("wake.json"),
         serde_json::json!({ "": outcome.wake.min(now + METERED).round() })
@@ -148,7 +138,7 @@ fn tell(notify: &str, notice: Notice) {
 fn local_time(t: f64) -> String {
     match jiff::Timestamp::from_second(t.round() as i64) {
         Ok(at) => at
-            .to_zoned(TimeZone::system())
+            .to_zoned_datetime(TimeZone::system())
             .strftime("%a %-I:%M %p %Z")
             .to_string(),
         Err(_) => format!("{} (epoch)", t.round()),

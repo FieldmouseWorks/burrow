@@ -10,6 +10,7 @@
 mod branch;
 mod file_size;
 mod guide_size;
+mod mention;
 mod model_names;
 mod runs;
 mod rust_first;
@@ -367,7 +368,7 @@ impl Outcome {
     }
 }
 
-pub const RULES: [&str; 7] = [
+pub const RULES: [&str; 8] = [
     "title",
     "rust-first",
     "timers",
@@ -375,6 +376,7 @@ pub const RULES: [&str; 7] = [
     "guide-size",
     "model-names",
     "branch",
+    "mention",
 ];
 
 /// What each rule's error is titled, and the line its body wants.
@@ -387,6 +389,10 @@ pub fn wants(rule: &str) -> (&'static str, &'static str) {
         "guide-size" => ("Why a longer guide?", "Why a longer guide:"),
         "model-names" => ("Why a model name?", "Why a model name:"),
         "branch" => ("Renovate's branch", "outside 'renovate/'"),
+        "mention" => (
+            "The connector's mention",
+            "Write 'the connector's bare review mention'",
+        ),
         _ => unreachable!("{rule}"),
     }
 }

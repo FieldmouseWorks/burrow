@@ -10,9 +10,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+# burrow-brief (argv[2]), which the steward's tasks read their policy text
+# from as they're imported.
+BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
+                        str(Path(__file__).resolve().parents[2] / 'crates/target/debug/burrow-brief'))
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(
+    cfg.write_text(json.dumps(dict(brief=[BRIEF], owner='Sam',
         context='test', stateDir=tmp, snapDir=tmp,
         conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {'ci': {'name': 'waiting: CI'}}},
@@ -66,9 +70,9 @@ with tempfile.TemporaryDirectory() as tmp:
             (S, 'open_prs', lambda owner, name: (info, copy.deepcopy(prs[name]))),
             (S.P, 'begin', lambda *a: None), (S.P, 'place', lambda repo, n: n),
             (S.T, 'begin', lambda repo: S.T.STOPPED.pop(repo, None)), (S.T, 'on', lambda *a: True),
-            (S.T, 'step', train), (S.step, 'handle', handle),
+            (S.T, 'step', train), (S.step, 'handle', handle), (S.L, 'lands', lambda repo: True),
             (S, 'branches', lambda repo, *a, **k: branches.append(repo)),
-            (S, 'upkeep', lambda *a: None), (S.V, 'sweep', lambda *a: None),
+            (S, 'upkeep', lambda *a: None),
             (C, 'follow_renames', lambda names: None), (C, 'taken', lambda *a: None),
             (C, 'coverage', coverage), (C, 'poke', lambda *a: None),
         ):

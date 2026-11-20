@@ -1,29 +1,14 @@
 use std::fs;
 
-use super::{github_app, gone_quiet, stopped};
-use crate::config::Config;
-use crate::engine::Engine;
+use super::watch::gone_quiet;
+use super::{github_app, stopped};
 
-// A Codex turn reaches GitHub as an App, its job's own or the machine's,
-// never as the user, whose logins its sandbox hides; with neither it
-// doesn't start. Claude's acts as the user unless its job names an App.
+// A turn acts as the user unless its job names an App.
 #[test]
-fn a_codex_turn_acts_as_an_app_or_not_at_all() {
-    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-    let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-    assert_eq!(app(None, Engine::Codex), Ok(Some("workers".into())));
-    assert_eq!(app(Some(""), Engine::Codex), Ok(Some("workers".into())));
-    assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-    assert_eq!(app(None, Engine::Claude), Ok(None));
-    assert_eq!(app(Some("other"), Engine::Claude), Ok(Some("other".into())));
-    for none in [None, Some(String::new())] {
-        cfg.machinery = none;
-        let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-        let refused = app(None, Engine::Codex).unwrap_err();
-        assert!(refused.contains("only as a GitHub App"), "{refused}");
-        assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-        assert_eq!(app(None, Engine::Claude), Ok(None));
-    }
+fn a_turn_acts_as_its_jobs_app_or_the_user() {
+    assert_eq!(github_app(None), None);
+    assert_eq!(github_app(Some(String::new())), None);
+    assert_eq!(github_app(Some("other".into())), Some("other".into()));
 }
 
 // A sandbox's VM counts as stopped, everything a refused run left in it
@@ -63,4 +48,54 @@ fn quiet_is_all_of_idle_wherever_in_a_second_the_stream_last_spoke() {
 #[test]
 fn no_idle_never_goes_quiet() {
     assert!(!gone_quiet(1000 * SECOND, 0, 0));
+}
+
+/// A turn the credit refused ends with the refusal as its result and
+/// outcome, in words that name the credit, not the plan's usage.
+#[test]
+fn an_api_refusal_ends_the_turn_in_its_own_words() {
+    use super::{Config, Job, api_refused, engine};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+    cfg.jobs = dir.path().join("jobs");
+    let job = Job::new(&cfg, "job");
+    fs::create_dir_all(&job.dir).unwrap();
+    let told = std::cell::RefCell::new(String::new());
+    let refused = engine::api::Refused::new("its credit has no room: today's allowance spent");
+    api_refused(&job, "1", &refused, &|t| told.borrow_mut().push_str(t));
+    let said = "claude-api refused: its credit has no room: today's allowance spent";
+    assert_eq!(*told.borrow(), said);
+    assert_eq!(
+        fs::read_to_string(job.turn("1", "result")).unwrap(),
+        format!("{said}\n")
+    );
+    assert!(!cfg.jobs.join(crate::usage::FILE).exists());
+}
+
+/// A retry the credit won't admit keeps the answer an earlier run of the
+/// turn gave; with none, or only an error, the refusal is the turn's end.
+#[test]
+fn a_refused_retry_keeps_the_answer_the_turn_has() {
+    use super::answered;
+    let dir = tempfile::tempdir().unwrap();
+    let stream = dir.path().join("1.jsonl");
+    fs::write(&stream, "").unwrap();
+    assert_eq!(answered(&stream), None);
+    let error = r#"{"type":"result","is_error":true,"result":"broke"}"#;
+    fs::write(
+        &stream,
+        format!("{{\"type\":\"burrow.run\",\"at\":1}}\n{error}\n"),
+    )
+    .unwrap();
+    assert_eq!(answered(&stream), None);
+    let good = r#"{"type":"result","is_error":false,"result":"done, no next step said"}"#;
+    fs::write(
+        &stream,
+        format!("{{\"type\":\"burrow.run\",\"at\":1}}\n{good}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        answered(&stream).unwrap()["result"],
+        "done, no next step said"
+    );
 }

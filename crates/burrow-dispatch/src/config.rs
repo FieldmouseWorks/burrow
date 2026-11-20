@@ -111,6 +111,10 @@ pub struct Deploy {
     /// Each of the flake's inputs whose default branch it puts live
     /// (OWNER/REPO), and the commit of it the running system was built from.
     pub running: BTreeMap<String, String>,
+    /// Each of its inputs the flake itself holds at a commit (OWNER/REPO,
+    /// and that commit): HOST-update leaves it there, so its default branch
+    /// isn't on its way live and nothing waits on it.
+    pub held: BTreeMap<String, String>,
     /// Seconds a commit may wait to go live, a run of HOST-update may go
     /// without writing to its logs, and a commit may wait behind
     /// HOST-update's own open PR (it brings in nothing newer until that

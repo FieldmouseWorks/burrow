@@ -155,6 +155,8 @@ refused() {
 }
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          EVENT: ${{ github.event_name }}')")" \
   "an env that isn't an input" 'env EVENT is'
+refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          V: ${{ vars.V }}')")" \
+  "an Actions variable but the build store's" 'env V is'
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          NONE: ${{ inputs.none }}')")" \
   "an input the workflow doesn't have" "input none, which the workflow doesn't have"
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          OS: ${{ matrix.os }}')")" \
@@ -197,5 +199,10 @@ grep -qx 'env: SKIP=agents' "$tmp/print" || fail "burrow's gate skips $(grep SKI
 grep -q 'legs: [2-8]$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
 for leg in LEGS LEG; do
   grep -qx "env: $leg=1" "$tmp/print" || fail "flake-gate runs one leg of several: $(grep LEG "$tmp/print")"
+done
+# No build store on a desk: its variables are empty, as GitHub gives them
+# unset.
+for v in BUILDS BUILDS_KEY; do
+  grep -qx "env: $v=" "$tmp/print" || fail "flake-gate names a build store: $(grep BUILDS "$tmp/print")"
 done
 echo "flake-gate: ok"

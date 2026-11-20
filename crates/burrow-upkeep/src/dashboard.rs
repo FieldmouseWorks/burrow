@@ -279,7 +279,7 @@ fn runs(repo: &str, cfg: &Dashboard) -> Vec<f64> {
 pub fn day(t: f64) -> String {
     jiff::Timestamp::from_second(t.floor() as i64)
         .map(|ts| {
-            ts.to_zoned(jiff::tz::TimeZone::system())
+            ts.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y-%m-%d")
                 .to_string()
         })

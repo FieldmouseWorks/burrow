@@ -6,7 +6,9 @@
 //! which fixes them on their branches so they can merge. Once per PR head,
 //! so a fix that's pushed gets a fresh look only if it's still stuck. The
 //! autoland steward's own status (`settled`) doesn't count as a check. With
-//! the machine's own App, it and its jobs act on GitHub as that App.
+//! the machine's own App, it and its jobs act on GitHub as that App. A PR
+//! the steward is kept off (`held`: its hold and owner labels) the sweep
+//! leaves alone too.
 //!
 //! The job's verdict on a major: ok when it can merge as it is, held when
 //! it shouldn't (its comment says why). The job ends that comment with a
@@ -15,8 +17,8 @@
 //! PR major-ok or major-held for people to see. The sweep seals both verdicts
 //! on the head and base it hands a major over on (major-seal) and puts the
 //! markers in the task, as the steward gives a judge its seals: the job runs
-//! nothing of the sweep's, whose state its sandbox needn't see (a Codex
-//! job's doesn't), and can seal no head it wasn't handed. A verdict counts only for the
+//! nothing of the sweep's, whose state its sandbox needn't see, and can
+//! seal no head it wasn't handed. A verdict counts only for the
 //! head and base it names, only from our own login and only with its seal,
 //! so a job still finishing on an older head, a push since, a PR retargeted
 //! since, someone else's comment or another job quoting a marker can't
@@ -42,11 +44,12 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, flock};
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{complain, say, trimmed};
 
+mod config;
+mod job;
 mod pr;
 mod request;
 mod scan;
@@ -54,6 +57,7 @@ mod steward;
 mod task;
 mod wake;
 
+pub use config::{App, Config, Tools};
 use pr::{Pr, State};
 use request::{REQUEST, TITLE};
 use steward::Steward;
@@ -66,62 +70,6 @@ pub(crate) const HELD: &str = "major-held";
 const RUN_COMES: i64 = 3600;
 /// How long a security fix may stay open before it's a notice.
 const SECURITY_DAY: i64 = 86400;
-
-/// What modules/updates.nix tells renovate-sweep.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Config {
-    /// renovate-sweep, as the machine names it: how it says itself.
-    pub name: String,
-    /// Its own: what each PR was last handed over for (OWNER_REPO-N), its
-    /// refresh requests taken back (OWNER_REPO-N.released), and the key
-    /// major-seal seals verdicts with.
-    pub state: PathBuf,
-    /// Where the machine's projects are: each clone of a GitHub repo, a
-    /// project its job runs in.
-    pub projects: PathBuf,
-    /// Who decides a major that's held, as the task names them.
-    pub owner: String,
-    /// The autoland steward's own commit status, which isn't CI.
-    pub settled: String,
-    /// The repos the steward covers, as it last found them (its
-    /// repos.json): none without it.
-    pub covered: Option<PathBuf>,
-    /// The machine's own App, when the jobs act as it.
-    pub app: Option<App>,
-    /// The longest a Renovate run goes on, in seconds: a refresh request
-    /// taken back waits that long before a job may push.
-    pub renovate_run: u64,
-    pub tools: Tools,
-}
-
-/// The App the jobs act on GitHub as.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct App {
-    /// As proj run --app names it.
-    pub name: String,
-    /// Its bot's login as GraphQL spells it: who the jobs post as.
-    pub bot: String,
-}
-
-/// What it runs, by path.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Tools {
-    /// gh, as the App when there's one.
-    pub gh: PathBuf,
-    pub git: PathBuf,
-    pub proj: PathBuf,
-    /// HOST-notify, which tells the owner.
-    pub notify: PathBuf,
-    /// major-seal, which seals the verdicts a job is handed, and checks one.
-    pub seal: PathBuf,
-    /// lock-wait (modules/autoland/lock_wait.py): when a lock file refresh that
-    /// lock-age refused for age only can go again, and how far the sweep
-    /// goes asking.
-    pub lock_wait: PathBuf,
-}
 
 impl Config {
     pub fn read(path: &Path) -> Result<Config, String> {
@@ -172,18 +120,23 @@ impl Config {
         // Who the jobs post as, whose verdicts are read: the App's bot, or
         // the user's own login. A user can hold the bot's name in GraphQL's
         // spelling, but not the seal. Who Renovate comments as, as REST
-        // spells it: it runs as the same App, or user, and an App's bot is
-        // SLUG[bot] there, a name no person's can be.
-        let (me, renovate) = match &self.app {
-            Some(app) => (app.bot.clone(), format!("{}[bot]", app.bot)),
-            None => {
-                let me = burrow_github::call(&mut self.github(), "GET", "user", None, None)
-                    .ok()
-                    .and_then(|r| r.json().ok())
-                    .and_then(|v| v["login"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                (me.clone(), me)
-            }
+        // spells it: its App's bot, SLUG[bot] there, a name no person's can
+        // be, or the user's own login when it runs as them.
+        let user = || {
+            burrow_github::call(&mut self.github(), "GET", "user", None, None)
+                .ok()
+                .and_then(|r| r.json().ok())
+                .and_then(|v| v["login"].as_str().map(str::to_owned))
+                .unwrap_or_default()
+        };
+        let me = match &self.app {
+            Some(app) => app.bot.clone(),
+            None => user(),
+        };
+        let renovate = match &self.renovate {
+            Some(bot) => bot.clone(),
+            None if self.app.is_none() => me.clone(),
+            None => user(),
         };
         let limits = self.limits()?;
         let who = Who {
@@ -253,92 +206,39 @@ impl Config {
             pass.failed = true;
             return;
         }
-        // Each one's key is kept before its job starts, so a key that can't
-        // be kept hands nothing over pass after pass; a job that doesn't
-        // start gives them back to the next pass.
+        // Each one's key, and the handover's that names its job, is kept
+        // before its job starts, so a key that can't be kept hands nothing
+        // over pass after pass; a job that doesn't start gives them back to
+        // the next pass.
+        let handover = job::key(repo);
         let mut kept = Vec::new();
         let mut was = Vec::new();
         for h in handed {
-            let before = fs::read_to_string(&h.key).ok();
-            match write(&h.key, &format!("{}\n", h.want)) {
+            let files = [h.key.clone(), job::path(&h.key)];
+            let texts = [format!("{}\n", h.want), format!("{handover}\n")];
+            let before = files.clone().map(|f| fs::read_to_string(f).ok());
+            match files.iter().zip(&texts).try_for_each(|(f, t)| write(f, t)) {
                 Ok(()) => {
                     kept.push(h);
-                    was.push(before);
+                    was.push((files, before));
                 }
                 Err(Broke(why)) => {
                     complain(&format!("{}: {why}", self.name));
                     pass.failed = true;
+                    job::put_back(&self.name, &files, before);
                 }
             }
         }
         if kept.is_empty() {
             return;
         }
-        if let Err(Broke(why)) = self.hand(project, repo, &info, &kept) {
+        if let Err(Broke(why)) = self.hand(project, repo, &info, &kept, &handover) {
             complain(&format!("{}: {why}", self.name));
             pass.failed = true;
-            for (h, before) in kept.iter().zip(was) {
-                let back = match before {
-                    Some(text) => write(&h.key, &text),
-                    None => fs::remove_file(&h.key)
-                        .map_err(|e| Broke(format!("{}: {e}", h.key.display()))),
-                };
-                if let Err(Broke(why)) = back {
-                    complain(&format!("{}: {why}", self.name));
-                }
+            for (files, before) in was {
+                job::put_back(&self.name, &files, before);
             }
         }
-    }
-
-    /// `handed` to one Claude job in `project`.
-    fn hand(
-        &self,
-        project: &str,
-        repo: &str,
-        info: &steward::Repo,
-        handed: &[Handed],
-    ) -> Result<(), Broke> {
-        let mut seals = String::new();
-        for h in handed {
-            if let Some(m) = &h.major {
-                let [ok, held] = ["ok", "held"].map(|v| self.seal(repo, m, v));
-                seals.push_str(&format!(
-                    "- #{} on {} for {}: ok `{}`, held `{}`\n",
-                    m.n, m.sha, m.base, ok?, held?
-                ));
-            }
-        }
-        let todo: String = handed.iter().map(|h| h.line.as_str()).collect();
-        let task = task::task(
-            self,
-            repo,
-            todo.trim_end_matches('\n'),
-            &info.proofs,
-            seals.trim_end_matches('\n'),
-        );
-        let mut proj = Command::new(&self.tools.proj);
-        // The kind of work it is, which the machine may give a model of its own.
-        proj.args(["run", "--pipeline", "--role", "renovate-sweep"]);
-        if let Some(app) = &self.app {
-            proj.args(["--app", &app.name]);
-        }
-        let ran = proj
-            .args([project, &task])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .status();
-        let why = match ran {
-            Ok(s) if s.success() => {
-                say(&format!(
-                    "{repo}: {} PRs handed to one Claude job",
-                    todo.matches('\n').count()
-                ));
-                return Ok(());
-            }
-            Ok(s) => format!("{repo}: proj run: {s}"),
-            Err(e) => format!("{}: {e}", self.tools.proj.display()),
-        };
-        Err(Broke(why))
     }
 
     /// The marker major-seal seals verdict `v` on major `m` with, in `repo`.
@@ -603,14 +503,14 @@ impl Sweep<'_> {
             want = format!("{sha} verdicts sealed for {base}");
         }
         if security {
-            want = format!("{sha} {}", jiff::Zoned::now().strftime("%Y-%m-%d"));
+            want = format!("{sha} {}", jiff::ZonedDateTime::now().strftime("%Y-%m-%d"));
         }
         // Red since it was handed over (a proof run later, say): another
         // job fixes that, verdict or not. Otherwise a major's key names the
         // CI its job was handed: CI that finishes again on the same head,
         // after a job reran it and left (as LoK-web#598's did) or turned up
         // after the job saw none, brings another job if there's still no
-        // verdict.
+        // verdict, once the one before has left (job.rs).
         if red > 0 {
             want.push_str(" red");
         } else if major {
@@ -631,9 +531,16 @@ impl Sweep<'_> {
             }
         }
         let url = format!("https://github.com/{repo}/pull/{n}");
+        let on_hold = cfg.held.iter().any(|l| pr.labelled(l));
         if major && verdict == "held" {
             pass.held.push_str(&format!("- {title}: {url}\n"));
-        } else if major && verdict == "ok" && !self.info.covered && red == 0 && pending == 0 {
+        } else if major
+            && verdict == "ok"
+            && !on_hold
+            && !self.info.covered
+            && red == 0
+            && pending == 0
+        {
             // One with no CI at all is listed too, saying so: nothing else
             // would bring it to anyone.
             let note = if untested {
@@ -655,6 +562,13 @@ impl Sweep<'_> {
             };
             pass.stuck.push_str(&format!("- {title}: {url} ({why})\n"));
         }
+        // Held, as the steward has it: someone keeps it as it is (waiting
+        // on another PR, a deploy, the owner), so no job pushes to it and
+        // no refresh is asked for. Taking the label off is a PR event, which
+        // starts a pass that takes it up again.
+        if on_hold {
+            return Ok(None);
+        }
         // A rebase! title has Renovate redo the branch on each of its runs,
         // each of whose pushes starts the next, until someone takes it off:
         // the sweep does, and leaves the PR for a pass after, which waits out
@@ -662,6 +576,14 @@ impl Sweep<'_> {
         if let Some(rest) = title.strip_prefix(TITLE) {
             self.wake(now() + who.limits.pass);
             self.retitle(&n, rest.trim_start());
+            return Ok(None);
+        }
+        // The job it was handed to, still at work on it, gets no second
+        // beside it, whatever has changed since (its own push, CI finishing
+        // again): nor does anything here touch it under that job. Its
+        // turn's end brings this repo's pass again.
+        if let Some(id) = cfg.at_work(&key)? {
+            say(&format!("{repo}#{n}: its job {id} is still at work"));
             return Ok(None);
         }
         // A head whose refresh request was taken back for a job (below) has
