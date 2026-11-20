@@ -56,6 +56,13 @@ fn reason(why: Trigger) -> &'static str {
 pub fn task(j: &Judge) -> String {
     let (repo, pr, head, base) = (j.repo, j.pr, j.head, j.base);
     let at = |name: &str| j.dir.join(name).display().to_string();
+    // A judge owed with its reasons unrecorded may be owed for no CI, which
+    // a look can't build yet (burrow#1190): it isn't told CI is green.
+    let ci = if j.why.contains(&Trigger::Started) {
+        ""
+    } else {
+        ", and CI is green"
+    };
     let (tree, rules, diff) = (at(HEAD), at(BASE), at(DIFF));
     let reasons = j.why.iter().map(|w| reason(*w)).collect::<Vec<_>>();
     let seen = if j.why.contains(&Trigger::MajorDependency) {
@@ -67,7 +74,7 @@ pub fn task(j: &Judge) -> String {
     };
     format!(
         "You judge {repo}#{pr} (\"{title}\") at its head {head}, on {base}. Conary's flow won't land it on its \
-         own word because {reasons}. So far {seen}, and CI is green.\n\n\
+         own word because {reasons}. So far {seen}{ci}.\n\n\
          That head is checked out, read-only, in {tree}, and {base} as the PR goes into it in {rules}. Read the \
          diff from where they meet to the head, in {diff}, and the repo's rules as {base} has them, not as the PR \
          does (a PR doesn't get to rewrite the rules it's held to): every AGENTS.md in {rules}, at its top and \

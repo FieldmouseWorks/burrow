@@ -827,6 +827,8 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
     assert!(brief(&[Trigger::RoundLimit]).contains(burrow_brief::PAST_LIMIT));
     assert!(brief(&[Trigger::MajorDependency]).contains(burrow_brief::DEP_SEEN));
     assert!(brief(&[Trigger::Asked]).contains(burrow_brief::REVIEWED));
+    assert!(brief(&[Trigger::Asked]).contains("CI is green"));
+    assert!(!brief(&[Trigger::Started]).contains("CI is green"));
 }
 
 #[test]
