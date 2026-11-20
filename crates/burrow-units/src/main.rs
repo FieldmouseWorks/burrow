@@ -6,7 +6,8 @@
 //!                          watch file, and kick the watchdog when what's in
 //!                          it changed (the service, burrow-units.service)
 //! burrow-units watch       follow the journal, asking for a pass each time a
-//!                          unit fails, recovers or a program dumps core
+//!                          unit fails, one in the watch file recovers or a
+//!                          program dumps core
 //!                          (burrow-units-watch.service)
 //! burrow-units             ask for a pass
 //! burrow-units clear EXE.. mark those programs' crashes so far dealt with
@@ -32,24 +33,39 @@ use serde::Deserialize;
 
 mod clear_door;
 
-use burrow_units::{Found, cores, failed_names, items, shown};
+use burrow_units::{Found, cores, failed_names, items, shown, unit_key};
 use burrow_watchdog::now;
-use burrow_watchdog::watch::{File as Watch, read};
+use burrow_watchdog::watch::{File as Watch, Item, read};
 
-/// The journal entries that start a pass: systemd's own (pid 1's) word that
-/// a service or socket failed, a start job failed, or a unit recovered;
-/// and systemd-coredump's that a program dumped core. A user's manager
-/// says the same of its own units, which aren't the machine's. Starting
-/// alone is no recovery: repeated failed starts must keep the same stall.
-const FOLLOW: [&str; 7] = [
-    "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c", // UNIT_FAILURE_RESULT
-    "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d", // UNIT_FAILED
-    "MESSAGE_ID=39f53479d3a045ac8e11786248231fbf", // UNIT_STARTED
-    "MESSAGE_ID=7ad2d189f7e94e70a38c781354912448", // UNIT_SUCCESS
-    "_PID=1",
-    "+",
-    "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+/// systemd's own (pid 1's) word that a service or socket failed
+/// (UNIT_FAILURE_RESULT) or a start job did (UNIT_FAILED).
+const FAILED: [&str; 2] = [
+    "d9b373ed55a64feb8242e02dbe79a49c",
+    "be02cf6855d2428ba40df7e9d022f03d",
 ];
+/// systemd's own word that a unit started (UNIT_STARTED) or finished well
+/// (UNIT_SUCCESS): a recovery, but only of a unit the watch file has. Any
+/// other is a timer's service doing its job, which clears nothing. Starting
+/// alone (UNIT_STARTING) is no recovery: repeated failed starts must keep
+/// the same stall.
+const RECOVERED: [&str; 2] = [
+    "39f53479d3a045ac8e11786248231fbf",
+    "7ad2d189f7e94e70a38c781354912448",
+];
+/// systemd-coredump's word that a program dumped core.
+const DUMPED: &str = "fc2e22bc6ee647b6b90729ab34a250b1";
+
+/// The journalctl matches for the entries the watcher reads: pid 1's
+/// FAILED and RECOVERED, or a DUMPED. A user's manager says the same of its
+/// own units, which aren't the machine's.
+fn follow() -> Vec<String> {
+    FAILED
+        .iter()
+        .chain(&RECOVERED)
+        .map(|id| format!("MESSAGE_ID={id}"))
+        .chain(["_PID=1".into(), "+".into(), format!("MESSAGE_ID={DUMPED}")])
+        .collect()
+}
 /// Units whose state changes start no pass: its own, since a pass's
 /// completion would otherwise ask for another for ever. The hourly
 /// catch-up still sees them failed.
@@ -173,7 +189,7 @@ fn request_pass(cfg: &Config) -> Result<(), String> {
 fn watch(cfg: &Config) -> Result<(), String> {
     let mut child = Command::new(&cfg.journalctl)
         .args(["--follow", "--lines=0", "--quiet", "--output=json"])
-        .args(FOLLOW)
+        .args(follow())
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{}: {e}", cfg.journalctl.display()))?;
@@ -182,7 +198,9 @@ fn watch(cfg: &Config) -> Result<(), String> {
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
-            if starts_a_pass(&line) && tx.send(()).is_err() {
+            if let Some(want) = wants(&line)
+                && tx.send(want).is_err()
+            {
                 break;
             }
         }
@@ -190,9 +208,12 @@ fn watch(cfg: &Config) -> Result<(), String> {
     if let Err(e) = ask(cfg) {
         eprintln!("burrow-units: {e}");
     }
-    while rx.recv().is_ok() {
-        gather(&rx, SETTLE);
-        if let Err(e) = ask(cfg) {
+    while let Ok(first) = rx.recv() {
+        let mut burst = vec![first];
+        burst.extend(gather(&rx, SETTLE));
+        if needs_a_pass(&burst, || watched(cfg))
+            && let Err(e) = ask(cfg)
+        {
             eprintln!("burrow-units: {e}");
         }
     }
@@ -203,29 +224,88 @@ fn watch(cfg: &Config) -> Result<(), String> {
 /// The rest of a burst whose first entry just came: whatever else RX has
 /// by WITHIN from now, however busy the journal stays, so a stream of
 /// entries holds an ask back no longer than that.
-fn gather(rx: &mpsc::Receiver<()>, within: Duration) {
+fn gather<T>(rx: &mpsc::Receiver<T>, within: Duration) -> Vec<T> {
     let by = Instant::now() + within;
+    let mut rest = Vec::new();
     while let Some(left) = by.checked_duration_since(Instant::now()) {
-        if rx.recv_timeout(left).is_err() {
-            break;
+        match rx.recv_timeout(left) {
+            Ok(got) => rest.push(got),
+            Err(_) => break,
+        }
+    }
+    rest
+}
+
+/// What a journal entry asks of the watcher.
+#[derive(Debug, PartialEq)]
+enum Want {
+    /// A pass: something may have failed or crashed.
+    Pass,
+    /// A pass if the watch file has this unit: it may have recovered.
+    IfWatched(String),
+}
+
+/// What a journal entry (journalctl's JSON) asks for: nothing when it's
+/// about burrow-units' own units, the unit that changed (`UNIT`) or the one
+/// a program that dumped core ran in (`COREDUMP_UNIT`, a pass's own tools
+/// included); a pass if its unit is watched when it's a RECOVERED; a pass
+/// otherwise, and when it can't be read.
+fn wants(entry: &str) -> Option<Want> {
+    let Ok(entry) = serde_json::from_str::<serde_json::Value>(entry) else {
+        return Some(Want::Pass);
+    };
+    let field = |name| entry.get(name).and_then(serde_json::Value::as_str);
+    if ["UNIT", "COREDUMP_UNIT"]
+        .into_iter()
+        .any(|name| field(name).is_some_and(|u| OWN.contains(&u)))
+    {
+        return None;
+    }
+    match (field("MESSAGE_ID"), field("UNIT")) {
+        (Some(id), Some(unit)) if RECOVERED.contains(&id) => Some(Want::IfWatched(unit.to_owned())),
+        _ => Some(Want::Pass),
+    }
+}
+
+/// Whether a burst of entries asks for a pass: any that wants one outright
+/// does, and a recovery does when its unit is in the watch file (WATCHED)
+/// or the watch file can't be read, so a recovery is never missed.
+fn needs_a_pass(
+    burst: &[Want],
+    watched: impl FnOnce() -> Result<BTreeMap<String, Item>, String>,
+) -> bool {
+    let mut recovered = Vec::new();
+    for want in burst {
+        match want {
+            Want::Pass => return true,
+            Want::IfWatched(unit) => recovered.push(unit),
+        }
+    }
+    if recovered.is_empty() {
+        return false;
+    }
+    match watched() {
+        Ok(items) => recovered.iter().any(|u| items.contains_key(&unit_key(u))),
+        Err(e) => {
+            eprintln!("burrow-units: {e}, so asking for a pass");
+            true
         }
     }
 }
 
-/// Whether a journal entry (journalctl's JSON) asks for a pass: any but
-/// one about burrow-units' own units, the unit that changed (`UNIT`) or
-/// the one a program that dumped core ran in (`COREDUMP_UNIT`, a pass's
-/// own tools included).
-fn starts_a_pass(entry: &str) -> bool {
-    let Ok(entry) = serde_json::from_str::<serde_json::Value>(entry) else {
-        return true;
-    };
-    !["UNIT", "COREDUMP_UNIT"].iter().any(|field| {
-        entry
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|u| OWN.contains(&u))
-    })
+/// The watch file's items, read under the lock a pass holds from what it
+/// reads to what it writes: a pass that read a unit failed before it
+/// recovered has written it by now, and any later pass reads it recovered.
+/// The watcher can't write there, so it opens the lock as it is and shares
+/// it.
+fn watched(cfg: &Config) -> Result<BTreeMap<String, Item>, String> {
+    let lock = cfg.file.with_file_name("lock");
+    let _held = File::open(&lock)
+        .and_then(|f| f.lock_shared().map(|()| f))
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    read(&cfg.file)
+        .map(|(_, items)| items)
+        .ok_or_else(|| format!("{}: no watch file to read", cfg.file.display()))
 }
 
 /// Where the system journal is kept, on disk and before it's flushed there.
@@ -355,7 +435,6 @@ fn write(file: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burrow_watchdog::watch::Item;
 
     #[test]
     fn a_pass_needs_the_system_journal() {
@@ -372,33 +451,109 @@ mod tests {
 
     #[test]
     fn its_own_units_changing_state_start_no_pass() {
-        assert!(starts_a_pass(
-            r#"{"UNIT":"backup.service","MESSAGE_ID":"d9b373ed55a64feb8242e02dbe79a49c"}"#
-        ));
-        assert!(starts_a_pass(r#"{"COREDUMP_EXE":"/bin/bash"}"#));
-        assert!(starts_a_pass(
-            r#"{"COREDUMP_EXE":"/bin/bash","COREDUMP_UNIT":"backup.service"}"#
-        ));
+        let pass = Some(Want::Pass);
+        assert_eq!(
+            wants(r#"{"UNIT":"backup.service","MESSAGE_ID":"d9b373ed55a64feb8242e02dbe79a49c"}"#),
+            pass
+        );
+        assert_eq!(wants(r#"{"COREDUMP_EXE":"/bin/bash"}"#), pass);
+        assert_eq!(
+            wants(r#"{"COREDUMP_EXE":"/bin/bash","COREDUMP_UNIT":"backup.service"}"#),
+            pass
+        );
         // systemd-coredump itself failing is anyone's to know.
-        assert!(starts_a_pass(
-            r#"{"UNIT":"systemd-coredump@0-1-2_3-0.service"}"#
-        ));
-        assert!(starts_a_pass("not json"));
+        assert_eq!(
+            wants(r#"{"UNIT":"systemd-coredump@0-1-2_3-0.service"}"#),
+            pass
+        );
+        assert_eq!(wants("not json"), pass);
         for own in OWN {
-            assert!(!starts_a_pass(&format!(r#"{{"UNIT":"{own}"}}"#)), "{own}");
+            assert_eq!(wants(&format!(r#"{{"UNIT":"{own}"}}"#)), None, "{own}");
             // Watching successful completions must not make each pass
             // schedule another one when its own service finishes.
-            for id in [
-                "39f53479d3a045ac8e11786248231fbf",
-                "7ad2d189f7e94e70a38c781354912448",
-            ] {
+            for id in RECOVERED {
                 let completed = format!(r#"{{"UNIT":"{own}","MESSAGE_ID":"{id}"}}"#);
-                assert!(!starts_a_pass(&completed), "{completed}");
+                assert_eq!(wants(&completed), None, "{completed}");
             }
             let dumped =
                 format!(r#"{{"COREDUMP_EXE":"/bin/coredumpctl","COREDUMP_UNIT":"{own}"}}"#);
-            assert!(!starts_a_pass(&dumped), "{own}");
+            assert_eq!(wants(&dumped), None, "{own}");
         }
+    }
+
+    #[test]
+    fn a_unit_starting_or_succeeding_asks_only_if_it_is_watched() {
+        for id in RECOVERED {
+            let entry = format!(r#"{{"UNIT":"reconcile.service","MESSAGE_ID":"{id}"}}"#);
+            assert_eq!(
+                wants(&entry),
+                Some(Want::IfWatched("reconcile.service".into()))
+            );
+            // One with no unit to look up can't be told apart: a pass.
+            assert_eq!(
+                wants(&format!(r#"{{"MESSAGE_ID":"{id}"}}"#)),
+                Some(Want::Pass)
+            );
+        }
+        let watching = |units: &[&str]| -> Result<BTreeMap<String, Item>, String> {
+            Ok(units
+                .iter()
+                .map(|u| (unit_key(u), Item::default()))
+                .collect())
+        };
+        let recovered = |u: &str| Want::IfWatched(u.into());
+        // A timer's service doing its job, every 30s: nothing to clear.
+        assert!(!needs_a_pass(&[recovered("reconcile.service")], || {
+            watching(&["backup.service"])
+        }));
+        assert!(!needs_a_pass(&[recovered("reconcile.service")], || {
+            watching(&[])
+        }));
+        // The failed unit running again leaves the watch file.
+        assert!(needs_a_pass(
+            &[recovered("reconcile.service"), recovered("backup.service")],
+            || watching(&["backup.service"])
+        ));
+        // A watch file that can't be read can't say: a pass.
+        assert!(needs_a_pass(&[recovered("reconcile.service")], || Err(
+            "unreadable".into()
+        )));
+        // Anything else in the burst wants one anyway, without a look.
+        assert!(needs_a_pass(
+            &[recovered("reconcile.service"), Want::Pass],
+            || -> Result<_, String> { panic!("no need to look") }
+        ));
+        assert!(!needs_a_pass(&[], || -> Result<_, String> {
+            panic!("no need to look")
+        }));
+    }
+
+    #[test]
+    fn the_watcher_reads_the_watch_file_under_the_lock_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            clear_socket: dir.path().join("clear.sock"),
+            file: dir.path().join("watch.json"),
+            ignore: Vec::new(),
+            grace: 600.0,
+            window: 3600.0,
+            systemctl: "systemctl".into(),
+            coredumpctl: "coredumpctl".into(),
+            journalctl: "journalctl".into(),
+            own: String::new(),
+            kick: None,
+        };
+        // Before any pass, there's no lock to share, and nothing it makes.
+        assert!(watched(&cfg).is_err());
+        assert!(!dir.path().join("lock").exists());
+        let items = BTreeMap::from([(unit_key("backup.service"), Item::default())]);
+        let watch = Watch {
+            at: 5.0,
+            items: items.clone(),
+        };
+        write(&cfg.file, &serde_json::to_vec(&watch).unwrap()).unwrap();
+        drop(hold(&cfg).unwrap());
+        assert_eq!(watched(&cfg), Ok(items));
     }
 
     #[test]
@@ -413,10 +568,11 @@ mod tests {
             }
         });
         let start = Instant::now();
-        gather(&rx, Duration::from_millis(300));
+        let rest = gather(&rx, Duration::from_millis(300));
         let took = start.elapsed();
         assert!(took >= Duration::from_millis(300), "{took:?}");
         assert!(took < Duration::from_millis(1500), "{took:?}");
+        assert!(!rest.is_empty());
         drop(rx);
         feed.join().unwrap();
     }
