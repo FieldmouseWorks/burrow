@@ -92,7 +92,7 @@ let
     # tells a fix job's own push from anyone else's (claims.py).
     machineryLogin = if machineApp == null then null else "${machineApp.slug}[bot]";
     stateDir = "${stateDir}/autoland";
-    # The key renovate-sweep seals its verdicts on majors with (its seal.rs),
+    # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
     # The longest a Renovate run goes on, when it runs here: how long after a
