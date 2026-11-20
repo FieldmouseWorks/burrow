@@ -6,8 +6,9 @@
 //! a program's, with no model or effort.
 use burrow_producer::serve::{Controller, Server, Work};
 use burrow_producer::sign::Signer;
+use burrow_producer::units::Systemd;
 use burrow_proof::plugin::{Config, plugin};
-use burrow_proof::producer::{GitHub, Producer, Systemd};
+use burrow_proof::producer::{GitHub, Producer};
 use std::process::ExitCode;
 use std::sync::Arc;
 

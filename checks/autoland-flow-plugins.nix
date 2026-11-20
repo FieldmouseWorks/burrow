@@ -4,9 +4,9 @@
 # `evidence.producers` names, with its unpadded base64url public key and
 # trusted for its own checks alone: the proofs' names, or the judge's
 # judgment. Conary's own loaders read each config and producers file
-# (crates/burrow-flow-files), as the machine's build does. The judge is
-# refused until burrow#1186, so its rendering is shown on its producers
-# alone, which need no build of it; the proof and fix plugins are rendered
+# (crates/burrow-flow-files), as the machine's build does. The judge's
+# rendering is shown on its producers alone, which need no build of it;
+# the proof and fix plugins are rendered
 # whole. With every plugin off, a config is byte for byte what it was before
 # plugins were rendered (autoland-shadow-homelab.json). A producer with no
 # check in a repo (the proof producer, where it has evidence and no proofs,
@@ -62,6 +62,7 @@ let
       producer = "sam/judge";
       keyFile = "/run/secrets/judge-key";
       sealFile = "/run/secrets/judge-seal";
+      claudeTokenFile = "/run/secrets/judge-claude-token";
       publicKey = keys.judge;
     };
   };

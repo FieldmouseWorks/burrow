@@ -1,28 +1,35 @@
 //! `burrow-judge plugin CONFIG`: the plugin the flow runs, on stdin and
 //! stdout. `burrow-judge producer CONFIG`: the producer it forwards to, as
-//! its own user, with its keys. `burrow-judge runner CONFIG`: the runner
-//! the producer has judge, as burrow.user.
-use burrow_judge::producer::{GitHub, Producer, Runner as AtRunner, seal_key};
-use burrow_judge::runner::Runner;
+//! its own user, with its keys. `burrow-judge look CONFIG ID`: one of the
+//! producer's looks, in its unit, as the look's own user.
+use burrow_judge::egress::dial;
+use burrow_judge::look::Looks;
+use burrow_judge::producer::{GitHub, Producer, seal_key};
+use burrow_judge::worker::Worker;
 use burrow_judge::{Config, conary, plugin};
 use burrow_producer::serve::{Controller, Server, Work};
 use burrow_producer::sign::Signer;
+use burrow_producer::units::Systemd;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [verb, path] = args.as_slice() else {
-        eprintln!("usage: burrow-judge plugin|producer|runner CONFIG");
-        return ExitCode::from(2);
+    let (verb, path, id) = match args.as_slice() {
+        [verb, path] => (verb, path, None),
+        [verb, path, id] if verb == "look" => (verb, path, Some(id)),
+        _ => {
+            eprintln!("usage: burrow-judge plugin|producer CONFIG, or burrow-judge look CONFIG ID");
+            return ExitCode::from(2);
+        }
     };
     let run = || -> Result<(), String> {
         let cfg = Config::read(path.as_ref())?;
-        match verb.as_str() {
-            "plugin" => {
+        match (verb.as_str(), id) {
+            ("plugin", None) => {
                 plugin(&cfg)?.answer(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
             }
-            "producer" => {
+            ("producer", None) => {
                 let signer = Signer::load(&cfg.producer, &cfg.credential)?;
                 let seal = seal_key(&cfg.seal)?;
                 let controller = Controller::named(&cfg.controller)?;
@@ -35,9 +42,29 @@ fn main() -> ExitCode {
                         ..Default::default()
                     })
                 });
+                let units = Box::new(Systemd {
+                    systemctl: cfg.systemctl.clone(),
+                    unit: cfg.unit.clone(),
+                });
+                let looks = Looks::new(
+                    cfg.clone(),
+                    conary(&cfg.api, &cfg.token)?,
+                    units,
+                    Arc::new(dial),
+                )?;
+                let stopped = looks.reconcile()?;
+                if stopped > 0 {
+                    eprintln!("stopped {stopped} looks whose requests a restart lost");
+                }
                 let read = conary(&cfg.api, &cfg.token)?;
-                let judges = Box::new(AtRunner(cfg.runner.clone()));
-                let producer = Arc::new(Producer::new(cfg, read, github, judges, signer, seal)?);
+                let producer = Arc::new(Producer::new(
+                    cfg,
+                    read,
+                    github,
+                    Box::new(looks),
+                    signer,
+                    seal,
+                )?);
                 let finished = producer.reconcile()?;
                 if finished > 0 {
                     eprintln!("finished {finished} judgments a restart interrupted");
@@ -46,24 +73,23 @@ fn main() -> ExitCode {
                     .serve(move |request, work: &Work| producer.handle(request, work))
                     .map_err(|e| e.to_string())
             }
-            "runner" => {
-                let user = Controller::named(&cfg.user)?;
-                let server = Server::bind(&cfg.runner, user)
-                    .map_err(|e| format!("{}: {e}", cfg.runner.display()))?;
-                let read = conary(&cfg.api, &cfg.runner_token)?;
-                let runner = Arc::new(
-                    Runner::new(cfg.clone(), Box::new(cfg.proj()), read)
-                        .map_err(|e| e.to_string())?,
-                );
-                let stopped = runner.reconcile()?;
-                if stopped > 0 {
-                    eprintln!("stopped {stopped} judge jobs whose requests a restart lost");
+            ("look", Some(id)) => {
+                if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!("{id:?} isn't a look's id"));
                 }
-                server
-                    .serve(move |request, work: &Work| runner.handle(request, work))
-                    .map_err(|e| e.to_string())
+                // Its own /tmp (PrivateTmp, which DynamicUser brings), gone
+                // with the unit.
+                let home = std::env::temp_dir().join("look");
+                std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+                Worker {
+                    claude: cfg.claude.clone(),
+                    dir: cfg.look(id),
+                    home,
+                    token: burrow_producer::credential::read(&cfg.login)?,
+                }
+                .look()
             }
-            other => Err(format!("{other} isn't plugin, producer or runner")),
+            (other, _) => Err(format!("{other} isn't plugin, producer or look")),
         }
     };
     match run() {

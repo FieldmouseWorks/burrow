@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 pub struct Pr {
     pub head: String,
     pub base: String,
+    /// The base branch's commit.
+    pub base_sha: String,
     pub title: String,
     pub body: String,
     pub threads: BTreeMap<String, ReviewThread>,
@@ -39,6 +41,7 @@ pub fn world() -> World {
     World(Arc::new(Mutex::new(Pr {
         head: HEAD.into(),
         base: "main".into(),
+        base_sha: "3333333333333333333333333333333333333333".into(),
         title: "Fix it".into(),
         body: "It fixes it.".into(),
         threads: BTreeMap::from([(
@@ -185,7 +188,7 @@ impl conary_github::Source for World {
             "number": n, "state": "open", "title": p.title, "body": p.body,
             "user": {"login": "someone", "type": "User"},
             "head": {"sha": p.head, "ref": "topic", "repo": null},
-            "base": {"sha": "3333333333333333333333333333333333333333", "ref": p.base, "repo": null},
+            "base": {"sha": p.base_sha, "ref": p.base, "repo": null},
         }))
         .unwrap())
     }

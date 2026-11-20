@@ -19,6 +19,8 @@
 //!   only.
 //! - [`jobs`]: work a producer runs as a proj job, on a role from the role
 //!   map, stopped with its request.
+//! - [`units`]: work run as a unit of its own, as a user systemd makes for
+//!   it, which only the producer starts and stops, and how it ended.
 //! - [`publish`]: a record's check run, completed once: with its signed
 //!   result, or as `cancelled` when its work is abandoned before it's
 //!   committed; and startup reconciliation, which does the same for what a
@@ -31,6 +33,7 @@ pub mod publish;
 pub mod records;
 pub mod serve;
 pub mod sign;
+pub mod units;
 mod wire;
 
 #[cfg(test)]

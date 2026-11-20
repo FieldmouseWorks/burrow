@@ -4,7 +4,7 @@
 //! recipes on a real mirror, with no cgroups.
 use crate::fence::Fence;
 use crate::plugin::{Config, describe, plugin};
-use crate::producer::{Ended, GitHub, Producer, Units, ended, lay, run_id};
+use crate::producer::{GitHub, Producer, lay};
 use crate::work::{self, BROKE, FAILED, Mode, PASSED, SPEC, Spec};
 use burrow_github::fake::{Fake, ok};
 use burrow_github::{Api, Failed, Response as GhResponse};
@@ -12,6 +12,7 @@ use burrow_producer::publish;
 use burrow_producer::records::{Records, Target};
 use burrow_producer::serve::{Controller, Server, Work};
 use burrow_producer::sign::{Proof, Signer};
+use burrow_producer::units::{Ended, Units, ended, run_id};
 use conary_core::op::{Outcome, Repo};
 use conary_core::plugin::{Answer, Capabilities, Kind, Model, Offers, Request, Sandbox};
 use conary_github::attest::service::Producers;

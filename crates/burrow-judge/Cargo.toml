@@ -1,6 +1,6 @@
 [package]
 name = "burrow-judge"
-description = "Conary's judge plugin and its producer: the flow's judgments run as proj jobs on the judging role, sealed and signed by a producer with a user and keys of its own"
+description = "Conary's judge plugin and its producer: the flow's judgments run in looks of the producer's own, on the judging role's model, sealed and signed by a producer with a user and keys of its own"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
