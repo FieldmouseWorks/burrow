@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
 
-const USAGE: &str = "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade] [--unless-pending]\n";
+const USAGE: &str = "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]\n";
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {

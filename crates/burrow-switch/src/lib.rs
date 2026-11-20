@@ -268,6 +268,12 @@ fn canonical(path: &Path) -> Result<PathBuf, Broke> {
     fs::canonicalize(path).map_err(|e| at(path, e))
 }
 
+/// A system as the one who switched to it names it, as a switch records
+/// it in `pending`: every symlink in it followed, when it's there.
+fn as_recorded(system: &Path) -> PathBuf {
+    fs::canonicalize(system).unwrap_or_else(|_| system.into())
+}
+
 /// `c` run, its output its own: whether it worked.
 fn ran(c: &mut Command) -> Result<(), Broke> {
     let shown = shown(c);

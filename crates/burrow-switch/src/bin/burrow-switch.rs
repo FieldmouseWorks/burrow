@@ -5,8 +5,9 @@
 //!                                  machine's flake) and put it live
 //!   HOST-switch --toplevel PATH    an already-built system instead
 //!   HOST-switch --status           what's pending
-//!   HOST-switch --abort            a pending switch reverted now instead of
-//!                                  waiting
+//!   HOST-switch --abort [SYSTEM]   a pending switch reverted now instead of
+//!                                  waiting; told SYSTEM, only that one (it
+//!                                  exits 4 when another is pending)
 //!
 //! `--allow-downgrade`, anywhere on the line, puts live a system built from
 //! an older nixpkgs than the running one; without it the refusal exits 3.
@@ -52,7 +53,7 @@ fn main() -> ExitCode {
     };
     let Some((through_sudo, word)) = parse(words) else {
         eprintln!(
-            "usage: {} [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade] [--unless-pending]",
+            "usage: {} [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]",
             cfg.switch
         );
         return ExitCode::from(2);

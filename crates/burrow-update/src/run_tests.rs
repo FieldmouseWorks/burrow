@@ -34,6 +34,22 @@ fn switched(m: &Machine) -> bool {
 }
 
 /// How many VM tests ran.
+/// The system the run's switch put live, in its calls.
+fn switched_to(calls: &str) -> String {
+    calls
+        .lines()
+        .find_map(|l| l.strip_prefix("switch --toplevel "))
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or_else(|| panic!("no switch: {calls}"))
+        .into()
+}
+
+/// Whether the run's last call took back its own switch, naming it.
+fn took_back(m: &Machine) -> bool {
+    let calls = m.did("calls");
+    calls.ends_with(&format!("switch --abort {}\n", switched_to(&calls)))
+}
+
 fn vm_tests(m: &Machine) -> usize {
     m.kept("nix.log").matches("#checks.").count()
 }
@@ -107,7 +123,7 @@ fn a_bump_goes_live_healthy_and_onto_main() {
     assert_eq!(
         m.did("calls"),
         format!(
-            "health snapshot {h}\nswitch --toplevel {now} --unless-pending\nhealth compare {h} 180\nconfirm\n",
+            "health snapshot {h}\nswitch --toplevel {now} --unless-pending\nhealth compare {h} 180\nconfirm {now}\n",
             h = health.display()
         )
     );
@@ -465,13 +481,13 @@ fn an_activation_that_fails_is_taken_back() {
         ("failed".into(), "activation failed; reverted".into())
     );
     assert_eq!((m.running(), m.main()), (was, main));
-    assert!(m.did("calls").ends_with("switch --abort\n"));
+    assert!(took_back(&m), "{}", m.did("calls"));
     assert!(
         fs::read_to_string(m.cfg.state.join("logs/switch.log"))
             .unwrap()
             .ends_with("a switch's own words\ntaken back\n")
     );
-    assert!(jobs(&m).contains("failed during activation and was reverted"));
+    assert!(jobs(&m).contains("failed during activation; reverted."));
 }
 
 #[test]
@@ -489,7 +505,7 @@ fn unhealthy_after_the_switch_goes_straight_back() {
         )
     );
     assert_eq!((m.running(), m.main()), (was.clone(), main));
-    assert!(m.did("calls").ends_with("switch --abort\n"));
+    assert!(took_back(&m), "{}", m.did("calls"));
     let new = m.recorded("previous");
     assert_eq!(new, None, "the stand-in keeps what it switched from");
     assert!(jobs(&m).contains(&format!(
@@ -521,7 +537,8 @@ fn what_a_failing_check_explains_is_noted_not_reverted() {
     fs::write(m.path("excused"), format!("{excused}\n")).unwrap();
     assert_eq!(go(&m), 0);
     assert_eq!(said(&m).0, "ok");
-    assert!(m.did("calls").ends_with("confirm\n"));
+    let new = switched_to(&m.did("calls"));
+    assert!(m.did("calls").ends_with(&format!("confirm {new}\n")));
     assert_eq!(
         m.did("journal"),
         format!("-t box-update -p warning: not the switch's doing: {excused}\n")
@@ -538,9 +555,58 @@ fn bad_proj_config_reverts_without_confirm_and_names_the_line_in_the_notice() {
     fs::write(m.path("unhealthy"), diagnostic).unwrap();
     assert_eq!(go(&m), 1);
     assert_eq!(m.running(), was);
-    assert!(m.did("calls").ends_with("switch --abort\n"));
-    assert!(!m.did("calls").lines().any(|line| line == "confirm"));
+    assert!(took_back(&m), "{}", m.did("calls"));
+    assert!(!m.did("calls").lines().any(|l| l.starts_with("confirm")));
     assert!(m.did("notice-health").contains(diagnostic));
+}
+
+#[test]
+fn a_switch_that_replaced_its_own_is_neither_kept_nor_taken_back() {
+    // Someone switched in its health settle: healthy, its confirm is
+    // refused; unhealthy, its abort is. Either way that switch stays, and
+    // nothing is said about this one's.
+    for unhealthy in [false, true] {
+        let m = machine();
+        let main = m.main();
+        m.upstream("nixpkgs", &sha('c'));
+        fs::write(m.path("replaced"), "").unwrap();
+        if unhealthy {
+            fs::write(m.path("unhealthy"), "nginx: inactive\n").unwrap();
+        }
+        assert_eq!(go(&m), 0, "{unhealthy}");
+        assert_eq!(
+            said(&m),
+            (
+                "held".into(),
+                "a box-switch replaced its switch before it was kept; trying again next run".into()
+            ),
+            "{unhealthy}"
+        );
+        let calls = m.did("calls");
+        let new = switched_to(&calls);
+        let last = if unhealthy {
+            format!("switch --abort {new}\n")
+        } else {
+            format!("confirm {new}\n")
+        };
+        assert!(calls.ends_with(&last), "{calls}");
+        assert_eq!(m.main(), main, "not pushed");
+        assert_eq!(m.recorded("deployed"), None);
+        assert_eq!(jobs(&m), "");
+        let notices = m.did("notices");
+        assert!(!notices.contains("open "), "{notices}");
+    }
+    // An activation that failed still did: it says another's switch stays.
+    let m = machine();
+    m.upstream("nixpkgs", &sha('c'));
+    fs::write(m.path("switch-rc"), "1").unwrap();
+    fs::write(m.path("replaced"), "").unwrap();
+    assert_eq!(go(&m), 1);
+    assert_eq!(
+        said(&m).1,
+        "activation failed; a switch since replaced it, and stays"
+    );
+    assert!(jobs(&m).contains("failed during activation; a switch since replaced it, and stays."));
 }
 
 #[test]
