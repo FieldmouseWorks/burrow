@@ -128,13 +128,16 @@ class Jobs:
         again (strike), and its caller lists it on the stuck issue), or
         what begin starts in its place and gives the id of (a proof build).
         One that isn't in place of one that broke (retry_at) ends a run of
-        those."""
+        those. None, not False, while a fix job waits for the earlier ones
+        on the branch to stand down: nothing failed to start, so its caller
+        lists nothing, and a stop or an answer that keeps failing is its own
+        strike (claims)."""
         if at is _HEAD:
             at = self.head
         if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
             log(f"{self.tag}: no new {kind} job yet: an earlier one on the branch may still push, or its answers just went up")
             self.after(C.NOW, 1)  # ends: the next try to stop it
-            return False
+            return None
         jid = begin() if begin else C.job(self.repo, task, since=ts(self.pr["createdAt"]), role=f"steward-{kind}")
         step = "build" if begin else "job"
         if jid:
