@@ -111,7 +111,7 @@ impl Machine {
 
     /// The serial's count.
     fn serial(&self) -> u64 {
-        read_serial(&self.c().serial).unwrap().unwrap().0
+        read_serial(&self.c().serial).unwrap().unwrap().count
     }
 
     /// conaryd started again on the events file as it is now, as
@@ -515,6 +515,14 @@ fn conaryd_runs_only_while_it_is_given_a_repo() {
     // reads, on a machine without its credentials).
     m.run(&mut kicks);
     assert!(m.c().events.exists() && !m.c().given.exists());
+    // A marker put there by hand, holding no count, is taken away again.
+    let before = m.serial();
+    fs::write(&m.c().given, "").unwrap();
+    m.run(&mut kicks);
+    assert!(!m.c().given.exists(), "a stray marker stayed");
+    assert_eq!(m.serial(), before + 1);
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 1);
 
     m.set("conaryd");
     m.run(&mut kicks);
@@ -534,6 +542,20 @@ fn conaryd_runs_only_while_it_is_given_a_repo() {
     // Once there, a run changes nothing: conaryd isn't restarted for it.
     m.run(&mut kicks);
     assert_eq!(m.serial(), before + 1);
+
+    // The same, cut short between the marker and its count: the marker
+    // is back, but the serial didn't count it. The next run still owes
+    // conaryd that publication, and counts it once.
+    let serial = fs::read(&m.c().serial).unwrap();
+    fs::remove_file(&m.c().given).unwrap();
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2);
+    fs::write(&m.c().serial, &serial).unwrap();
+    assert!(m.c().given.exists());
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2, "a recovery cut short was lost");
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2);
 
     // Taken off its last repo, the marker goes with the publication that
     // takes it off, so conaryd's restart on it stops it for good.

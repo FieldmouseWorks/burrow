@@ -29,8 +29,9 @@ let
   # the count conaryd last started on.
   serial = "${dir}/conaryd-events.serial";
   started = "${dir}/conaryd-started";
-  # There while the events file gives conaryd a repo: conaryd runs only
-  # then (crates/burrow-landing).
+  # There while the events file gives conaryd a repo, holding the count of
+  # the publication that put it there: conaryd runs only then
+  # (crates/burrow-landing).
   given = "${dir}/conaryd-given";
   data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
   # The repos' hooks' secret as burrow-events and the hooks have it,

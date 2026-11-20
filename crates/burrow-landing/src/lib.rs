@@ -79,10 +79,11 @@ pub struct Conaryd {
     /// The serial conaryd last started on, written once it has
     /// (autoland/landing.nix's conary-flow-given).
     pub started: PathBuf,
-    /// There while the events file gives conaryd a repo, and only then:
-    /// conaryd runs only while it is (conary-flow's condition), so a
-    /// machine that gives it nothing never starts it, nor needs what it
-    /// reads (its credentials).
+    /// There while the events file gives conaryd a repo, and only then,
+    /// holding the count of the publication that put it there: conaryd
+    /// runs only while it is (conary-flow's condition), so a machine that
+    /// gives it nothing never starts it, nor needs what it reads (its
+    /// credentials).
     pub given: PathBuf,
 }
 
@@ -243,24 +244,33 @@ fn restarted(cfg: &Config) -> Result<bool, String> {
     };
     // A publication whose count wasn't written yet is none conaryd can
     // have started on.
-    let Some((serial, hash)) = read_serial(&c.serial)? else {
+    let Some(serial) = read_serial(&c.serial)? else {
         return Ok(false);
     };
-    let started = read_serial(&c.started)?.map(|(n, _)| n);
-    Ok(hash.as_deref() == Some(&hash_of(&c.events)?) && started == Some(serial))
+    let started = read_serial(&c.started)?.map(|s| s.count);
+    Ok(serial.hash.as_deref() == Some(&hash_of(&c.events)?) && started == Some(serial.count))
 }
 
-/// `N` or `N HASH`, as the serial and conaryd's acknowledgment hold them.
-fn read_serial(path: &Path) -> Result<Option<(u64, Option<String>)>, String> {
+/// A publication as its serial names it, `N` or `N HASH`: its count and
+/// the hash of the events file it counts. conaryd's acknowledgment holds
+/// only the count.
+#[derive(Debug, PartialEq)]
+struct Serial {
+    count: u64,
+    hash: Option<String>,
+}
+
+fn read_serial(path: &Path) -> Result<Option<Serial>, String> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
             let mut words = s.split_whitespace();
-            let n = words
+            let count = words
                 .next()
                 .unwrap_or_default()
                 .parse()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(Some((n, words.next().map(str::to_owned))))
+            let hash = words.next().map(str::to_owned);
+            Ok(Some(Serial { count, hash }))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
@@ -303,11 +313,7 @@ fn publish(
                 .map_err(|e| format!("{repo}: not a repository: {e}"))
         })
         .collect::<Result<_, String>>()?;
-    // Whether conaryd runs at all, set before the count that restarts it;
-    // and a change of it is a publication of its own, counted even when
-    // the file's repos didn't change (a machine whose marker went missing
-    // with a repo still given), so conaryd starts or stops on it.
-    let marked = mark(&c.given, !runtime.repos.is_empty())?;
+    let given = !runtime.repos.is_empty();
     let mut body = serde_json::to_vec_pretty(&runtime).map_err(|e| e.to_string())?;
     body.push(b'\n');
     if std::fs::read(events).ok().as_deref() != Some(&body[..]) {
@@ -315,29 +321,46 @@ fn publish(
     }
     // Then its count, after the file it counts, so a serial names a
     // publication that's already there; written again for a file a run
-    // cut short replaced without it.
+    // cut short replaced without it. Before the count, the marker that
+    // says whether conaryd runs at all, holding the count of the
+    // publication that put it there: a change of it alone is a publication
+    // of its own (a machine whose marker went missing with a repo still
+    // given), so conaryd starts or stops on it, and one a run cut short
+    // before its count is still owed at the next run, whose marker names a
+    // count the serial hasn't reached.
     let hash = hash_of(events)?;
     let last = read_serial(&c.serial)?;
-    if !marked && last.as_ref().and_then(|(_, h)| h.as_deref()) == Some(&hash) {
+    let count = last.as_ref().map_or(0, |l| l.count);
+    let counted = last.is_some_and(|l| l.hash.as_deref() == Some(&hash));
+    if counted && read_marker(&c.given)? == given.then_some(Some(count)) {
         return Ok(());
     }
-    let next = last.map_or(0, |(n, _)| n) + 1;
+    let next = count + 1;
+    mark(&c.given, given.then_some(next))?;
     replace(&c.serial, format!("{next} {hash}\n").as_bytes())
 }
 
-/// Puts `path` there (empty) or takes it away; whether that changed it.
-fn mark(path: &Path, there: bool) -> Result<bool, String> {
-    let was = path
-        .try_exists()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    match (was, there) {
-        (false, true) => replace(path, b"")?,
-        (true, false) => {
-            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?
-        }
-        _ => return Ok(false),
+/// Whether conaryd's marker is there, and the count it holds if it holds
+/// one: a marker without one (put there by hand) is there all the same.
+fn read_marker(path: &Path) -> Result<Option<Option<u64>>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s.trim().parse().ok())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
-    Ok(true)
+}
+
+/// Puts the marker there, holding `count`, or takes it away.
+fn mark(path: &Path, count: Option<u64>) -> Result<(), String> {
+    match count {
+        Some(n) => replace(path, format!("{n}\n").as_bytes()),
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("{}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        },
+    }
 }
 
 fn replace(path: &Path, body: &[u8]) -> Result<(), String> {
