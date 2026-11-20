@@ -204,6 +204,15 @@
     LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-dashboard-no-work.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
     touch $out
   '';
+  # Where the steward doesn't land, Renovate merges nothing, every way it
+  # could (modules/updates/renovate-package.nix), by its own code; and
+  # renovate-run's words leave such a repo out of a full run and force
+  # merging off in its own.
+  renovate-no-merge = pkgs.runCommand "renovate-no-merge-check" { } ''
+    export HOME=$TMPDIR
+    LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-no-merge.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
+    touch $out
+  '';
   # What a dashboard's Repository Problems lists under the example's
   # config, by Renovate's own logger: not the refresh it was told to take
   # without a release timestamp, but still a warning that's a problem.
