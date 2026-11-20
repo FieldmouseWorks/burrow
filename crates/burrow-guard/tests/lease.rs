@@ -132,6 +132,10 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
         "git push $(printf -- -f) origin pr",
         "git push origin pr$(printf ' -f')",
         "printf '%s\\n' pr | xargs git push -f origin",
+        // A bare lease where the named one covers another ref, and two
+        // named leases on one ref, of which git takes the first.
+        &format!("git push --force-with-lease --force-with-lease=other:{seen} origin pr"),
+        &format!("git push --force-with-lease=pr --force-with-lease=pr:{seen} origin pr"),
     ] {
         assert!(refusal(cmd, &stale).is_some(), "{cmd}");
         let dry = cmd.replacen("push ", "push --dry-run --porcelain ", 1);
@@ -149,6 +153,9 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
         "git push --force-with-lease --force-if-includes origin pr",
         "git push --force-with-lease=pr --force-if-includes origin HEAD:pr",
         &format!("git push --force-with-lease=pr:{seen} origin pr"),
+        // A bare lease beside a named one that covers what it pushes.
+        &format!("git push --force-with-lease --force-with-lease=pr:{seen} origin pr"),
+        &format!("git push --force-with-lease=pr:{seen} --force-with-lease origin pr"),
     ] {
         assert_eq!(refusal(cmd, &stale), None, "{cmd}");
         assert!(!sh(&stale, cmd).status.success(), "{cmd}");

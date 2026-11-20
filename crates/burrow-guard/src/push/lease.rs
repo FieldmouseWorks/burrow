@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{Lease, PLACES, Push, pushes, resolve, unknown};
+use super::{Expect, Lease, PLACES, Push, pushes, resolve, unknown};
 
 /// Why `cmd`, run in `cwd`, is refused: one of its pushes forces without
 /// a lease ([`UNLEASED`]) or by its remote's configuration
@@ -83,9 +83,25 @@ impl Push {
         // beside a delete too.
         let implied = lease.tags || lease.all || lease.mirror;
         let updating = !lease.delete && (refspecs.is_empty() || !updates.is_empty() || implied);
-        let unleased = lease.leases.iter().any(|expect| match expect {
-            None => !lease.if_includes,
-            Some(oid) => !oid.is_empty() && !is_object_id(oid),
+        // The bare lease covers only what no named one does: where each
+        // update's destination is named by one, it covers nothing.
+        let named = |dest: &str| {
+            lease
+                .leases
+                .iter()
+                .any(|e| e.refname.as_deref() == Some(dest))
+        };
+        let rest = refspecs.is_empty()
+            || implied
+            || updates
+                .iter()
+                .any(|r| destination(r).is_none_or(|d| !named(d)));
+        // Every lease that applies holds the head its pusher saw; one named
+        // twice is held to both, though git takes the first.
+        let unleased = lease.leases.iter().any(|e| match (&e.refname, &e.object) {
+            (None, _) => rest && !lease.if_includes,
+            (Some(_), None) => !lease.if_includes,
+            (Some(_), Some(oid)) => !oid.is_empty() && !is_object_id(oid),
         });
         if updating && (lease.force || updates.iter().any(|r| r.starts_with('+')) || unleased) {
             return Verdict::Refused(UNLEASED);
@@ -103,19 +119,19 @@ impl Push {
         if config.forces(remote.map(String::as_str), refspecs, &updates) {
             return Verdict::Refused(CONFIGURED);
         }
-        let named: Vec<&String> = lease
+        let objects: Vec<&String> = lease
             .leases
             .iter()
-            .flatten()
+            .filter_map(|e| e.object.as_ref())
             .filter(|o| !o.is_empty())
             .collect();
-        if named.is_empty() {
+        if objects.is_empty() {
             return Verdict::Leased;
         }
         let Some(lengths) = repos.object_id_lengths(at, &self.repo.args) else {
             return Verdict::Unread;
         };
-        if named.iter().all(|oid| lengths.contains(&oid.len())) {
+        if objects.iter().all(|oid| lengths.contains(&oid.len())) {
             Verdict::Leased
         } else {
             Verdict::Refused(UNLEASED)
@@ -128,6 +144,23 @@ impl Push {
 fn deletes(refspec: &str) -> bool {
     let spec = refspec.strip_prefix('+').unwrap_or(refspec);
     spec.starts_with(':') && spec != ":"
+}
+
+/// The destination `refspec` updates, as a lease names it, where git's own
+/// name for it holds whatever the refspec says: `DST` in `SRC:DST`, or
+/// `SRC` alone, which git pushes to the ref of the same name. None where
+/// the destination is another's (`HEAD` and `@` are whatever is checked
+/// out) or several (git's wildcard `*`), or `SRC` is an object, not a ref.
+/// A ref git finds by the same name (`pr`, `refs/heads/pr`) is one a lease
+/// of that name covers, since git matches both by the same rules.
+fn destination(refspec: &str) -> Option<&str> {
+    let spec = refspec.strip_prefix('+').unwrap_or(refspec);
+    // git splits a push refspec at its last colon.
+    let dest = spec.rsplit_once(':').map_or(spec, |(_, dest)| dest);
+    let plain = !dest.is_empty()
+        && !matches!(dest, "HEAD" | "@")
+        && !dest.contains(['*', '^', '~', '@', ':']);
+    plain.then_some(dest)
 }
 
 /// Whether `text` has the shape of a whole object id, SHA-1's or
@@ -164,11 +197,20 @@ impl Lease {
             (Some("all" | "branches"), _) => self.all = !negated,
             (Some("tags"), _) => self.tags = !negated,
             (Some("delete"), _) => self.delete = !negated,
-            (Some("force-with-lease"), false) => self.leases.push(
-                value
-                    .and_then(|v| v.split_once(':'))
-                    .map(|(_, expect)| expect.to_owned()),
-            ),
+            // `=REF[:OBJECT]`, split at its first colon as git splits it.
+            (Some("force-with-lease"), false) => self.leases.push(match value {
+                None => Expect {
+                    refname: None,
+                    object: None,
+                },
+                Some(v) => {
+                    let (refname, object) = v.split_once(':').unzip();
+                    Expect {
+                        refname: Some(refname.unwrap_or(v).to_owned()),
+                        object: object.map(str::to_owned),
+                    }
+                }
+            }),
             (Some("force-with-lease"), true) => self.leases.clear(),
             (Some("force-if-includes"), _) => self.if_includes = !negated,
             _ => {}

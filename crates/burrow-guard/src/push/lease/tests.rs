@@ -310,6 +310,56 @@ fn a_push_the_guard_cant_read_is_refused() {
     );
 }
 
+/// git holds each ref it updates to the first lease that names it, and to
+/// the bare one only where none does: a bare lease beside named ones that
+/// cover every destination checks nothing, so it needs no
+/// `--force-if-includes`. Where a destination may be another's, it does.
+#[test]
+fn a_bare_lease_needs_force_if_includes_only_where_no_named_one_covers() {
+    let dir = repo(&[]);
+    let at = dir.path();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let each =
+        |cmds: &[&str]| -> Vec<String> { cmds.iter().map(|c| c.replace("SHA", sha)).collect() };
+    assert_each(
+        at,
+        &each(&[
+            "git push --force-with-lease --force-with-lease=pr:SHA origin pr",
+            "git push --force-with-lease=pr:SHA --force-with-lease origin pr",
+            "git push --force-with-lease --force-with-lease=pr:SHA origin HEAD:pr",
+            "git push --force-with-lease --force-with-lease=refs/heads/pr:SHA origin x:refs/heads/pr",
+            "git push --force-with-lease --force-with-lease=pr:SHA --force-with-lease=b:SHA origin pr x:b",
+            "git push --force-with-lease --force-with-lease=pr:SHA origin pr :old",
+            "git push --force-with-lease --force-with-lease=pr: origin pr",
+        ]),
+        None,
+    );
+    assert_each(
+        at,
+        &each(&[
+            // A destination no named lease covers.
+            "git push --force-with-lease --force-with-lease=pr:SHA origin pr other",
+            "git push --force-with-lease --force-with-lease=other:SHA origin pr",
+            "git push --force-with-lease --force-with-lease=refs/heads/pr:SHA origin pr",
+            // Or one the guard can't name: what's checked out, a wildcard,
+            // or what git's configuration or --tags, --all, --mirror push.
+            "git push --force-with-lease --force-with-lease=pr:SHA origin",
+            "git push --force-with-lease --force-with-lease=HEAD:SHA origin HEAD",
+            "git push --force-with-lease --force-with-lease=@:SHA origin @",
+            "git push --force-with-lease --force-with-lease=pr:SHA origin 'refs/heads/*'",
+            "git push --force-with-lease --force-with-lease=pr:SHA origin pr --tags",
+            "git push --force-with-lease --force-with-lease=pr:SHA origin pr:",
+            // A named lease on the remote-tracking ref still needs it, and
+            // git takes the first of two that name one ref.
+            "git push --force-with-lease=pr --force-with-lease=pr:SHA origin pr",
+            "git push --force-with-lease=pr:origin/pr --force-with-lease=pr:SHA origin pr",
+            // The bare lease cleared, the named ones go with it.
+            "git push --force-with-lease=pr:SHA --no-force-with-lease --force-with-lease origin pr",
+        ]),
+        Some(UNLEASED),
+    );
+}
+
 /// A lease's expected object is a whole object id of the repository's own
 /// format, or its compatibility format's: git takes an all-hex name of
 /// another length for a ref, which a fetch can move.

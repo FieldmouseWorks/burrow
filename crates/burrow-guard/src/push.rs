@@ -220,9 +220,8 @@ struct Lease {
     /// `-d` or `--delete` (undone by a later `--no-delete`): every refspec
     /// deletes.
     delete: bool,
-    /// Each `--force-with-lease` since the last `--no-force-with-lease`:
-    /// the object it expects, or None for the remote-tracking ref's.
-    leases: Vec<Option<String>>,
+    /// Each `--force-with-lease` since the last `--no-force-with-lease`.
+    leases: Vec<Expect>,
     /// `--force-if-includes` (undone by a later `--no-force-if-includes`).
     if_includes: bool,
     /// What it pushes beyond its refspecs, each undone by its `--no-`:
@@ -231,6 +230,19 @@ struct Lease {
     tags: bool,
     all: bool,
     mirror: bool,
+}
+
+/// One `--force-with-lease`, as git keeps it (`push_cas` in git's
+/// remote.c): for each ref it updates, git takes the first entry that
+/// names it, and the bare form only for a ref none names.
+#[derive(Debug)]
+struct Expect {
+    /// The ref it names (`=REF[:…]`), or None for the bare form, which
+    /// covers every ref no other entry names.
+    refname: Option<String>,
+    /// The object it expects (`=REF:OBJECT`), or None for the
+    /// remote-tracking ref's.
+    object: Option<String>,
 }
 
 impl Push {
