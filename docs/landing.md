@@ -118,6 +118,13 @@ a pause, and a pause doesn't move ownership:
   gets everything landing needs: its review, its proofs and its judgment
   (lesson `scope-below-a-repo`).
 
+A late review in a repo conaryd lands is asked for through the owner's door
+(burrow-review-ask), as the steward asks: the flow config's `review_ask`
+names its command and `burrow.autoland.askAsOwner.repos`, and the command
+starts the door as burrow.user's own unit. So conaryd must run as
+burrow.user (no `burrow.ledger.controllerUser`) in a repo the door asks in,
+and a build that breaks this is refused.
+
 ## What it doesn't do yet
 
 - conaryd reads one flow configuration for every repo it lands. Any repos

@@ -1,11 +1,13 @@
-//! burrow-review-ask: the one door through which the steward acts as the
+//! burrow-review-ask: the one door through which the pipeline acts as the
 //! owner. Codex's GitHub connector takes a review ask only from the owner of
 //! the ChatGPT account it's set up on: an App's `@codex review` gets no
 //! review, and an ask with any text after it is read as a task. So when the
-//! steward finds a head the connector hasn't reviewed (review_step.py), it
-//! runs this, in a unit of the machine user's own (reviewers.py), and this
-//! posts the bare ask with the user's own gh login, the one a person's
-//! issue's job acts as. The steward's own units never hold that login.
+//! steward finds a head the connector hasn't reviewed (review_step.py), or
+//! Conary's flow does in a repo conaryd lands (its `review_ask`), it runs
+//! the door's command, which starts this in a unit of the machine user's own
+//! (modules/autoland/review-ask.nix), and this posts the bare ask with the
+//! user's own gh login, the one a person's issue's job acts as. The units
+//! that hold the App's key never hold that login.
 //!
 //! It posts [`ASK`] and nothing else, ever, and only when every check holds,
 //! read as the owner sees the PR right then:

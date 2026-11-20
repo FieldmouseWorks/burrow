@@ -152,25 +152,24 @@ for unasked in ("unlisted", "declined"):
     DOOR.clear()
 print("once a head, the digest after: ok")
 
-# The door runs as a unit of the machine user's own, waited for, with only
-# the PR it's for: what it prints is what came of it.
-bin_dir = f"{tmp}/owner-bin"
-os.makedirs(bin_dir, exist_ok=True)
-with open(f"{bin_dir}/systemd-run", "w") as f:
+# The steward runs the door's command (which starts it as a unit of the
+# machine user's own: checks/autoland-review-ask.nix) with only the PR it's
+# for, waited for: what it prints is what came of it.
+stub = f"{tmp}/owner-door"
+with open(stub, "w") as f:
     f.write(f"""#!{shutil.which("bash")}
-printf '%s\\n' "$@" > {tmp}/systemd-run-args
+printf '%s\\n' "$@" > {tmp}/door-args
 echo '{{"outcome": "posted", "at": 7}}'
 """)
-os.chmod(f"{bin_dir}/systemd-run", stat.S_IRWXU)
-path = os.environ["PATH"]
-os.environ["PATH"] = f"{bin_dir}:{path}"
+os.chmod(stub, stat.S_IRWXU)
+command = S.CFG["askAsOwner"]["command"]
+S.CFG["askAsOwner"]["command"] = [stub]
 assert REAL["ask_as_owner"]("sam/r", 5, head) == {"outcome": "posted", "at": 7}
-args = open(f"{tmp}/systemd-run-args").read().split("\n")[:-1]
-assert args[:5] == ["--user", "--wait", "--pipe", "--quiet", "--collect"] and args[5].startswith("--unit=autoland-ask-"), args
-assert args[6:] == ["--", f"{tmp}/review-ask", "sam/r", "5", head], args
-with open(f"{bin_dir}/systemd-run", "w") as f:
+args = open(f"{tmp}/door-args").read().split("\n")[:-1]
+assert args == ["sam/r", "5", head], args
+with open(stub, "w") as f:
     f.write(f"#!{shutil.which('bash')}\necho 'Failed to connect to bus' >&2\nexit 1\n")
 out = REAL["ask_as_owner"]("sam/r", 5, head)
 assert out["outcome"] == "failed" and "Failed to connect to bus" in out["why"], out
-os.environ["PATH"] = path
+S.CFG["askAsOwner"]["command"] = command
 print("the owner's door: ok")

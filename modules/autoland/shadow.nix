@@ -40,6 +40,13 @@ let
           require = rc.trainRequire;
           negative = rc.trainNegative;
         } else null;
+    } // lib.optionalAttrs (cfg.askAsOwner.door != null) {
+      # Where the connector takes no App's ask, the flow asks for a late
+      # review through the owner's door (autoland/review-ask.nix), as the
+      # steward does: its command, run with REPO PR HEAD, and its repos.
+      # Absent with no door: the flow then asks with its own comment.
+      review_ask = { inherit (cfg.askAsOwner.door) command repos; };
+    } // {
       settings = {
         inherit (rc) train rounds;
         # The most PRs a train candidate holds, as the steward's `cn train
