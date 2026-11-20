@@ -10,12 +10,16 @@ publish.workspace = true
 burrow-github = { path = "../burrow-github" }
 burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
+# Conary's seal: the MAC a major's verdict carries, which the steward and
+# conaryd check it with.
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
 jiff.workspace = true
 md-5 = "0.11.0"
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl"] }
-rustix = { version = "1.1.6", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs", "rand"] }
 serde.workspace = true
 serde_json.workspace = true
+subtle = "2.6.1"
 tempfile.workspace = true
 
 [dev-dependencies]

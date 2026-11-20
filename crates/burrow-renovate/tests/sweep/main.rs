@@ -1,13 +1,12 @@
 //! renovate-sweep on a machine made of files, with stand-ins for gh, git,
-//! proj, the notifier, major-seal and lock-wait: which Renovate PRs go to a
-//! Claude job, what the owner's notices list, which verdicts count, and the
-//! lock file refreshes that only wait for their releases to be old enough.
-//! What major-seal makes of a verdict or a seal, and lock-wait of Renovate's
-//! comments, is theirs (tests/renovate-sweep.py): here major-seal seals a
-//! verdict as `sealed-N-VERDICT` (fails with FAKE/seal-fails), takes the
-//! seals FAKE/seals lists, and lock-wait says the time on the line of
-//! FAKE/rest-N (Renovate's comments on PR N) that names who it was asked
-//! about.
+//! proj, the notifier and lock-wait: which Renovate PRs go to a Claude job,
+//! what the owner's notices list, which verdicts count, and the lock file
+//! refreshes that only wait for their releases to be old enough. What
+//! lock-wait makes of Renovate's comments is its own (tests/renovate-sweep.py):
+//! here it says the time on the line of FAKE/rest-N (Renovate's comments on
+//! PR N) that names who it was asked about. The sweep seals verdicts itself
+//! (src/sweep/seal.rs, tested there), under the key its state dir holds:
+//! KEY, unless a test says otherwise.
 //!
 //! The stand-ins note how they were run in FAKE/log; each job and notice is
 //! a file of its own, its words \0-separated. A file in FAKE makes one fail
@@ -34,6 +33,8 @@ use serde_json::{Value, json};
 const SWEEP: &str = env!("CARGO_BIN_EXE_burrow-renovate-sweep");
 const REPO: &str = "sam/r";
 const LOCK: &str = "Lock file maintenance (cargo)";
+/// The sweep's key, in its state dir.
+const KEY: &str = "abababababababababababababababababababababababababababababababab";
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
@@ -49,7 +50,7 @@ fn bin() -> &'static Path {
     .path()
 }
 
-const STAND_INS: [(&str, &str); 6] = [
+const STAND_INS: [(&str, &str); 5] = [
     (
         // GitHub: the user's login (FAKE/user-fails to fail), a repo's
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
@@ -117,14 +118,6 @@ esac
         "git",
         r#"[ "$1 $3 $4 $5" = "-C remote get-url origin" ] || exit 2
 cat "$2/.origin"
-"#,
-    ),
-    (
-        "major-seal",
-        r#"echo "major-seal $*" >>"$FAKE/log"
-if [ "$1" = --check ]; then shift; grep -qxF -- "$*" "$FAKE/seals" 2>/dev/null; exit; fi
-[ -e "$FAKE/seal-fails" ] && exit 2
-echo "<!-- major-verdict: $3 $4 on $5 sealed-$2-$3 -->"
 "#,
     ),
     (
@@ -270,6 +263,8 @@ impl Machine {
             covered: None,
         };
         m.project("r", "https://github.com/sam/r.git");
+        fs::create_dir(m.path("state")).unwrap();
+        fs::write(m.state("verdict.key"), KEY).unwrap();
         m
     }
 
@@ -327,15 +322,10 @@ impl Machine {
         );
     }
 
-    /// The job's verdict `v` on PR `n`'s head for `base`, by `by`, with a
-    /// seal major-seal takes.
+    /// The job's verdict `v` on PR `n`'s head for `base`, by `by`, sealed
+    /// under its key.
     fn verdict(&self, n: u64, v: &str, base: &str, by: &str) -> Value {
-        let mac = format!("{:032x}", n * 1000 + u64::from(v == "ok"));
-        let seals = self.path("fake/seals");
-        let mut all = fs::read_to_string(&seals).unwrap_or_default();
-        all.push_str(&format!("{REPO} {n} {v} {} {base} {mac}\n", sha(n)));
-        fs::write(seals, all).unwrap();
-        marked(by, &marker(n, v, base, &mac))
+        marked(by, &marker(n, v, base, &mac(n, v, base)))
     }
 
     /// The steward's repos.json, written `age` seconds ago: the repos it
@@ -365,8 +355,7 @@ impl Machine {
             "renovate": self.renovate,
             "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
-                      "notify": b.join("notify"), "seal": b.join("major-seal"),
-                      "lockWait": b.join("lock-wait")},
+                      "notify": b.join("notify"), "lockWait": b.join("lock-wait")},
         });
         let path = self.path("config.json");
         fs::write(&path, config.to_string()).unwrap();
@@ -548,6 +537,14 @@ fn with(mut p: Value, check: Value) -> Value {
 
 fn marker(n: u64, v: &str, base: &str, mac: &str) -> String {
     format!("<!-- major-verdict: {v} {} on {base} {mac} -->", sha(n))
+}
+
+/// Verdict `v`'s seal on PR `n`'s head for `base`, under KEY: Conary's
+/// seal, which src/sweep/seal.rs pins to seal.py's.
+fn mac(n: u64, v: &str, base: &str) -> String {
+    conary_github::flow::SealKey::from_hex(KEY)
+        .unwrap()
+        .seal(REPO, n, "major-verdict", v, &sha(n), base)
 }
 
 fn marked(by: &str, marker: &str) -> Value {
