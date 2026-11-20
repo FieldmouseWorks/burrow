@@ -83,7 +83,8 @@ pub struct Comment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Nothing about this head yet.
+    /// Nothing about this head yet, or nothing that's a verdict or a
+    /// review under way (a summary that ended with no word on findings).
     None,
     /// A review of this head is under way.
     Running,
@@ -107,6 +108,10 @@ pub struct Said {
     /// settle the PR alone.
     pub changed: bool,
 }
+
+/// The summary's statuses for a review under way: only these are
+/// `Running`.
+const IN_FLIGHT: [&str; 1] = ["running"];
 
 /// The summary comment's state for one kind of review.
 #[derive(Debug, Deserialize)]
@@ -157,8 +162,13 @@ pub fn said(asked: &Asked) -> Result<Said, String> {
         let verdict = match (code.status.as_deref(), code.has_any_findings) {
             (Some("completed"), Some(false)) => Verdict::Clean,
             (Some("completed"), Some(true)) => Verdict::Findings,
-            // Begun, or a state this doesn't know: not a verdict yet.
-            _ => Verdict::Running,
+            (Some(s), _) if IN_FLIGHT.contains(&s) => Verdict::Running,
+            // Ended with no word on findings (completed with them null, as
+            // on Conary#511), failed, or a state this doesn't know: nothing
+            // said of the head, so it's asked once its wait is up (the
+            // connector's 👀 still guards an ask it has in hand). Calling
+            // it running stalled the PR with nothing under way.
+            _ => continue,
         };
         saw(verdict, when(&c.updated_at)?);
     }
