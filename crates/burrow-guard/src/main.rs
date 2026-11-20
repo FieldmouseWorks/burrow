@@ -1,6 +1,7 @@
 //! burrow-guard CONFIG, as modules/claude/guard.nix's hook runs it: the
-//! hook's JSON on stdin, and nothing (allow) or a question for the owner on
-//! stdout.
+//! hook's JSON on stdin, and nothing (allow) or a decision on stdout: a
+//! question for the owner, or a refusal for what has a safe spelling of its
+//! own ([`Guard::refusal`]).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,8 @@ use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
 use burrow_guard::config::Config;
-use burrow_guard::{Guard, Hook, ask};
+use burrow_guard::{Guard, Hook, ask, deny};
+use serde_json::Value;
 
 /// The one answer, whichever comes first: the guard's, or its deadline's.
 static ANSWER: Once = Once::new();
@@ -16,14 +18,14 @@ static ANSWER: Once = Once::new();
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // A guard that can't read what it guards asks, rather than let the command through with no undo and no question.
-    let question = check(&args).unwrap_or_else(|e| {
-        Some(format!(
+    let decision = check(&args).unwrap_or_else(|e| {
+        Some(ask(&format!(
             "The guard couldn't check this command ({e}), so it asks."
-        ))
+        )))
     });
     ANSWER.call_once(|| {
-        if let Some(q) = question {
-            println!("{}", ask(&q));
+        if let Some(d) = decision {
+            println!("{d}");
         }
     });
 }
@@ -44,7 +46,7 @@ fn ask_after(seconds: u64) {
     });
 }
 
-fn check(args: &[String]) -> Result<Option<String>, String> {
+fn check(args: &[String]) -> Result<Option<Value>, String> {
     let [path] = args else {
         return Err("usage: burrow-guard CONFIG < HOOK-JSON".to_owned());
     };
@@ -63,5 +65,8 @@ fn check(args: &[String]) -> Result<Option<String>, String> {
         config: &config,
         mark: runtime.join("claude-guard-last-snapshot"),
     };
-    Ok(guard.check(&hook, SystemTime::now()))
+    if let Some(reason) = guard.refusal(&hook) {
+        return Ok(Some(deny(&reason)));
+    }
+    Ok(guard.check(&hook, SystemTime::now()).map(|q| ask(&q)))
 }

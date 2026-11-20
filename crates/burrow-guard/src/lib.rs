@@ -10,6 +10,11 @@
 //!   force-push or delete of a default branch (push.rs), and firmware and
 //!   Hetzner Robot calls with no undo (doors.rs).
 //!
+//! And it refuses outright, with nobody asked, a
+//! force-push of any branch with no lease on the head its pusher saw
+//! (push/lease.rs): the leased spelling does the same work, and
+//! keeps it from dropping what another job pushed since.
+//!
 //! The command is read as text, line by line, so one nested in quotes
 //! (`ssh host '…'`, `sh -c "…"`) counts the same as one typed bare.
 //!
@@ -22,7 +27,7 @@ mod shell;
 mod undo;
 mod walk;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use regex::Regex;
@@ -54,6 +59,20 @@ pub struct Guard<'a> {
 }
 
 impl Guard<'_> {
+    /// Why `hook`'s command is refused outright: there's a safe way to do the same, so there's nothing to ask.
+    #[must_use]
+    pub fn refusal(&self, hook: &Hook) -> Option<String> {
+        if hook.tool_name.as_deref() != Some("Bash") {
+            return None;
+        }
+        let cmd = hook
+            .tool_input
+            .as_ref()
+            .and_then(|i| i.command.as_deref())
+            .unwrap_or_default();
+        push::unleased(cmd, &cwd(hook), &self.config.git)
+    }
+
     /// What the hook says about `hook`'s command: `None` lets it run, a
     /// question asks the owner first.
     #[must_use]
@@ -66,7 +85,7 @@ impl Guard<'_> {
             .as_ref()
             .and_then(|i| i.command.as_deref())
             .unwrap_or_default();
-        let cwd = Path::new(hook.cwd.as_deref().filter(|c| !c.is_empty()).unwrap_or("."));
+        let cwd = &cwd(hook);
         let mut asks = Vec::new();
         // The undo first, so a command the owner lets through at a question
         // has its snapshot too.
@@ -80,6 +99,11 @@ impl Guard<'_> {
     }
 }
 
+/// Where `hook`'s command runs.
+fn cwd(hook: &Hook) -> PathBuf {
+    PathBuf::from(hook.cwd.as_deref().filter(|c| !c.is_empty()).unwrap_or("."))
+}
+
 /// The hook's answer that asks the owner `question`.
 #[must_use]
 pub fn ask(question: &str) -> Value {
@@ -88,6 +112,19 @@ pub fn ask(question: &str) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
             "permissionDecisionReason": question,
+        }
+    })
+}
+
+/// The hook's answer that refuses the command for `reason`, asking no one:
+/// for a command with a safe spelling of its own ([`Guard::refusal`]).
+#[must_use]
+pub fn deny(reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
     })
 }
