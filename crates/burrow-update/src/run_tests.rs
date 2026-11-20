@@ -107,7 +107,7 @@ fn a_bump_goes_live_healthy_and_onto_main() {
     assert_eq!(
         m.did("calls"),
         format!(
-            "health snapshot {h}\nswitch --toplevel {now}\nhealth compare {h} 180\nconfirm\n",
+            "health snapshot {h}\nswitch --toplevel {now} --unless-pending\nhealth compare {h} 180\nconfirm\n",
             h = health.display()
         )
     );
@@ -427,6 +427,30 @@ fn a_switch_refused_as_a_downgrade_changes_nothing() {
     assert!(!m.did("calls").contains("--abort"));
     assert!(jobs(&m).contains(" as built from an older nixpkgs than the running system"));
     assert!(m.cfg.state.join("jobs/switch").exists());
+}
+
+#[test]
+fn a_switch_that_went_pending_while_it_built_holds_it_and_stays() {
+    // Someone's switch went pending after the run began: the switch refuses
+    // under its lock, and the run neither takes it back nor confirms it.
+    let m = machine();
+    let (was, main) = (m.running(), m.main());
+    m.upstream("nixpkgs", &sha('c'));
+    fs::write(m.path("switch-rc"), "4").unwrap();
+    assert_eq!(go(&m), 0);
+    assert_eq!(
+        said(&m),
+        (
+            "held".into(),
+            "a box-switch went pending while it built; trying again next run".into()
+        )
+    );
+    assert_eq!((m.running(), m.main()), (was, main));
+    let calls = m.did("calls");
+    assert!(calls.contains(" --unless-pending"), "{calls}");
+    assert!(!calls.contains("--abort"), "{calls}");
+    assert!(!calls.contains("confirm"), "{calls}");
+    assert_eq!(jobs(&m), "");
 }
 
 #[test]

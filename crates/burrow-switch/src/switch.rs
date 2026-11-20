@@ -27,6 +27,10 @@ use crate::{Broke, Config, canonical, complain, exit_of, ran, say};
 /// changed (HOST-update tells it by this).
 pub const DOWNGRADE: u8 = 3;
 
+/// What a switch told `--unless-pending` exits with when a switch is
+/// pending, before anything changed (HOST-update holds by it).
+pub const PENDING: u8 = 4;
+
 /// What switch-to-configuration exits with when someone else holds its
 /// lock: it changed nothing.
 const LOCKED: i32 = 11;
@@ -39,10 +43,13 @@ const KEEP: &str = "--property=ManagedOOMPreference=omit";
 #[derive(Debug, PartialEq, Eq)]
 pub enum Word {
     /// Put a system live: built from a flake (the machine's, unless one's
-    /// named), or one already built (`--toplevel`).
+    /// named), or one already built (`--toplevel`). Told
+    /// `--unless-pending`, it doesn't when another switch is pending as it
+    /// takes the lock: that one is someone's, mid-change.
     Switch {
         system: System,
         allow_downgrade: bool,
+        unless_pending: bool,
     },
     /// What's pending.
     Status,
@@ -61,19 +68,21 @@ pub enum System {
     Toplevel(PathBuf),
 }
 
-/// Its words, `--allow-downgrade` anywhere among them: nothing when they
-/// aren't.
+/// Its words, `--allow-downgrade` and `--unless-pending` anywhere among
+/// them: nothing when they aren't.
 pub fn parse(words: &[String]) -> Option<Word> {
-    let allow_downgrade = words.iter().any(|w| w == "--allow-downgrade");
+    let flag = |f: &str| words.iter().any(|w| w == f);
+    let (allow_downgrade, unless_pending) = (flag("--allow-downgrade"), flag("--unless-pending"));
     let words: Vec<&str> = words
         .iter()
         .map(String::as_str)
-        .filter(|w| *w != "--allow-downgrade")
+        .filter(|w| !matches!(*w, "--allow-downgrade" | "--unless-pending"))
         .collect();
     let path = |p: &str| (!p.is_empty()).then(|| PathBuf::from(p));
     let switch = |system| Word::Switch {
         system,
         allow_downgrade,
+        unless_pending,
     };
     Some(match words[..] {
         [] => switch(System::Flake(None)),
@@ -112,7 +121,8 @@ pub fn run(cfg: &Config, me: &Me, within: &str, word: &Word) -> Result<u8, Broke
         Word::Switch {
             system,
             allow_downgrade,
-        } => switch(cfg, me, within, system, *allow_downgrade),
+            unless_pending,
+        } => switch(cfg, me, within, system, *allow_downgrade, *unless_pending),
         Word::Status => status(cfg),
         Word::Abort => abort(cfg, me),
         Word::RevertTo(prev) => revert_to(cfg, prev),
@@ -126,6 +136,7 @@ fn switch(
     within: &str,
     system: &System,
     allow_downgrade: bool,
+    unless_pending: bool,
 ) -> Result<u8, Broke> {
     // As systemd reads the window, before anything: the revert's timer and
     // the activation's deadline both come from it.
@@ -144,6 +155,23 @@ fn switch(
         complain(&format!("not a NixOS system: {}", new.display()));
         return Ok(1);
     }
+    // Told `--unless-pending`, it decides under the lock it then holds
+    // through the switch, so a switch that went pending while this one
+    // built (someone's, mid-change) is seen and left be: not even said to
+    // be "already running", which would have its caller confirm it.
+    let held = if unless_pending {
+        let lock = cfg.lock()?;
+        if let Some(pending) = cfg.recorded("pending")? {
+            complain(&format!(
+                "{} is pending; not switching over it (it's someone's, mid-change)",
+                pending.display()
+            ));
+            return Ok(PENDING);
+        }
+        Some(lock)
+    } else {
+        None
+    };
     if new == cfg.running()? {
         say(&format!("already running {}", new.display()));
         return Ok(0);
@@ -159,7 +187,10 @@ fn switch(
         return Ok(DOWNGRADE);
     }
 
-    let _lock = cfg.lock()?;
+    let _lock = match held {
+        Some(lock) => lock,
+        None => cfg.lock()?,
+    };
     // The last *confirmed* system, even if an earlier switch is still
     // pending: read under the lock, as a confirm may have just moved it.
     let prev = canonical(&cfg.profile)?;
@@ -577,6 +608,7 @@ mod tests {
             Some(Word::Switch {
                 system,
                 allow_downgrade,
+                unless_pending: false,
             })
         };
         assert_eq!(parsed(&[]), switch(System::Flake(None), false));
@@ -600,6 +632,19 @@ mod tests {
         assert_eq!(
             parsed(&["--allow-downgrade"]),
             switch(System::Flake(None), true)
+        );
+        assert_eq!(
+            parsed(&[
+                "--unless-pending",
+                "--toplevel",
+                "/nix/store/x",
+                "--allow-downgrade"
+            ]),
+            Some(Word::Switch {
+                system: System::Toplevel("/nix/store/x".into()),
+                allow_downgrade: true,
+                unless_pending: true,
+            })
         );
         assert_eq!(parsed(&["--status"]), Some(Word::Status));
         assert_eq!(parsed(&["--abort"]), Some(Word::Abort));
