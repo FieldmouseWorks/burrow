@@ -1096,12 +1096,13 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=385eff3f03a775fa2602af1f2b459dd933a6a6b2#385eff3f03a775fa2602af1f2b459dd933a6a6b2"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e#437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e"
 dependencies = [
  "blake3",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "regex",
+ "rustix",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -1112,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=385eff3f03a775fa2602af1f2b459dd933a6a6b2#385eff3f03a775fa2602af1f2b459dd933a6a6b2"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e#437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e"
 dependencies = [
  "base64 0.23.1",
  "conary-core",

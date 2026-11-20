@@ -388,3 +388,29 @@ fn a_refusal_unrecords_a_lost_answer_doesnt() {
     );
     assert!(record(dir.path()).is_empty());
 }
+
+#[test]
+fn only_an_ask_exits_zero() {
+    // Conary's flow counts a head as asked on exit 0 alone: a no that may
+    // not last (the day's cap) must leave it to ask again.
+    assert_eq!(Outcome::Posted { at: 1 }.code(), 0);
+    assert_eq!(Outcome::Asked { at: 1 }.code(), 0);
+    assert_ne!(
+        Outcome::Declined {
+            why: "the day's cap".into()
+        }
+        .code(),
+        0
+    );
+    assert_ne!(
+        Outcome::Failed {
+            why: "refused".into()
+        }
+        .code(),
+        0
+    );
+    assert_ne!(
+        Outcome::Declined { why: String::new() }.code(),
+        Outcome::Failed { why: String::new() }.code()
+    );
+}

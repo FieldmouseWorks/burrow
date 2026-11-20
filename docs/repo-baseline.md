@@ -158,7 +158,9 @@ root only.
    `burrow.autoland.askAsOwner.repos` lists the owner's door,
    [burrow-review-ask](../crates/burrow-review-ask/src/lib.rs), posts the
    bare `@codex review` as the machine user's own gh login, once a head: the
-   one thing the steward does as the owner. Elsewhere nothing is asked.
+   one thing the steward does as the owner. Conary's flow asks through the
+   same door in a repo conaryd lands (its flow config's `review_ask`).
+   Elsewhere nothing is asked.
    Codex's word binds only the commit:
    nothing it posts says which base or description it read, or when a review
    began. So a PR retargeted onto another base, or whose description is

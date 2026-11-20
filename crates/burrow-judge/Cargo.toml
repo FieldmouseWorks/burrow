@@ -13,8 +13,8 @@ burrow-producer = { path = "../burrow-producer" }
 burrow-settings = { path = "../burrow-settings" }
 # The plugin contract, the seal, the receipts and the judging context are
 # Conary's, pinned with the kit's by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "385eff3f03a775fa2602af1f2b459dd933a6a6b2" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "385eff3f03a775fa2602af1f2b459dd933a6a6b2" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

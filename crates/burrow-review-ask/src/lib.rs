@@ -1,11 +1,13 @@
-//! burrow-review-ask: the one door through which the steward acts as the
+//! burrow-review-ask: the one door through which the pipeline acts as the
 //! owner. Codex's GitHub connector takes a review ask only from the owner of
 //! the ChatGPT account it's set up on: an App's `@codex review` gets no
 //! review, and an ask with any text after it is read as a task. So when the
-//! steward finds a head the connector hasn't reviewed (review_step.py), it
-//! runs this, in a unit of the machine user's own (reviewers.py), and this
-//! posts the bare ask with the user's own gh login, the one a person's
-//! issue's job acts as. The steward's own units never hold that login.
+//! steward finds a head the connector hasn't reviewed (review_step.py), or
+//! Conary's flow does in a repo conaryd lands (its `review_ask`), it runs
+//! the door's command, which starts this in a unit of the machine user's own
+//! (modules/autoland/review-ask.nix), and this posts the bare ask with the
+//! user's own gh login, the one a person's issue's job acts as. The units
+//! that hold the App's key never hold that login.
 //!
 //! It posts [`ASK`] and nothing else, ever, and only when every check holds,
 //! read as the owner sees the PR right then:
@@ -91,6 +93,21 @@ pub enum Outcome {
     Declined { why: String },
     /// GitHub couldn't be read, or refused the comment.
     Failed { why: String },
+}
+
+impl Outcome {
+    /// Its exit: 0 only once the head is asked (posted now, or before), as
+    /// Conary's flow reads it (its `review_ask`: anything else, and a later
+    /// pass asks again), so a no that may not last (the day's cap, a hold,
+    /// a draft) isn't taken for an ask; 2 for that no, 1 for a failure. The
+    /// steward reads the JSON line instead.
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::Posted { .. } | Self::Asked { .. } => 0,
+            Self::Failed { .. } => 1,
+            Self::Declined { .. } => 2,
+        }
+    }
 }
 
 const PR: &str = "query($owner: String!, $name: String!, $n: Int!) {

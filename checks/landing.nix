@@ -32,6 +32,17 @@ let
   }];
   controlledRuns = c: c.systemd.services.burrow-landing.serviceConfig.User == "conary-flow"
     && c.systemd.services.burrow-landing.environment.CONARY_DATA or null == "${c.burrow.stateDir}/flow";
+  # The owner's door in a repo conaryd may have: the flow asks for a late
+  # review through it (its config's review_ask), which needs the flow to
+  # run as burrow.user, whose own manager starts the door.
+  asked = controller: machine [{
+    burrow.ledger.controllerUser = lib.mkIf controller "conary-flow";
+    burrow.autoland.shadow = [ "sam/homelab" ];
+    burrow.autoland.askAsOwner.repos = [ "Sam/HomeLab" ];
+    burrow.landing.conaryd = [ "sam/homelab" ];
+  }];
+  askedFlow = asked false;
+  door = askedFlow.burrow.autoland.askAsOwner.door;
   units = on.systemd.services;
   flow = units.conary-flow;
   driver = units.burrow-landing;
@@ -68,7 +79,16 @@ let
       burrow.autoland.repos."sam/plain".settleDelay = 2;
       burrow.landing.conaryd = [ "sam/homelab" "sam/plain" ];
     }]))) then "two repos with different flow configs are both given to one conaryd" else null)
+    (if failing askedFlow != [ ] then "a machine whose flow asks through the owner's door fails: ${toString (failing askedFlow)}" else null)
+    (if !(lib.any (lib.hasInfix "the owner's door") (failing (asked true))) then "conaryd running as a controller of its own is given the owner's door, which it can't start as burrow.user" else null)
+    (if failing (machine [{
+      burrow.ledger.controllerUser = "conary-flow";
+      burrow.autoland.shadow = [ "sam/homelab" ];
+      burrow.autoland.askAsOwner.repos = [ "sam/plain" ];
+      burrow.landing.conaryd = [ "sam/homelab" ];
+    }]) != [ ] then "a controller is refused the owner's door in a repo conaryd may not have" else null)
   ];
+  askedConfig = "${askedFlow.burrow.autoland.flowConfigs}/sam/homelab.json";
   flowFiles = "${self.packages.${system}.burrow-flow-files}/bin/burrow-flow-files";
 in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   fail() { echo "$*"; exit 1; }
@@ -80,6 +100,14 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
     || fail "conaryd is given a repo by the build, not the setting, or listens where nothing forwards: $(jq -c '[.repos, .listen]' ${template})"
   cmp "$(jq -r .flow_config ${template})" ${on.burrow.autoland.flowConfigs}/sam/homelab.json \
     || fail "conaryd's flow config isn't the repo's rendered one"
+  # conaryd's flow asks through the owner's door, in its repos and with
+  # its command, and Conary's flow::Config takes that; with no door, the
+  # key is left out, and the flow asks with its own comment.
+  jq -e --argjson door '${builtins.toJSON { inherit (door) command repos; }}' '.review_ask == $door' ${askedConfig} >/dev/null \
+    || fail "conaryd's flow doesn't ask through the owner's door: $(jq -c .review_ask ${askedConfig})"
+  ${flowFiles} flow ${askedConfig} || fail "Conary's flow::Config refuses the owner's door"
+  jq -e 'has("review_ask") | not' ${on.burrow.autoland.flowConfigs}/sam/homelab.json >/dev/null \
+    || fail "a flow config asks through a door the machine doesn't have"
   grep -q "${template}" ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} || fail "burrow-landing doesn't write the rendered events file"
   jq '. + {bogus: 1}' ${template} > key.json
   jq '.repos = "sam/homelab"' ${template} > type.json

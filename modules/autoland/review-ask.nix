@@ -1,9 +1,11 @@
 # The owner's door (crates/burrow-review-ask, burrow.autoland.askAsOwner):
-# the one thing the steward does as the owner, a bare review ask to Codex's
-# connector, which takes one from nobody else. The steward (reviewers.py)
-# runs it as a unit of burrow.user's own, waited for, so it posts with that
-# user's own gh login, as a person's issue's job acts, and the steward's own
-# units never hold that login. Part of burrow.autoland, which imports it.
+# the one thing the pipeline does as the owner, a bare review ask to Codex's
+# connector, which takes one from nobody else. Whoever asks (the steward's
+# reviewers.py, or Conary's flow in conaryd, its `review_ask`) runs its
+# command, which starts the door as a unit of burrow.user's own, waited
+# for, so it posts with that user's own gh login, as a person's issue's job
+# acts, and the units that hold the App's key never hold that login. Part
+# of burrow.autoland, which imports it.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -22,6 +24,22 @@ let
     export BURROW_REVIEW_ASK_CONFIG=${doorConfig}
     export PATH=${lib.makeBinPath [ (config.burrow.tools.gh or pkgs.gh) ]}
     exec ${package}/bin/burrow-review-ask "$@"
+  '';
+  # The door's command as its askers run it, with REPO PR HEAD: the door in
+  # a unit of the caller's own user manager (burrow.user's: the steward's,
+  # and conaryd's while the flow has no controller of its own), waited for,
+  # so nothing of the caller's environment (its App token, its credentials)
+  # goes with it. Its exit and what it prints are the door's. One unit a
+  # head, so two asks of the same head never run at once. The unit is ended
+  # within 160s (150s, then 10s to stop), inside Conary's flow's 180s
+  # deadline for a door (flow/ask.rs): the flow's kill of its process group
+  # doesn't reach a unit of the user manager's, so without this a door the
+  # flow gave up on could still post.
+  launch = pkgs.writeShellScript "burrow-review-ask-as-owner" ''
+    unit=autoland-ask-$(printf '%s#%s@%s' "$1" "$2" "$3" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+    export XDG_RUNTIME_DIR=''${XDG_RUNTIME_DIR:-/run/user/$(${pkgs.coreutils}/bin/id -u)}
+    exec ${config.systemd.package}/bin/systemd-run --user --wait --pipe --quiet --collect \
+      --unit="$unit" --property=RuntimeMaxSec=150 --property=TimeoutStopSec=10 -- ${command} "$@"
   '';
 in
 {
@@ -54,11 +72,11 @@ in
       readOnly = true;
       internal = true;
       default = if cfg.askAsOwner.repos == [ ] then null else {
-        command = [ "${command}" ];
+        command = [ "${launch}" ];
         record = "${dir}/asked.json";
         inherit (cfg.askAsOwner) repos;
       };
-      description = "The door as the steward's config gives it (reviewers.py): its command, its record and its repos; null when it asks in none.";
+      description = "The door as its askers are given it (the steward's reviewers.py, the flow's review_ask): its command, which starts it as burrow.user's unit, its record and its repos; null when it asks in none.";
     };
   };
 

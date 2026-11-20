@@ -1,7 +1,7 @@
 //! `burrow-review-ask REPO PR HEAD`: ask Codex's connector to review the
 //! head as the owner, if every check holds (lib.rs). Its config is the file
 //! BURROW_REVIEW_ASK_CONFIG names. Prints what came of it as one JSON line
-//! (lib.rs `Outcome`) and exits 0, or 1 when it failed.
+//! (lib.rs `Outcome`) and exits as `Outcome::code` says.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ fn main() {
         "{}",
         serde_json::to_string(&out).expect("an outcome is JSON")
     );
-    std::process::exit(i32::from(matches!(out, Outcome::Failed { .. })));
+    std::process::exit(out.code());
 }
 
 fn run() -> Outcome {
