@@ -402,6 +402,19 @@ writer(out=[ROW])
 R.watch_default(repo, default("SUCCESS"), [], mine)
 assert writer_runs() == [], writer_runs()
 
+# A red's fixes go first: the job's, from RED_BRANCH, and the red's undo
+# get the first label (once), and nothing else does: a feature PR, the
+# door's undo, a fork's branch of that name.
+C.save("repo-sam_u.json", {"red": {"undos": [40]}})
+WROTE.clear()
+ours = mkpr(number=7, branch="autoland/red-cccccccccccc")
+labelled = mkpr(number=8, branch="autoland/red-dddddddddddd", labels=["first"])
+fork = dict(mkpr(number=9, branch="autoland/red-eeeeeeeeeeee"), isCrossRepository=True)
+prs = [ours, labelled, fork, undo_pr(), undo_pr(41), mkpr(number=6), {"number": 5}]
+assert R.first_fixes(repo, prs) == {7, 8, 40}, R.first_fixes(repo, prs)
+added = [x for x in WROTE if "--add-label first" in x]
+assert added == ["pr edit 7 -R sam/u --add-label first", "pr edit 40 -R sam/u --add-label first"], WROTE
+
 FAIL.clear()
 STATES.pop("job-1", None)
 C.CFG["undo"] = kept_undo

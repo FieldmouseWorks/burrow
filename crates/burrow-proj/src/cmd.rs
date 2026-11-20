@@ -742,6 +742,8 @@ pub(crate) fn record_wait(
         .map_err(|e| io_fail(&next, e))?;
     crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
     let _ = fs::remove_file(job.file(JobFile::GithubPending));
+    // Awaited now, whatever comes of this.
+    crate::first::mark_all(cfg, job, &found);
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
         targets.join(" ")

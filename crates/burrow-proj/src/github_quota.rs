@@ -450,6 +450,8 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
     publish(job, &kept)?;
     fs::remove_file(job.file(JobFile::GithubPending))
         .map_err(|e| crate::io_fail(&job.file(JobFile::GithubPending), e))?;
+    // Awaited now, whatever comes of this.
+    crate::first::mark_all(cfg, job, &found);
     Ok(None)
 }
 
@@ -523,14 +525,22 @@ if [ -f '{}/denied' ]; then
   printf 'HTTP/2.0 403 Forbidden\n\n{{"message":"Resource not accessible by integration"}}'; exit 1
 fi
 printf 'HTTP/2.0 200 OK\n\n'
-case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"body":"news"}}]'; else echo '[]'; fi;; *) echo '{{"state":"open"}}';; esac
+case "$*" in
+  *graphql*) echo '{{"data":{{"repository":{{"issueOrPullRequest":{{"__typename":"PullRequest","viewerDidAuthor":true,"createdAt":"2999-01-01T00:00:00Z","labels":{{"nodes":[]}}}}}}}}}}';;
+  */labels*) echo "$*" >> "$(dirname "$0")/labelled"; echo '[]';;
+  */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"body":"news"}}]'; else echo '[]'; fi;;
+  *) echo '{{"state":"open"}}';;
+esac
 "#,
                 d.path().display(),
                 now() + 3600,
                 d.path().display()
             ),
         );
+        cfg.tools.job_gh = Some(gh.clone());
         cfg.tools.gh = gh;
+        cfg.tools.bash = "sh".into();
+        cfg.first_label = Some("first".into());
         (d, cfg)
     }
     #[test]
@@ -545,6 +555,9 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         )
         .unwrap();
         job.set_turns(1).unwrap();
+        // A pipeline job's own PR: first, once it's awaited.
+        fs::write(job.prompt("1"), "the task").unwrap();
+        fs::write(job.file(crate::record::JobFile::Pipeline), "").unwrap();
         fs::write(d.path().join("limited"), "").unwrap();
         let targets = vec!["sam/r#7".to_owned()];
         // This assertion fails with the former record_wait: it returned an
@@ -585,8 +598,17 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         )
         .unwrap();
         park(&job, now() - 1).unwrap();
+        assert!(
+            !d.path().join("labelled").exists(),
+            "labelled before it was awaited"
+        );
         crate::watch::look(&cfg, "").unwrap();
         assert!(!job.file(crate::record::JobFile::GithubPending).exists());
+        let labelled = read(&d.path().join("labelled")).unwrap_or_default();
+        assert!(
+            labelled.contains("repos/sam/r/issues/7/labels"),
+            "{labelled:?}"
+        );
         assert!(read(&job.path("await")).unwrap().starts_with("sam/r#7\t"));
         assert_eq!(read(&job.turn("1", "end")).as_deref(), Some("await"));
         assert_eq!(job.turns().as_deref(), Some("1"));

@@ -358,6 +358,8 @@ impl Run<'_> {
             }
         };
         let Some(pr) = pr else { return Ok(()) };
+        // Open, and refreshed in place when it's stuck: first, either way.
+        train::first(t, self.api, &pr);
         match train::stuck(cfg, t, self.api, &pr) {
             Err(why) => Err(self.end(Outcome::Held, &format!("{why}; trying again next run"))),
             Ok(Some(why)) => {

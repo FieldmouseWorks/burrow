@@ -73,6 +73,11 @@ pub struct Config {
     pub waiting_owner_label: String,
     #[serde(default = "needs_owner_label")]
     pub needs_owner_label: String,
+    /// The steward's label that takes a PR first in the landing line
+    /// (burrow.autoland.labels.first), which a first job's own awaited PRs
+    /// get ([`crate::first`]). None where there's no steward.
+    #[serde(default)]
+    pub first_label: Option<String>,
     /// burrow-events' kick port: `http://127.0.0.1:PORT/kick`.
     pub kick: String,
     /// proj-watch's wake file, where it books its next look at each repo.
@@ -166,6 +171,10 @@ pub struct Tools {
     pub bash: PathBuf,
     pub flock: PathBuf,
     pub gh: PathBuf,
+    /// gh as a job's turns run it: its App's when its env names one, the
+    /// user's own login otherwise. `gh` is the machinery App's alone.
+    #[serde(default)]
+    pub job_gh: Option<PathBuf>,
     pub git: PathBuf,
     pub systemctl: PathBuf,
     pub systemd_run: PathBuf,
