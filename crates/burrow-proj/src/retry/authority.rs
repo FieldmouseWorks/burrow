@@ -128,11 +128,8 @@ impl Identity {
         crate::job::Request::load(job)?
             .publish(job)
             .map_err(|e| e.to_string())?;
-        crate::state_reads::write(
-            job.turn_file(n, TurnFile::Engine),
-            identity.choice.engine.name(),
-        )
-        .map_err(|e| e.to_string())
+        job.record_engine(n, identity.choice.engine)
+            .map_err(|e| e.to_string())
     }
 }
 

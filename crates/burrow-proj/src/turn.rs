@@ -484,18 +484,17 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // Where the role's route runs the turn now, when a refusal moves it to
     // another engine of its conversation (engine/route.rs): kept as the
     // turn's identity, which its next run and a retained retry start on.
-    // Its record (N.engine) names the credit once the turn has been on it,
-    // which is how the credit's ledger finds the turn; the ledger charges
-    // each run by the engine its marker names (job/start.rs).
+    // Its record (N.engine) names the credit once the turn has been on it
+    // (Job::record_engine), which is how the credit's ledger finds the turn;
+    // the ledger charges each run by the engine its marker names
+    // (job/start.rs).
     let moved = |from: &engine::Choice| -> Result<Option<engine::Choice>, Fail> {
         let Some(next) = engine::reroute(cfg, &job, from).map_err(|e| Fail::new(1, e))? else {
             return Ok(None);
         };
         crate::retry::Identity::reroute(&job, &n, &next).map_err(|e| Fail::new(1, e))?;
-        if from.engine != Engine::ClaudeApi {
-            job.record_choice(&n, &next)
-                .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
-        }
+        job.record_choice(&n, &next)
+            .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
         eprintln!(
             "proj: the turn moves from {} to {}",
             from.engine.name(),

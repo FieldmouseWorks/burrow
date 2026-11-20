@@ -380,6 +380,30 @@ fn the_credits_threshold_is_its_cycles_spend() {
     assert_eq!(r.engine(), Engine::Claude, "$10 of $20");
 }
 
+/// A route that starts on the credit, with no key its runs can launch with:
+/// the credit is short on the first hop too, so the turn goes on to the
+/// subscription rather than fail at launch and be routed back to the credit.
+#[test]
+fn a_credit_first_without_a_usable_key_goes_on_to_the_subscription() {
+    type Unkeyed = fn(&mut Rig);
+    let cases: [(&str, Unkeyed); 3] = [
+        ("no key", |r| r.cfg.claude_api_key_file = None),
+        ("an unreadable key", |r| {
+            r.cfg.claude_api_key_file = Some(r.tmp.path().join("absent"))
+        }),
+        ("an empty key", |r| {
+            fs::write(r.cfg.claude_api_key_file.as_ref().unwrap(), "\n").unwrap()
+        }),
+    ];
+    for (name, unkeyed) in cases {
+        let mut r = rig("claude-api over 50 claude");
+        r.claude(10.0, 60);
+        assert_eq!(r.engine(), Engine::ClaudeApi, "{name}: before");
+        unkeyed(&mut r);
+        assert_eq!(r.engine(), Engine::Claude, "{name}");
+    }
+}
+
 #[test]
 fn a_pin_starts_the_route_where_it_names_the_engine() {
     let r = rig(ROUTE);
@@ -471,4 +495,62 @@ fn a_refused_run_moves_its_turn_and_the_move_is_its_identity() {
     let started = choice(&r.cfg, &vm).unwrap();
     r.refused();
     assert_eq!(reroute(&r.cfg, &vm, &started).unwrap(), None);
+}
+
+/// A turn that has been on the credit keeps naming it in its N.engine
+/// through every writer of that record once its route moves it back to the
+/// subscription: the move back, a retained retry's restore and the record a
+/// handover's startup writes again. That is how the credit's ledger finds
+/// the turn's job, so its credit run stays charged.
+#[test]
+fn a_turn_that_has_been_on_the_credit_stays_in_its_ledger() {
+    use super::super::{choice, reroute};
+    let r = rig(ROUTE);
+    let job = job_at(&r, None);
+    let engine = || crate::read(&job.turn("1", "engine"));
+    let started = choice(&r.cfg, &job).unwrap();
+    job.record_choice("1", &started).unwrap();
+    assert_eq!(engine().as_deref(), Some("claude"));
+    // Out of usage: on to the credit, which runs and spends $3 of $20.
+    r.refused();
+    let next = reroute(&r.cfg, &job, &started).unwrap().unwrap();
+    crate::retry::Identity::reroute(&job, "1", &next).unwrap();
+    job.record_choice("1", &next).unwrap();
+    assert_eq!(engine().as_deref(), Some("claude-api"));
+    let now = crate::now();
+    fs::write(job.turn("1", "started"), now.to_string()).unwrap();
+    fs::write(
+        job.turn("1", "jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({"type": "burrow.run", "at": now, "engine": "claude-api", "budget": 5_000_000}),
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "result", "session_id": "s", "total_cost_usd": 3}),
+        ),
+    )
+    .unwrap();
+    let charged = || api::short(&r.cfg, 10.0, crate::now());
+    assert!(charged(), "$3 of $20 is past 10%");
+    // Back on the subscription, in the same conversation.
+    crate::retry::Identity::reroute(&job, "1", &started).unwrap();
+    job.record_choice("1", &started).unwrap();
+    assert_eq!(engine().as_deref(), Some("claude-api"), "the move back");
+    // A retained retry restores the turn's identity, the subscription's.
+    crate::retry::Identity::restore(&job, "1").unwrap();
+    assert_eq!(engine().as_deref(), Some("claude-api"), "the restore");
+    // The handover's turn starts again on its identity and records it.
+    let resumed = choice(&r.cfg, &job).unwrap();
+    assert_eq!(resumed.engine, Engine::Claude);
+    job.record_choice("1", &resumed).unwrap();
+    assert_eq!(
+        engine().as_deref(),
+        Some("claude-api"),
+        "the startup record"
+    );
+    // Its model and effort follow the engine it runs on.
+    assert_eq!(
+        crate::read(&job.turn("1", "model")).as_deref(),
+        Some("sub-model")
+    );
+    assert!(charged(), "its credit run still counts");
 }

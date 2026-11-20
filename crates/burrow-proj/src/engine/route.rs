@@ -75,6 +75,12 @@ impl Live<'_> {
         crate::usage::out_metered(self.cfg).is_some_and(|h| h.holds_run(run))
     }
 
+    /// A key the credit's runs can launch with: none in a sandbox, and
+    /// none missing, unreadable or empty ([`api::key`]).
+    fn keyed(&self) -> bool {
+        !self.sandboxed && api::key(self.cfg).is_ok()
+    }
+
     fn reading(&self, engine: Engine) -> Option<burrow_usage_reset::meter::Snapshot> {
         burrow_usage_reset::meter::Snapshot::read(
             self.cfg.meters.as_deref()?,
@@ -91,9 +97,9 @@ impl Meters<Engine> for Live<'_> {
         }
         match engine {
             Engine::Claude => self.reading(engine).is_some_and(|m| m.short(pct)),
-            // No key in a sandbox, and missing or unreadable credit state
-            // is no room: admission would refuse it.
-            Engine::ClaudeApi => self.sandboxed || api::short(self.cfg, pct, self.now),
+            // No usable key (a sandbox is given none), or missing or
+            // unreadable credit state: launch or admission would refuse it.
+            Engine::ClaudeApi => !self.keyed() || api::short(self.cfg, pct, self.now),
         }
     }
 
@@ -103,9 +109,7 @@ impl Meters<Engine> for Live<'_> {
         }
         match engine {
             Engine::Claude => self.reading(engine).is_some_and(|m| m.room()),
-            Engine::ClaudeApi => {
-                !self.sandboxed && api::key(self.cfg).is_ok() && api::room(self.cfg)
-            }
+            Engine::ClaudeApi => self.keyed() && api::room(self.cfg),
         }
     }
 }

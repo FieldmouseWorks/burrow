@@ -101,7 +101,7 @@ impl<'a> Job<'a> {
     /// What turn N runs on, in its N.engine, N.model and N.effort: no model
     /// or effort file for the engine's own.
     pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) -> io::Result<()> {
-        crate::state_reads::write(self.turn_file(n, TurnFile::Engine), choice.engine.name())?;
+        self.record_engine(n, choice.engine)?;
         for (kind, said) in [
             (TurnFile::Model, &choice.model),
             (TurnFile::Effort, &choice.effort),
@@ -116,6 +116,22 @@ impl<'a> Job<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Turn N's N.engine, every writer's: once a turn has been on the
+    /// credit it names the credit for good, though its route moves it back
+    /// to the subscription in the same conversation (engine/route.rs) and a
+    /// retained retry or a handover records it again, since that is how the
+    /// credit's ledger finds the turn's job (burrow-probe's credit.rs).
+    pub fn record_engine(&self, n: &str, engine: crate::engine::Engine) -> io::Result<()> {
+        use crate::engine::Engine;
+        let path = self.turn_file(n, TurnFile::Engine);
+        if engine.conversation() == Engine::ClaudeApi.conversation()
+            && read(&path).as_deref() == Some(Engine::ClaudeApi.name())
+        {
+            return Ok(());
+        }
+        crate::state_reads::write(path, engine.name())
     }
 
     /// Before publishing another turn, remove every artifact beyond the last
