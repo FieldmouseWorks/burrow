@@ -947,3 +947,48 @@ fn full_drain_only_fetches_cached_repair_candidates() {
 }
 
 mod admission;
+
+// A subscription turn retried after its usage limit keeps its place while
+// the plan's hold keeps it; the credit's room isn't held by it, as the line
+// isn't. With no hold on it, it goes first.
+#[test]
+fn a_plan_held_retry_leaves_the_api_credits_room() {
+    let renews = jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .checked_add(jiff::Span::new().days(2))
+        .unwrap();
+    let mut b = Box::new();
+    let dir = b.path("settings");
+    crate::config::tests::set(&mut b.cfg, &dir, &[&format!("credit 20 {renews} 200 5")]);
+    let cfg = &b.cfg;
+    fs::create_dir_all(&cfg.jobs).unwrap();
+    let job = crate::job::Job::new(cfg, "retried");
+    fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    job.set_turns(1).unwrap();
+    crate::record::mark_turn(&job, "1", crate::record::TurnMarker::RetryMigration)
+        .swap(
+            &json!({"waited": crate::now_nanos(), "said": "spent", "deadline": null,
+                    "name": "2-1-retried", "first": false, "retained": true})
+            .to_string(),
+        )
+        .unwrap();
+    assert_eq!(crate::retry::admission(cfg).unwrap().len(), 1);
+    let usage = cfg.jobs.join(crate::usage::FILE);
+    fs::write(
+        &usage,
+        json!({"at":crate::now(), "until":crate::now() + 3600, "said":"spent", "job":"retried"})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
+    assert!(!crate::slot::seen_room(cfg, Engine::Claude, false));
+    fs::remove_file(&usage).unwrap();
+    assert!(!crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
+}

@@ -43,8 +43,13 @@ pub fn seen_room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
     // What the drain's `metered` would leave, released by nothing here.
     let hold = usage::out_metered(cfg);
     let held = |run| hold.as_ref().is_some_and(|h| h.holds_run(run));
+    // A retained retry waits first, unless a hold keeps it (a plan's
+    // usage limit, say, while this run is the credit's): as the line.
     !held(Run { sandboxed, api })
-        && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
+        && crate::retry::admission(cfg).is_ok_and(|p| {
+            p.iter()
+                .all(|(id, _, _)| held(usage::login::run_of(cfg, id)))
+        })
         && line(cfg)
             .iter()
             .all(|w| held(usage::login::run_of(cfg, &w.job)))
