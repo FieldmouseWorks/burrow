@@ -38,7 +38,7 @@
 # engines use` takes effect with no deploy (burrow#1393). A role whose
 # choice its jobs would refuse (no model, or one its engine doesn't offer)
 # fails the render, which then writes nothing.
-{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles, config }:
+{ lib, pkgs, cfg, settings, ledger, credentials, tokenCommand, flowFiles, config }:
 let
   inherit (config.burrow) stateDir;
   settingsSource = config.burrow.settings;
@@ -356,7 +356,7 @@ in
     requires = needs;
     unitConfig.ConditionPathExists = instanceConfig;
     environment = ledger.env // ledger.flow.env // {
-      CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
+      CONARY_TOKEN_COMMAND = tokenCommand;
     };
     serviceConfig = {
       Type = "oneshot";
@@ -366,7 +366,7 @@ in
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";
       Nice = 15;
-      # The App's key, which the steward's token reads.
+      # The App's key, which the token command reads.
       LoadCredential = credentials;
     };
   };
