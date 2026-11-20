@@ -642,9 +642,25 @@ let
         # run: `rust-test.testBinaries "CRATE"`, each in bin/, for a check
         # that runs the tests a Nix build can't (#[ignore]d, with
         # --include-ignored) where they can, a VM test: the sandbox's
-        # seccomp filter refuses every setxattr, so no ACL, say.
+        # seccomp filter refuses every setxattr, so no ACL, say. Built from
+        # the workspace less the other packages' tests (cargoTests), so only
+        # a change to CRATE's tests or to code changes it, and the negative
+        # run builds a check that runs it only for those; such a check says
+        # so in its testFiles.
         passthru.testBinaries = package: craneLib.mkCargoDerivation (common // {
           inherit cargoArtifacts;
+          src =
+            let
+              own = lib.findFirst (d: (readToml (pathOf "${d}/Cargo.toml")).package.name == package)
+                (throw "testBinaries: no package ${package} in ${rustCfg.dir}") (lib.attrNames cargoPackages);
+            in
+            lib.cleanSourceWith {
+              inherit (rustSrc) src;
+              name = "source";
+              filter = path: type:
+                let p = builtins.unsafeDiscardStringContext (toString path); in
+                p == own || lib.hasPrefix "${own}/" p || !(cargoTests p type);
+            };
           pnameSuffix = "-test-binaries-${package}";
           cargoExtraArgs = "--locked -p ${package}";
           doInstallCargoArtifacts = false;
