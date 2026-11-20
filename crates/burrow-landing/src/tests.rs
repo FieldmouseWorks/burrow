@@ -54,9 +54,13 @@ impl Machine {
         let cfg = Config {
             settings: p("settings.json"),
             steward_released: p("released.json"),
-            events_template: p("events-template.json"),
-            events: p("events.json"),
-            conaryd_started: p("conaryd-started"),
+            data: p("data"),
+            conaryd: Some(Conaryd {
+                events_template: p("events-template.json"),
+                events: p("events.json"),
+                serial: p("events-serial"),
+                started: p("conaryd-started"),
+            }),
             steward_kick: String::new(),
         };
         Self { dir, cfg, settings }
@@ -82,7 +86,7 @@ impl Machine {
 
     /// The repos conaryd's events file gives it.
     fn given(&self) -> Vec<String> {
-        let runtime: Runtime = read_json(&self.cfg.events).unwrap();
+        let runtime: Runtime = read_json(&self.c().events).unwrap();
         runtime.repos.iter().map(ToString::to_string).collect()
     }
 
@@ -99,12 +103,11 @@ impl Machine {
     /// conaryd started again on the events file as it is now, as
     /// conary-flow-given says once it has.
     fn started(&self) {
-        use sha2::Digest;
-        let hash: String = sha2::Sha256::digest(fs::read(&self.cfg.events).unwrap())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        fs::write(&self.cfg.conaryd_started, hash).unwrap();
+        fs::copy(&self.c().serial, &self.c().started).unwrap();
+    }
+
+    fn c(&self) -> &Conaryd {
+        self.cfg.conaryd.as_ref().unwrap()
     }
 
     fn release(&self, generation: u64) {
@@ -252,12 +255,12 @@ fn a_run_cut_short_goes_on_from_the_record() {
     assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Conaryd));
     // And once it's done, runs change nothing: conaryd's events file is
     // written once, so it's restarted once and launches nothing twice.
-    let written = fs::metadata(&m.cfg.events).unwrap().modified().unwrap();
+    let written = fs::metadata(&m.c().events).unwrap().modified().unwrap();
     for _ in 0..3 {
         assert_eq!(m.run(&mut kicks), Moved::default());
     }
     assert_eq!(
-        fs::metadata(&m.cfg.events).unwrap().modified().unwrap(),
+        fs::metadata(&m.c().events).unwrap().modified().unwrap(),
         written
     );
 }
@@ -367,6 +370,65 @@ fn a_free_lock_is_no_release_until_conaryd_has_started_without_the_repo() {
 }
 
 #[test]
+fn a_restart_counts_for_one_publication_only() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    m.run(&mut kicks);
+    m.started();
+    // Handed back: the file without the repo, and conaryd starts on it.
+    m.set("steward");
+    m.run(&mut kicks);
+    m.started();
+    let without = fs::read(&m.c().events).unwrap();
+    // Set back before it's done, then handed back again: the file holds
+    // what it held when conaryd last started, but it's a new publication,
+    // and a pass that read the one in between may yet start.
+    m.set("conaryd");
+    assert!(m.run(&mut kicks).undone.contains(REPO));
+    m.set("steward");
+    assert!(m.run(&mut kicks).waiting.contains(REPO));
+    assert_eq!(fs::read(&m.c().events).unwrap(), without);
+    assert!(!m.holding().lands(Owner::Steward) && m.given().is_empty());
+    m.started();
+    assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));
+}
+
+#[test]
+fn with_conaryd_gone_its_repo_comes_back_once_its_workers_have_exited() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    m.run(&mut kicks);
+    assert!(m.holding().lands(Owner::Conaryd));
+    // A deploy takes the last repo off burrow.landing.conaryd: conaryd no
+    // longer runs, and burrow-landing still does.
+    let dir = m.flow_dir();
+    fs::write(dir.join("3-1.job"), b"{}").unwrap();
+    let running = fs::File::create(dir.join("3-1.running")).unwrap();
+    running.lock().unwrap();
+    let narrower = burrow_settings::Config {
+        conaryd: vec![],
+        ..m.settings.clone()
+    };
+    fs::write(&m.cfg.settings, serde_json::to_vec(&narrower).unwrap()).unwrap();
+    let cfg = Config {
+        conaryd: None,
+        ..m.cfg.clone()
+    };
+    let run = std::thread::spawn(move || run(&cfg, &mut Kicks::default(), &PATIENT).unwrap());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!run.is_finished());
+    assert!(!m.holding().lands(Owner::Steward));
+    running.unlock().unwrap();
+    assert_eq!(run.join().unwrap().moved.get(REPO), Some(&Owner::Steward));
+}
+
+#[test]
 fn a_kick_that_fails_moves_the_repo_all_the_same() {
     struct Down;
     impl Wake for Down {
@@ -396,7 +458,7 @@ fn nothing_moves_on_what_cant_be_read() {
     assert!(run(&m.cfg, &mut kicks, &PATIENT).is_err());
     fs::remove_file(&m.cfg.steward_released).unwrap();
     fs::write(m.dir.path().join("owners.json"), b"not json").unwrap();
-    let before = fs::read(&m.cfg.events).unwrap();
+    let before = fs::read(&m.c().events).unwrap();
     assert!(run(&m.cfg, &mut kicks, &PATIENT).is_err());
-    assert_eq!(fs::read(&m.cfg.events).unwrap(), before);
+    assert_eq!(fs::read(&m.c().events).unwrap(), before);
 }

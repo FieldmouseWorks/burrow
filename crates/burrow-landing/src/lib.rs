@@ -13,9 +13,10 @@
 //!    file: it passes no repo it isn't given.
 //! 2. Once the one letting go is quiet, the record gives the repo to the
 //!    other. The steward is quiet when its marker names this handover.
-//!    conaryd is when it has started again on an events file without the
-//!    repo (a pass reads its repos before it takes the repo's lock, so a
-//!    free lock alone could be a pass about to start), no pass of the repo
+//!    conaryd is when it has started again since the events file's last
+//!    publication, which no longer lists the repo, by that publication's
+//!    serial, never its contents (a pass reads its repos before it takes
+//!    the repo's lock, so a free lock alone could be a pass about to start), no pass of the repo
 //!    holds the flow's lock and every worker it launched there has exited
 //!    (Conary's own lock and its workers' `.running` locks, waited on,
 //!    never guessed).
@@ -46,17 +47,32 @@ pub struct Config {
     pub settings: PathBuf,
     /// The steward's release marker: repo -> the generation it let go at.
     pub steward_released: PathBuf,
+    /// The flow's data directory: its repositories' locks and workers.
+    pub data: PathBuf,
+    /// conaryd's files, where it runs for landing. Without them a repo the
+    /// record still gives conaryd (its last one taken off at a deploy) is
+    /// handed back once the workers it left have exited.
+    pub conaryd: Option<Conaryd>,
+    /// Where a kick of the steward's pass of a repo goes, `/OWNER/REPO`
+    /// added: burrow-events' kick of the steward's handler.
+    pub steward_kick: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Conaryd {
     /// conaryd's events file as burrow renders it, `repos` empty: checked
     /// against Conary's types as the machine is built.
     pub events_template: PathBuf,
     /// The events file conaryd reads, the template with its repos.
     pub events: PathBuf,
-    /// The sha256 of the events file conaryd last started on, written
-    /// once it has (autoland/landing.nix's conary-flow-given).
-    pub conaryd_started: PathBuf,
-    /// Where a kick of the steward's pass of a repo goes, `/OWNER/REPO`
-    /// added: burrow-events' kick of the steward's handler.
-    pub steward_kick: String,
+    /// Counts the events file's publications: written after each one, so
+    /// the number conaryd started on names one publication, never two
+    /// that happen to hold the same repos.
+    pub serial: PathBuf,
+    /// The serial conaryd last started on, written once it has
+    /// (autoland/landing.nix's conary-flow-given).
+    pub started: PathBuf,
 }
 
 /// What a run does beyond its files: wake the owner a repo went to.
@@ -111,7 +127,11 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
     let admission = settings.snapshot()?;
     let allowed = |repo: &str| admission.decision(repo).allowed;
     let mut record = Record::read(&path)?;
-    let template: Runtime = read_json(&cfg.events_template)?;
+    let template: Option<Runtime> = cfg
+        .conaryd
+        .as_ref()
+        .map(|c| read_json(&c.events_template))
+        .transpose()?;
     let mut moved = Moved::default();
     let now = burrow_settings::now();
 
@@ -150,7 +170,7 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
     // Published before anything waits on it: from here the steward lets go
     // at its next decision, and conaryd is no longer given a repo it's
     // handing back.
-    publish(&record, &path, &template, &cfg.events, &allowed)?;
+    publish(&record, &path, cfg, template.as_ref(), &allowed)?;
     for repo in moved.started.keys().chain(&moved.undone) {
         if record.holding(repo).owner == Owner::Steward {
             // It lets go, or carries on, at its next pass: this one.
@@ -167,10 +187,7 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
         let Some(to) = h.to else { continue };
         let quiet = match h.owner {
             Owner::Steward => released.get(&repo) == Some(&h.generation),
-            Owner::Conaryd => {
-                restarted_without(&cfg.events, &cfg.conaryd_started)?
-                    && conaryd_quiet(&template.data, &repo, patience)?
-            }
+            Owner::Conaryd => restarted(cfg)? && conaryd_quiet(&cfg.data, &repo, patience)?,
         };
         if !quiet {
             moved.waiting.insert(repo);
@@ -188,7 +205,7 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
         moved.moved.insert(repo, to);
     }
     if !moved.moved.is_empty() {
-        publish(&record, &path, &template, &cfg.events, &allowed)?;
+        publish(&record, &path, cfg, template.as_ref(), &allowed)?;
     }
     for (repo, to) in &moved.moved {
         if *to == Owner::Steward {
@@ -206,19 +223,26 @@ fn wake_steward(wake: &mut dyn Wake, repo: &str) {
     }
 }
 
-/// Whether conaryd has started on the events file as it is now: one
-/// that no longer lists a repo it's letting go of.
-fn restarted_without(events: &Path, started: &Path) -> Result<bool, String> {
-    use sha2::Digest;
-    let now = std::fs::read(events).map_err(|e| format!("{}: {e}", events.display()))?;
-    let hash: String = sha2::Sha256::digest(&now)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    match std::fs::read_to_string(started) {
-        Ok(on) => Ok(on.trim() == hash),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("{}: {e}", started.display())),
+/// Whether conaryd has started since the events file's last publication,
+/// which no longer lists a repo it's letting go of. With no conaryd
+/// running for landing, there's none to start.
+fn restarted(cfg: &Config) -> Result<bool, String> {
+    let Some(c) = &cfg.conaryd else {
+        return Ok(true);
+    };
+    let serial = read_serial(&c.serial)?;
+    Ok(serial.is_some() && read_serial(&c.started)? == serial)
+}
+
+fn read_serial(path: &Path) -> Result<Option<u64>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -228,13 +252,17 @@ fn restarted_without(events: &Path, started: &Path) -> Result<bool, String> {
 fn publish(
     record: &Record,
     path: &Path,
-    template: &Runtime,
-    events: &Path,
+    cfg: &Config,
+    template: Option<&Runtime>,
     allowed: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
     if Record::read(path).ok().as_ref() != Some(record) {
         record.write(path)?;
     }
+    let (Some(c), Some(template)) = (&cfg.conaryd, template) else {
+        return Ok(());
+    };
+    let events = &c.events;
     let mut runtime = template.clone();
     runtime.repos = record
         .repos
@@ -250,11 +278,19 @@ fn publish(
     if std::fs::read(events).ok().as_deref() == Some(&body[..]) {
         return Ok(());
     }
-    let pending = events.with_extension("pending");
-    std::fs::write(&pending, &body)
+    replace(events, &body)?;
+    // After the file it counts, so a serial names a publication that's
+    // already there.
+    let next = read_serial(&c.serial)?.unwrap_or(0) + 1;
+    replace(&c.serial, next.to_string().as_bytes())
+}
+
+fn replace(path: &Path, body: &[u8]) -> Result<(), String> {
+    let pending = path.with_extension("pending");
+    std::fs::write(&pending, body)
         .and_then(|()| std::fs::File::open(&pending)?.sync_all())
-        .and_then(|()| std::fs::rename(&pending, events))
-        .map_err(|e| format!("{}: {e}", events.display()))
+        .and_then(|()| std::fs::rename(&pending, path))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Whether conaryd has let go of `repo`, which it's no longer given: no
@@ -313,18 +349,15 @@ fn conaryd_quiet(data: &Path, repo: &str, patience: &Patience) -> Result<bool, S
 /// that are the same mean nothing changed in between.
 pub fn inputs(cfg: &Config) -> Result<Vec<Option<Vec<u8>>>, String> {
     let settings: burrow_settings::Config = read_json(&cfg.settings)?;
-    [
-        settings.overlay.as_path(),
-        &cfg.steward_released,
-        &cfg.conaryd_started,
-    ]
-    .iter()
-    .map(|p| match std::fs::read(p) {
-        Ok(b) => Ok(Some(b)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", p.display())),
-    })
-    .collect()
+    [settings.overlay.as_path(), &cfg.steward_released]
+        .into_iter()
+        .chain(cfg.conaryd.as_ref().map(|c| c.started.as_path()))
+        .map(|p| match std::fs::read(p) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        })
+        .collect()
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {

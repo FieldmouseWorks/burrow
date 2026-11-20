@@ -25,8 +25,11 @@ let
   dir = "${stateDir}/landing";
   record = cfg.record;
   events = "${dir}/conaryd-events.json";
-  # The sha256 of the events file conaryd last started on.
+  # Counts the events file's publications, written after each one; and
+  # the count conaryd last started on.
+  serial = "${dir}/conaryd-events.serial";
   started = "${dir}/conaryd-started";
+  data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
   # The repos' hooks' secret as burrow-events and the hooks have it,
   # trimmed: conaryd reads a secret file's bytes as they are.
   secret = "/run/conary-flow/webhook";
@@ -47,7 +50,7 @@ let
       # burrow-events passes them on whole.
       secret_path = secret;
       repos = [ ];
-      data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
+      inherit data;
       flow_config = flowConfig;
       policy = ledger.env.CONARY_POLICY;
       token_command = autoland.flow.token;
@@ -62,9 +65,10 @@ let
   driver = pkgs.writeText "burrow-landing.json" (builtins.toJSON {
     settings = config.burrow.settings.file;
     stewardReleased = "${stateDir}/autoland/landing-released.json";
-    eventsTemplate = cfg.eventsTemplate;
-    inherit events;
-    conarydStarted = started;
+    inherit data;
+    # Without conaryd, a repo the record still gives it (its last one taken
+    # off at a deploy) is handed back once the workers it left have exited.
+    conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started; } else null;
     stewardKick = "${config.burrow.events.kick}/autoland";
   });
 in
@@ -119,6 +123,56 @@ in
       burrow.events.handlers.autoland.landing = true;
       burrow.events.handlers.autoland-continue.landing = true;
     }
+    # burrow-landing wherever the ledger is, conaryd or not: a repo the
+    # record gives conaryd is handed back through it even once the last
+    # repo is taken off burrow.landing.conaryd.
+    (lib.mkIf ledger.enable {
+      systemd.tmpfiles.settings.burrow.${dir}.d = {
+        mode = "0755";
+        user = ledger.flow.user;
+        group = config.users.users.${ledger.flow.user}.group;
+      };
+
+      systemd.services.burrow-landing = {
+        description = "landing: move each repo's landing between the steward and conaryd as its setting says";
+        # And once as the machine starts, carrying on a handover a
+        # shutdown cut short.
+        wantedBy = [ "multi-user.target" ];
+        after = [ "burrow-events.service" ];
+        # A switch leaves a running one be: the path unit's next start is
+        # the new one, and it goes on from the record.
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          # The flow's own: it reads conaryd's state, its pass's lock and
+          # its workers' locks, and writes conaryd's events file.
+          User = ledger.flow.user;
+          ExecStart = "${package}/bin/burrow-landing ${driver}";
+          # It waits for conaryd's workers in a repo it hands back to
+          # exit, each within its job's or proof's own timeout.
+          TimeoutStartSec = "${toString (lib.max autoland.jobTimeoutMinutes autoland.proofTimeoutMinutes + 15)}min";
+          # A run that fails (a pass of conaryd's that didn't end, a file
+          # it couldn't read) goes again from the record.
+          Restart = "on-failure";
+          RestartSec = "1min";
+        };
+      };
+      # The backstop: a pipeline-only hold's end writes nothing, and a run
+      # still waiting on a worker can't hear a change that came meanwhile
+      # until it's done (it then goes again on its own).
+      systemd.timers.burrow-landing = {
+        wantedBy = [ "timers.target" ];
+        timerConfig.OnUnitInactiveSec = "5min";
+      };
+      systemd.paths.burrow-landing = {
+        wantedBy = [ "multi-user.target" ];
+        pathConfig.PathChanged = [
+          config.burrow.settings.effective.overlay
+          "${stateDir}/autoland/landing-released.json"
+          "/run/current-system"
+        ] ++ lib.optional on started;
+      };
+    })
     (lib.mkIf on {
       assertions = [{
         assertion = ledger.enable;
@@ -136,12 +190,6 @@ in
         # What Conary's docs/conaryd.md has a repo's hook send it.
         events = [ "pull_request" "pull_request_review" "pull_request_review_comment"
           "pull_request_review_thread" "issue_comment" "check_suite" "check_run" "status" "push" ];
-      };
-
-      systemd.tmpfiles.settings.burrow.${dir}.d = {
-        mode = "0755";
-        user = ledger.flow.user;
-        group = config.users.users.${ledger.flow.user}.group;
       };
 
       systemd.services = {
@@ -186,73 +234,32 @@ in
         # start, which kicks every repo it's given. One taken off is let go
         # of only once conaryd has started again without it: a pass reads
         # its repos before it takes the repo's lock, so until then one that
-        # read the old file may still start. Then it says which file it
-        # started on, which burrow-landing waits for.
+        # read the old file may still start. Then it says which publication
+        # it started on, which burrow-landing waits for.
         conary-flow-given = {
           description = "landing: restart conaryd's flow on the repos it's given";
           restartIfChanged = false;
           serviceConfig.Type = "oneshot";
-          # Again while the file changed under it: a change that comes
-          # while this runs may start no run of its own.
+          # The publication it started on, by its serial (written after the
+          # file, so conaryd read that one or a later one); again while it
+          # changed under it, since a change that comes while this runs may
+          # start no run of its own.
           script = ''
-            hash() { ${pkgs.coreutils}/bin/sha256sum < ${events} | ${pkgs.coreutils}/bin/cut -d' ' -f1; }
             while :; do
-              on=$(hash)
+              on=$(cat ${serial})
               ${pkgs.systemd}/bin/systemctl restart conary-flow.service
               printf %s "$on" > ${started}.pending
-              ${pkgs.coreutils}/bin/chmod 0644 ${started}.pending
-              ${pkgs.coreutils}/bin/mv ${started}.pending ${started}
-              [ "$(hash)" = "$on" ] && break
+              chmod 0644 ${started}.pending
+              mv ${started}.pending ${started}
+              [ "$(cat ${serial})" = "$on" ] && break
             done
           '';
         };
-        burrow-landing = {
-          description = "landing: move each repo's landing between the steward and conaryd as its setting says";
-          # And once as the machine starts, carrying on a handover a
-          # shutdown cut short.
-          wantedBy = [ "multi-user.target" ];
-          after = [ "burrow-events.service" ];
-          # A switch leaves a running one be: the path unit's next start is
-          # the new one, and it goes on from the record.
-          restartIfChanged = false;
-          serviceConfig = {
-            Type = "oneshot";
-            # The flow's own: it reads conaryd's state, its pass's lock and
-            # its workers' locks, and writes conaryd's events file.
-            User = ledger.flow.user;
-            ExecStart = "${package}/bin/burrow-landing ${driver}";
-            # It waits for conaryd's workers in a repo it hands back to
-            # exit, each within its job's or proof's own timeout.
-            TimeoutStartSec = "${toString (lib.max autoland.jobTimeoutMinutes autoland.proofTimeoutMinutes + 15)}min";
-            # A run that fails (a pass of conaryd's that didn't end, a file
-            # it couldn't read) goes again from the record.
-            Restart = "on-failure";
-            RestartSec = "1min";
-          };
-        };
-      };
-      # The backstop: a pipeline-only hold's end writes nothing, and a run
-      # still waiting on a worker can't hear a change that came meanwhile
-      # until it's done (it then goes again on its own).
-      systemd.timers.burrow-landing = {
-        wantedBy = [ "timers.target" ];
-        timerConfig.OnUnitInactiveSec = "5min";
       };
       systemd.paths = {
         conary-flow-given = {
           wantedBy = [ "multi-user.target" ];
-          pathConfig.PathChanged = events;
-        };
-        # The setting, the steward letting go, and each deploy (a repo
-        # taken off burrow.landing.conaryd goes back to the steward).
-        burrow-landing = {
-          wantedBy = [ "multi-user.target" ];
-          pathConfig.PathChanged = [
-            config.burrow.settings.effective.overlay
-            "${stateDir}/autoland/landing-released.json"
-            started
-            "/run/current-system"
-          ];
+          pathConfig.PathChanged = serial;
         };
       };
     })

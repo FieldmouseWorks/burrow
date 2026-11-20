@@ -27,7 +27,8 @@ let
   template = on.burrow.landing.eventsTemplate;
   handlers = c: c.burrow.events.handlers;
   wrong = lib.filter (x: x != null) [
-    (if plain.systemd.services ? conary-flow || plain.systemd.services ? burrow-landing then "conaryd runs with no repo it may have" else null)
+    (if plain.systemd.services ? conary-flow then "conaryd runs with no repo it may have" else null)
+    (if !(plain.systemd.services ? burrow-landing) || plain.systemd.services.burrow-landing.serviceConfig.User != plain.burrow.ledger.flow.user then "with no repo for conaryd, nothing could hand back one the record still gives it" else null)
     (if plain.burrow.events.landing.forward != null then "deliveries are forwarded with no conaryd" else null)
     (if plain.burrow.events.landing.record != plain.burrow.landing.record then "burrow-events doesn't read the record by default" else null)
     (if !(handlers plain).autoland.landing || !(handlers plain).autoland-continue.landing then "the steward's handlers take repos the record gives conaryd" else null)
@@ -41,11 +42,10 @@ let
     (if flow.serviceConfig.KillMode != "process" then "a restart of conaryd kills the flow's workers" else null)
     (if !(lib.elem "${on.burrow.stateDir}/autoland/landing-released.json" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the steward let go" else null)
     (if !(lib.elem "${on.burrow.stateDir}/landing/conaryd-started" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear conaryd start again without a repo it let go of" else null)
-    (if !(lib.hasInfix "conaryd-started" units.conary-flow-given.script) then "conaryd's restart isn't recorded, so a free lock would count as its release" else null)
+    (if !(lib.hasInfix "conaryd-started" units.conary-flow-given.script) || on.systemd.paths.conary-flow-given.pathConfig.PathChanged != "${on.burrow.stateDir}/landing/conaryd-events.serial" then "conaryd's restart isn't recorded by publication, so a free lock would count as its release" else null)
     (if !(on.systemd.timers ? burrow-landing) || driver.serviceConfig.Restart != "on-failure" then "a failed or missed run of burrow-landing isn't run again" else null)
     (if !(flow.serviceConfig ? ExecStartPre) then "conaryd reads the hooks' secret untrimmed" else null)
     (if !(lib.elem on.burrow.settings.effective.overlay on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the setting change" else null)
-    (if on.systemd.paths.conary-flow-given.pathConfig.PathChanged != "${on.burrow.stateDir}/landing/conaryd-events.json" then "conaryd isn't restarted when it's given a repo" else null)
     (if on.burrow.events.landing.forward != on.burrow.landing.port then "deliveries don't go where conaryd listens" else null)
     (if !(lib.all (e: lib.elem e on.burrow.events.hookEvents) [ "check_run" "pull_request_review_thread" "push" ]) then "the hooks don't send what conaryd takes" else null)
     (if !(lib.any (lib.hasInfix "shadow each repo first") (failing (machine [{ burrow.landing.conaryd = [ "sam/homelab" ]; }]))) then "a repo conaryd may have that was never shadowed is taken" else null)

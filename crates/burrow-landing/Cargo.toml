@@ -14,7 +14,6 @@ conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526
 conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "1ef526b32fc70b73633b6cc37a8e3c7073b4e9ef" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]

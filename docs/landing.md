@@ -22,7 +22,9 @@ never waits on the pipeline being left. `conaryd` is refused for a repo that
 isn't in `burrow.landing.conaryd` (a deploy option). A repo may only be listed
 there once it's shadowed (`burrow.autoland.shadow`). Being listed gives conaryd
 nothing; only the setting does. Taking a repo off the list at a deploy hands
-it back to the steward through the same handover.
+it back to the steward through the same handover. That works even when it's
+the last repo and conaryd no longer runs: burrow-landing runs wherever the
+ledger does, and then waits only for the workers conaryd left.
 
 ## Who lands, and when
 
@@ -57,10 +59,12 @@ at the same time:
      it isn't given.
 2. **The new owner takes the repo** once the one letting go is quiet:
    - The steward is quiet when its marker names this generation.
-   - conaryd is quiet once three things hold. It has started again on an
-     events file without the repo: a pass reads its repos before it takes
-     the repo's lock, so until the restart, a pass that read the old file
-     could still start. No pass holds the flow's repository lock. Every
+   - conaryd is quiet once three things hold. It has started again since
+     the events file was last published without the repo, which a
+     publication serial shows; matching contents isn't enough, because a
+     quick hand-over-and-back republishes the same file. A pass reads its
+     repos before it takes the repo's lock, so until the restart, a pass
+     that read the old file could still start. No pass holds the flow's repository lock. Every
      worker it launched there has exited. The last two are Conary's own
      locks, and they're waited on, never guessed at.
 
