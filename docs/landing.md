@@ -113,7 +113,9 @@ a pause, and a pause doesn't move ownership:
   parks the repo's Claude jobs and proofs. Under the steward, its decision
   holds every landing. Under conaryd, the repo is taken off conaryd's events
   file while the pause lasts, so conaryd passes it no more. Its workers
-  aren't vacated, though; their jobs are proj's to park. A pipeline-only
+  aren't vacated, though; their jobs are proj's to park. With the only
+  repo conaryd is given paused, conaryd stops until the pause ends (it runs
+  only while it's given a repo). A pipeline-only
   hold that ends writes nothing, so the repo is given back to conaryd at
   burrow-landing's next run.
 - The flow's own switch, `cn flow pause OWNER/REPO --reason TEXT`, run as the

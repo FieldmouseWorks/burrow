@@ -145,12 +145,16 @@ in
         # A switch leaves a running one be: the path unit's next start is
         # the new one, and it goes on from the record.
         restartIfChanged = false;
-        # No start limit: a handover's own steps (the setting, the steward's
-        # release, conaryd's restart on the publication) start it in a
-        # burst, and a start refused for it would fail burrow-landing.path
-        # too, which then hears nothing until the timer's backstop. Each run
-        # is one pass from the record, and nothing it writes starts another.
-        startLimitIntervalSec = 0;
+        # A handover's own steps (the setting, the steward's release,
+        # conaryd's restart on the publication) start it several times at
+        # once, and a start refused by systemd's default limit (five in ten
+        # seconds) fails burrow-landing.path too, which then hears nothing
+        # until the timer's backstop. A publication does start one more run
+        # (through conaryd-started), but that run publishes nothing new, so
+        # a handover ends; the limit stays, well above one, to stop a loop
+        # that wouldn't, loudly.
+        startLimitIntervalSec = 10;
+        startLimitBurst = 30;
         # One of the flow's own units, on its state (burrow.ledger keeps
         # the controller to those).
         environment = ledger.flow.env;

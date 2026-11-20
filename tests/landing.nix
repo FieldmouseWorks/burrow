@@ -63,8 +63,7 @@ pkgs.testers.runNixOSTest {
     def record():
         return json.loads(machine.succeed("cat ${landing}/owners.json"))["repos"].get("${repo}", {})
 
-    # A run by hand, on top of those its paths start: a burst no start limit
-    # refuses, so its path unit keeps listening.
+    # A run by hand, on top of those its paths start.
     def landing():
         machine.succeed("systemctl start burrow-landing.service")
 
@@ -126,5 +125,12 @@ pkgs.testers.runNixOSTest {
         machine.fail("systemctl -q is-failed conary-flow-given.service")
         machine.fail("systemctl -q is-failed burrow-landing.service")
         machine.succeed("systemctl -q is-active burrow-landing.path conary-flow-given.path")
+
+    with subtest("a handover's burst of starts doesn't cost burrow-landing its path"):
+        # More than systemd's default limit lets through in ten seconds: the
+        # setting, the steward's release and conaryd's restart can.
+        for _ in range(8):
+            landing()
+        machine.succeed("systemctl -q is-active burrow-landing.path")
   '';
 }

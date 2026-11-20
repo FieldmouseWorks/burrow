@@ -60,7 +60,7 @@ let
     (if !(lib.elem "${on.burrow.stateDir}/autoland/landing-released.json" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the steward let go" else null)
     (if !(lib.elem "${on.burrow.stateDir}/landing/conaryd-started" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear conaryd start again without a repo it let go of" else null)
     (if !(lib.hasInfix "conaryd-started" units.conary-flow-given.script) || on.systemd.paths.conary-flow-given.pathConfig.PathChanged != "${on.burrow.stateDir}/landing/conaryd-events.serial" then "conaryd's restart isn't recorded by publication, so a free lock would count as its release" else null)
-    (if driver.startLimitIntervalSec or null != 0 then "a handover's burst of starts can hit burrow-landing's start limit, and fail its path unit" else null)
+    (if lib.toInt (toString (driver.unitConfig.StartLimitBurst or 5)) < 20 then "a handover's burst of starts can hit burrow-landing's start limit, and fail its path unit" else null)
     (if !(on.systemd.timers ? burrow-landing) || driver.serviceConfig.Restart != "on-failure" then "a failed or missed run of burrow-landing isn't run again" else null)
     (if !(flow.serviceConfig ? ExecStartPre) then "conaryd reads the hooks' secret untrimmed" else null)
     (if !(lib.elem on.burrow.settings.effective.overlay on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the setting change" else null)
