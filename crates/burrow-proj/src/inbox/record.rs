@@ -709,7 +709,10 @@ impl Look<'_, '_> {
     fn ready(&self, repo: &str, name: &str, n: &str, i: &Value) -> Option<Record> {
         let p = self.pass;
         let t = p.inbox.triage.as_ref()?;
+        // A notice no job is handed ([`super::triage::notice`]) as GitHub
+        // has it now, though a ready list kept from before names it.
         if i.get("pull_request").is_some()
+            || super::triage::notice(i)
             || !p.eligible(repo, i)
             || super::enrollment::automatic_parked(p.inbox, repo, i)
         {

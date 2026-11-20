@@ -53,6 +53,13 @@ fn the_drain_picks() {
         found("sam/elsewhere", 4, "sam", &["ready"], old),
         found("sam/game", 4, "sam", &["later"], old),
         found("sam/game", 4, "sam", &["ready", "outside text"], old),
+        // A notice its opener settles, as GitHub has it once the mark is
+        // on, though a ready list kept from before still names it.
+        {
+            let mut i = found("sam/game", 4, "sam", &["ready"], old);
+            i["body"] = json!(format!("It's flaky.\n\n{}", burrow_notify::HANDLED));
+            i
+        },
     ] {
         assert_eq!(
             pick(std::slice::from_ref(&passed_over)),
