@@ -6,13 +6,15 @@
 { self, pkgs }:
 let
   # How long burrow-agent itself gives a sandbox to answer, booting or
-  # running: BOOT (crates/burrow-agent/src/ssh.rs). The test waits on a
-  # nested boot as long as the agent does, never less: on a loaded machine
-  # one takes minutes, and a shorter wait only fails the test for it.
+  # running: BOOT (crates/burrow-agent/src/ssh.rs). A command that boots
+  # one gets BOOT for it to come up, then BOOT again for its own banner.
+  # The test waits on a nested boot as long as the agent does, never less:
+  # on a loaded machine one takes minutes, and a shorter wait only fails
+  # the test for it.
   agentSecs = name: pkgs.lib.toInt (builtins.head (builtins.match
     ".*pub const ${name}: Duration = Duration::from_secs\\(([0-9]+)\\);.*"
     (builtins.readFile ../crates/burrow-agent/src/ssh.rs)));
-  boot = agentSecs "BOOT";
+  boot = 2 * agentSecs "BOOT";
 in
 pkgs.testers.runNixOSTest {
   name = "agents";
