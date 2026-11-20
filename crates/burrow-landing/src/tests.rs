@@ -60,6 +60,7 @@ impl Machine {
                 events: p("events.json"),
                 serial: p("events-serial"),
                 started: p("conaryd-started"),
+                given: p("conaryd-given"),
             }),
             steward_kick: String::new(),
         };
@@ -98,6 +99,19 @@ impl Machine {
         assert!(!(steward && conaryd), "both land {REPO}");
         let allowed = self.settings.decision(REPO).unwrap().allowed;
         assert_eq!(conaryd, self.holding().lands(Owner::Conaryd) && allowed);
+        // And conaryd runs only while it's given a repo (conary-flow's
+        // condition): with none, it isn't started, so a machine that gives
+        // it nothing needs none of what it reads.
+        assert_eq!(
+            self.c().given.exists(),
+            !self.given().is_empty(),
+            "conaryd's marker disagrees with its events file"
+        );
+    }
+
+    /// The serial's count.
+    fn serial(&self) -> u64 {
+        read_serial(&self.c().serial).unwrap().unwrap().count
     }
 
     /// conaryd started again on the events file as it is now, as
@@ -490,4 +504,65 @@ fn nothing_moves_on_what_cant_be_read() {
     let before = fs::read(&m.c().events).unwrap();
     assert!(run(&m.cfg, &mut kicks, &PATIENT).is_err());
     assert_eq!(fs::read(&m.c().events).unwrap(), before);
+}
+
+#[test]
+fn conaryd_runs_only_while_it_is_given_a_repo() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    // Listed, but given nothing: the events file is there, conaryd's
+    // marker isn't, so conary-flow isn't started (nor fails on what it
+    // reads, on a machine without its credentials).
+    m.run(&mut kicks);
+    assert!(m.c().events.exists() && !m.c().given.exists());
+    // A marker put there by hand, holding no count, is taken away again.
+    let before = m.serial();
+    fs::write(&m.c().given, "").unwrap();
+    m.run(&mut kicks);
+    assert!(!m.c().given.exists(), "a stray marker stayed");
+    assert_eq!(m.serial(), before + 1);
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 1);
+
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    m.run(&mut kicks);
+    assert!(m.c().given.exists());
+
+    // A marker gone missing with the repo still given (a machine whose
+    // burrow-landing predates it, or a hand's rm) is put back, and counted
+    // as a publication even though the events file didn't change, so
+    // conary-flow-given starts conaryd on it.
+    let before = m.serial();
+    fs::remove_file(&m.c().given).unwrap();
+    m.run(&mut kicks);
+    assert!(m.c().given.exists());
+    assert_eq!(m.serial(), before + 1);
+    // Once there, a run changes nothing: conaryd isn't restarted for it.
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 1);
+
+    // The same, cut short between the marker and its count: the marker
+    // is back, but the serial didn't count it. The next run still owes
+    // conaryd that publication, and counts it once.
+    let serial = fs::read(&m.c().serial).unwrap();
+    fs::remove_file(&m.c().given).unwrap();
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2);
+    fs::write(&m.c().serial, &serial).unwrap();
+    assert!(m.c().given.exists());
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2, "a recovery cut short was lost");
+    m.run(&mut kicks);
+    assert_eq!(m.serial(), before + 2);
+
+    // Taken off its last repo, the marker goes with the publication that
+    // takes it off, so conaryd's restart on it stops it for good.
+    m.set("steward");
+    m.run(&mut kicks);
+    assert!(m.given().is_empty() && !m.c().given.exists());
+    m.started();
+    assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));
+    assert!(!m.c().given.exists());
 }

@@ -44,6 +44,8 @@ let
   askedFlow = asked false;
   door = askedFlow.burrow.autoland.askAsOwner.door;
   units = on.systemd.services;
+  # There only while burrow-landing gives conaryd a repo.
+  given = "${on.burrow.stateDir}/landing/conaryd-given";
   flow = units.conary-flow;
   driver = units.burrow-landing;
   template = on.burrow.landing.eventsTemplate;
@@ -64,10 +66,12 @@ let
     (if on.burrow.settings.effective.conaryd != [ "sam/homelab" ] then "the settings don't know which repos conaryd may have" else null)
     (if flow.serviceConfig.User != on.burrow.ledger.flow.user || driver.serviceConfig.User != on.burrow.ledger.flow.user then "conaryd's flow or burrow-landing runs as someone other than the flow's user" else null)
     (if flow.environment.CONARY_EVENTS_CONFIG != "${on.burrow.stateDir}/landing/conaryd-events.json" then "conaryd doesn't read the events file burrow-landing writes" else null)
+    (if !(lib.elem given flow.unitConfig.ConditionPathExists) then "conaryd starts with no repo given it, and fails on credentials a machine that gives it none needn't have" else null)
     (if flow.serviceConfig.KillMode != "process" then "a restart of conaryd kills the flow's workers" else null)
     (if !(lib.elem "${on.burrow.stateDir}/autoland/landing-released.json" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the steward let go" else null)
     (if !(lib.elem "${on.burrow.stateDir}/landing/conaryd-started" on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear conaryd start again without a repo it let go of" else null)
     (if !(lib.hasInfix "conaryd-started" units.conary-flow-given.script) || on.systemd.paths.conary-flow-given.pathConfig.PathChanged != "${on.burrow.stateDir}/landing/conaryd-events.serial" then "conaryd's restart isn't recorded by publication, so a free lock would count as its release" else null)
+    (if lib.toInt (toString (driver.unitConfig.StartLimitBurst or 5)) < 20 then "a handover's burst of starts can hit burrow-landing's start limit, and fail its path unit" else null)
     (if !(on.systemd.timers ? burrow-landing) || driver.serviceConfig.Restart != "on-failure" then "a failed or missed run of burrow-landing isn't run again" else null)
     (if !(flow.serviceConfig ? ExecStartPre) then "conaryd reads the hooks' secret untrimmed" else null)
     (if !(lib.elem on.burrow.settings.effective.overlay on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the setting change" else null)
@@ -109,6 +113,8 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   jq -e 'has("review_ask") | not' ${on.burrow.autoland.flowConfigs}/sam/homelab.json >/dev/null \
     || fail "a flow config asks through a door the machine doesn't have"
   grep -q "${template}" ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} || fail "burrow-landing doesn't write the rendered events file"
+  jq -e '.conaryd.given == "${given}"' ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} >/dev/null \
+    || fail "burrow-landing doesn't keep the marker conaryd starts on, so it starts with no repo given it"
   jq '. + {bogus: 1}' ${template} > key.json
   jq '.repos = "sam/homelab"' ${template} > type.json
   ! ${flowFiles} events key.json || fail "an events file with a key Conary doesn't know was taken"

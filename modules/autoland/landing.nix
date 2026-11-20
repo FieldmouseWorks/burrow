@@ -29,6 +29,10 @@ let
   # the count conaryd last started on.
   serial = "${dir}/conaryd-events.serial";
   started = "${dir}/conaryd-started";
+  # There while the events file gives conaryd a repo, holding the count of
+  # the publication that put it there: conaryd runs only then
+  # (crates/burrow-landing).
+  given = "${dir}/conaryd-given";
   data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
   # The repos' hooks' secret as burrow-events and the hooks have it,
   # trimmed: conaryd reads a secret file's bytes as they are.
@@ -68,7 +72,7 @@ let
     inherit data;
     # Without conaryd, a repo the record still gives it (its last one taken
     # off at a deploy) is handed back once the workers it left have exited.
-    conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started; } else null;
+    conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started given; } else null;
     stewardKick = "${config.burrow.events.kick}/autoland";
   });
 in
@@ -142,6 +146,16 @@ in
         # A switch leaves a running one be: the path unit's next start is
         # the new one, and it goes on from the record.
         restartIfChanged = false;
+        # A handover's own steps (the setting, the steward's release,
+        # conaryd's restart on the publication) start it several times at
+        # once, and a start refused by systemd's default limit (five in ten
+        # seconds) fails burrow-landing.path too, which then hears nothing
+        # until the timer's backstop. A publication does start one more run
+        # (through conaryd-started), but that run publishes nothing new, so
+        # a handover ends; the limit stays, well above one, to stop a loop
+        # that wouldn't, loudly.
+        startLimitIntervalSec = 10;
+        startLimitBurst = 30;
         # One of the flow's own units, on its state (burrow.ledger keeps
         # the controller to those).
         environment = ledger.flow.env;
@@ -207,13 +221,17 @@ in
         # network and no token): it takes the deliveries burrow-events
         # passes it and lands the repos its events file lists, as the
         # flow's controller where it has one. Started only once
-        # burrow-landing has written that file.
+        # burrow-landing has written that file and given it a repo: being
+        # listed in burrow.landing.conaryd gives it none, and with none it
+        # neither runs nor reads its credentials, so a machine that has
+        # none (the rehearsal's VM) never sees it fail on them. Given a
+        # repo without them, it fails, and says so.
         conary-flow = {
           description = "landing: Conary's flow, for the repos burrow-landing gives conaryd";
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
-          unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events ];
+          unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events given ];
           environment = ledger.env // ledger.flow.env // {
             CONARY_SOCKET = socket;
             CONARY_EVENTS_CONFIG = events;

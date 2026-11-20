@@ -82,6 +82,17 @@ at the same time:
      kicks every repo it's given.
    - The steward: a kick of the repo's pass.
 
+conaryd runs only while it's given a repo. Next to its events file,
+burrow-landing keeps `landing/conaryd-given`, there exactly while the file
+gives conaryd one; conary-flow starts only while it's there, and a change of
+it is a publication of its own, counted even when the file's repos didn't
+change. It holds the count of the publication that put it there, so one a
+run cut short before its count is still counted at the next run. So conaryd starts with the first repo it's given, and stops for good
+at the restart that takes off its last one. A machine that lists repos in
+`burrow.landing.conaryd` but gives conaryd none never starts it, and so
+never needs its credentials (the hooks' secret and the App's key). Given a
+repo without them, conaryd fails, and says so.
+
 Setting the owner back before a handover finishes ends the handover, and
 the owner that was letting go carries on. A release for the handover that
 was ended counts for nothing, because its generation is spent.
@@ -103,7 +114,9 @@ a pause, and a pause doesn't move ownership:
   parks the repo's Claude jobs and proofs. Under the steward, its decision
   holds every landing. Under conaryd, the repo is taken off conaryd's events
   file while the pause lasts, so conaryd passes it no more. Its workers
-  aren't vacated, though; their jobs are proj's to park. A pipeline-only
+  aren't vacated, though; their jobs are proj's to park. With the only
+  repo conaryd is given paused, conaryd stops until the pause ends (it runs
+  only while it's given a repo). A pipeline-only
   hold that ends writes nothing, so the repo is given back to conaryd at
   burrow-landing's next run.
 - The flow's own switch, `cn flow pause OWNER/REPO --reason TEXT`, run as the
