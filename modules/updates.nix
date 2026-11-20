@@ -767,7 +767,7 @@ in
         ${config.networking.hostName} keeps itself current; nobody runs updates by hand.
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
-          ${if train then "builds and runs the VM tests, then puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces its head). A bump is never switched to before it lands: only main goes live, so a pin goes live after it lands, like any other change" else "builds, runs the VM tests, switches, checks health, confirms and pushes to main"}.
+          ${if train then "builds and runs the VM tests, then puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, unless a check fails on it, a finding on it is left open or it stops merging into main: then a fresh bump replaces its head). A bump is never switched to before it lands: only main goes live, so a pin goes live after it lands, like any other change" else "builds, runs the VM tests, switches, checks health, confirms and pushes to main"}.
           It deploys main, so a merged PR goes live the same way, switched with the dead man's switch and a health check. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
           aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.

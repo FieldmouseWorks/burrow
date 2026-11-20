@@ -140,7 +140,7 @@ fn its_pr_says_what_the_commit_passed_and_that_its_not_live() {
         body,
         "Pushed by box-update after the build and the VM tests passed.\n\n\
          It is not live: box runs main. The steward settles this PR and the merge train lands it; until then \
-         box-update brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it. Only main goes live: box-update deploys this after it lands."
+         box-update brings in nothing newer, unless a check fails on it, a finding on it is left open or it stops merging into main: then a fresh bump replaces it. Only main goes live: box-update deploys this after it lands."
     );
 }
 
@@ -398,6 +398,52 @@ fn a_finding_left_open_on_its_own_head_holds_it_as_red_does() {
         Err("its PR #7 isn't stuck any more, so it stays as it is".into())
     );
     assert_eq!(m.branch(), pr.head);
+}
+
+/// A GitHub that says whether `head`'s PR merges into main: no check has run
+/// on it and no thread is open.
+fn merging(head: &str, mergeable: &str) -> Fake {
+    let mut said = checked(head, &[], false);
+    said["data"]["repository"]["pullRequest"]["mergeable"] = json!(mergeable);
+    let mut gh = Fake::default();
+    gh.on("POST", "graphql", vec![ok(200, said, &[])]);
+    gh
+}
+
+#[test]
+fn a_head_main_moved_under_is_stuck_as_red_is() {
+    let m = Machine::new();
+    let pr = m.pushed_before("v2");
+    // It merges, or GitHub hasn't worked out whether it does (the next run
+    // reads it again): it's ridden.
+    for merges in ["MERGEABLE", "UNKNOWN"] {
+        let mut gh = merging(&pr.head, merges);
+        assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(None), "{merges}");
+    }
+    assert!(!m.has(&pr.head), "fetched a head that isn't stuck");
+    // Main moved where the bump did: no check runs on that head, so none
+    // fails to say it's stuck. It's fetched, for `replaces`, and a fresh
+    // bump on main goes up in its place.
+    let mut gh = merging(&pr.head, "CONFLICTING");
+    assert_eq!(
+        stuck(&m.cfg, m.t(), &mut gh, &pr),
+        Ok(Some(Stuck::Conflict))
+    );
+    assert!(m.has(&pr.head), "didn't fetch the head in conflict");
+    let mut gh = merging(&pr.head, "CONFLICTING");
+    let url = "https://github.com/sam/homelab/pull/7";
+    gh.on(
+        "PATCH",
+        "repos/sam/homelab/pulls/7",
+        vec![ok(200, json!({"html_url": url}), &[])],
+    );
+    assert_eq!(
+        replace(&m.cfg, m.t(), &mut gh, &pr),
+        Ok(format!(
+            "{url}, in place of its head {}, which was in conflict with main",
+            &pr.head[..7]
+        ))
+    );
 }
 
 #[test]
