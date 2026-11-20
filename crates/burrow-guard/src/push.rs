@@ -90,7 +90,14 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
     let mut repo = Repo::default();
     // Every word it reads, an option's value too.
     let globbed = Cell::new(false);
-    let mut words = words.inspect(|w| globbed.set(globbed.get() || shell::globs(w)));
+    // Every word it reads, push's own too: one with an expansion in it, git's
+    // or push's, may split into any words, options among them, unless it's
+    // quoted, which the guard no longer sees.
+    let expanded = Cell::new(false);
+    let mut words = words.inspect(|w| {
+        globbed.set(globbed.get() || shell::globs(w));
+        expanded.set(expanded.get() || unknown(w));
+    });
     let unread = || {
         let push = Push {
             globbed: true,
@@ -104,13 +111,10 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
             "push" => {
                 let mut push = Push::read(words);
                 push.repo = repo;
+                push.unread = expanded.get();
                 return Some((at, push));
             }
-            "-C" => {
-                let dir = words.next()?;
-                repo.unread |= unknown(dir);
-                at = at.join(dir);
-            }
+            "-C" => at = at.join(words.next()?),
             "-c" => repo.config(words.next()?),
             "--config-env" => repo.config_env(words.next()?),
             "--git-dir" | "--work-tree" => {
@@ -124,9 +128,7 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
             "--namespace" | "--attr-source" | "--super-prefix" => {
                 words.next();
             }
-            w if w.starts_with('-') => {}
-            // It may be any of git's options.
-            w if unknown(w) => repo.unread = true,
+            w if w.starts_with('-') || unknown(w) => {}
             _ => return None,
         }
     }
@@ -147,9 +149,9 @@ struct Push {
     /// whatever files match it: any number of words, which may force
     /// (`-f`, `+…`) and name any branch.
     globbed: bool,
-    /// A word of its own the guard can't read, which may be any option or
-    /// refspec (`$(printf -- -f)`, `"$x"`): an expansion where an option's
-    /// name or a refspec begins. An option's value can't be one.
+    /// A word the guard can't read, its own or git's: an expansion, which may
+    /// be any words, options and refspecs among them (`$(printf -- -f)`,
+    /// `pr$(printf ' -f')`, `-c x=$(…)`).
     unread: bool,
     /// The remote `--repo` names, used where no word names one.
     remote: Option<String>,
@@ -166,19 +168,16 @@ struct Repo {
     /// Each, for git to read the configuration with: `-c` settings,
     /// `--git-dir`, `--work-tree` and `--bare`.
     args: Vec<String>,
-    /// One the guard can't read that may configure a push or say where git
-    /// runs: an expansion among them, a `-C` the guard can't name, or a
-    /// remote's setting from `--config-env`.
+    /// A setting from `--config-env` that may configure a push, whose value
+    /// is the environment's, which the guard doesn't see.
     unread: bool,
 }
 
 impl Repo {
-    /// `-c KEY=VALUE`. One with an expansion in it is left out, since git
-    /// reads a value the guard can't, unless it can configure a push.
+    /// `-c KEY=VALUE`. One with an expansion in it is left out: its push
+    /// is unread anyway (see [`Push::unread`]).
     fn config(&mut self, setting: &str) {
-        if unknown(setting) {
-            self.unread |= configures_a_push(setting);
-        } else {
+        if !unknown(setting) {
             self.args.extend(["-c".to_owned(), setting.to_owned()]);
         }
     }
@@ -191,18 +190,16 @@ impl Repo {
 
     /// `--git-dir`, `--work-tree` or `--bare`.
     fn place(&mut self, option: &str) {
-        self.unread |= unknown(option);
         self.args.push(option.to_owned());
     }
 }
 
 /// Whether the `KEY=…` setting can configure a push: a remote's, or one
-/// that reads in other files (`include.path`, `includeIf.….path`), or one
-/// whose key the guard can't read.
+/// that reads in other files (`include.path`, `includeIf.….path`).
 fn configures_a_push(setting: &str) -> bool {
     let key = setting.split('=').next().unwrap_or_default();
     let key = key.to_ascii_lowercase();
-    unknown(&key) || key.starts_with("remote.") || key.starts_with("include")
+    key.starts_with("remote.") || key.starts_with("include")
 }
 
 /// Whether `word` holds an expansion the guard doesn't read: a parameter
@@ -245,13 +242,11 @@ impl Push {
                     break;
                 }
                 // Its text was read in ahead of it, in its place. What `x`
-                // holds if set isn't known, so it isn't taken for the remote,
-                // and may be any option or refspec.
-                w if shell::is_only_a_parameter_text(w) => p.unread = true,
+                // holds if set isn't known, so it isn't taken for the remote.
+                w if shell::is_only_a_parameter_text(w) => {}
                 w if let Some(option) = w.strip_prefix("--") => {
                     let (name, value) = option.split_once('=').unzip();
                     let name = name.unwrap_or(option);
-                    p.unread |= unknown(name);
                     p.lease.read(name, value);
                     let value = match long(name) {
                         Long::Force => {
@@ -275,16 +270,11 @@ impl Push {
                 }
                 // Short options, apart or together: `-f`, `-d` and `-uf`
                 // force; `-o` takes the rest of its word, or the next word.
-                // An expansion may be any of them.
                 w if w.starts_with('-') => {
                     for (i, c) in w.char_indices().skip(1) {
                         match c {
                             'f' => (p.force, p.lease.force) = (true, true),
                             'd' => (p.force, p.lease.delete) = (true, true),
-                            '$' | shell::UNKNOWN => {
-                                p.unread = true;
-                                break;
-                            }
                             'o' => {
                                 if i + 1 == w.len() {
                                     words.next();
@@ -303,11 +293,9 @@ impl Push {
     }
 
     /// The remote or a refspec. A `+` forces, and an empty source deletes;
-    /// `:` alone is an ordinary push of the branches both sides have. One
-    /// that begins with an expansion may be any option or refspec.
+    /// `:` alone is an ordinary push of the branches both sides have.
     fn positional(&mut self, word: &str) {
         self.force |= word.starts_with('+') || (word.starts_with(':') && word != ":");
-        self.unread |= word.starts_with(['$', shell::UNKNOWN]);
         self.positional.push(word.to_owned());
     }
 

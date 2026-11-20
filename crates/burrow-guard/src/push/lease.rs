@@ -13,8 +13,8 @@
 //! (`remote.NAME.push` with a `+`, `remote.NAME.mirror`), from the
 //! repository's configuration or the command's own (`-c`). A delete
 //! rebuilds nothing, so a push that only deletes is let through, forced or
-//! not. And a push the guard can't read in full (an expansion where an
-//! option or refspec begins, a glob, words from its input, configuration
+//! not. And a push the guard can't read in full (an expansion in any of
+//! its words or git's, which may split into any words, a glob, words from its input, configuration
 //! from the environment, or git that can't answer) may force anything, so
 //! it's refused too, unless what it can read already is.
 
@@ -57,7 +57,7 @@ pub const UNLEASED: &str = "Force-push without a lease on the head you last saw:
 pub const CONFIGURED: &str = "Push its remote's git configuration forces (a remote.NAME.push refspec with +, or remote.NAME.mirror), which overrides any lease: another job's or session's commits on the branch would be dropped. Name the destination in the refspec (HEAD:refs/heads/BRANCH), with --force-with-lease --force-if-includes if it has to force, or take the forcing out of the configuration.";
 
 /// What [`unleased`] says of a push it can't read.
-pub const UNREAD: &str = "The guard can't read all of this push (an expansion where an option or refspec begins, a glob, words from its input, git configuration set in the environment or by --config-env, or a place or configuration git couldn't report), so it can't tell whether it forces without a lease on the head you last saw. Write the push out in full: its options, remote and refspecs as plain text, in the repository it runs in (git -C DIR with DIR spelled out).";
+pub const UNREAD: &str = "The guard can't read all of this push (an expansion in any of its words or git's, which may split into options, a glob, words from its input, git configuration set in the environment or by --config-env, or a place or configuration git couldn't report), so it can't tell whether it forces without a lease on the head you last saw. Write the push out in full: its options, remote and refspecs as plain text, in the repository it runs in (git -C DIR with DIR spelled out).";
 
 /// A push's verdict.
 enum Verdict {

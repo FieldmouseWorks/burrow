@@ -98,11 +98,6 @@ fn a_force_push_needs_a_lease_on_what_its_pusher_saw() {
             "git push origin :pr".to_owned(),
             "git push -o ci.skip origin pr".to_owned(),
             "echo git push -o -f".to_owned(),
-            // An expansion that can't begin a word, or is an option's value.
-            "git push origin HEAD:refs/heads/$BRANCH".to_owned(),
-            "git push -o \"$X\" origin pr".to_owned(),
-            "git push --push-option=$(echo x) origin pr".to_owned(),
-            "git -c user.name=$NAME push origin pr".to_owned(),
         ],
         None,
     );
@@ -247,8 +242,8 @@ fn a_remote_configured_to_force_overrides_any_lease() {
     assert_eq!(refusal(&cmd, elsewhere.path()), Some(CONFIGURED), "{cmd}");
 }
 
-/// What the guard can't read may force anything: an expansion where an
-/// option or refspec begins, a glob, words from its input, configuration
+/// What the guard can't read may force anything: an expansion in any of
+/// its words or git's, a glob, words from its input, configuration
 /// from the environment or `--config-env`. What it can read and refuses
 /// says so ahead of what it can't.
 #[test]
@@ -260,6 +255,13 @@ fn a_push_the_guard_cant_read_is_refused() {
         &owned(&[
             "git push $(printf -- -f) origin pr",
             "git push `printf -- -f` origin pr",
+            // Unquoted, an expansion anywhere splits into words of its own.
+            "git push origin pr$(printf ' -f')",
+            "git push origin HEAD:refs/heads/$BRANCH",
+            "git push -o $(echo 'x -f') origin pr",
+            "git push --push-option=$(echo x) origin pr",
+            "git -c user.name=$(echo 'a -c remote.origin.mirror') push origin",
+            "git -c user.name=$NAME push origin pr",
             "git push \"$FLAGS\" origin pr",
             "git push origin \"$BRANCH\"",
             "git push origin ${BRANCH:-pr}",

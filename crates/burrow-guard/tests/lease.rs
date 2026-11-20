@@ -130,6 +130,7 @@ fn a_force_push_rebuilt_from_a_stale_branch_cant_drop_another_jobs_fix() {
         "git -c remote.origin.push=+refs/heads/pr:refs/heads/pr push --force-with-lease --force-if-includes origin pr",
         // A force the guard can't read, or one among words from input.
         "git push $(printf -- -f) origin pr",
+        "git push origin pr$(printf ' -f')",
         "printf '%s\\n' pr | xargs git push -f origin",
     ] {
         assert!(refusal(cmd, &stale).is_some(), "{cmd}");
