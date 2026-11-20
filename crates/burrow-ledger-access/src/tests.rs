@@ -329,10 +329,19 @@ fn on_disk_the_controller_gets_its_access_and_turned_off_keeps_none() {
     std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
         .create(dir.join("etags"))
         .unwrap();
+    // And an answer in it, 0600 as Conary's tempfile is, which takes the
+    // default entries etags took.
+    let answer = dir.join("etags/h1");
+    std::fs::write(&answer, "etag").unwrap();
+    burrow_test::permissions(&answer, 0o600);
     assert!(acl(&dir.join("etags"), ACCESS).is_some());
+    assert!(acl(&answer, ACCESS).is_some());
     run(&dir, Some(ME()));
     assert_eq!(acl(&dir.join("etags"), ACCESS), None);
+    assert_eq!(acl(&dir.join("etags"), DEFAULT), None);
     assert_eq!(mode(&dir.join("etags")), 0o700, "etags isn't widened");
+    assert_eq!(acl(&answer, ACCESS), None, "what etags holds names no one");
+    assert_eq!(mode(&answer), 0o600);
     // What either writer makes takes the directory's default entries.
     std::fs::write(dir.join("made"), "").unwrap();
     std::fs::create_dir(dir.join("cache")).unwrap();

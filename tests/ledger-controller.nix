@@ -48,6 +48,10 @@ let
           : >>"$d/lock"
           : >>"$d/ops.jsonl"
           mkdir -m 0700 "$d/etags"
+          # An answer, 0600 as Conary's tempfile makes it: a default ACL
+          # would override a umask.
+          echo etag >"$d/etags/h1"
+          chmod 600 "$d/etags/h1"
           echo "0 $(id -un)" >"$d/anchor"
           ;;
         sync | sign) sign "$2" ;;
@@ -147,6 +151,9 @@ pkgs.testers.runNixOSTest {
         on.fail(f"runuser -u conary-flow -- ls {ledger}/etags")
         on.fail(f"runuser -u other -- ls {ledger}/etags")
         assert on.succeed(f"stat -c '%U %a' {ledger}/etags").strip() == "dev 700", "etags isn't widened"
+        # Nor does what it holds name anyone.
+        assert on.succeed(f"stat -c '%U %a' {ledger}/etags/h1").strip() == "dev 600"
+        assert on.succeed(f"getfacl -cps {ledger}/etags {ledger}/etags/h1") == ""
         # The directory stats as 775 (its ACL's mask): still nobody else's to write.
         on.fail(f"runuser -u other -- touch {ledger}/x")
         on.fail(f"runuser -u nobody -- touch {ledger}/x")
@@ -180,6 +187,9 @@ pkgs.testers.runNixOSTest {
         # The key the first sync made gets the controller's access at once.
         on.wait_until_succeeds(f"runuser -u conary-flow -- test -r {ledger}/key", timeout=60)
         on.wait_for_unit("burrow-ledger-access.service")
+        # Its next run, as the next boot or switch: the etags cache the
+        # first sync made under the directory's default entries.
+        on.succeed("systemctl restart burrow-ledger-access.service")
         # So the flow makes the merge bases, and burrow.user appends to them.
         on.succeed(f"rm {ledger}/merge-bases")
         for op in ["train-join", "train-step", "evidence", "train-leave"]:

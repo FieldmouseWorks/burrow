@@ -6,7 +6,7 @@
 //! nothing however the key was made; it reads and writes the files Conary's
 //! writer opens in place ([`WRITABLE`]); the directory's default entries let
 //! both writers append to and replace whatever the other made first; a
-//! directory in it (etags) names no one. It says what the access is, not
+//! directory in it (etags), and what it holds, names no one. It says what the access is, not
 //! what to add to it: no entry names anyone but the controller it has now,
 //! so a controller changed or turned off keeps nothing.
 //!
@@ -147,6 +147,12 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         (Some(_), true) => What::Dir,
         (Some(name), false) => What::File(name.to_bytes()),
     };
+    // A directory in the ledger that took its default entries when it was
+    // made (etags, from Conary's first sync) gave them to what was made in
+    // it since: they go with its own, once, as they're found.
+    if matches!(what, What::Dir) && (now.is_some() || default_now.is_some()) {
+        strip_entries(p)?;
+    }
     let want = want(access, what, st.st_mode, now.as_ref(), default_now.as_ref());
     match (&want.access, &now) {
         (Some(want), now) if now.as_ref() != Some(want) => {
@@ -180,6 +186,38 @@ fn stripped(mode: u32, acl: &Acl) -> u32 {
         base.group &= mask;
     }
     (mode & 0o7000) | base.mode()
+}
+
+/// No ACL on any regular file in the directory `dir`, each pinned as the
+/// ledger's entries are.
+fn strip_entries(dir: &Pinned) -> rustix::io::Result<()> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = fs::openat(&dir.fd, c".", flags, Mode::empty())?;
+    for entry in fs::Dir::read_from(&fd)? {
+        let name = entry?.file_name().to_owned();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let file = match fs::openat(&fd, name.as_c_str(), flags, Mode::empty()) {
+            Ok(file) => Pinned {
+                name: Some(name),
+                fd: file,
+            },
+            Err(Errno::NOENT) => continue,
+            Err(e) => return Err(e),
+        };
+        let st = file.stat()?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+            continue;
+        }
+        let path = file.proc();
+        if let Some(now) = read(&path, ACCESS)? {
+            fs::removexattr(&path, ACCESS)?;
+            fs::chmod(&path, Mode::from_raw_mode(stripped(st.st_mode, &now)))?;
+        }
+    }
+    Ok(())
 }
 
 /// Which of the ledger's entries an inode is.
