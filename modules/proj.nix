@@ -50,7 +50,7 @@ let
     hostState = "${stateDir}/proj-questions";
     stream = "${stateDir}/proj-stream";
     scratch = config.burrow.scratchDir;
-    slice = "claude-jobs.slice";
+    inherit (cfg) slice;
     inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
     inherit (config.burrow.events) kick;
     askTimeout = cfg.askTimeout;
@@ -197,6 +197,13 @@ in
 
   options.burrow.proj = {
     enable = lib.mkEnableOption "proj, background agent jobs in each project";
+    slice = lib.mkOption {
+      type = lib.types.str;
+      default = "claude-jobs.slice";
+      internal = true;
+      readOnly = true;
+      description = "The slice of the user's manager each job's unit runs in.";
+    };
     usage.paid = lib.mkOption {
       type = lib.types.bool;
       default = false;

@@ -13,6 +13,10 @@
 # Only burrow-units.service passes, with the whole journal: `burrow-units`
 # run by hand, and its `clear`, ask it to. A burrow-units that stops
 # passing goes stale, which the watchdog catches.
+#
+# A crash that something running sees for itself isn't the machine's: one
+# in a Nix build fails that build, and one in a proj job's unit (a proof of
+# concept, a test binary) is the job's. Neither is an item.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -31,8 +35,9 @@ let
     inherit (cfg) ignore;
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
+    buildGid = if config.nix.enable then config.ids.gids.nixbld else null;
+    inherit (cfg) ownedSlices;
     systemctl = "${config.systemd.package}/bin/systemctl";
-    coredumpctl = "${config.systemd.package}/bin/coredumpctl";
     journalctl = "${config.systemd.package}/bin/journalctl";
     own = "${kick}/units";
     kick = if config.burrow.events.handlers ? watchdog then "${kick}/watchdog" else null;
@@ -76,6 +81,16 @@ in
       description = ''
         Globs (`*`, `?`, `[...]`) of unit names and program paths it never
         watches: ones that fail by design.
+      '';
+    };
+
+    ownedSlices = mkOption {
+      type = types.listOf types.str;
+      default = lib.optional (config.burrow.proj.enable or false) config.burrow.proj.slice;
+      defaultText = lib.literalExpression "[ config.burrow.proj.slice ] when proj is on";
+      description = ''
+        Slices whose units run someone's own work: a crash in one is theirs
+        to see (a job's proof of concept or test binary), never an item.
       '';
     };
 

@@ -33,7 +33,7 @@ use serde::Deserialize;
 
 mod clear_door;
 
-use burrow_units::{Found, cores, failed_names, items, shown, unit_key};
+use burrow_units::{Found, Owned, cores, failed_names, items, shown, unit_key};
 use burrow_watchdog::now;
 use burrow_watchdog::watch::{File as Watch, Item, read};
 
@@ -52,8 +52,17 @@ const RECOVERED: [&str; 2] = [
     "39f53479d3a045ac8e11786248231fbf",
     "7ad2d189f7e94e70a38c781354912448",
 ];
-/// systemd-coredump's word that a program dumped core.
-const DUMPED: &str = "fc2e22bc6ee647b6b90729ab34a250b1";
+/// systemd-coredump's entries, the two kinds coredumpctl lists: a kernel
+/// dump, and a backtrace submitted with `systemd-coredump --backtrace`.
+const DUMPED: [&str; 2] = [
+    "fc2e22bc6ee647b6b90729ab34a250b1",
+    "1f4e0a44a88649939aaea34fc6da8c95",
+];
+
+/// journalctl matches for DUMPED's entries, whoever logged them.
+fn dumped() -> impl Iterator<Item = String> {
+    DUMPED.iter().map(|id| format!("MESSAGE_ID={id}"))
+}
 
 /// The journalctl matches for the entries the watcher reads: pid 1's
 /// FAILED and RECOVERED, or a DUMPED. A user's manager says the same of its
@@ -63,7 +72,8 @@ fn follow() -> Vec<String> {
         .iter()
         .chain(&RECOVERED)
         .map(|id| format!("MESSAGE_ID={id}"))
-        .chain(["_PID=1".into(), "+".into(), format!("MESSAGE_ID={DUMPED}")])
+        .chain(["_PID=1".into(), "+".into()])
+        .chain(dumped())
         .collect()
 }
 /// Units whose state changes start no pass: its own, since a pass's
@@ -87,8 +97,11 @@ struct Config {
     grace: f64,
     /// How far back a crash counts, in seconds.
     window: f64,
+    /// The Nix build users' group, whose crashes are their builds'.
+    build_gid: Option<u64>,
+    /// Slices whose units run someone's own work, whose crashes are theirs.
+    owned_slices: Vec<String>,
     systemctl: PathBuf,
-    coredumpctl: PathBuf,
     journalctl: PathBuf,
     /// Where to ask for a pass: burrow-units' own burrow-events handler.
     own: String,
@@ -367,26 +380,25 @@ fn pass(cfg: &Config) -> Result<(), String> {
         args.extend(names.iter().map(String::as_str));
         shown(&output(&cfg.systemctl, &args)?, now)
     };
-    // coredumpctl fails when it finds nothing, and says so: anything else
-    // it says, failing, is a failed pass, which keeps the last watch file
-    // (and goes stale, if it lasts) rather than drop a crash still there.
+    // systemd-coredump's word of each crash, with the cgroup and group
+    // that say whose it was. Anything journalctl says, failing, is a
+    // failed pass, which keeps the last watch file (and goes stale, if it
+    // lasts) rather than drop a crash still there.
     let since = format!("--since=@{}", (now - cfg.window).floor());
-    let dumps = Command::new(&cfg.coredumpctl)
-        .args(["list", "--json=short", "--no-pager", &since])
-        .output()
-        .map_err(|e| format!("{}: {e}", cfg.coredumpctl.display()))?;
-    let said = String::from_utf8_lossy(&dumps.stderr);
-    let cores = if dumps.status.success() {
-        cores(&String::from_utf8_lossy(&dumps.stdout))?
-    } else if said.contains("No coredumps found") {
-        Vec::new()
-    } else {
-        return Err(format!(
-            "{} list: {}",
-            cfg.coredumpctl.display(),
-            said.trim()
-        ));
+    let owned = Owned {
+        build_gid: cfg.build_gid,
+        slices: cfg.owned_slices.clone(),
     };
+    let dumped: Vec<String> = dumped().collect();
+    let mut args = vec![
+        "--quiet",
+        "--no-pager",
+        "--output=json",
+        "--output-fields=COREDUMP_EXE,COREDUMP_COMM,COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_GID,COREDUMP_CGROUP",
+        &since,
+    ];
+    args.extend(dumped.iter().map(String::as_str));
+    let cores = cores(&output(&cfg.journalctl, &args)?, &owned)?;
 
     let last = read(&cfg.file).map(|(_, items)| items).unwrap_or_default();
     let found = Found {
@@ -538,7 +550,8 @@ mod tests {
             grace: 600.0,
             window: 3600.0,
             systemctl: "systemctl".into(),
-            coredumpctl: "coredumpctl".into(),
+            build_gid: None,
+            owned_slices: Vec::new(),
             journalctl: "journalctl".into(),
             own: String::new(),
             kick: None,
