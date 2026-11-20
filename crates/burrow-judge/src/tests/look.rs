@@ -548,3 +548,19 @@ fn a_look_whose_request_ends_is_stopped_and_answers_nothing() {
     assert!(r.w.posted().is_empty());
     assert!(r.w.with(|p| p.runs.is_empty()));
 }
+
+#[test]
+fn a_judgment_a_look_cant_take_is_refused_before_it_burns_a_generation() {
+    let r = rig();
+    let p = r.producer();
+    let got = ask(
+        r.dir.path(),
+        &p,
+        &judge_request(&r.w, vec![Trigger::NoCi, Trigger::Asked]),
+    );
+    assert!(got.unwrap_err().contains("burrow#1190"));
+    // No generation was allocated, no look ran, nothing was posted.
+    assert!(!r.dir.path().join("state/generations").exists());
+    assert!(r.asked().ran.is_empty());
+    assert!(r.w.posted().is_empty());
+}
