@@ -42,6 +42,9 @@ let
         } else null;
       settings = {
         inherit (rc) train rounds;
+        # The most PRs a train candidate holds, as the steward's `cn train
+        # step --size` says it.
+        train_size = rc.trainSize;
         job_login = settings.machineryLogin;
         proof_slots = own.proofSlots or null;
         proof_timeout = minutes cfg.proofTimeoutMinutes;
