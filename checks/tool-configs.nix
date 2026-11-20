@@ -20,8 +20,8 @@ assert burrow.events.handlers.renovate-sweep.wake == "${burrow.stateDir}/renovat
 assert burrow.events.handlers.renovate-sweep.gap <= 20;
 pkgs.runCommand "tool-configs-check" { } (
   usage (tool "update") "${p}-update [--force | status]"
-  + usage (tool "switch") "${p}-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade] [--unless-pending]"
-  + usage (tool "confirm") "${p}-confirm"
+  + usage (tool "switch") "${p}-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]"
+  + usage (tool "confirm") "${p}-confirm [SYSTEM]"
   + usage (tool "boot") "${p}-boot default SYSTEM | trial [--deadline | --force] | check | status"
   + usage systemd.services.firmware-check.serviceConfig.ExecStart "firmware-check [--review]"
   + usage systemd.services.renovate.serviceConfig.ExecStart "renovate-run [OWNER/REPO]"

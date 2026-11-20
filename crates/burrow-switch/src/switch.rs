@@ -21,14 +21,15 @@ use std::process::{Command, Stdio};
 
 use rustix::fs::{Access, FlockOperation, access, flock};
 
-use crate::{Broke, Config, canonical, complain, exit_of, ran, say};
+use crate::{Broke, Config, as_recorded, canonical, complain, exit_of, ran, say};
 
 /// What a switch exits with when it refuses a downgrade, before anything
 /// changed (HOST-update tells it by this).
 pub const DOWNGRADE: u8 = 3;
 
 /// What a switch told `--unless-pending` exits with when a switch is
-/// pending, before anything changed (HOST-update holds by it).
+/// pending, and a confirm or an abort told the system it means when what's
+/// pending is another: it changed nothing (HOST-update holds by it).
 pub const PENDING: u8 = 4;
 
 /// What switch-to-configuration exits with when someone else holds its
@@ -53,8 +54,10 @@ pub enum Word {
     },
     /// What's pending.
     Status,
-    /// A pending switch reverted now instead of waiting.
-    Abort,
+    /// A pending switch reverted now instead of waiting. Told the system
+    /// it means, it doesn't when what's pending is another: a switch that
+    /// replaced that one is someone's, mid-change.
+    Abort(Option<PathBuf>),
     /// What the revert's units run: the confirmed system put back.
     RevertTo(PathBuf),
     /// What the activation's unit runs as it stops, with the system it was
@@ -87,7 +90,9 @@ pub fn parse(words: &[String]) -> Option<Word> {
     Some(match words[..] {
         [] => switch(System::Flake(None)),
         ["--status"] => Word::Status,
-        ["--abort"] => Word::Abort,
+        ["--abort"] => Word::Abort(None),
+        // The system it means, as a path from the root.
+        ["--abort", p] if p.starts_with('/') => Word::Abort(Some(p.into())),
         ["--toplevel", p] => switch(System::Toplevel(path(p)?)),
         ["--revert-to", p] => Word::RevertTo(path(p)?),
         ["--activation-stopped", p] => Word::ActivationStopped(path(p)?),
@@ -124,7 +129,7 @@ pub fn run(cfg: &Config, me: &Me, within: &str, word: &Word) -> Result<u8, Broke
             unless_pending,
         } => switch(cfg, me, within, system, *allow_downgrade, *unless_pending),
         Word::Status => status(cfg),
-        Word::Abort => abort(cfg, me),
+        Word::Abort(mine) => abort(cfg, me, mine.as_deref()),
         Word::RevertTo(prev) => revert_to(cfg, prev),
         Word::ActivationStopped(new) => activation_stopped(cfg, new),
     }
@@ -466,11 +471,22 @@ fn status(cfg: &Config) -> Result<u8, Broke> {
     Ok(0)
 }
 
-fn abort(cfg: &Config, me: &Me) -> Result<u8, Broke> {
+fn abort(cfg: &Config, me: &Me, mine: Option<&Path>) -> Result<u8, Broke> {
     let _lock = cfg.lock()?;
-    if cfg.recorded("pending")?.is_none() {
+    let Some(pending) = cfg.recorded("pending")? else {
         say("nothing pending");
         return Ok(0);
+    };
+    // Decided under the lock, which a switch holds as it writes `pending`.
+    if let Some(mine) = mine.map(as_recorded)
+        && pending != mine
+    {
+        complain(&format!(
+            "{} is pending, not {}; leaving it be (it's someone's, mid-change)",
+            pending.display(),
+            mine.display()
+        ));
+        return Ok(PENDING);
     }
     cfg.systemctl_quiet(&["stop", &cfg.timer()]);
     // A revert that already fired finishes on its own.
@@ -485,7 +501,11 @@ fn abort(cfg: &Config, me: &Me) -> Result<u8, Broke> {
             cfg.file("prev").display()
         )));
     };
-    Ok(u8::try_from(exit_of(revert_now(cfg, me, &prev))).unwrap_or(1))
+    // The revert's own exit, but never one that reads as the refusal.
+    Ok(match u8::try_from(exit_of(revert_now(cfg, me, &prev))) {
+        Ok(PENDING) | Err(_) => 1,
+        Ok(rc) => rc,
+    })
 }
 
 /// The revert, now, in a unit of its own: it outlives whatever started it,
@@ -647,7 +667,11 @@ mod tests {
             })
         );
         assert_eq!(parsed(&["--status"]), Some(Word::Status));
-        assert_eq!(parsed(&["--abort"]), Some(Word::Abort));
+        assert_eq!(parsed(&["--abort"]), Some(Word::Abort(None)));
+        assert_eq!(
+            parsed(&["--abort", "/nix/store/n"]),
+            Some(Word::Abort(Some("/nix/store/n".into())))
+        );
         assert_eq!(
             parsed(&["--revert-to", "/nix/store/p"]),
             Some(Word::RevertTo("/nix/store/p".into()))
@@ -661,7 +685,10 @@ mod tests {
             &["--toplevel", ""],
             &["--revert-to"],
             &["--status", "now"],
-            &["--abort", "/etc/nixos"],
+            &["--abort", ""],
+            &["--abort", "--status"],
+            &["--abort", "result"],
+            &["--abort", "/nix/store/n", "/nix/store/m"],
             &["-f"],
             &["--force"],
             &["a", "b"],

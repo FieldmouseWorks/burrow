@@ -63,7 +63,9 @@ pub const BRANCH: &str = "box-update";
 ///   one before (T/previous) for --abort to go back to, and exits with
 ///   T/switch-rc's code when there is one (3 or 4 changing nothing, as
 ///   a downgrade's and a pending switch's refusals); confirm fails with
-///   T/confirm-fails there.
+///   T/confirm-fails there. With T/replaced there (another's switch
+///   pending in place of the one they're told), --abort and confirm exit
+///   4 changing nothing.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
 ///   that's there, or healthy, then T/excused when that's there.
 /// - notify keeps what it opens and closes in T/notices, and each notice's
@@ -198,6 +200,7 @@ T=${0%/*}/..
 printf 'switch %s\n' "$*" >>"$T/calls"
 case $1 in
   --abort)
+    [ ! -e "$T/replaced" ] || { echo "another is pending, not $2" >&2; exit 4; }
     [ ! -e "$T/previous" ] || ln -sfn "$(cat "$T/previous")" "$T/current-system"
     echo "taken back"
     exit 0 ;;
@@ -217,7 +220,8 @@ exit 9
                 "confirm",
                 r#"#!/bin/sh
 T=${0%/*}/..
-echo confirm >>"$T/calls"
+printf 'confirm %s\n' "$*" >>"$T/calls"
+[ ! -e "$T/replaced" ] || { echo "$1 isn't pending" >&2; exit 4; }
 echo confirmed
 [ ! -e "$T/confirm-fails" ]
 "#,

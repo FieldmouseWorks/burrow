@@ -10,7 +10,7 @@ use burrow_switch::switch::{DOWNGRADE, PENDING};
 
 use crate::Broke;
 use crate::dispatch::{open, settled};
-use crate::run::{Run, Step, name};
+use crate::run::{End, Run, Step, name};
 use crate::status::Outcome;
 
 /// How long the health check waits for the box to settle after a switch,
@@ -136,12 +136,16 @@ impl Run<'_> {
                 return Err(e);
             }
             _ => {
-                self.back(&log);
-                let e = self.end(Outcome::Failed, "activation failed; reverted");
+                let back = if self.back(&log) {
+                    "reverted"
+                } else {
+                    "a switch since replaced it, and stays"
+                };
+                let e = self.end(Outcome::Failed, &format!("activation failed; {back}"));
                 self.dispatch(
                     "activation",
                     &format!(
-                        "{}: switching to {} ({what}) failed during activation and was reverted. The output is {}; journalctl has the rest. Fix it. {}",
+                        "{}: switching to {} ({what}) failed during activation; {back}. The output is {}; journalctl has the rest. Fix it. {}",
                         cfg.update,
                         self.new,
                         log.display(),
@@ -173,7 +177,11 @@ impl Run<'_> {
             }
         } else {
             let bad = said;
-            self.back(&log);
+            if !self.back(&log) {
+                // What it measured was partly that one's: nothing to say
+                // about its own.
+                return Err(self.replaced());
+            }
             let e = self.end(
                 Outcome::Failed,
                 &format!("unhealthy after the switch ({bad}); reverted"),
@@ -211,12 +219,17 @@ impl Run<'_> {
 
         let (out, err) = to(&log, true)?;
         let confirmed = Command::new(&tools.confirm)
+            .arg(&self.new)
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
             .status()
-            .is_ok_and(|s| s.success());
-        if !confirmed {
+            .ok()
+            .and_then(|s| s.code());
+        if confirmed == Some(i32::from(PENDING)) {
+            return Err(self.replaced());
+        }
+        if confirmed != Some(0) {
             return Err(self.end(
                 Outcome::Failed,
                 &format!(
@@ -234,15 +247,29 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The switch taken back, saying so in its log: whatever that says, the
-    /// dead man's switch reverts it in the end.
-    fn back(&self, log: &Path) {
+    /// Its own switch taken back, saying so in its log: whatever that says,
+    /// the dead man's switch reverts it in the end. False when another
+    /// replaced it (a hand switch in its health settle, say): that one is
+    /// someone's, mid-change, and stays.
+    fn back(&self, log: &Path) -> bool {
         let mut c = Command::new(&self.cfg.tools.switch);
-        c.arg("--abort").stdin(Stdio::null());
+        c.args(["--abort", &self.new]).stdin(Stdio::null());
         if let Ok((out, err)) = to(log, true) {
             c.stdout(out).stderr(err);
         }
-        let _ = c.status();
+        c.status().ok().and_then(|s| s.code()) != Some(i32::from(PENDING))
+    }
+
+    /// Its switch replaced by another before it was kept: the run holds,
+    /// neither keeping nor taking back what's pending, and tries again.
+    fn replaced(&self) -> End {
+        self.end(
+            Outcome::Held,
+            &format!(
+                "a {} replaced its switch before it was kept; trying again next run",
+                name(&self.cfg.tools.switch)
+            ),
+        )
     }
 
     /// Claude Code's version, as the user runs it: nothing when it doesn't

@@ -104,7 +104,8 @@ Each has an entry below, and each can be imported on its own.
   stop timeout when empty. This also covers stopping a start that ignores
   SIGTERM. Finite
   stops can still delay the revert; existing generations and hand-written
-  unit files need the same discipline. `--abort` reverts at once; with `flakeInputs` it refuses a system
+  unit files need the same discipline. `--abort` reverts at once. `HOST-confirm SYSTEM` and `--abort SYSTEM` act only on that
+  system, and exit 4 when another switch has replaced it, as `HOST-update` uses them. With `flakeInputs` it refuses a system
   built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a
   new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last

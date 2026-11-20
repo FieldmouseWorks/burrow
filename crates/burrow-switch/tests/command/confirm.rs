@@ -5,8 +5,10 @@ use crate::machine::{CONFIRM, Machine, ok, refused, said};
 #[test]
 fn a_usage_or_nothing_pending_does_nothing() {
     let m = Machine::new(false);
-    let out = m.command(CONFIRM, &["now"]).output().unwrap();
-    assert_eq!(said(&out), refused(2, "usage: box-confirm\n"));
+    for words in [&["now"][..], &["/a", "/b"], &[""]] {
+        let out = m.command(CONFIRM, words).output().unwrap();
+        assert_eq!(said(&out), refused(2, "usage: box-confirm [SYSTEM]\n"));
+    }
     assert_eq!(m.fake("sudo"), "");
     assert_eq!(said(&m.confirm()), ok("nothing pending\n"));
     // Through sudo.
