@@ -145,6 +145,12 @@ in
         # A switch leaves a running one be: the path unit's next start is
         # the new one, and it goes on from the record.
         restartIfChanged = false;
+        # No start limit: a handover's own steps (the setting, the steward's
+        # release, conaryd's restart on the publication) start it in a
+        # burst, and a start refused for it would fail burrow-landing.path
+        # too, which then hears nothing until the timer's backstop. Each run
+        # is one pass from the record, and nothing it writes starts another.
+        startLimitIntervalSec = 0;
         # One of the flow's own units, on its state (burrow.ledger keeps
         # the controller to those).
         environment = ledger.flow.env;

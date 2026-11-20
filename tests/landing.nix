@@ -6,7 +6,8 @@
 # Given the repo, conaryd starts on the publication that gives it; taken
 # off its last one, its restart stops it and the handback completes; and a
 # machine whose marker is missing with the repo still given (one deployed
-# from before it) gets conaryd back at burrow-landing's next run.
+# from before it) gets conaryd back at burrow-landing's next run. A
+# handover's burst of starts doesn't cost burrow-landing its path unit.
 # crates/burrow-landing's tests hold the files to the same, without systemd.
 #
 #   nix build .#checks.x86_64-linux.landing-flow -L
@@ -62,11 +63,10 @@ pkgs.testers.runNixOSTest {
     def record():
         return json.loads(machine.succeed("cat ${landing}/owners.json"))["repos"].get("${repo}", {})
 
-    # A run by hand, on top of those its paths start: within systemd's start
-    # limit (five in ten seconds), which this test's pace, not a machine's,
-    # can reach.
+    # A run by hand, on top of those its paths start: a burst no start limit
+    # refuses, so its path unit keeps listening.
     def landing():
-        machine.wait_until_succeeds("systemctl start burrow-landing.service", timeout=30)
+        machine.succeed("systemctl start burrow-landing.service")
 
     def serial():
         return machine.succeed("cut -d' ' -f1 ${landing}/conaryd-events.serial").strip()
@@ -125,5 +125,6 @@ pkgs.testers.runNixOSTest {
         machine.fail("systemctl -q is-failed conary-flow.service")
         machine.fail("systemctl -q is-failed conary-flow-given.service")
         machine.fail("systemctl -q is-failed burrow-landing.service")
+        machine.succeed("systemctl -q is-active burrow-landing.path conary-flow-given.path")
   '';
 }
