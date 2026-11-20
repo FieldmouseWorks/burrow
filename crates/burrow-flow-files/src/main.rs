@@ -14,10 +14,15 @@
 //! `execution`): the role's engine, model and effort in the settings source
 //! SETTINGS (`burrow_settings::Config`), as the plugin's jobs are held to
 //! them (`burrow_producer::jobs::choice`).
+//!
+//! `burrow-flow-files judge-key CONFIG SEAL` loads CONFIG as the flow does
+//! (`flow::Config::load`, which reads a key its `judge_key_file` names) and
+//! succeeds only if its `judge_key` is the key the file SEAL holds (the
+//! judge's seal key), printing neither.
 use conary_core::Policy;
 use conary_github::attest::service::Producers;
 use conary_github::events::Runtime;
-use conary_github::flow::Config;
+use conary_github::flow::{Config, SealKey};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -36,6 +41,7 @@ fn main() -> ExitCode {
         },
         Some("producers") => |p| Producers::load(p).map(drop),
         Some("choice") => return choice(&files),
+        Some("judge-key") => return judge_key(&files),
         _ => return usage(),
     };
     if files.is_empty() {
@@ -79,9 +85,34 @@ fn choice(args: &[String]) -> ExitCode {
     }
 }
 
+fn judge_key(args: &[String]) -> ExitCode {
+    let [config, seal] = args else {
+        return usage();
+    };
+    let loaded = Config::load(Path::new(config))
+        .map(|c| c.settings.judge_key)
+        .map_err(|e| format!("{config}: {e}"));
+    let sealed = SealKey::read(Path::new(seal));
+    match (loaded, sealed) {
+        (Ok(Some(loaded)), Ok(sealed)) if loaded == sealed => ExitCode::SUCCESS,
+        (Ok(Some(_)), Ok(_)) => {
+            eprintln!("{config}: its judge_key isn't the one {seal} holds");
+            ExitCode::FAILURE
+        }
+        (Ok(None), _) => {
+            eprintln!("{config}: it has no judge_key");
+            ExitCode::FAILURE
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files choice SETTINGS ROLE"
+        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files choice SETTINGS ROLE | burrow-flow-files judge-key CONFIG SEAL"
     );
     ExitCode::from(2)
 }

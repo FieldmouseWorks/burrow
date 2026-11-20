@@ -10,8 +10,8 @@ publish.workspace = true
 burrow-settings = { path = "../burrow-settings" }
 # Conary's own types: conaryd's events file, the flow's repository lock and
 # its workers. Pinned with burrow-flow-files' by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "f060d1b95b3da6ecc99eecafbc71b09f5c001829" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "f060d1b95b3da6ecc99eecafbc71b09f5c001829" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

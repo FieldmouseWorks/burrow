@@ -10,8 +10,11 @@
 #
 # Each repo's flow config is the steward's own settings for it, in the
 # flow's terms (Conary's flow::Config), at OWNER/NAME.json lowercased, as
-# burrow-events names a pass's instance. The judge's and renovate-sweep's
-# seal keys stay out of it: they're secrets, and a config is a store path.
+# burrow-events names a pass's instance. The seal keys stay out of it:
+# they're secrets, and a config is a store path. The judge's is named by
+# its file instead (`judge_key_file`, which Conary reads at each load):
+# autoland-flow-keys's copy of its credential, which only the flow's
+# controller can read. renovate-sweep's (`major_key`) isn't given to the flow yet.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
 #
@@ -30,6 +33,18 @@ let
   stewardLogin = "${cfg.app.slug}[bot]";
   # The plugins turned on, by the kind the flow knows each by.
   enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix judge proof; };
+  # The flow's seal keys, in a directory of the flow's controller alone
+  # for as long as a unit of its own is up: systemd reads each key file as
+  # root and hands it to the unit as a credential, which the unit, as the
+  # controller, copies into its runtime directory. Not the credential
+  # itself: a unit's credentials are mounted in its own namespace, which no
+  # other unit sees. Every unit that runs the flow (the shadow's and
+  # conaryd's) requires it, as its config names the key's file there. None
+  # with the judge off: no unit.
+  keysUnit = "autoland-flow-keys";
+  seals = lib.optionalAttrs (enabled ? judge) { judge-seal = enabled.judge.sealFile; };
+  keyFile = name: "/run/${keysUnit}/${name}";
+  needs = lib.optional (seals != { }) "${keysUnit}.service";
   # The producers a repo's evidence trusts, and the checks each may attest
   # (Conary's docs/m6-plugins.md, "Who produces what"): the judge its
   # judgment, the proof producer the repo's proofs. One with none there
@@ -139,6 +154,10 @@ let
         train_stall_after = minutes rc.trainStallAfter;
         renovate_merge_after = minutes rc.renovateMergeAfter;
         renovate_sweep = settings.majorKey != null;
+      } // lib.optionalAttrs (seals ? judge-seal) {
+        # The judge's seal key, its sealFile, as the flow's controller alone
+        # reads it.
+        judge_key_file = keyFile "judge-seal";
       };
     };
   # Loaded by the machine's own cn as it's built (`cn flow settings`), as
@@ -176,17 +195,40 @@ let
   config = "${configs}/%I.json";
 in
 {
-  inherit configs;
+  inherit configs needs;
   # One repo's, by its name.
   file = flowFile;
+  # The unit holding the flow's seal keys, null with none.
+  keys = if seals == { } then null else {
+    name = keysUnit;
+    service = {
+      description = "autoland: the flow's seal keys, for its controller alone";
+      wantedBy = [ "multi-user.target" ];
+      # One of the flow's own units (burrow.ledger keeps the controller to
+      # those).
+      environment = ledger.flow.env;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = ledger.flow.user;
+        LoadCredential = lib.mapAttrsToList (name: file: "${name}:${file}") seals;
+        # Gone, keys and all, when the unit stops.
+        RuntimeDirectory = keysUnit;
+        RuntimeDirectoryMode = "0700";
+        # %d: its credentials' directory.
+        ExecStart = map (name: "${pkgs.coreutils}/bin/install -m 0400 %d/${name} ${keyFile name}") (lib.attrNames seals);
+      };
+    };
+  };
   # What a successful pass starts: the shadow, which skips a repo with no
   # config.
   onSuccess = lib.optional (cfg.shadow != [ ] && !cfg.dryRun) "autoland-shadow@%i.service";
   service = {
     description = "autoland: Conary's flow beside the steward's pass of %I";
     restartIfChanged = false;
-    after = [ "network-online.target" ];
+    after = [ "network-online.target" ] ++ needs;
     wants = [ "network-online.target" ];
+    requires = needs;
     unitConfig.ConditionPathExists = config;
     environment = ledger.env // ledger.flow.env // {
       CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";

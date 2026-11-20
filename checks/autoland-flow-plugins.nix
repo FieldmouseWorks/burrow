@@ -93,6 +93,18 @@ let
     # Bare has evidence, and its proof producer no check there.
     bareNoProducers = producers on "sam/bare" == null;
     twins = file on "sam/bare" == file on "sam/twin";
+    # The judge's seal key reaches the flow as a credential of a unit of
+    # the controller's own, which the shadow's units require; with the
+    # judge off there's no such unit and nothing requires one
+    # (tests/autoland-flow-keys.nix runs it).
+    offNoKeys = lib.all (m: !(m.systemd.services ? autoland-flow-keys)
+      && m.systemd.services."autoland-shadow@".requires == [ ]
+      && m.burrow.autoland.flow.needs == [ ]) [ off on plain ];
+    judgedKeys = let k = judged.systemd.services.autoland-flow-keys; in
+      k.serviceConfig.User == "conary-flow"
+      && k.serviceConfig.LoadCredential == [ "judge-seal:/run/secrets/judge-seal" ]
+      && judged.systemd.services."autoland-shadow@".requires == [ "autoland-flow-keys.service" ]
+      && judged.burrow.autoland.flow.needs == [ "autoland-flow-keys.service" ];
     judgedProducers = builtins.fromJSON (producers judged "sam/homelab").producers == [
       { name = "sam/judge"; key = keys.judge; checks = [ "conary/judgment" ]; }
       { name = "sam/proof"; key = keys.proof; checks = [ "gate" "vm" ]; }

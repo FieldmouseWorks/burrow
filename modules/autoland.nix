@@ -687,11 +687,14 @@ in
         inherit credentials;
         token = "${steward}/bin/autoland-steward token";
         config = shadow.file;
+        inherit (shadow) needs;
       };
       description = ''
         What runs Conary's flow as the steward's App (autoland/landing.nix):
-        the credentials its token reads, the token's command, and each
-        shadowed repo's flow configuration by name.
+        the credentials its token reads, the token's command, each
+        shadowed repo's flow configuration by name, and the units a unit
+        running the flow requires (the one holding its seal keys, which its
+        configurations name).
       '';
     };
 
@@ -910,7 +913,8 @@ in
       };
       # Conary's flow beside a shadowed repo's pass, once it's done.
       unitConfig.OnSuccess = lib.optionals (lib.hasSuffix "@" name) shadow.onSuccess;
-    }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; };
+    }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; }
+      // lib.optionalAttrs (shadow.keys != null) { ${shadow.keys.name} = shadow.keys.service; };
     # The steward's state, and its clones of the repos, which are its alone.
     # What the retired review service kept (its queue, answers, sessions and
     # snapshots) is removed.
