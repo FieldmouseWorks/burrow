@@ -226,11 +226,31 @@ UNSTOPPABLE.add(first)
 for t in (7700, 7800):
     status, digest = run(clean(**threads), t)
     assert JOBS == [] and first not in STOPPED, (t, status, JOBS)
+# Waiting on the first to stand down isn't a job that couldn't start: the
+# stop that failed is the strike, and nothing is listed for the wait.
+assert "once the last one on the branch has stood down" in status and digest == [], (status, digest)
 UNSTOPPABLE.clear()
 run(clean(**threads), 7900)
 status, digest = run(clean(**threads), 8000)
 assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
 assert first in STOPPED, (first, STOPPED)
+# The same on the pass that does stop the first: claims keeps it until proj
+# says it's over, so the second is handed the branch on a later pass, and
+# that one pass between the two lists nothing (remi#1449: burrow#1287 was
+# on the stuck issue as a PR no Claude job could start for).
+STATES.clear()
+HELD.clear()
+fresh_pr_state()
+run(clean(**threads), 0)
+run(clean(**threads), 7200)
+ends("done")
+awaits("SAM/R#5")
+claimed(waits=True, owns=False)
+first = ISSUED[-1]
+run(clean(**threads), 7300)
+status, digest = run(clean(**threads), 7400)
+assert JOBS == [] and first in STOPPED, (status, JOBS, STOPPED)
+assert "once the last one on the branch has stood down" in status and digest == [], (status, digest)
 C.upkeep = real_upkeep
 STATES.clear()
 HELD.clear()

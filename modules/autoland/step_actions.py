@@ -105,9 +105,10 @@ class Actions:
             train = self.ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in self.ci_names)
             before = claims.unposted(self.st, kind, at)
             red_negative = negative(self.ci_names) if self.ci == "red" and not conflict else None
-            if self.started(
+            started = self.started(
                 kind, fix_task(self.repo, self.pr, why, proofs, train, self.tested, before, red_negative, describe), at, bool(how)
-            ):
+            )
+            if started:
                 if retry:
                     if not how:
                         self.st[kind + "Again"] = at
@@ -115,6 +116,8 @@ class Actions:
                 if kind == "handed":
                     eyes(self.repo, self.pr)
                 who = f"a Claude job has it since {clock(C.NOW)}" + ("; the last one's answers didn't go up" if before else "")
+            elif started is None:
+                who = "a Claude job takes it once the last one on the branch has stood down"
             else:
                 self.digest.append(("Couldn't start a Claude job to fix it", self.line, why))
                 who = "no Claude job could start"
