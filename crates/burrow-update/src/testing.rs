@@ -61,7 +61,8 @@ pub const BRANCH: &str = "box-update";
 ///
 /// - switch puts T/current-system at the system it's given, keeping the
 ///   one before (T/previous) for --abort to go back to, and exits with
-///   T/switch-rc's code when there is one; confirm fails with
+///   T/switch-rc's code when there is one (3 or 4 changing nothing, as
+///   a downgrade's and a pending switch's refusals); confirm fails with
 ///   T/confirm-fails there.
 /// - health snapshots, and compares unhealthy, saying T/unhealthy, when
 ///   that's there, or healthy, then T/excused when that's there.
@@ -204,7 +205,7 @@ case $1 in
     echo "switching to $2, to confirm within $BURROW_CONFIRM_WITHIN"
     echo "a switch's own words" >&2
     rc=$(cat "$T/switch-rc" 2>/dev/null || echo 0)
-    [ "$rc" != 3 ] || exit 3
+    case $rc in 3|4) exit "$rc" ;; esac
     readlink -f "$T/current-system" >"$T/previous"
     ln -sfn "$2" "$T/current-system"
     exit "$rc" ;;

@@ -249,6 +249,9 @@ impl Run<'_> {
     /// train repo, its PR, when it's open: nothing fresh is brought in (main
     /// still deploys), unless it's stuck on a head of its own (red, or held
     /// by an open finding), which a fresh bump replaces.
+    /// That pending switch is only looked for here to save a build: what
+    /// holds the switch itself is HOST-switch's `--unless-pending`, under
+    /// its lock (live.rs), for one that goes pending while this builds.
     fn begin(&mut self) -> Step {
         let cfg = self.cfg;
         if cfg.switch_state.join("pending").exists() {

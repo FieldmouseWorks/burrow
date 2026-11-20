@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use burrow_switch::switch::{DOWNGRADE, PENDING};
+
 use crate::Broke;
 use crate::dispatch::{open, settled};
 use crate::run::{Run, Step, name};
@@ -14,10 +16,6 @@ use crate::status::Outcome;
 /// How long the health check waits for the box to settle after a switch,
 /// in seconds.
 const SETTLE: &str = "180";
-
-/// What the switch exits with when it refuses a system as built from an
-/// older nixpkgs than the running one, before anything went live.
-const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
     /// Whether the system that runs is a bump the updater before this one
@@ -97,7 +95,9 @@ impl Run<'_> {
         let mut switch_cmd = Command::new(&tools.switch);
         switch_cmd
             .env("BURROW_CONFIRM_WITHIN", &cfg.within)
-            .args(["--toplevel", &self.new]);
+            // Decided under the switch's own lock: one that went pending
+            // while this built is someone's, mid-change, and stays.
+            .args(["--toplevel", &self.new, "--unless-pending"]);
         if self.leaves_old_bump() {
             switch_cmd.arg("--allow-downgrade");
         }
@@ -111,7 +111,14 @@ impl Run<'_> {
         let what = self.what()?;
         match switched.and_then(|s| if s.success() { Some(0) } else { s.code() }) {
             Some(0) => {}
-            Some(DOWNGRADE) => {
+            // Nothing to take back: what's pending isn't this run's.
+            Some(c) if c == i32::from(PENDING) => {
+                return Err(self.end(
+                    Outcome::Held,
+                    &format!("a {switch} went pending while it built; trying again next run"),
+                ));
+            }
+            Some(c) if c == i32::from(DOWNGRADE) => {
                 let e = self.end(
                     Outcome::Failed,
                     "the switch refused it as a downgrade; nothing changed",
