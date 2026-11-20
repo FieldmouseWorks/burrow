@@ -102,6 +102,26 @@ fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
                 }
             };
         }
+        Rule::Mention => {
+            // Where it is, never what: the title and body are the author's.
+            let wrote = match (rules::mentions(title), rules::mentions(body)) {
+                (false, false) => {
+                    return pass(rule, "the title and body don't write the connector's mention");
+                }
+                (true, false) => "title",
+                (false, true) => "body",
+                (true, true) => "title and body",
+            };
+            return Verdict {
+                rule,
+                passed: false,
+                why: format!("the {wrote} writes the review connector's mention"),
+                error: Some(format!(
+                    "::error title=The connector's mention::This PR's {wrote} writes '{mention}', the mention that calls Codex's GitHub connector, in backticks or not. The connector reads a PR that writes it as a task for itself: it answers 'create an environment for this repo' and posts no review of the head, which then waits for the steward's late ask as the owner. Write 'the connector's bare review mention' (or 'the connector's mention') in its place. The connector read the PR when it opened, so this head may still get no review of its own: the steward asks for one, and a later push gets one. Editing the title or body runs this again.",
+                    mention = rules::MENTION
+                )),
+            };
+        }
         Rule::RustFirst => (
             !diff.new_python.is_empty() || diff.growth > event.growth,
             format!(

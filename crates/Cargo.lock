@@ -658,6 +658,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
  "burrow-github",
+ "burrow-review-ask",
  "burrow-test",
  "house-sync",
  "regex",

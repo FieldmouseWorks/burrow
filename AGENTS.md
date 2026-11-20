@@ -63,6 +63,10 @@ they're more specific.
 CI's house check holds every PR to its title's style and to the rules below,
 each of which a PR can pass with a line in its body starting as shown and a
 reason of four words or more. Editing the body or title runs it again.
+No line passes one more: a PR's title and body never write the review
+connector's at-sign mention, even in backticks, as the connector then reads
+the PR as a task and doesn't review it. Write "the connector's bare review
+mention" in its place.
 
 - Rust by default, shell included: new code meant to last starts in Rust
   unless its platform picks the language, and a coin toss goes to Rust. A PR
