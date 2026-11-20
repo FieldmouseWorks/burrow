@@ -923,6 +923,31 @@ fn snooze_outlasts_a_run_that_looks() {
     );
 }
 
+// A stall whose kick changes has the new one tried, as a stall of its own
+// would: a deploy wait kicked through dispatch while an earlier run was in
+// its way, back on HOST-update (the same since) once that run has ended, gets
+// HOST-update's kick, and a job only after that kick's GRACE.
+#[test]
+fn a_new_kick_is_tried() {
+    let behind = |kick: &str, refresh: bool| {
+        let mut it = item(T - 3.0 * H, T - MIN, Some(kick));
+        it["refresh"] = json!(refresh);
+        json!({"deploy/sam/r": it})
+    };
+    let m = Machine::new();
+    m.write(&m.steward, behind("dispatch", true), T);
+    m.pass(T, false);
+    assert_eq!(m.kicks(), ["dispatch"]);
+    m.write(&m.steward, behind("update", false), T + MIN);
+    m.pass(T + MIN, false);
+    assert_eq!(m.kicks(), ["dispatch", "update"]);
+    assert!(m.runs().is_empty());
+    m.pass(T + MIN + GRACE - 1.0, false);
+    assert!(m.runs().is_empty());
+    m.pass(T + MIN + GRACE, false);
+    assert_eq!((m.kicks().len(), m.runs().len()), (2, 1));
+}
+
 // What a source writes that isn't an item is left out, not a crash, and half
 // a file is no file.
 #[test]

@@ -323,7 +323,11 @@ pub fn decide(
 /// after it lands and has a wait of its own with the steward, and not before
 /// `off_main`, when the owner hears that the box runs changes that aren't on
 /// main: held for those, it waits on whoever switched to them (their PR in
-/// the train, say), not on HOST-update.
+/// the train, say), not on HOST-update. Nor is it due while a run that
+/// started before it is at work: that run hasn't got it, and no other can
+/// start (a kick of HOST-update does nothing) till it ends, so the wait is
+/// behind it as a wait on a run is, the watchdog refreshing first, and falls
+/// to HOST-update at its own deadline once the run has ended or gone quiet.
 #[allow(clippy::too_many_arguments)]
 fn going_live(
     dep: &Deploy,
@@ -339,11 +343,13 @@ fn going_live(
     any: bool,
     refresh: &str,
 ) -> Item {
-    match update.since {
-        Some(start) if update.state == "activating" && (any || start >= since) => Item {
+    let running = update.since.filter(|_| update.state == "activating");
+    let wrote = |start: f64| progress.filter(|p| *p > start);
+    if let Some(start) = running.filter(|start| any || *start >= since) {
+        return Item {
             repo: None,
             what,
-            phase: match progress.filter(|p| *p > start) {
+            phase: match wrote(start) {
                 Some(p) => format!(
                     "{} has been putting it live since {}, its last output at {}",
                     dep.unit,
@@ -357,38 +363,53 @@ fn going_live(
                 ),
             },
             since: start,
-            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
+            due: wrote(start).unwrap_or(start) + dep.run,
             link,
             kick: Some(refresh.to_owned()),
             line: false,
             unstick: false,
             claude: false,
             refresh: true,
+        };
+    }
+    let phase = match (behind, off_main) {
+        (Some(pr), _) => format!(
+            "{waiting}; behind {}'s own PR #{pr}, until that lands; its last run: {said}",
+            dep.unit
+        ),
+        (None, Some(at)) => format!(
+            "{waiting}; {}'s last run: {said}; the owner hears of it at {} if it still does",
+            dep.unit,
+            clock(at)
+        ),
+        (None, None) => format!("{waiting}; {}'s last run: {said}", dep.unit),
+    };
+    let due = (since + behind.map_or(dep.after, |_| dep.ride)).max(off_main.unwrap_or(0.0));
+    // An earlier run in its way, while it's at work.
+    let ahead = running.map(|start| (start, wrote(start)));
+    Item {
+        repo: None,
+        what,
+        phase: match ahead {
+            Some((start, Some(p))) => format!(
+                "{phase}; the run under way since {} started before it, its last output at {}",
+                clock(start),
+                clock(p)
+            ),
+            Some((start, None)) => format!(
+                "{phase}; the run under way since {} started before it",
+                clock(start)
+            ),
+            None => phase,
         },
-        _ => Item {
-            repo: None,
-            what,
-            phase: match (behind, off_main) {
-                (Some(pr), _) => format!(
-                    "{waiting}; behind {}'s own PR #{pr}, until that lands; its last run: {said}",
-                    dep.unit
-                ),
-                (None, Some(at)) => format!(
-                    "{waiting}; {}'s last run: {said}; the owner hears of it at {} if it still does",
-                    dep.unit,
-                    clock(at)
-                ),
-                (None, None) => format!("{waiting}; {}'s last run: {said}", dep.unit),
-            },
-            since,
-            due: (since + behind.map_or(dep.after, |_| dep.ride)).max(off_main.unwrap_or(0.0)),
-            link,
-            kick: Some(dep.handler.clone()),
-            line: false,
-            unstick: false,
-            claude: false,
-            refresh: false,
-        },
+        since,
+        due: ahead.map_or(due, |(start, p)| due.max(p.unwrap_or(start) + dep.run)),
+        link,
+        kick: Some(ahead.map_or(dep.handler.as_str(), |_| refresh).to_owned()),
+        line: false,
+        unstick: false,
+        claude: false,
+        refresh: ahead.is_some(),
     }
 }
 
@@ -422,7 +443,10 @@ fn retained(
     now: f64,
     cfg: &Config,
 ) -> Item {
-    let was_run = was.kick.as_deref() == Some(cfg.handler.as_str());
+    // A wait behind an earlier run is kicked as a run's is, but it's still
+    // on HOST-update: its phase says what it waited for.
+    let was_run = was.kick.as_deref() == Some(cfg.handler.as_str())
+        && waited_for(&was.phase, &dep.unit).is_none();
     // Its run is the one it waited on, or a later one: any run at work that
     // started no earlier than the wait, or than the run the wait was on.
     let ours = update

@@ -203,14 +203,15 @@ in
         description = ''
           How long a commit on a repo HOST-update watches (burrow.updates.watch)
           may wait to go live before it's a stall: the watchdog kicks
-          HOST-update, then hands it to a Claude job.
+          HOST-update, then hands it to a Claude job. A run of HOST-update
+          at work isn't one, whether it has the commit or started before it.
         '';
       };
       runMinutes = mkOption {
         type = types.ints.positive;
         default = 90;
         description = ''
-          How long a run of HOST-update that has the commit may go without
+          How long a run of HOST-update a commit waits on or behind may go without
           writing to its logs (a build's or a VM test's output) before that's
           a stall: a long build is a run at work, one gone quiet isn't.
         '';

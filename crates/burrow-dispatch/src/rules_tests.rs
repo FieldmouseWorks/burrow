@@ -778,3 +778,118 @@ fn deploy_unread_progress() {
         );
     }
 }
+
+// A commit that lands while a run is at work isn't that run's, and no other
+// run can start till it ends: the wait keeps its age and says what's ahead
+// of it, due no sooner than `run` after that run last wrote to its logs (or
+// started), and is refreshed as a run's wait is. A run gone quiet leaves it
+// due at its own deadline; once the run has ended it's HOST-update's again,
+// and the watchdog's kick starts the run that takes it. A pass that can't
+// read the repo keeps it behind the run.
+#[test]
+fn deploy_behind_an_earlier_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let at_work = |since: f64| Unit {
+        state: "activating".into(),
+        since: Some(since),
+        ..Unit::default()
+    };
+    let mut s = Snapshot {
+        deploys: BTreeMap::from([
+            (
+                "sam/box".into(),
+                Behind {
+                    branch: "main".into(),
+                    running: "aaa".into(),
+                    count: 1,
+                    oldest: T,
+                    newest: "c1c1c1c1c1".into(),
+                },
+            ),
+            ("sam/kit".into(), Behind::default()),
+        ]),
+        update: Some((at_work(T - 3000.0), "ok at then: deployed".into())),
+        progress: Some(T + 2400.0),
+        ..Snapshot::default()
+    };
+    let waiting = format!(
+        "1 commit the running system wasn't built from, the oldest from {} (the newest c1c1c1c)",
+        clock(T)
+    );
+    let d = decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 2500.0);
+    let it = &d.items["deploy/sam/box"];
+    assert_eq!(
+        (it.since, it.due, it.kick.as_deref(), it.refresh),
+        (T, T + 2400.0 + 5400.0, Some("dispatch"), true),
+        "past `after`, but the run ahead of it wrote to its logs 100s ago"
+    );
+    assert_eq!(
+        it.phase,
+        format!(
+            "{waiting}; box-update's last run: ok at then: deployed; the run under way since {} started before it, its last output at {}",
+            clock(T - 3000.0),
+            clock(T + 2400.0)
+        )
+    );
+    // No write since it started: from its start.
+    s.progress = Some(T - 3100.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T - 3000.0 + 5400.0);
+    assert_eq!(
+        it.phase,
+        format!(
+            "{waiting}; box-update's last run: ok at then: deployed; the run under way since {} started before it",
+            clock(T - 3000.0)
+        )
+    );
+    // A run gone quiet buys it nothing: due `after` its commit, as ever.
+    s.update.as_mut().unwrap().0 = at_work(T - 6000.0);
+    s.progress = None;
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!((it.since, it.due, it.refresh), (T, T + 1800.0, true));
+    // Unreadable now: still behind the run, by what its logs say now.
+    let unread = Snapshot {
+        unread: BTreeMap::from([("sam/box".into(), "HTTP 502".into())]),
+        deploys: BTreeMap::from([("sam/kit".into(), Behind::default())]),
+        update: Some((at_work(T - 3000.0), "ok at then: deployed".into())),
+        progress: Some(T + 3000.0),
+        ..Snapshot::default()
+    };
+    let e = decide(&cfg, &unread, &d.state, &d.items, T + 3100.0);
+    let it = &e.items["deploy/sam/box"];
+    assert_eq!(
+        (it.since, it.due, it.kick.as_deref()),
+        (T, T + 3000.0 + 5400.0, Some("dispatch"))
+    );
+    assert_eq!(
+        it.phase,
+        format!(
+            "{waiting}; box-update's last run: ok at then: deployed; the run under way since {} started before it, its last output at {}",
+            clock(T - 3000.0),
+            clock(T + 3000.0)
+        )
+    );
+    // The run has ended: HOST-update's again, overdue, so the watchdog
+    // kicks it, read or not.
+    s.update = Some((Unit::default(), "ok at then: deployed".into()));
+    let mut ended = unread.clone();
+    ended.update = s.update.clone();
+    for it in [
+        &decide(&cfg, &s, &d.state, &d.items, T + 4000.0).items["deploy/sam/box"],
+        &decide(&cfg, &ended, &e.state, &e.items, T + 4000.0).items["deploy/sam/box"],
+    ] {
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref(), it.refresh),
+            (T, T + 1800.0, Some("update"), false)
+        );
+        assert_eq!(
+            it.phase,
+            format!("{waiting}; box-update's last run: ok at then: deployed")
+        );
+    }
+}
