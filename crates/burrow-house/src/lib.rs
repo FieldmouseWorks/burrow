@@ -26,8 +26,14 @@
 //!     own, and retitles the PR of one it has no update for `... -
 //!     abandoned`, the subject main would get. No line passes it: the work
 //!     moves to a branch of its own. A fork's branch isn't Renovate's.
+//!   - mention: the title and body never write the mention that calls
+//!     Codex's GitHub connector, even in backticks. The connector reads a
+//!     PR that writes it as a task, answers that the repo needs an
+//!     environment, and posts no review of the head, which then waits for
+//!     the steward's late ask as the owner (burrow#1293). No line passes
+//!     it: the words change.
 //!
-//! Each line goes in the PR's body, starting a line of its own, with a
+//! Each rule's line goes in the PR's body, starting a line of its own, with a
 //! reason after it (rules.rs says what counts as one). The check reads the
 //! title and body when it runs, so fixing either runs it again and the new
 //! status replaces the old: a commit keeps one status per context, the
