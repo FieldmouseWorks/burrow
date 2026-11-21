@@ -61,7 +61,7 @@ impl Account for ClaudeCode {
 /// shown to be fresh (read_fresh).
 pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
     read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, TIMEOUT)
+        ask_usage(claude, dir, TIMEOUT, None)
     })
 }
 
@@ -78,6 +78,8 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(80);
 /// be what answers, so it is waited out first; then a live reading of the
 /// meter (read_usage's) is asked, whatever the copy's age. A copy dated ahead
 /// of this clock proves nothing and is not waited out: the reading refuses it.
+/// A reading that fails on the endpoint's rate limit alone doesn't fail the
+/// login (login_shown): Claude Code's debug log says which it was.
 pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
     let start = Instant::now();
     if let Some(at) = copied_at()? {
@@ -87,17 +89,82 @@ pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
         }
     }
     let left = LOGIN_BUDGET.saturating_sub(start.elapsed());
-    read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, left)
-    })
-    .map(|_| ())
+    // Its debug log, in a private folder of its own, removed on drop.
+    let logs = tempfile::Builder::new()
+        .prefix("debug-")
+        .tempdir_in(dir)
+        .map_err(|e| format!("a folder for Claude Code's debug log: {e}"))?;
+    let log = logs.path().join("claude.log");
+    let mut answer = Value::Null;
+    let reading = read_fresh(&mut copied_at, &mut crate::now, &mut || {
+        answer = ask_usage(claude, dir, left, Some(&log))?;
+        Ok(answer.clone())
+    });
+    let said = std::fs::read(&log).unwrap_or_default();
+    login_shown(
+        reading.map(|_| ()),
+        &answer,
+        &String::from_utf8_lossy(&said),
+    )
+}
+
+/// Whether the login is shown working, given a live READING of the meter,
+/// the ANSWER it was read from and Claude Code's debug LOG of the asking. A
+/// reading is the proof; a failed one still leaves the login working when
+/// the usage endpoint answered nothing but 429 (usage_statuses) and the
+/// answer has plan limits. That endpoint is shared by every Claude Code
+/// logged in as this user, and a 429 is remembered for the bearer for
+/// minutes, so it often answers from its copy on a rate limit; an expired or
+/// revoked login gets a 401 or no plan limits instead. With no 429 in the
+/// log, or anything else beside it, the reading's error stands.
+fn login_shown(reading: Result<(), String>, answer: &Value, log: &str) -> Result<(), String> {
+    let Err(failed) = reading else {
+        return Ok(());
+    };
+    let statuses = usage_statuses(log);
+    if answer["rate_limits_available"] == true
+        && !statuses.is_empty()
+        && statuses.iter().all(|status| *status == 429)
+    {
+        return Ok(());
+    }
+    Err(failed)
+}
+
+/// The HTTP statuses Claude Code's debug LOG shows its usage endpoint
+/// answering: the three-digit numbers on its lines about that endpoint,
+/// which 2.1.330 writes as `fetchUtilization: 429 remembered for this
+/// bearer; not asking again for 300s`, `fetchUtilization: 200 after 1
+/// attempt(s)` and `Failed to load usage data: Request failed with status
+/// code 429` (checked against remi's). Should a later Claude Code word them
+/// otherwise, none are found and a rate limit fails the login again.
+fn usage_statuses(log: &str) -> Vec<u16> {
+    const ABOUT: [&str; 2] = ["fetchUtilization:", "Failed to load usage data:"];
+    log.lines()
+        .filter_map(|line| {
+            ABOUT
+                .iter()
+                .find_map(|about| line.split_once(about).map(|(_, said)| said))
+        })
+        .flat_map(|said| said.split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|word| word.len() == 3 && word.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|word| word.parse().ok())
+        .filter(|status| (100..600).contains(status))
+        .collect()
 }
 
 /// Claude Code's answer to `get_usage`, without the scan of local
-/// transcripts the meter has no use for. It makes no model call.
-fn ask_usage(claude: &Path, dir: &Path, timeout: Duration) -> Result<Value, String> {
+/// transcripts the meter has no use for. It makes no model call. With a
+/// LOG, Claude Code writes its debug log there.
+fn ask_usage(
+    claude: &Path,
+    dir: &Path,
+    timeout: Duration,
+    log: Option<&Path>,
+) -> Result<Value, String> {
     {
-        let mut child = Command::new(claude)
+        let mut command = Command::new(claude);
+        command
             .args([
                 "-p",
                 "--input-format",
@@ -106,7 +173,11 @@ fn ask_usage(claude: &Path, dir: &Path, timeout: Duration) -> Result<Value, Stri
                 "stream-json",
                 "--verbose",
             ])
-            .args(["--strict-mcp-config", "--no-session-persistence"])
+            .args(["--strict-mcp-config", "--no-session-persistence"]);
+        if let Some(log) = log {
+            command.arg("--debug-file").arg(log);
+        }
+        let mut child = command
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
