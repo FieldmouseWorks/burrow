@@ -1,4 +1,5 @@
-//! Bounded child transport and confined process-state reads.
+//! Bounded child transport, fences and confined process-state reads.
+pub mod fence;
 pub mod lifecycle;
 pub mod state_reads;
 use rustix::{

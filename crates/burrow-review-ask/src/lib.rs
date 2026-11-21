@@ -4,10 +4,11 @@
 //! review, and an ask with any text after it is read as a task. So when the
 //! steward finds a head the connector hasn't reviewed (review_step.py), or
 //! Conary's flow does in a repo conaryd lands (its `review_ask`), it runs
-//! the door's command, which starts this in a unit of the machine user's own
-//! (modules/autoland/review-ask.nix), and this posts the bare ask with the
-//! user's own gh login, the one a person's issue's job acts as. The units
-//! that hold the App's key never hold that login.
+//! the door's command, which asks the door's broker (broker.rs,
+//! modules/autoland/review-ask.nix), a service of the machine user's, to run
+//! this, and this posts the bare ask with the user's own gh login, the one
+//! a person's issue's job acts as. The units that hold the App's key, and
+//! the flow's controller, never hold that login.
 //!
 //! It posts [`ASK`] and nothing else, ever, and only when every check holds,
 //! read as the owner sees the PR right then:
@@ -359,6 +360,8 @@ fn save(path: &Path, record: &Record) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(())
 }
+
+pub mod broker;
 
 #[cfg(test)]
 mod tests;

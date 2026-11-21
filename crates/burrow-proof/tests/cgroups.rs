@@ -14,7 +14,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use burrow_proof::fence::{Cgroups, clear_all, populated, unified};
+use burrow_process::fence::{populated, unified};
+use burrow_proof::fence::{Cgroups, clear_all};
 use burrow_proof::run::run;
 use world::{World, read};
 

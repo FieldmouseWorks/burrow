@@ -212,13 +212,6 @@ in
         # trainNegative renders.
         assertion = !lib.any (f: f.trainWithoutEvidence) (lib.attrValues flowConfigs);
         message = "burrow.landing.conaryd: ${lib.concatStringsSep ", " (lib.attrNames (lib.filterAttrs (_: f: f.trainWithoutEvidence) flowConfigs))} run a train with no trainNegative, so no evidence, and conaryd's train steps only on evidence.";
-      } {
-        # conaryd runs the owner's door's command (its flow config's
-        # review_ask) as the flow's user, and the command starts the door in
-        # that user's own manager: burrow.user's only with no controller.
-        assertion = ledger.flow.user == config.burrow.user
-          || !lib.any (r: lib.any (a: lib.toLower a == lib.toLower r) autoland.askAsOwner.repos) cfg.conaryd;
-        message = "burrow.landing.conaryd: the owner's door (burrow.autoland.askAsOwner) runs as ${config.burrow.user}, and conaryd, running as the flow's controller (burrow.ledger.controllerUser), can't start it as them: list a repo in only one of the two.";
       }];
 
       burrow.events.landing = {

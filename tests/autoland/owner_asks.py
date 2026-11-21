@@ -182,8 +182,8 @@ assert heard["owner"] == [("sam/r", 5, head)], heard
 STATES.clear()
 print("no ask of a head a conflict's job replaces: ok")
 
-# The steward runs the door's command (which starts it as a unit of the
-# machine user's own: checks/autoland-review-ask.nix) with only the PR it's
+# The steward runs the door's command (which asks the door's broker, which
+# runs it as the machine user: checks/autoland-review-ask.nix) with only the PR it's
 # for, waited for: what it prints is what came of it.
 stub = f"{tmp}/owner-door"
 with open(stub, "w") as f:
