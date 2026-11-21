@@ -12,6 +12,7 @@ use super::{arg, put};
 use crate::config::Config;
 use crate::job::Job;
 use crate::pick::demoted;
+use crate::record::JobFile;
 use crate::systemd;
 use crate::turn::start;
 use crate::{Fail, filled, io_fail, now, read};
@@ -47,6 +48,11 @@ pub struct New {
     pub since: Option<String>,
     /// What its starter knows it by before it has its id (`proj find`).
     pub key: Option<String>,
+    /// One job at work a key: a run under a key whose job is still at work
+    /// joins that job (its id, nothing started), and one whose job has
+    /// ended hands the key to the new job. Without it, a key a started job
+    /// has is refused, however that job stands.
+    pub join: bool,
     /// Inbox label choice, kept for every turn.
     pub engine: Option<crate::engine::Engine>,
     /// The kind of work it is, which picks its engine (Config::roles).
@@ -113,7 +119,9 @@ fn find_held(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
         Err(e) => return Err(io_fail(&path, e)),
     };
     let job = Job::new(cfg, &id);
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     if job.turns().is_some() {
         return Ok(Some(id));
     }
@@ -137,21 +145,41 @@ fn find_held(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
     }
 }
 
-/// The key taken for the new job `id`, or the job that has it.
-fn take_key(cfg: &Config, key: &str, id: &str) -> Result<(), Fail> {
+/// The key taken for the new job `id`, or the job that has it: refused,
+/// or, with `join`, joined while it's still at work (`Some`, its id) and
+/// let go once it has ended. All of it under the key's lock, so two
+/// starters joining at once get one job.
+fn take_key(cfg: &Config, key: &str, id: &str, join: bool) -> Result<Option<String>, Fail> {
     let path = key_path(cfg, key);
     let _key = key_lock(cfg, key)?;
     match std::os::unix::fs::symlink(id, &path) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(None),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(io_fail(&path, e)),
     }
     // One that never started lets it go, and, under the key's lock, it's
     // this job's before anything else can judge or take it.
     if let Some(had) = find_held(cfg, key)? {
-        return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
+        if !join {
+            return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
+        }
+        let at_work = Job::new(cfg, &had).at_work().map_err(|e| {
+            Fail::new(
+                1,
+                format!("proj run: can't tell whether {had}, which has the key {key}, is still at work: {e}"),
+            )
+        })?;
+        if at_work {
+            return Ok(Some(had));
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_fail(&path, e)),
+        }
     }
-    std::os::unix::fs::symlink(id, &path).map_err(|e| io_fail(&path, e))
+    std::os::unix::fs::symlink(id, &path).map_err(|e| io_fail(&path, e))?;
+    Ok(None)
 }
 
 /// A --kick: HANDLER or HANDLER/OWNER/REPO.
@@ -198,15 +226,6 @@ const KEY: &str = "proj run --key KEY (letters, digits and ._/:-, at most 200)";
 
 /// `proj run` and `proj reply`.
 pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
-    run_with_cgroup(cfg, reply, args, || fs::read_to_string("/proc/self/cgroup"))
-}
-
-fn run_with_cgroup(
-    cfg: &Config,
-    reply: bool,
-    args: &[String],
-    cgroup: impl FnOnce() -> io::Result<String>,
-) -> Result<(), Fail> {
     let mut new = New::default();
     let mut cutoff = None;
     let mut i = 0;
@@ -267,6 +286,10 @@ fn run_with_cgroup(
                     .ok_or_else(|| Fail::new(2, KEY))?;
                 new.key = Some(k.to_owned());
                 i += 1;
+            }
+            Some("--join") => {
+                only_run("--join: the job's own key is kept")?;
+                new.join = true;
             }
             Some("--app") => {
                 only_run("--app: the job's own is kept")?;
@@ -335,10 +358,16 @@ fn run_with_cgroup(
         }
         id.to_owned()
     } else {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY [--join]] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
-        super::starter::check(new.role.as_deref(), cgroup)?;
+        if new.join && new.key.is_none() {
+            return Err(Fail::new(
+                2,
+                "proj run --join needs a --key: what it joins by",
+            ));
+        }
+        super::starter::check(new.role.as_deref())?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
     put(&format!("{id}\n"));
@@ -347,6 +376,16 @@ fn run_with_cgroup(
 
 /// A new job in the project, its first turn started with the task: its id.
 pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String, Fail> {
+    // A repo, OWNER/NAME, is its own clone among the projects (no folder's
+    // name has a slash): what a starter that knows the repo alone names.
+    let folder;
+    let p = if p.contains('/') {
+        folder = crate::inbox::project_of(cfg, p)
+            .ok_or_else(|| Fail::new(1, format!("no project is a clone of {p}")))?;
+        folder.as_str()
+    } else {
+        p
+    };
     let project = format!("{}/{p}", cfg.projects.display());
     if !fs::metadata(&project).is_ok_and(|m| m.is_dir()) {
         return Err(Fail::new(1, format!("no such project: {project}")));
@@ -392,16 +431,21 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let job = Job::new(cfg, &id);
     // Held until its first turn has started or failed to, so what finds it
     // by its key never judges it halfway (find).
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-    if let Some(k) = &new.key
-        && let Err(e) = take_key(cfg, k, &id)
-    {
-        let _ = fs::remove_dir_all(&job.dir);
-        return Err(e);
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
+    if let Some(k) = &new.key {
+        let joined = take_key(cfg, k, &id, new.join);
+        if !matches!(joined, Ok(None)) {
+            let _ = fs::remove_dir_all(&job.dir);
+        }
+        if let Some(had) = joined? {
+            eprintln!("proj run: joined {had}, which has the key {k} and is still at work");
+            return Ok(had);
+        }
     }
-    let write = |name: &str, text: &str| {
-        fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
-    };
+    let write =
+        |f: JobFile, text: &str| fs::write(job.file(f), text).map_err(|e| io_fail(&job.file(f), e));
     // What every turn of it runs as, kept where the job can't write it.
     let mut request = crate::job::Request {
         project: project.clone(),
@@ -413,7 +457,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     };
     request.save(&job).map_err(|e| Fail::new(1, e))?;
     if new.inbox_issue {
-        write("inbox-issue", "true\n")?;
+        write(JobFile::InboxIssue, "true\n")?;
     }
     let parent = std::env::var("PROJ_JOB").ok().filter(|s| !s.is_empty());
     // A launch from inside a job inherits that job's automation: only a
@@ -429,11 +473,11 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             .map_err(|e| Fail::new(1, e))?,
     };
     if let Some(kind) = &new.usage_kind {
-        write("usage-kind", kind)?;
+        write(JobFile::UsageKind, kind)?;
     }
     let starter = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     write(
-        "starter",
+        JobFile::Starter,
         parent
             .as_deref()
             .or_else(|| {
@@ -446,7 +490,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     )?;
     if !new.kicks.is_empty() {
         write(
-            "kick",
+            JobFile::Kick,
             &new.kicks
                 .iter()
                 .map(|k| format!("{k}\n"))
@@ -454,31 +498,33 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         )?;
     }
     if let Some(t) = &new.limit {
-        write("timeout", &format!("{t}\n"))?;
+        write(JobFile::Timeout, &format!("{t}\n"))?;
     }
     if let Some(t) = &new.idle {
-        write("idle", &format!("{t}\n"))?;
+        write(JobFile::Idle, &format!("{t}\n"))?;
     }
     // Work on the pipeline holds the pipeline's slots only in its own
     // repos' projects (pick::class), and says so when it won't.
     if new.pipeline {
-        write("pipeline", "")?;
+        write(JobFile::Pipeline, "")?;
         if let Some(why) = demoted(cfg, &job.dir) {
             eprintln!("proj: {id} {why}");
         }
     }
     if new.unstick {
-        write("unstick", "")?;
+        let unstick = crate::record::mark(&job, crate::record::Marker::Unstick);
+        unstick.put("").map_err(|e| unstick.fail(e))?;
     }
     crate::ask::initialize(&job, new.link.as_deref()).map_err(|e| Fail::new(1, e))?;
     if let Some(l) = &new.link {
-        write("link", &format!("{l}\n"))?;
+        write(JobFile::Link, &format!("{l}\n"))?;
     }
     if let Some(t) = &new.since {
-        write("since", &format!("{t}\n"))?;
+        write(JobFile::Since, &format!("{t}\n"))?;
     }
     if new.vm {
-        let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;
+        let out = File::create(job.file(JobFile::Agent))
+            .map_err(|e| io_fail(&job.file(JobFile::Agent), e))?;
         let s = Command::new("agent")
             .args(["new", p])
             .stdout(out)
@@ -487,14 +533,14 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         if !s.success() {
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
-        request.agent = read(&job.path("agent")).filter(|a| !a.is_empty());
+        request.agent = read(&job.file(JobFile::Agent)).filter(|a| !a.is_empty());
         request.save(&job).map_err(|e| Fail::new(1, e))?;
     }
     let given = if let Some(source) = &new.task_source {
-        write("task-source", source)?;
+        write(JobFile::TaskSource, source)?;
         task.replace(
             "@PROJ_TASK_SOURCE@",
-            &job.path("task-source").to_string_lossy(),
+            &job.file(JobFile::TaskSource).to_string_lossy(),
         )
     } else {
         task.to_owned()
@@ -568,7 +614,9 @@ fn deliver(
     first: bool,
 ) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     crate::question::recover(&job).map_err(|e| Fail::new(1, e))?;
     if crate::question::acceptance_pending(&job).map_err(|e| Fail::new(1, e))? {
         return Ok(());
@@ -594,7 +642,7 @@ fn resume_one(
 ) -> Result<Sharing, Fail> {
     let job = Job::new(cfg, id);
     let no = if cutoff.is_some() { 3 } else { 1 };
-    if !filled(&job.path("session")) {
+    if !filled(&job.file(JobFile::Session)) {
         return Err(Fail::new(
             no,
             format!("{id} has no session to continue (yet)"),
@@ -602,7 +650,9 @@ fn resume_one(
     }
     // A job's turns start one at a time, and a look by proj-watch writes
     // back a wait only under the same lock.
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let _held = job
+        .lock()
+        .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
     crate::question::recover(&job).map_err(|e| Fail::new(no, e))?;
     let st = job.state();
     crate::planning::admit(&job).map_err(|e| Fail::new(no, e))?;
@@ -640,7 +690,9 @@ fn resume_one(
 fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
     fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
     let name = id_name(project);
-    let when = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
+    let when = jiff::ZonedDateTime::now()
+        .strftime("%Y%m%d-%H%M%S")
+        .to_string();
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let random = RandomState::new();
     for attempt in 0u64.. {

@@ -61,10 +61,18 @@
   ],
   "$defs": {
     "Engine": {
-      "type": "string",
-      "enum": [
-        "claude",
-        "codex"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "claude"
+          ]
+        },
+        {
+          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login ([`api`]).",
+          "type": "string",
+          "const": "claude-api"
+        }
       ]
     },
     "EngineMeter": {
@@ -557,11 +565,6 @@
           "description": "The one slot past `maxJobs` for jobs run --unstick.",
           "type": "string",
           "const": "unstick"
-        },
-        {
-          "description": "One of Codex's own pool.",
-          "type": "string",
-          "const": "codex"
         },
         {
           "description": "One of the drain's `drainJobs`: an issue it handed on, until that\nissue's record goes.",

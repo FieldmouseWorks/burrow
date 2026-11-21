@@ -5,18 +5,20 @@ fn its_config_is_every_setting_and_only_those() {
     let config = serde_json::json!({
         "name": "renovate-sweep", "state": "/s/renovate-sweep", "projects": "/p", "owner": "Sam",
         "settled": "review-settled", "covered": "/s/autoland/repos.json",
-        "app": {"name": "workers", "bot": "sam-workers"}, "renovateRun": 7200,
+        "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200, "held": ["hold", "needs-owner"],
         "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
                   "seal": "/b/major-seal", "lockWait": "/b/lock-wait"},
     });
     let cfg: Config = serde_json::from_value(config.clone()).unwrap();
     assert_eq!(cfg.app.unwrap().bot, "sam-workers");
+    assert_eq!(cfg.renovate.as_deref(), Some("sam-renovate[bot]"));
     assert_eq!(cfg.renovate_run, 7200);
     let mut user = config.clone();
     user["app"] = Value::Null;
     user["covered"] = Value::Null;
+    user["renovate"] = Value::Null;
     let cfg: Config = serde_json::from_value(user).unwrap();
-    assert!(cfg.app.is_none() && cfg.covered.is_none());
+    assert!(cfg.app.is_none() && cfg.covered.is_none() && cfg.renovate.is_none());
     let mut more = config.clone();
     more["stray"] = 1.into();
     assert!(serde_json::from_value::<Config>(more).is_err());
@@ -47,5 +49,24 @@ fn a_request_taken_back_is_its_head_tries_and_when() {
     assert_eq!(
         with_suffix(&dir.path().join("k"), ".released"),
         dir.path().join("k.released")
+    );
+}
+
+#[test]
+fn a_handovers_key_is_one_proj_takes_and_no_other_has() {
+    // proj run --key's rule (burrow-proj's key_name): letters, digits and
+    // ._/:-, starting with a letter or digit, at most 200.
+    let k = job::key("Sam-1/a_b.c-d");
+    assert!(k.starts_with("renovate-sweep/Sam-1/a.b.c-d/"), "{k}");
+    assert!(k.len() <= 200);
+    assert!(
+        k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/:-".contains(&b)),
+        "{k}"
+    );
+    assert_ne!(k, job::key("Sam-1/a_b.c-d"));
+    assert_eq!(
+        job::path(Path::new("/s/sam_r-1")),
+        Path::new("/s/sam_r-1.job")
     );
 }

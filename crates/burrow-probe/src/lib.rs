@@ -16,6 +16,7 @@
 //! things anyway.
 
 pub mod answer;
+pub mod credit;
 pub mod pass;
 pub mod query;
 pub mod scrub;
@@ -44,8 +45,7 @@ pub struct Config {
     pub machinery: Option<burrow_github::Author>,
     /// The machine's name, for the answer's first line.
     pub host: String,
-    /// The user it runs as, whose user manager `units`, `rc` and `queue`
-    /// read.
+    /// The user it runs as, whose user manager `units` and `queue` read.
     pub user: String,
     /// The units whose journals it may read: globs (`*`, `?`, `[...]`).
     pub journal: Journal,

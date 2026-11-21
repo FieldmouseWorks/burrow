@@ -1,5 +1,5 @@
 //! HOST-switch and HOST-confirm as the machine runs them: burrow-switch
-//! CONFIG [WORDS] and burrow-confirm CONFIG, on a machine made of files
+//! CONFIG [WORDS] and burrow-confirm CONFIG [SYSTEM], on a machine made of files
 //! (machine.rs). Every run is as someone other than root (as nobody, when
 //! the tests run as root), so it goes through sudo wherever they run.
 //!
@@ -9,4 +9,5 @@
 
 mod confirm;
 mod machine;
+mod mine;
 mod switch;

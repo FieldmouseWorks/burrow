@@ -1,10 +1,10 @@
 # claude-trust DIR...: marks each DIR trusted in the user's Claude Code config
 # (~/.claude.json), the answer to the question Claude Code asks on its first
 # start in a folder, for the Claudes that start in one with nobody at their
-# terminal to answer it: the Remote Control servers (remote-control/serve.sh)
-# and the usage watcher's Claude Code (usage-reset.nix). Claude keys trust by
-# the folder's real path; the spelling given is seeded too. A folder that
-# isn't there yet is trusted at the path it will have.
+# terminal to answer it (such as the usage watcher's Claude Code in
+# usage-reset.nix). Claude keys trust by the folder's real path; the spelling
+# given is seeded too. A folder that isn't there yet is trusted at the path it
+# will have.
 
 [ $# -gt 0 ] || { echo "usage: claude-trust DIR..." >&2; exit 2; }
 cfg=$HOME/.claude.json

@@ -23,9 +23,8 @@ fn the_fixture_reads_as_the_schema_says() {
     serde_json::from_str::<Snapshot>(FIXTURE).unwrap();
 }
 
-#[test]
-fn sections_come_in_order_and_what_is_unknown_isnt_claimed() {
-    let snap: Snapshot = serde_json::from_str(FIXTURE).unwrap();
+/// The live page as `snap` renders it a minute after it was read.
+fn page(snap: &Snapshot) -> String {
     let fonts = tempfile::tempdir().unwrap();
     for name in FONTS {
         fs::write(fonts.path().join(name), name.as_bytes()).unwrap();
@@ -37,7 +36,13 @@ fn sections_come_in_order_and_what_is_unknown_isnt_claimed() {
         host: "box.ts.net",
         assets: &assets,
     };
-    let html = live(&f, &snap, snap.at as u64 + 60).into_string();
+    live(&f, snap, snap.at as u64 + 60).into_string()
+}
+
+#[test]
+fn sections_come_in_order_and_what_is_unknown_isnt_claimed() {
+    let snap: Snapshot = serde_json::from_str(FIXTURE).unwrap();
+    let html = page(&snap);
     let at = |id: &str| {
         html.find(&format!("id=\"{id}\""))
             .unwrap_or_else(|| panic!("{id}"))
@@ -53,9 +58,18 @@ fn sections_come_in_order_and_what_is_unknown_isnt_claimed() {
     assert!(html.contains("Taken; no holder is known."));
     assert!(!html.contains("can take it"));
     assert!(html.contains("41.5"));
-    assert!(html.contains("too old to move a turn"));
+    assert!(!html.contains("too old to move a turn"));
     assert!(html.contains("GitHub · fixture-worker / FieldmouseWorks"));
     assert!(html.contains("0 requests remaining · resets in 20 minutes"));
     assert!(html.contains("retry in 5 minutes"));
     assert!(html.contains("Remaining budget unknown"));
+}
+
+/// A meter reading too old to act on says so.
+#[test]
+fn a_stale_reading_says_it_is_too_old() {
+    let mut fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    fixture["meters"][0]["reading"]["fresh"] = false.into();
+    let snap: Snapshot = serde_json::from_value(fixture).unwrap();
+    assert!(page(&snap).contains("too old to move a turn"));
 }

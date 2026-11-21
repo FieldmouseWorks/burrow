@@ -1,6 +1,7 @@
 """A red default branch's undo: with the ledger on, a job that finds one PR's
 merge broke it names that PR, and the steward has the ledger's writer cn
-undo it. That undo's PR is the red's fix from then on, and only that one:
+undo it, with the red's reason: the red run's URL, the checks that failed
+and the first error line of the first one's log (repos.red_reason). That undo's PR is the red's fix from then on, and only that one:
 an undo the door or anyone else asked for lands as any PR does. The job
 may name only a PR of the red repo; the ledger refusing it, finding nothing
 to revert, or stopping partway again and again, leaves the red to its next
@@ -10,7 +11,7 @@ import json
 import os
 import sys
 
-from harness import C, FAIL, JOBS, R, STATES, WROTE, mkpr, stand_in, tmp
+from harness import C, FAIL, JOBS, LOGS, R, STATES, WROTE, mkpr, stand_in, tmp
 import tasks
 
 stand_in()
@@ -45,8 +46,34 @@ def writer_runs():
     return [json.loads(x) for x in open(WRITER_LOG)]
 
 
-def default(state, sha="c" * 40):
-    return {"defaultBranchRef": {"name": "main", "target": {"oid": sha, "statusCheckRollup": {"state": state}}}}
+# The red tip's run: the repo's Actions workflow `check`, whose job `gate`
+# (job 77) failed, its log as Actions keeps it.
+RUN = "https://github.com/sam/u/actions/runs/9"
+LOG = "repos/sam/u/actions/jobs/77/logs"
+LOGS[LOG] = ("\ufeff2026-11-16T10:00:00.0000000Z ##[group]Run nix flake check\n"
+             "2026-11-16T10:00:01.0000000Z copying path '/nix/store/abc-libgpg-error-1.59' from 'https://cache.nixos.org'...\n"
+             "2026-11-16T10:00:01.0000000Z vm-test> firmware load for regulatory.db failed with error -2\n"
+             "2026-11-16T10:00:02.0000000Z \x1b[31;1merror:\x1b[0m builder for '/nix/store/abc-gate.drv' failed with exit code 1\n"
+             "2026-11-16T10:00:03.0000000Z error: 1 dependencies of derivation failed to build\n"
+             "2026-11-16T10:00:04.0000000Z ##[error]Process completed with exit code 1.\n")
+REASON = (f"main is red at {'c' * 40}. Red run: {RUN}. Failing checks: check / gate. "
+          "First error: error: builder for '/nix/store/abc-gate.drv' failed with exit code 1")
+ARGS = ["undo", "sam/u#12", f"--reason={REASON}"]
+
+
+def gate(conclusion="FAILURE", job=77, name="gate"):
+    """A check run of the workflow `check`, as prs.TIP reads it."""
+    return {"conclusion": conclusion, "name": name, "databaseId": job, "detailsUrl": f"{RUN}/job/{job}",
+            "title": None, "checkSuite": {"workflowRun": {"url": RUN, "workflow": {"name": "check"}}}}
+
+
+def default(state, sha="c" * 40, contexts=None):
+    """main at sha, its CI at state; red, its checks are contexts, by
+    default a lint that passed and gate, which failed."""
+    if contexts is None:
+        contexts = [gate("SUCCESS", 76, "lint"), gate()] if state == "FAILURE" else []
+    return {"defaultBranchRef": {"name": "main", "target": {"oid": sha, "statusCheckRollup": {
+        "state": state, "contexts": {"nodes": contexts}}}}}
 
 
 def answer(jid, what):
@@ -83,6 +110,7 @@ ROW = {"change": "c1", "pr": 40, "url": "https://github.com/sam/u/pull/40", "rev
 repo = {"repo": "sam/u", "private": False, "default": "main"}
 mine = []
 kept_undo = C.CFG.get("undo")
+kept_now0 = C.NOW
 
 # A red's job is told: revert the one merge that broke it only to check,
 # and name that PR in its answers file, of this repo, one only.
@@ -102,7 +130,8 @@ STATES["job-1"] = "done"
 assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
 # As the writer, with its own token: never the steward's, which would make
 # its PR the steward App's, no fix of the machinery's.
-assert writer_runs() == [{"args": ["undo", "sam/u#12"], "tokens": []}], writer_runs()
+# With why: the red run, the checks that failed and the first error line.
+assert writer_runs() == [{"args": ARGS, "tokens": []}], writer_runs()
 assert red()["undos"] == [40] and red()["asked"] and C.WAKE.get("sam/u") == C.NOW + 60, (red(), C.WAKE)
 assert len(JOBS) == 1 and mine == [], (JOBS, mine)
 # The undo's PR is the red's fix: nothing more is asked or started while
@@ -159,7 +188,74 @@ STATES["job-1"] = "done"
 answer("job-1", {"undo": "Sam/U#12"})
 writer(out=[ROW])
 R.watch_default(repo, default("FAILURE"), [], mine)
-assert writer_runs()[0]["args"] == ["undo", "sam/u#12"] and red()["undos"] == [40], (writer_runs(), red())
+assert writer_runs()[0]["args"] == ARGS and red()["undos"] == [40], (writer_runs(), red())
+
+# The reason names every run a check failed in and every check that failed,
+# the first error line of the first one to fail, a status's own words, and
+# a log that's gone or has no error line as just that.
+other = {"context": "ci/other", "state": "ERROR", "targetUrl": "https://ci.example/9", "description": "  the build\n timed out  "}
+# A job whose own error is only the last thing it printed, as an aggregate
+# of other jobs' says it.
+LOGS["repos/sam/u/actions/jobs/78/logs"] = ("2026-11-16T10:00:00Z ##[group]Run ./legs\n2026-11-16T10:00:00Z leg 1 of 2: ok\n"
+                                            "2026-11-16T10:00:00Z the legs: failure\n##[endgroup]\n\n"
+                                            "2026-11-16T10:00:01Z ##[error]Process completed with exit code 2.\n")
+LOGS["repos/sam/u/actions/jobs/82/logs"] = ("2026-11-16T10:00:00Z tests> running 3 tests\n"
+                                            "2026-11-16T10:00:00Z tests> thread 'main' panicked at src/lib.rs:3:5:\n"
+                                            "2026-11-16T10:00:00Z tests> error: test failed\n")
+LOGS["repos/sam/u/actions/jobs/79/logs"] = RuntimeError("gh api repos/sam/u/actions/jobs/79/logs: gh: Not Found (HTTP 404)")
+for contexts, said in (
+        ([gate("CANCELLED", 80, "slow"), dict(gate(job=78), checkSuite={"workflowRun": {"url": RUN + "0", "workflow": {"name": "nightly"}}}),
+          other, gate()],
+         f"Red run: {RUN}0, https://ci.example/9, {RUN}. Failing checks: nightly / gate, ci/other, check / gate, check / slow. "
+         "First error: the legs: failure"),
+        # The first to fail is the one whose error is told: an aggregate
+        # fails after what it aggregates.
+        ([dict(gate(job=78, name="check"), completedAt="2026-11-16T10:05:00Z"),
+          dict(gate(name="leg 2"), completedAt="2026-11-16T10:01:00Z")],
+         f"Red run: {RUN}. Failing checks: check / leg 2, check / check. "
+         "First error: error: builder for '/nix/store/abc-gate.drv' failed with exit code 1"),
+        # A Rust panic, behind a nix build's prefix.
+        ([gate(job=82)], f"Red run: {RUN}. Failing checks: check / gate. "
+                         "First error: tests> thread 'main' panicked at src/lib.rs:3:5:"),
+        ([other], "Red run: https://ci.example/9. Failing checks: ci/other. First error: the build timed out"),
+        ([dict(gate(), checkSuite=None, title="3 tests failed", detailsUrl="https://app.example/1")],
+         "Red run: https://app.example/1. Failing checks: gate. First error: 3 tests failed"),
+        ([gate(job=79)], f"Red run: {RUN}. Failing checks: check / gate. First error: its log couldn't be read (Not Found (HTTP 404))"),
+        ([gate(job=81)], f"Red run: {RUN}. Failing checks: check / gate. First error: none in its log"),
+        ([gate("SUCCESS")], "and GitHub names no failed check on it")):
+    start()
+    STATES["job-1"] = "done"
+    answer("job-1", {"undo": "sam/u#12"})
+    writer(out=[ROW])
+    R.watch_default(repo, default("FAILURE", contexts=contexts), [], mine)
+    (args,) = [x["args"] for x in writer_runs()]
+    assert args[:2] == ["undo", "sam/u#12"] and args[2].startswith(f"--reason=main is red at {'c' * 40}") and len(args) == 3, args
+    assert args[2].endswith(said), (args[2], said)
+    assert red()["undos"] == [40], red()
+# Twelve failed checks: ten are named, and how many more.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+R.watch_default(repo, default("FAILURE", contexts=[gate(job=77, name=f"g{i:02}") for i in range(12)]), [], mine)
+assert "Failing checks: " + ", ".join(f"check / g{i:02}" for i in range(10)) + " and 2 more. First error" in writer_runs()[0]["args"][2], writer_runs()
+# GitHub not giving the log: no undo without its reason. It's asked again,
+# as when cn stops for GitHub.
+kept_log, kept_clock = LOGS[LOG], R.clock
+LOGS[LOG] = C.Unavailable("gh api repos/sam/u/actions/jobs/77/logs: HTTP 502")
+R.clock = lambda: C.NOW
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+C.WAKE.clear()
+assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
+assert writer_runs() == [] and red()["undoTries"] == 1 and not red().get("asked"), (writer_runs(), red())
+assert C.WAKE.get("sam/u") == red()["retryAt"], (red(), C.WAKE)
+LOGS[LOG] = kept_log
+C.NOW = red()["retryAt"]
+writer(out=[ROW])
+R.watch_default(repo, default("FAILURE"), [], mine)
+assert [x["args"] for x in writer_runs()] == [ARGS] and red()["undos"] == [40] and red()["asked"], (writer_runs(), red())
+C.NOW, R.clock = kept_now0, kept_clock
 
 # The ledger refuses it (cn's 65: not landed, reverted already, a PR it
 # keeps no change of), or finds nothing to revert: the next job is told so,
@@ -305,6 +401,19 @@ answer("job-1", {"undo": "sam/u#12"})
 writer(out=[ROW])
 R.watch_default(repo, default("SUCCESS"), [], mine)
 assert writer_runs() == [], writer_runs()
+
+# A red's fixes go first: the job's, from RED_BRANCH, and the red's undo
+# get the first label (once), and nothing else does: a feature PR, the
+# door's undo, a fork's branch of that name.
+C.save("repo-sam_u.json", {"red": {"undos": [40]}})
+WROTE.clear()
+ours = mkpr(number=7, branch="autoland/red-cccccccccccc")
+labelled = mkpr(number=8, branch="autoland/red-dddddddddddd", labels=["first"])
+fork = dict(mkpr(number=9, branch="autoland/red-eeeeeeeeeeee"), isCrossRepository=True)
+prs = [ours, labelled, fork, undo_pr(), undo_pr(41), mkpr(number=6), {"number": 5}]
+assert R.first_fixes(repo, prs) == {7, 8, 40}, R.first_fixes(repo, prs)
+added = [x for x in WROTE if "--add-label first" in x]
+assert added == ["pr edit 7 -R sam/u --add-label first", "pr edit 40 -R sam/u --add-label first"], WROTE
 
 FAIL.clear()
 STATES.pop("job-1", None)

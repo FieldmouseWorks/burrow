@@ -30,10 +30,13 @@ pub enum Query {
         since: When,
         until: When,
     },
-    /// The Remote Control servers: each one's state and memory.
-    Rc,
     /// proj's jobs (`proj status`).
     Queue,
+    /// Where an issue stands with proj's inbox, and its job's record
+    /// (`proj why OWNER/REPO#N`).
+    Why {
+        issue: String,
+    },
     /// What the machine runs: its system, its inputs' revisions, and what
     /// HOST-update last found live.
     Deployed,
@@ -49,7 +52,7 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | queue | why OWNER/REPO#N | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -151,7 +154,7 @@ impl When {
         if word.len() == 10 {
             let date: jiff::civil::Date = word.parse().map_err(|_| bad())?;
             let t = date
-                .to_zoned(jiff::tz::TimeZone::UTC)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .map_err(|_| bad())?
                 .timestamp();
             return Ok(When::At(t.as_second()));
@@ -205,8 +208,21 @@ impl Query {
                     "`crashes` takes an absolute executable path and optional time ({VOCABULARY})"
                 )),
             },
-            "rc" => none(Query::Rc),
             "queue" => none(Query::Queue),
+            "why" => match args {
+                [issue]
+                    if issue.rsplit_once('#').is_some_and(|(repo, n)| {
+                        repository(repo)
+                            && (1..=10).contains(&n.len())
+                            && n.bytes().all(|b| b.is_ascii_digit())
+                    }) =>
+                {
+                    Ok(Query::Why {
+                        issue: issue.to_string(),
+                    })
+                }
+                _ => Err(format!("`why` takes one OWNER/REPO#N ({VOCABULARY})")),
+            },
             "deployed" => none(Query::Deployed),
             "contains" => match args {
                 [repo, commit]
@@ -275,8 +291,8 @@ impl fmt::Display for Query {
             ),
             Query::Units => f.write_str("units"),
             Query::Crashes { exe, since } => write!(f, "crashes {exe} {}", show(*since)),
-            Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),
+            Query::Why { issue } => write!(f, "why {issue}"),
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
             Query::Deployed => f.write_str("deployed"),
             Query::Oom { since } => write!(f, "oom {}", show(*since)),
@@ -333,8 +349,13 @@ mod tests {
     fn each_word() {
         assert_eq!(Query::parse("memory"), Ok(Query::Memory));
         assert_eq!(Query::parse("  Units "), Ok(Query::Units));
-        assert_eq!(Query::parse("rc"), Ok(Query::Rc));
         assert_eq!(Query::parse("queue"), Ok(Query::Queue));
+        assert_eq!(
+            Query::parse("why sam/box#7"),
+            Ok(Query::Why {
+                issue: "sam/box#7".into()
+            })
+        );
         assert_eq!(Query::parse("deployed"), Ok(Query::Deployed));
         assert_eq!(
             Query::parse("oom"),
@@ -367,8 +388,9 @@ mod tests {
             "journal",
             "journal remi-update -1h",
             "journal remi-update -1h now extra",
-            "journal 'claude-rc@*' -1h now",
-            "journal claude-rc@* -1h now",
+            "journal 'proj-*' -1h now",
+            "journal proj-* -1h now",
+            "rc",
             "journal -u -1h now",
             "journal --since=x -1h now",
             "journal a;b -1h now",
@@ -384,6 +406,14 @@ mod tests {
             "usage --totals --totals",
             "usage -1h -2h --totals",
             "usage -1h --total",
+            "why",
+            "why sam/box",
+            "why sam/box#",
+            "why sam/box#7x",
+            "why sam/box#7 now",
+            "why --json#7",
+            "why sam/box#-7",
+            "why j1",
         ] {
             assert!(Query::parse(line).is_err(), "{line:?} parsed");
         }
@@ -392,8 +422,8 @@ mod tests {
     #[test]
     fn unit_names() {
         assert_eq!(
-            Unit::parse(r"claude-rc@LoK\x2dweb").unwrap().as_str(),
-            r"claude-rc@LoK\x2dweb.service"
+            Unit::parse(r"autoland@LoK\x2dweb").unwrap().as_str(),
+            r"autoland@LoK\x2dweb.service"
         );
         assert_eq!(
             Unit::parse("nix-gc.timer").unwrap().as_str(),
@@ -439,6 +469,7 @@ mod tests {
             "oom -1d",
             "usage -7d --totals",
             "usage -5h",
+            "why sam/box#7",
             "journal remi-update.service -2h now",
             "journal a.timer 2026-11-01T13:05:00Z now",
         ] {

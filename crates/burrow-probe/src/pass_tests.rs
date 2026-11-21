@@ -261,7 +261,7 @@ fn a_repo_that_isnt_private_gets_nothing() {
 fn a_comment_that_fails_leaves_the_issue_open() {
     let mut gh = Fake::default();
     let issues = json!([
-        issue(3, "sam", "rc", json!(null)),
+        issue(3, "sam", "memory", json!(null)),
         issue(4, "sam", "queue", json!(null))
     ]);
     unedited(&mut gh, &issues);

@@ -55,10 +55,15 @@ pub fn markdown() -> String {
             kept,
             s.help.to_owned(),
         ];
-        let row: Vec<_> = row.iter().map(|cell| cell.replace('|', "\\|")).collect();
-        out.push_str(&format!("| {} |\n", row.join(" | ")));
+        out.push_str(&line(&row));
     }
     out
+}
+
+/// One table row, a pipe in a cell escaped: it would end the cell.
+fn line(cells: &[String]) -> String {
+    let cells: Vec<_> = cells.iter().map(|cell| cell.replace('|', "\\|")).collect();
+    format!("| {} |\n", cells.join(" | "))
 }
 
 fn code(text: &str) -> String {
@@ -71,10 +76,12 @@ fn kind_type(kind: &Kind) -> String {
         Kind::Bool => "boolean".into(),
         Kind::Count { .. } => "integer".into(),
         Kind::Text => "text".into(),
-        Kind::Percent => "number".into(),
+        Kind::Percent | Kind::Usd => "number".into(),
+        Kind::Date => "date".into(),
         Kind::OneOf(_) => "word".into(),
         Kind::Repo => "repository".into(),
         Kind::Maybe(kind) => format!("{} or null", kind_type(kind)),
+        Kind::Omitted(kind) => format!("{}, optional", kind_type(kind)),
         Kind::List(kind) => format!("list of {}", kind_type(kind)),
         Kind::Map(kind) => format!("map of {}", kind_type(kind)),
         Kind::Record(fields) => format!(
@@ -95,10 +102,13 @@ fn allowed(kind: &Kind) -> String {
         Kind::Bool => "`true`, `false`".into(),
         Kind::Count { min } => format!("{min} or more"),
         Kind::Percent => "0 to 100".into(),
+        Kind::Usd => "dollars, 0 or more, to the cent".into(),
+        Kind::Date => "`YYYY-MM-DD`".into(),
         Kind::Text | Kind::Object => "any".into(),
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
         Kind::Repo => "`OWNER/NAME`".into(),
         Kind::Maybe(kind) => format!("{}, or `null`", allowed(kind)),
+        Kind::Omitted(kind) => format!("{}, or left out", allowed(kind)),
         Kind::List(kind) | Kind::Map(kind) => match allowed(kind) {
             any if any == "any" => any,
             each => format!("each {each}"),
@@ -140,6 +150,9 @@ mod tests {
             "| `settings.pipelineUntil` | integer or null | 0 or more, or `null` | `null` | yes | proj | `settings/overlay.json` |"
         ));
         // A pipe in a cell would end it.
-        assert!(text.contains(r#"`["(^\|/)secrets?/","#), "pipes escaped");
+        assert_eq!(
+            line(&["`(^|/)x`".into(), "y".into()]),
+            "| `(^\\|/)x` | y |\n"
+        );
     }
 }

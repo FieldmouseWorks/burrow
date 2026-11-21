@@ -1,5 +1,6 @@
 //! Parking wins over both inbox passes and resumes that beat the label event.
 use super::sorting_tests::{Box, issue};
+use crate::inbox::record::files;
 use crate::{ask, job::Job, read};
 use serde_json::json;
 use std::fs;
@@ -100,7 +101,7 @@ fn parking_stops_running_and_policy_parked_issue_jobs_too() {
 
 #[test]
 fn an_await_wake_on_a_parked_issue_takes_no_turn() {
-    for labels in [vec!["codex", "later"], vec![]] {
+    for labels in [vec!["claude", "later"], vec![]] {
         let b = fixture();
         on_github(&b, &issue(7, "sam", &labels));
         on_github(&b, &issue(8, "sam", &["claude"]));
@@ -152,14 +153,14 @@ fn relabelling_starts_a_fresh_job_and_never_resumes_the_stopped_one() {
     b.pass().new_issues("sam/box", &[parked]).unwrap();
     let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
     assert!(
-        !record.join("job").exists(),
+        !record.join(files::File::Job).exists(),
         "later wins over an engine label"
     );
 
-    let ready = issue(7, "sam", &["ready", "codex"]);
+    let ready = issue(7, "sam", &["ready", "claude"]);
     on_github(&b, &ready);
     b.pass().new_issues("sam/box", &[ready]).unwrap();
-    let fresh = read(&record.join("job")).unwrap();
+    let fresh = read(&record.join(files::File::Job)).unwrap();
     assert_ne!(fresh, "j1");
     let job = Job::new(&b.cfg, &fresh);
     assert_eq!(job.turns().as_deref(), Some("1"));
@@ -168,18 +169,6 @@ fn relabelling_starts_a_fresh_job_and_never_resumes_the_stopped_one() {
     let _held = old.lock().unwrap();
     assert!(crate::turn::start(&b.cfg, "j1", "late wake", false).is_err());
     assert_eq!(old.turns().as_deref(), Some("1"));
-}
-
-#[test]
-fn removing_one_engine_label_keeps_the_other_enrolled() {
-    let b = fixture();
-    on_github(&b, &issue(7, "sam", &["codex"]));
-    let job = Job::new(&b.cfg, "j1");
-    let _held = job.lock().unwrap();
-    crate::turn::start(&b.cfg, "j1", "news", false).unwrap();
-    assert_eq!(job.turns().as_deref(), Some("2"));
-    assert!(b.path("launched").exists());
-    assert!(!job.turn("1", "stopped").exists());
 }
 
 #[test]
@@ -221,11 +210,11 @@ fn relabelling_after_a_refused_wake_retires_the_old_record() {
         let _held = job.lock().unwrap();
         assert!(crate::turn::start(&b.cfg, "j1", "news", false).is_err());
     }
-    let ready = issue(7, "sam", &["ready", "codex"]);
+    let ready = issue(7, "sam", &["ready", "claude"]);
     on_github(&b, &ready);
     b.pass().new_issues("sam/box", &[ready]).unwrap();
     let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-    assert_ne!(read(&record.join("job")).as_deref(), Some("j1"));
+    assert_ne!(read(&record.join(files::File::Job)).as_deref(), Some("j1"));
     assert_eq!(job.turns().as_deref(), Some("1"));
 }
 
@@ -250,11 +239,11 @@ fn a_repository_release_cannot_launch_a_parked_issues_queued_turn() {
 fn an_explicit_stop_without_parking_does_not_enrol_a_replacement() {
     let b = fixture();
     crate::cmd::stop(&b.cfg, "j1", false).unwrap();
-    let ready = issue(7, "sam", &["codex"]);
+    let ready = issue(7, "sam", &["claude"]);
     on_github(&b, &ready);
     b.pass().new_issues("sam/box", &[ready]).unwrap();
     let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
-    assert_eq!(read(&record.join("job")).as_deref(), Some("j1"));
+    assert_eq!(read(&record.join(files::File::Job)).as_deref(), Some("j1"));
     assert!(!b.path("launched").exists());
 }
 
@@ -266,7 +255,7 @@ fn a_hand_stopped_worker_tells_its_issue_once_and_never_retries() {
     let b = fixture();
     let d = b.record("j1");
     crate::cmd::stop(&b.cfg, "j1", false).unwrap();
-    let enrolled = issue(7, "sam", &["codex"]);
+    let enrolled = issue(7, "sam", &["claude"]);
     on_github(&b, &enrolled);
     fs::write(
         b.path("comments"),
@@ -286,7 +275,7 @@ fn a_hand_stopped_worker_tells_its_issue_once_and_never_retries() {
     let job = Job::new(&b.cfg, "j1");
     assert_eq!(job.turns().as_deref(), Some("1"));
     assert!(!b.path("launched").exists());
-    assert_eq!(read(&d.join("job")).as_deref(), Some("j1"));
+    assert_eq!(read(&d.join(files::File::Job)).as_deref(), Some("j1"));
     let posted = b.posted();
     assert_eq!(posted.matches("was stopped").count(), 1, "{posted}");
 
@@ -296,7 +285,7 @@ fn a_hand_stopped_worker_tells_its_issue_once_and_never_retries() {
     b.pass().jobs("sam/box", "box", &[]).unwrap();
     on_github(&b, &enrolled);
     b.pass().new_issues("sam/box", &[enrolled]).unwrap();
-    let fresh = read(&d.join("job")).unwrap();
+    let fresh = read(&d.join(files::File::Job)).unwrap();
     assert_ne!(fresh, "j1");
     assert_eq!(Job::new(&b.cfg, &fresh).turns().as_deref(), Some("1"));
     assert_eq!(job.turns().as_deref(), Some("1"));

@@ -2,11 +2,11 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, kick, token) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place.
 
-The steward talks to GitHub only as its GitHub App (config.app): the API
-through gh and git both, each owner's repos with a token of the App's
-installation on that owner. Whose repos a call is about is set around it
-(`acting_for`); a call outside one fails rather than going as the machine
-user's own gh login, which every Claude session on the machine shares.
+The steward talks to GitHub only as its GitHub App (config.app), through gh
+and git, each owner's repos with its installation's token on that owner, but
+for its one door that acts as the owner (reviewers.ask_as_owner), in a unit
+of its own. Whose repos a call is about is set around it (`acting_for`); a
+call outside one fails rather than going as the machine user's own gh login.
 `autoland-steward status` changes nothing, and reads as whoever runs it."""
 
 import contextlib
@@ -26,6 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
+from admission import decision, handed, held, landing, lands, spend, spend_closed  # noqa: F401 (the steward's, as C.*)
 import proof_state
 from proof_state import build_unit, user_systemctl, build_state
 
@@ -118,7 +119,7 @@ def limited(stderr, env):
     if LIMITED or not re.search(r"rate limit", stderr, re.I):
         return
     p = remote(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
-               capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env, cwd=GH_CWD)
     try:
         LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
     except ValueError:
@@ -173,12 +174,29 @@ def token(owner):
 def gh_env(repo=None):
     """The environment gh runs in, and git with gh as its only credential
     helper (GIT_AUTH): the App's token for repo's owner, else for the owner
-    it's acting for. A status run only reads, as whoever runs it."""
-    if DRY:
-        return None
+    it's acting for. A status run only reads, as whoever runs it: their gh,
+    which (gh-token) holds a token for each account they act in, and is
+    told the account here, as burrow-github's transport tells it
+    (crates/burrow-github/src/transport.rs). A call naming no repo (a
+    GraphQL one) is about GH_TOKEN_OWNER's, unless GH_REPO or the checkout
+    it runs in says otherwise (crates/gh-token/src/account.rs): neither is
+    what the call is about, so GH_REPO goes, and gh runs outside any
+    checkout (GH_CWD)."""
     if repo is None and not _for:
+        if DRY:
+            return None
         raise RuntimeError("a GitHub call outside acting_for: it would go as the machine user's own login")
-    return {**os.environ, "GH_TOKEN": token(repo.split("/")[0].lower() if repo else _for[-1])}
+    owner = repo.split("/")[0].lower() if repo else _for[-1]
+    if DRY:
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GIT_DIR")}
+        return {**env, "GH_TOKEN_OWNER": owner}
+    return {**os.environ, "GH_TOKEN": token(owner)}
+
+
+# Where gh runs: in no checkout, whose remotes gh-token would take for the
+# account a call naming no repo is about. Every call of the steward's names
+# its repo, or its owner by gh_env.
+GH_CWD = "/"
 
 
 # How long one call of burrow-upkeep may take: its look at a repo is a few
@@ -190,7 +208,7 @@ UPKEEP_TIMEOUT = 300
 def upkeep(*args, input=None, as_app=True, bounded=True):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
     owner, as every GitHub call of a pass's, `input` on its stdin: what it
-    printed, read, with a rate limit it met noted for the pass (LIMITED).
+    printed, read, with the latest rate limit any call met noted (LIMITED).
     Not `as_app`, it's handed no token: `hooks` mints its own, for each
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
@@ -204,8 +222,8 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     if p.returncode:
         raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
-    if out["limited"] is not None and not LIMITED:
-        LIMITED.append(out["limited"])
+    if out["limited"] is not None:
+        LIMITED[:] = [max([*LIMITED, out["limited"]])]
     return out
 
 
@@ -213,7 +231,7 @@ def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     env = gh_env()
-    p = remote(["gh", *args], input=input, capture_output=True, text=True, env=env)
+    p = remote(["gh", *args], input=input, capture_output=True, text=True, env=env, cwd=GH_CWD)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         limited(p.stderr, env)
@@ -254,7 +272,7 @@ def fresh(path, etag=None):
     gh() does, and Gone when there's no such thing."""
     env = gh_env()
     p = remote(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
-               capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env, cwd=GH_CWD)
     status, _, rest = p.stdout.partition("\n")
     code = status.split(" ")[1:2]
     if code == ["304"]:
@@ -291,8 +309,8 @@ def comment(repo, n, body):
 
 
 def me():
-    """The steward's login as REST gives it: its App's bot. The reviewers'
-    reviews, its statuses, comments and merges are posted as it, and nobody
+    """The steward's login as REST gives it: its App's bot. Its statuses,
+    comments, judges' verdicts and merges are posted as it, and nobody
     else can post as it: a user's login can't have "[bot]" in it."""
     return CFG["app"]["slug"] + "[bot]"
 
@@ -370,14 +388,14 @@ def seal(repo, n, name, verdict, head, base):
 
 
 def quote(body):
-    """A PR's description as the reviewers are shown it: each line quoted,
-    so nothing in it reads as their brief going on."""
+    """A PR's description as a judge is shown it: each line quoted, so
+    nothing in it reads as its brief going on."""
     return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
 
 
 def fingerprint(body):
-    """What a review or a judge's verdict carries of the description it was
-    on: the reasons a description gives are part of what's judged."""
+    """What a judge's verdict carries of the description it was on: the
+    reasons a description gives are part of what's judged."""
     return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
 
 
@@ -836,8 +854,8 @@ def at_work(jid, key=None, snapshot=None):
     """Whether job jid (or a proof build) is still at work: queued, running,
     nothing can say, or its turn is over but it holds something open
     (job_lifecycle)."""
-    state, held = job_lifecycle(jid, key, snapshot)
-    return state != "parked" and (state in (None, "queued", "running") or held is not None)
+    state, holds = job_lifecycle(jid, key, snapshot)
+    return state != "parked" and (state in (None, "queued", "running") or holds is not None)
 
 
 def holding(lines, key):

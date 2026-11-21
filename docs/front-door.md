@@ -4,11 +4,10 @@ You talk to one claude.ai project chat. The work runs on the box, inside each
 project: its checkout, its agent instructions, its tools and logins. Nothing gets
 copied to the cloud and back.
 
-## Four doors, cheapest first
+## Three doors, cheapest first
 
 A thread takes the first door that fits. A probe and a run start no Claude on
-the box; a job or a session holds an agent, and its memory, for as long as it
-works.
+the box; a job holds an agent, and its memory, only for as long as it works.
 
 1. **Probe:** a fact about the box that only needs reading (its memory, a
    unit's log, what's deployed, the job queue), answered in seconds
@@ -22,14 +21,10 @@ works.
 3. **Job:** code or judgment in a project, handed over as an issue
    ([the inbox](#jobs-the-inbox-nothing-to-approve)). It waits for a slot,
    and holds no agent until it gets one.
-4. **Session:** work the owner steers live, or that can't wait for a slot:
-   Remote Control on the project's server
-   ([below](#sessions-remote-control-one-tap-per-thread)). It costs the owner
-   a tap, and holds a Claude while it's open.
 
 ```
-claude.ai project chat                   GitHub                  the box
-──────────────────────                   ──────                  ──────────────────────
+chat thread                              GitHub                  the box
+───────────                              ──────                  ──────────────────────
 thread ── issue labelled `probe` ───▶ the machine's repo ──▶ burrow-probe (on its webhook)
        ◀── answers, then closed ────
 
@@ -41,9 +36,6 @@ thread ── issue labelled `undo` ────▶ the machine's repo ──▶
 
 thread ── issue labelled `claude` ──▶ the project's repo ──▶ proj-inbox (on its webhook)
        ◀── answer as a comment ─────                     ──▶ proj run / proj reply
-
-thread ── Remote Control (one tap) ───────────────────────────▶ claude-rc@PROJECT
-       ◀── results, PRs, questions ────────────────────────────  (own worktree)
 ```
 
 ## Probes: facts with no Claude
@@ -67,7 +59,6 @@ own, say), in seconds and without starting a Claude.
     units on `probe.journal.units` (and `userUnits`) only. The system defaults
     include Renovate's full pass (`renovate.service`) and repository passes
     (`renovate@*.service`), so jobs can diagnose their failed runs.
-  - `rc`: each Remote Control server's state, memory and restarts
   - `queue`: `proj status`
   - `deployed`: the running and booted systems, the generation, the inputs'
     revisions, and what `HOST-update` last found live
@@ -81,7 +72,10 @@ own, say), in seconds and without starting a Claude.
     from selected turns, recovered cost potentially belonging outside the span,
     unread engine streams and partial token counts. Recovery is matched by run
     identity, so including both a crash and its recovery does not claim the
-    recovered cost is still missing. `--totals` gives only this required section.
+    recovered cost is still missing. Then the API credit as it stands now
+    ([settings.md](settings.md#the-api-credit)): its cycle and expiry, budget,
+    spend, reserve, what's left, and today's spend against its allowance, or
+    why it has no room. `--totals` gives only these required sections.
     Project basenames, including leading dots and underscores, remain distinct;
     names are escaped for display. Meter readings follow, then each turn by
     role, inbox label and opener category, or starter. Optional detail is cut
@@ -152,7 +146,10 @@ reversible default resumes it, or `proj stop` ends it, the job is still at work:
 question, a one-way one left for the owner, the PRs and issues it awaits),
 read together under its turn-start lock, and the steward never takes one that
 holds anything for ended, however its turn ended, or starts a second job on
-its work.
+its work. `proj why ID` says the rest of its record: what each wait is and what
+ends it, since when, when it's overdue, what happens next, and the changes
+its history noted (`--json` for the record whole, with how its latest turn
+said it ends and the engine, model, effort and session that turn ran on).
 
 ## Engines with no agent
 
@@ -189,9 +186,11 @@ probe's repo and from its authors unless set otherwise (`door.repo`,
 - **Ask:** one line, in `cn undo`'s words: `undo OWNER/REPO#N` (the change
   that PR is), `undo --actor SESSION_URL` (everything an agent session
   landed, one PR per repo) or `undo --since TIME --repo OWNER/REPO`
-  (everything that landed there after an RFC 3339 time). Which repos it
-  reaches is the ledger's to say: cn refuses a change or a repo it keeps
-  nothing of.
+  (everything that landed there after an RFC 3339 time), then `--reason`
+  and why, to the end of the line. Every undo needs its reason: the ledger
+  keeps it for good and the undo's PR opens with it, so it carries no
+  secrets, personal data or prompt text. Which repos it reaches is the
+  ledger's to say: cn refuses a change or a repo it keeps nothing of.
 - **Answer:** `cn undo` runs as the ledger's writers do, as the machine's
   App, and the comment links each undo's PR, with any change left out (its
   revert conflicts with the rest: ask again) or already gone from trunk.
@@ -215,9 +214,6 @@ into project jobs.
   `inbox.authors`. Put the whole brief in the body: the job knows only the
   issue. Within seconds it's a `proj run` job in that project, and the
   issue gets an "On it" comment naming the job.
-- **Engine:** `codex` for code work with a checkable bar: a gate or tests.
-  `claude` for judgment, anything the owner reads, and one-way calls. If an
-  issue has both, Codex takes it. VM jobs stay Claude-only.
 - **Answer:** when the job finishes a turn, its answer is posted to the issue.
 - **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the
   same job as its next turn (`proj reply`), with everything it already did in
@@ -250,23 +246,30 @@ into project jobs.
 
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
-  have the box user's permissions. Codex jobs write
-  only their project, scratch, job dir, git metadata and a /tmp of their own,
-  and see nothing else but the machine's system paths, with network access
-  (the App's token socket included) but no server of the user's own (the
-  runtime dir's D-Bus and systemd manager, tmux, any socket the user serves
-  outside those paths); sudo cannot elevate there.
-- Jobs are headless (`claude -p` or `codex exec --json`).
+  have the box user's permissions.
+- Jobs are headless (`claude -p`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.
 - On the box: `proj-inbox status` maps issues to jobs, `proj log ID` shows an
-  answer.
+  answer, and `proj why OWNER/REPO#N` (the probe's `why OWNER/REPO#N` off the
+  box) prints the issue's record: its stage (unseen and why, sorting, planned,
+  ready, working, answered, closed), what it waits on and what ends that, and
+  then its job's record when it has one. An issue the inbox never took up
+  says why: not opened by an author, no engine label, a label that keeps it
+  back, closed, its repo paused, or GitHub refusing to list its repo. GitHub
+  is asked about an issue once when no job holds it, so one closed reads
+  closed whatever the inbox kept of it; a ready one says what the drain's
+  admission does (its cap, a repair past it, its engine's room, the drain
+  off), and a child what its plan holds it on.
 
 ### Triage and the drain: issues nobody labelled
 
 With `inbox.triage.enable`, an issue doesn't need a label to get done. Every
 open issue one of `inbox.authors` opened, with none of the labels below, an
-engine's or one in `triage.skip` (probe, undo, flaky: other machinery's), is
+engine's or one in `triage.skip` (probe, undo, flaky: other machinery's), and
+no machine notice no job is handed (a question's, below, or one its opener
+marked `--handled`: HOST-update's, which it settles itself, with a job of its
+own where it has one), is
 sorted by a job of its own: the `triage` role's engine reads the issue and the
 repo, changes nothing, and answers with a verdict the inbox carries out.
 
@@ -310,8 +313,15 @@ first. Triage includes a priority in its verdict and adds it only if no priority
 label exists when it acts. `proj status` and the probe's `queue` show drain
 capacity used/total and the handoffs using it, then the next five candidates from the drain's cached lists; eligibility and slot availability
 are checked when handing one on.
-While a `ready` issue waits for a slot, every job turn's end kicks a pass, since
-any of them frees one; a usage hold books one for when it resets.
+While a `ready` issue waits for a slot, every job turn's end kicks the drain's
+own pass (`proj-inbox drain`), since any of them frees one: it reads the cached
+lists and lists nothing. A usage hold books a pass for when it resets.
+However many events, kicks and turns' ends come at once, a repo's open issues
+are listed at most once a gap, and the drain asks GitHub at most once a gap
+(`LISTING_GAP` and `DRAIN_GAP` in crates/burrow-proj/src/inbox); what comes
+sooner books the pass that does it at the gap's end. With no idle slot on the
+engine an issue's cached labels route it to, the drain doesn't ask GitHub
+about it at all.
 
 Strangers' issues are never sorted or handed on: an agent reads them with the
 box's logins. Nor is one labelled `inbox.outsideLabel` (`outside text`), whoever
@@ -323,20 +333,8 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Which engine, model and effort runs each role (`ROLE` or
-`ROLE@OWNER/REPO`), and when a turn overflows to the other engine, are
+Which model and effort runs each role (`ROLE` or `ROLE@OWNER/REPO`) are
 live settings: see [settings](settings.md#engines-models-and-efforts-per-role).
-
-Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
-an independent login: `autoland-codex-login job` logs the job user in,
-`autoland-codex-login review` logs the reviewer in. Each is a device-code
-login; don't copy tokens between them. Codex jobs have their own small
-pool (`burrow.proj.codex.slots`), leaving the reviewer first
-claim on the plan. Usage refusals wait for the reset and resume themselves.
-The job user's `.codex/config.toml` picks the default model. Machine
-instructions and one-way command rules are generated alongside Claude's.
-Codex commits carry `Engine: codex` (a push of a commit without it is
-refused); after the usual review, a Claude job judges whether their PR lands, as it does one GitHub won't list every commit of. A steward judge always uses Claude.
 
 ### For the Claude in the chat (coordinator and threads)
 
@@ -349,60 +347,12 @@ refused); after the usual review, a Claude job judges whether their PR lands, as
    answer as a reply on the issue, and check back again.
 4. Close the issue when the owner has what they asked for.
 
-## Sessions: Remote Control, one tap per thread
-
-For work the owner wants to watch or steer live, a thread starts a Remote
-Control session on the project's server (`modules/remote-control.nix`): the
-project's Claude, in its own git worktree, in `burrow.remoteControl.permissionMode`
-(bypassPermissions alongside `burrow.claude`, so only the one-way doors ask).
-The owner's messages in the thread reach it directly. The catch: each thread
-shows the owner an approval card first, and a box with no desktop app can't be
-pre-approved.
-
-- Every project in `burrow.projectsDir`, a git checkout with an origin, has an
-  always-on `claude remote-control` server that trusts its folder by itself, so
-  it never sits at a prompt nobody can see. The machine's own flake always has
-  one. Any other folder, a linked git worktree included, gets none.
-- With `burrow.remoteControl.spawn = "worktree"` (the default) each session
-  started from claude.ai gets its own git worktree, so several threads can work
-  in one project at once. A server holds no session until one is asked for
-  (`burrow.remoteControl.idleSession`). The servers keep memory back when
-  the machine runs short (`burrow.remoteControl.memoryLow`), and each server
-  and its sessions have a backstop of half the machine
-  (`burrow.remoteControl.memoryMax`): a session that grows past it is killed
-  alone, and the thread can pick it up again from its transcript
-  (`tests/remote-control-memory.nix`).
-- A switch never restarts a server, since that would cut off the session
-  confirming it. `claude-rc-scan` (on a switch, when a session's status changes, and when the
-  quiet spell it's waiting on ends) restarts
-  any server still running an older tmux or `claude-rc-serve` (older Claude
-  Code or permission mode) once none of its sessions is working or has done anything
-  in the last 30 minutes; a session that's open but idle doesn't count
-  (`tests/remote-control.nix`).
-- What the owner has approved in advance goes in `burrow.claude.standingAuthority`:
-  a section of the machine CLAUDE.md, so no session asks them to approve it
-  again just because the instruction came through a thread or an issue.
-- A thread holds one Remote Control session at a time. To give it more to do
-  after it started, start Remote Control again from the same thread with new
-  instructions; they reach the running session.
-- The machine's own flake folder is the operator. Its sessions stay in the
-  folder itself, since that checkout is what `HOST-switch` builds.
-
 ## What's running
 
 - Inbox and other proj jobs: `proj status` and `proj-inbox status` on the box;
-  open issues labelled `claude` or `codex` on GitHub.
-- Remote Control: the chat's thread list; on the box, `tmux -L rc-NAME attach`
-  shows a project's server and its sessions.
+  open issues labelled `claude` on GitHub.
 
-## Worktrees and untracked files
-
-A worktree has the tracked files only. If a project needs untracked ones to
-build (`.env`, a local config), list them in `.worktreeinclude` at the repo
-root and Claude Code copies them into each new Remote Control worktree.
-Dependencies (`node_modules`, `target/`) get rebuilt there; set
-`burrow.remoteControl.sameDir = [ "NAME" ]` for a project where that's too
-slow.
+## Job questions
 
 A job ending with `proj ask --default "TEXT" [--one-way]` sends its question through `burrow.tools.notify`
 when configured. The open-question state survives automated resumes (#549).
@@ -420,6 +370,9 @@ deadline. Active units and unknown lifecycle states stay protected.
 Completion (native or VM) or an explicit stop also closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.
+The inbox never sorts or drains a question's notice (titled
+`[proj-question-JOB-TURN]`), whatever its labels: only a person answers it, and
+a job's `proj reply` is an update, not an answer.
 
 ### GitHub's installation quota
 
@@ -436,7 +389,8 @@ The host records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
 hold. `proj usage` includes these readings in a `github` array inside its
 single JSON object; an active Claude hold keeps its existing top-level
-fields for consumers such as the watchdog. The version 2 live snapshot (`proj state --json`) includes these same
+fields for consumers such as the watchdog. The live snapshot (`proj state --json`, at the version in
+[`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs)'s `VERSION`) includes these same
 installation readings in `meters`, alongside the engine readings. Each
 installation entry identifies its App and owner and includes the reading's
 age and whether its hold is active.
@@ -485,6 +439,6 @@ registration intent; stopped jobs stay stopped.
 
 Known holds are published before optional budget sampling. Observations
 wake the host watcher, which refreshes queued watchdog records for matching
-Claude, Codex and emergency work. Their stall deadline includes the reset
+Claude and emergency work. Their stall deadline includes the reset
 and ordinary queue grace after it, so a long API hold never looks like a
 stalled queue; unrelated installations keep their existing deadlines.

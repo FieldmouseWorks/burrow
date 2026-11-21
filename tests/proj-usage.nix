@@ -5,7 +5,10 @@
 # usage until its limit resets: no turn takes a slot till then, the refused
 # one waits in line and runs once more, its wait due a stall's time after the
 # reset, `proj status` says why and until when, the owner hears once, and
-# all of it carries on by itself after. proj's usage tests have the rest.
+# all of it carries on by itself after. A role whose route goes on to the
+# API credit carries the refused turn on there instead, in the same
+# conversation, and its next turn is the subscription's again once usage is
+# back. proj's usage and route tests have the rest.
 #
 #   nix build .#checks.x86_64-linux.proj-usage -L
 { self, pkgs }:
@@ -90,4 +93,37 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       assert proj("usage") == "", proj("usage")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
       machine.succeed(f"test -s /data/dev/jobs/{j}/prompt.2")
+
+  with subtest("a run refused for usage goes on to the API credit along its route, with its tuning and conversation, and the subscription has the next turn back"):
+      def door(line):
+          machine.succeed(f"su - dev -c \"proj settings {line}\"")
+      renews = machine.succeed("date -u -d '+2 days' +%F").strip()
+      door(f"credit 20 {renews} 200 5")
+      door("offer claude-api models api-model")
+      door("model '*' claude-api api-model high")
+      door("role '*' claude over 95 claude-api")
+      machine.succeed("echo sk-ant-stand-in >/tmp/api-key && chown dev /tmp/api-key && chmod 600 /tmp/api-key")
+      machine.succeed("rm -f /tmp/told-spent /tmp/spent-args /tmp/spent-key")
+      machine.succeed("echo 3600 >/tmp/spent && chmod 644 /tmp/spent")
+      a = proj("run web spent")
+      # Refused once, and on at once: no wait for the hour's reset.
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+      assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+      assert machine.succeed(f"cat /data/dev/jobs/{a}/1.engine").strip() == "claude-api"
+      assert machine.succeed(f"cat /data/dev/jobs/{a}/1.model").strip() == "api-model"
+      told = machine.succeed("cat /tmp/told-spent")
+      assert "so this turn carries on on claude-api" in told and "weekly allowance" in told, told
+      args = machine.succeed("cat /tmp/spent-args")
+      for given in ("--resume spent", "--model api-model", "--effort high", "--max-budget-usd 10.000000"):
+          assert given in args, (given, args)
+      assert machine.succeed("cat /tmp/spent-key").strip() != "none"
+      # The subscription is still out: its hold stays.
+      assert "until" in proj("usage"), proj("usage")
+      # Usage back: the next turn is the subscription's, on no key.
+      machine.succeed("rm /tmp/spent /tmp/spent-key")
+      proj("usage back")
+      b = proj("run web hello")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=60)
+      assert machine.succeed(f"cat /data/dev/jobs/{b}/1.engine").strip() == "claude"
+      door("role '*' unset")
 ''

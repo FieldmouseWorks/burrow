@@ -38,7 +38,8 @@
 //! apart. A handler's passes run one at a time, each repo's before its full
 //! pass, which never stands in for one (the steward's yields after a slice
 //! and resumes later). A handler can yield to another (`yieldTo`): it starts
-//! no pass while that one has one running or due. When the service starts,
+//! no pass while that one has one running or due, and that one starts none
+//! while one of the yielder's runs. When the service starts,
 //! every handler gets a full pass, which catches up on whatever happened
 //! while it was down.
 
@@ -46,6 +47,7 @@ pub mod glob;
 pub mod handler;
 pub mod http;
 pub mod kick;
+pub mod landing;
 pub mod line;
 pub mod passes;
 pub mod routes;
@@ -53,6 +55,14 @@ pub mod routes;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The hooks' secret in tests: made as they run, as a real one is, never
+/// written in the source.
+#[cfg(test)]
+pub(crate) fn test_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| format!("hook-{}-{}", std::process::id(), now()))
+}
 
 /// The time now, in seconds since the epoch, as the wake files have it.
 pub fn now() -> f64 {

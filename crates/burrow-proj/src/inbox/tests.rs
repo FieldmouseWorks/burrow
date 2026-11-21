@@ -1,3 +1,4 @@
+use crate::inbox::record::files;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
@@ -51,6 +52,8 @@ fn pass(cfg: &Config) -> Pass<'_> {
         looked: Vec::new(),
         observe: false,
         scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
     }
 }
 
@@ -138,7 +141,7 @@ fn forgets_a_repo() {
     let state = tmp.path();
     let mk = |d: &str| {
         fs::create_dir_all(state.join(d)).unwrap();
-        fs::write(state.join(d).join("job"), "j\n").unwrap();
+        fs::write(state.join(d).join(files::File::Job), "j\n").unwrap();
     };
     for d in [
         "O_R-5",
@@ -278,7 +281,7 @@ fn refuses_once() {
     p.new_issues("sam/box", std::slice::from_ref(&outside))
         .unwrap();
     assert!(!posted.exists());
-    assert!(!record.join("refused").exists());
+    assert!(!record.join(files::File::Refused).exists());
     assert_eq!(p.unreached, ["sam/box"]);
     assert!(p.wake["sam/box"] >= crate::now() + 290);
 
@@ -302,8 +305,8 @@ fn refuses_once() {
     assert!(!said.contains("from-outside"), "{said}");
     assert!(p.unreached.is_empty() && p.wake.is_empty());
     // No job: no record of one, so the status and the job loop pass it over.
-    assert!(record.join("refused").exists());
-    assert!(!record.join("job").exists());
+    assert!(record.join(files::File::Refused).exists());
+    assert!(!record.join(files::File::Job).exists());
 }
 
 // A record's revived: the turn the last carrying on started, and its streak.
@@ -311,25 +314,22 @@ fn refuses_once() {
 fn revivals() {
     let tmp = tempfile::TempDir::new().unwrap();
     assert_eq!(revived(tmp.path()), (None, 0));
-    fs::write(tmp.path().join("revived"), "4 2\n").unwrap();
+    fs::write(tmp.path().join(files::File::Revived), "4 2\n").unwrap();
     assert_eq!(revived(tmp.path()), (Some(4), 2));
-    fs::write(tmp.path().join("revived"), "junk\n").unwrap();
+    fs::write(tmp.path().join(files::File::Revived), "junk\n").unwrap();
     assert_eq!(revived(tmp.path()), (None, 0));
 }
 
 #[test]
-fn issue_labels_choose_an_engine_and_codex_wins_when_both_are_present() {
+fn issue_labels_choose_an_engine() {
     use crate::engine::Engine;
     let cfg: Config = serde_json::from_value(example()).unwrap();
     let pass = pass(&cfg);
     for (labels, engine) in [
         (json!([]), None),
         (json!([{"name":"claude"}]), Some(Engine::Claude)),
-        (json!([{"name":"codex"}]), Some(Engine::Codex)),
-        (
-            json!([{"name":"claude"},{"name":"codex"}]),
-            Some(Engine::Codex),
-        ),
+        // A label for an engine the machine doesn't run selects none.
+        (json!([{"name":"codex"}]), None),
     ] {
         assert_eq!(pass.engine(&json!({"labels": labels})), engine);
     }
@@ -350,7 +350,7 @@ fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
         .as_mut()
         .unwrap()
         .labels
-        .insert("code".into(), crate::engine::Engine::Codex);
+        .insert("code".into(), crate::engine::Engine::Claude);
     pass(&cfg).label("sam/box");
     assert_eq!(
         fs::read_to_string(&marker).unwrap(),
@@ -383,8 +383,6 @@ fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
     cfg.inbox.as_mut().unwrap().owner_role = Some("inbox".into());
     let p = pass(&cfg);
     assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Claude)));
-    i["labels"] = json!([{"name":"codex"}]);
-    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Codex)));
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i), (Some("stuck".into()), None));
     i["labels"] = json!([{"name":"claude"}]);
@@ -397,12 +395,12 @@ fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identit
     let tmp = tempfile::TempDir::new().unwrap();
     let state = tmp.path();
     for (repo, issue, job, progress) in [
-        ("O_R", "7", "j1", "seen"),
-        ("o_r", "7", "j2", "reported"),
-        ("O_r", "8", "j3", "job"),
-        ("o_rx", "7", "j1", "seen"),
-        ("o_r-x", "7", "j1", "reported"),
-        ("p_r", "7", "j1", "job"),
+        ("O_R", "7", "j1", files::File::Seen),
+        ("o_r", "7", "j2", files::File::Reported),
+        ("O_r", "8", "j3", files::File::Job),
+        ("o_rx", "7", "j1", files::File::Seen),
+        ("o_r-x", "7", "j1", files::File::Reported),
+        ("p_r", "7", "j1", files::File::Job),
     ] {
         let d = state.join(".retired").join(repo).join(issue).join(job);
         fs::create_dir_all(&d).unwrap();
@@ -415,7 +413,11 @@ fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identit
         .collect();
     remaining.sort();
     assert_eq!(remaining, ["o_r-x", "o_rx", "p_r"]);
-    for (repo, progress) in [("o_rx", "seen"), ("o_r-x", "reported"), ("p_r", "job")] {
+    for (repo, progress) in [
+        ("o_rx", files::File::Seen),
+        ("o_r-x", files::File::Reported),
+        ("p_r", files::File::Job),
+    ] {
         assert_eq!(
             fs::read_to_string(
                 state

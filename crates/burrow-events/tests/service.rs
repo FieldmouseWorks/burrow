@@ -184,12 +184,13 @@ fn catches_up() {
             body,
             &[
                 ("X-GitHub-Event", "push"),
+                ("X-GitHub-Hook-ID", "42"),
                 ("X-Hub-Signature-256", "sha256=00")
             ]
         ),
         401
     );
-    svc.said("a push delivery whose signature isn't the hook secret's");
+    svc.said("a push delivery from hook 42, with a signature that isn't the hook secret's");
 }
 
 // A config it can't read is a failure, said.

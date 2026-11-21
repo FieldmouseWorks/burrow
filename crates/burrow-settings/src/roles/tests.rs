@@ -26,7 +26,7 @@ fn a_role_with_nothing_set_runs_on_the_declared_defaults() {
     let (_d, cfg) = rig();
     let force = cfg.roles().unwrap();
     assert_eq!(force.route("triage", None).engine, "claude");
-    assert_eq!(force.route("planner", Some("sam/box")).engine, "codex");
+    assert_eq!(force.route("planner", Some("sam/box")).engine, "claude");
     // Its model is the declared `* ENGINE` entry, shown as one: null, the
     // engine's own.
     assert_eq!(force.models["* claude"], Tuning::default());
@@ -37,43 +37,37 @@ fn a_role_with_nothing_set_runs_on_the_declared_defaults() {
 #[test]
 fn the_closest_key_wins() {
     let (_d, cfg) = rig();
-    set(&cfg, "role * codex").unwrap();
-    set(&cfg, "role fix@Sam/Box claude over 80 codex").unwrap();
-    set(&cfg, "role *@sam/web claude").unwrap();
-    let force = cfg.roles().unwrap();
-    assert_eq!(force.route("other", None).engine, "codex");
-    assert_eq!(force.route("other", Some("sam/web")).engine, "claude");
-    assert_eq!(force.route("fix", Some("sam/web")).engine, "claude");
-    let fix = force.route("fix", Some("SAM/box"));
-    assert_eq!(
-        (fix.engine.as_str(), fix.over.as_ref().map(|o| o.pct)),
-        ("claude", Some(80.0))
-    );
-    // A fraction is a threshold of its own, never rounded.
-    set(&cfg, "role half codex over 80.5 claude").unwrap();
-    let half = cfg.roles().unwrap().route("half", None).clone();
-    assert_eq!(half.over.unwrap().pct, 80.5);
-    assert_eq!(force.route("fix", None).engine, "codex");
+    let effort =
+        |role: &str, repo: Option<&str>| cfg.roles().unwrap().tuning(role, repo, "claude").effort;
+    set(&cfg, "model * claude - low").unwrap();
+    set(&cfg, "model fix@Sam/Box claude - high").unwrap();
+    set(&cfg, "model *@sam/web claude - medium").unwrap();
+    assert_eq!(effort("other", None).as_deref(), Some("low"));
+    assert_eq!(effort("other", Some("sam/web")).as_deref(), Some("medium"));
+    assert_eq!(effort("fix", Some("sam/web")).as_deref(), Some("medium"));
+    assert_eq!(effort("fix", Some("SAM/box")).as_deref(), Some("high"));
+    assert_eq!(effort("fix", None).as_deref(), Some("low"));
     // The repo is stored folded, so its next setting replaces it.
-    set(&cfg, "role fix@sam/box codex").unwrap();
-    assert_eq!(
-        cfg.roles().unwrap().route("fix", Some("sam/box")).engine,
-        "codex"
+    set(&cfg, "model fix@sam/box claude - max").unwrap();
+    assert_eq!(effort("fix", Some("sam/box")).as_deref(), Some("max"));
+    set(&cfg, "model fix@SAM/BOX claude unset").unwrap();
+    assert_eq!(effort("fix", Some("sam/box")).as_deref(), Some("low"));
+    assert!(
+        !cfg.roles()
+            .unwrap()
+            .models
+            .contains_key("fix@sam/box claude")
     );
+    // Routes are keyed the same way.
+    set(&cfg, "role fix@Sam/Box claude").unwrap();
+    assert!(cfg.roles().unwrap().roles.contains_key("fix@sam/box"));
     set(&cfg, "role fix@SAM/BOX unset").unwrap();
-    assert_eq!(
-        cfg.roles().unwrap().route("fix", Some("sam/box")).engine,
-        "codex"
-    );
     assert!(!cfg.roles().unwrap().roles.contains_key("fix@sam/box"));
     for bad in [
         "role fix gemini",
-        "role fix codex over 101 claude",
-        "role fix codex over 100.5 claude",
-        "role fix codex over NaN claude",
-        "role fix codex over inf claude",
-        "role fix codex over 80",
-        "role fix@owner codex",
+        "role fix codex",
+        "role fix claude over 80 claude",
+        "role fix@owner claude",
         "role fix",
     ] {
         assert!(set(&cfg, bad).is_err(), "{bad}");
@@ -89,8 +83,8 @@ fn an_unknown_model_or_effort_is_refused() {
     assert!(err.contains("claude doesn't offer that model"), "{err}");
     let err = set(&cfg, "model fix claude - enormous").unwrap_err();
     assert!(err.contains("doesn't offer effort enormous"), "{err}");
-    // Codex's efforts are its own: max is Claude's.
-    assert!(set(&cfg, "model fix codex - max").is_err());
+    // An engine the machine doesn't run has nothing to offer.
+    assert!(set(&cfg, "model fix codex - high").is_err());
     assert_eq!(
         fs::read(cfg.roles_file()).unwrap(),
         before,
@@ -99,7 +93,7 @@ fn an_unknown_model_or_effort_is_refused() {
 
     set(&cfg, "offer claude models big-one small").unwrap();
     set(&cfg, "model fix claude big-one high").unwrap();
-    set(&cfg, "model fix codex - medium").unwrap();
+    set(&cfg, "model judge claude - medium").unwrap();
     let force = cfg.roles().unwrap();
     assert_eq!(
         force.tuning("fix", Some("sam/box"), "claude"),
@@ -109,7 +103,7 @@ fn an_unknown_model_or_effort_is_refused() {
         }
     );
     assert_eq!(
-        force.tuning("fix", None, "codex").effort.as_deref(),
+        force.tuning("judge", None, "claude").effort.as_deref(),
         Some("medium")
     );
     // An offer a role is set to can't be withdrawn under it.
@@ -128,9 +122,9 @@ fn an_unknown_model_or_effort_is_refused() {
 #[test]
 fn every_change_is_logged() {
     let (_d, cfg) = rig();
-    set(&cfg, "offer codex models mid").unwrap();
-    set(&cfg, "model triage codex mid low").unwrap();
-    assert!(set(&cfg, "model triage codex other").is_err());
+    set(&cfg, "offer claude models mid").unwrap();
+    set(&cfg, "model triage claude mid low").unwrap();
+    assert!(set(&cfg, "model triage claude other").is_err());
     let log = fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
     let lines: Vec<serde_json::Value> = log
         .lines()
@@ -139,24 +133,108 @@ fn every_change_is_logged() {
     assert_eq!(lines.len(), 2, "a refused change isn't one: {log}");
     assert_eq!(
         lines[1]["change"],
-        serde_json::json!(["model", "triage", "codex", "mid", "low"])
+        serde_json::json!(["model", "triage", "claude", "mid", "low"])
     );
     assert_eq!(lines[1]["actor"], "test");
+}
+
+/// A route is an ordered chain: the first engine, then each it moves on to
+/// past its threshold. One without `over` is stored as it always was, and a
+/// chain goes through saved setups and back unchanged.
+#[test]
+fn a_route_is_an_ordered_chain_through_setups() {
+    let (_d, cfg) = rig();
+    set(&cfg, "role triage claude").unwrap();
+    assert_eq!(
+        overlay(&cfg)["routing"]["roles"]["triage"],
+        serde_json::json!({"engine": "claude"}),
+        "a single engine is stored as before"
+    );
+    set(&cfg, "engines save plain").unwrap();
+    set(&cfg, "role * claude over 95 claude-api").unwrap();
+    set(&cfg, "role triage claude-api over 50.5 claude").unwrap();
+    let stored = overlay(&cfg)["routing"]["roles"].clone();
+    assert_eq!(
+        stored["*"],
+        serde_json::json!({"engine": "claude", "over": [{"pct": 95.0, "engine": "claude-api"}]})
+    );
+    // What `settings show` holds it to takes both shapes, and no other.
+    let kind = crate::schema::find("proj.roles").unwrap().kind;
+    kind.check(&stored).unwrap();
+    for wrong in [
+        serde_json::json!({"*": {"engine": "claude", "over": [{"pct": 101, "engine": "claude-api"}]}}),
+        serde_json::json!({"*": {"engine": "claude", "over": [{"engine": "claude-api"}]}}),
+        serde_json::json!({"*": {"engine": "claude", "over": {"pct": 95, "engine": "claude-api"}}}),
+    ] {
+        assert!(kind.check(&wrong).is_err(), "{wrong}");
+    }
+    let force = cfg.roles().unwrap();
+    let route = force.route("fix", None);
+    assert_eq!(route.text(), "claude over 95 claude-api");
+    assert_eq!(
+        route.engines().collect::<Vec<_>>(),
+        ["claude", "claude-api"]
+    );
+    assert_eq!(
+        force.route("triage", None).text(),
+        "claude-api over 50.5 claude"
+    );
+    let said = set(&cfg, "engines save credit").unwrap();
+    assert!(said.contains("* claude over 95 claude-api\n"), "{said}");
+    set(&cfg, "engines use plain").unwrap();
+    assert_eq!(cfg.roles().unwrap().route("fix", None).text(), "claude");
+    set(&cfg, "engines use back").unwrap();
+    assert_eq!(overlay(&cfg)["routing"]["roles"], stored);
+    set(&cfg, "engines use plain").unwrap();
+    set(&cfg, "engines use credit").unwrap();
+    assert_eq!(overlay(&cfg)["routing"]["roles"], stored);
+    assert!(cfg.engines().unwrap().contains("Active: credit"));
+
+    let before = fs::read(cfg.roles_file()).unwrap();
+    for bad in [
+        "role fix claude over",
+        "role fix claude over 95",
+        "role fix claude over 95 claude-api over",
+        "role fix claude under 95 claude-api",
+        "role fix claude over x claude-api",
+        "role fix claude over NaN claude-api",
+        "role fix claude over inf claude-api",
+        "role fix claude over 101 claude-api",
+        "role fix claude over -1 claude-api",
+        "role fix claude over 95 codex",
+        "role fix claude over 95 claude-api over 99 claude",
+        "role fix claude-api over 95 claude-api",
+    ] {
+        assert!(set(&cfg, bad).is_err(), "{bad}");
+    }
+    assert_eq!(fs::read(cfg.roles_file()).unwrap(), before, "nothing kept");
+    // A stored chain is checked on the way in, as a typed one is.
+    let mut twice = super::route(&["claude", "over", "95", "claude-api"]).unwrap();
+    twice.over.push(Hop {
+        pct: 50.0,
+        engine: "claude".into(),
+    });
+    let stored = Roles {
+        roles: [("fix".to_owned(), twice)].into(),
+        ..Default::default()
+    };
+    let err = stored.check(&default_offers()).unwrap_err();
+    assert!(err.contains("claude is on the route twice"), "{err}");
 }
 
 #[test]
 fn engines_use_changes_exactly_the_saved_values() {
     let (_d, cfg) = rig();
     set(&cfg, "offer claude models small big").unwrap();
-    set(&cfg, "role triage codex").unwrap();
+    set(&cfg, "role triage claude").unwrap();
     set(&cfg, "model triage claude small low").unwrap();
     set(&cfg, "engines save cheap").unwrap();
     assert!(
         set(&cfg, "engines save cheap").is_err(),
         "save needs --replace"
     );
-    set(&cfg, "role triage claude").unwrap();
-    set(&cfg, "role fix codex over 80 claude").unwrap();
+    set(&cfg, "role triage unset").unwrap();
+    set(&cfg, "model fix claude - high").unwrap();
     set(&cfg, "model triage claude big").unwrap();
     let said = set(&cfg, "engines save usual").unwrap();
     assert!(said.contains("Active: usual"), "{said}");
@@ -188,10 +266,10 @@ fn engines_use_changes_exactly_the_saved_values() {
         "admission unchanged"
     );
     let force = cfg.roles().unwrap();
-    assert_eq!(force.route("triage", None).engine, "codex");
+    assert!(force.roles.contains_key("triage"));
     assert_eq!(
-        force.route("fix", None).engine,
-        "claude",
+        force.tuning("fix", None, "claude"),
+        Tuning::default(),
         "fix is default again"
     );
     assert_eq!(
@@ -205,7 +283,7 @@ fn engines_use_changes_exactly_the_saved_values() {
     set(&cfg, "engines use back").unwrap();
     assert_eq!(overlay(&cfg)["routing"], *saved);
     // A change after it leaves no setup active, until one equals it again.
-    set(&cfg, "role judge codex").unwrap();
+    set(&cfg, "role judge claude").unwrap();
     assert!(cfg.engines().unwrap().contains("Active: unsaved"));
     set(&cfg, "role judge unset").unwrap();
     assert!(cfg.engines().unwrap().contains("Active: cheap"));
@@ -230,9 +308,9 @@ fn engines_use_changes_exactly_the_saved_values() {
 #[test]
 fn a_door_receipt_answers_again_without_switching_again() {
     let (d, cfg) = rig();
-    set(&cfg, "role work claude").unwrap();
+    set(&cfg, "model work claude - low").unwrap();
     set(&cfg, "engines save one").unwrap();
-    set(&cfg, "role work codex").unwrap();
+    set(&cfg, "model work claude - high").unwrap();
     set(&cfg, "engines save two").unwrap();
     let receipt = d.path().join("issue-1");
     let args = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -252,12 +330,12 @@ fn a_door_receipt_answers_again_without_switching_again() {
 #[test]
 fn the_old_files_migrate_once() {
     let (_d, cfg) = rig();
-    let routing = |engine: &str| Roles {
+    let routing = |effort: &str| Roles {
         roles: [(
             "triage".to_owned(),
             Route {
-                engine: engine.into(),
-                over: None,
+                engine: "claude".into(),
+                over: vec![],
             },
         )]
         .into(),
@@ -265,41 +343,42 @@ fn the_old_files_migrate_once() {
             "triage claude".to_owned(),
             Tuning {
                 model: Some("small".into()),
-                effort: Some("low".into()),
+                effort: Some(effort.into()),
             },
         )]
         .into(),
     };
-    let migration = |engine: &str| Migration {
-        routing: routing(engine),
+    let migration = |effort: &str| Migration {
+        routing: routing(effort),
         offers: [(
             "claude".to_owned(),
             Offer {
                 models: vec!["small".into()],
-                efforts: vec!["low".into()],
+                efforts: vec!["low".into(), "high".into()],
             },
         )]
         .into(),
         receipts: BTreeMap::new(),
         setups: Setups {
-            saved: [("usual".to_owned(), routing(engine))].into(),
+            saved: [("usual".to_owned(), routing(effort))].into(),
             active: Some("usual".into()),
             previous: None,
         },
     };
-    assert!(cfg.migrate(migration("codex"), "test").unwrap());
+    let effort = |cfg: &Config| cfg.roles().unwrap().tuning("triage", None, "claude").effort;
+    assert!(cfg.migrate(migration("low"), "test").unwrap());
     let force = cfg.roles().unwrap();
-    assert_eq!(force.route("triage", None).engine, "codex");
+    assert_eq!(effort(&cfg).as_deref(), Some("low"));
     assert_eq!(force.offers["claude"].models, ["small"]);
     assert!(cfg.engines().unwrap().contains("Active: usual"));
     // Never again, whatever the old files say now.
-    assert!(!cfg.migrate(migration("claude"), "test").unwrap());
-    assert_eq!(cfg.roles().unwrap().route("triage", None).engine, "codex");
+    assert!(!cfg.migrate(migration("high"), "test").unwrap());
+    assert_eq!(effort(&cfg).as_deref(), Some("low"));
     let log = fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
     assert_eq!(log.lines().count(), 1, "{log}");
     // A file that names a model its engine doesn't offer moves nothing.
     let (_d, fresh) = rig();
-    let mut bad = migration("codex");
+    let mut bad = migration("low");
     bad.offers.clear();
     assert!(fresh.migrate(bad, "test").is_err());
     assert!(!fresh.roles_file().exists());
@@ -308,16 +387,20 @@ fn the_old_files_migrate_once() {
 #[test]
 fn a_store_with_no_legacy_source_keeps_its_complete_accepted_state() {
     let (_d, cfg) = rig();
-    set(&cfg, "role triage claude").unwrap();
+    set(&cfg, "model triage claude - low").unwrap();
     set(&cfg, "engines save mine").unwrap();
+    let high = Tuning {
+        model: None,
+        effort: Some("high".into()),
+    };
     let old = Migration {
         routing: Roles {
-            roles: [
-                ("triage".to_owned(), route(&["codex"]).unwrap()),
-                ("fix".to_owned(), route(&["codex"]).unwrap()),
+            roles: [("fix".to_owned(), route(&["claude"]).unwrap())].into(),
+            models: [
+                ("triage claude".to_owned(), high.clone()),
+                ("fix claude".to_owned(), high),
             ]
             .into(),
-            models: BTreeMap::new(),
         },
         offers: BTreeMap::new(),
         receipts: BTreeMap::new(),
@@ -329,10 +412,13 @@ fn a_store_with_no_legacy_source_keeps_its_complete_accepted_state() {
     };
     assert!(!cfg.migrate(old, "test").unwrap());
     let force = cfg.roles().unwrap();
-    assert_eq!(force.route("triage", None).engine, "claude", "newer wins");
     assert_eq!(
-        force.route("fix", None).engine,
-        "claude",
+        force.tuning("triage", None, "claude").effort.as_deref(),
+        Some("low"),
+        "newer wins"
+    );
+    assert!(
+        !force.roles.contains_key("fix") && !force.models.contains_key("fix claude"),
         "absent keys stay absent"
     );
     let engines = cfg.engines().unwrap();
@@ -347,7 +433,7 @@ fn a_store_with_no_legacy_source_keeps_its_complete_accepted_state() {
 fn the_admission_overlay_keeps_its_own_format() {
     let (_d, cfg) = rig();
     set(&cfg, "pause sam/box").unwrap();
-    set(&cfg, "role triage codex").unwrap();
+    set(&cfg, "role triage claude").unwrap();
     // A generation from before role settings reads this overlay: it takes
     // only these fields.
     let admission: serde_json::Value =
@@ -359,14 +445,14 @@ fn the_admission_overlay_keeps_its_own_format() {
 #[test]
 fn every_role_mutation_waits_for_migration_but_admission_stays_available() {
     for command in [
-        "role fix codex",
+        "role fix claude",
         "role fix unset",
         "role fix@Sam/Box unset",
         "role *@Sam/Box claude",
-        "model fix codex - low",
-        "model fix codex unset",
-        "model fix@Sam/Box codex unset",
-        "offer codex models",
+        "model fix claude - low",
+        "model fix claude unset",
+        "model fix@Sam/Box claude unset",
+        "offer claude models",
         "offer claude efforts low",
         "engines save mine",
         "engines use mine",
@@ -375,7 +461,7 @@ fn every_role_mutation_waits_for_migration_but_admission_stays_available() {
         let (d, mut cfg) = rig();
         let old = d.path().join("old");
         fs::create_dir(&old).unwrap();
-        fs::write(old.join("roles"), "fix codex\nfix@Sam/Box codex\n").unwrap();
+        fs::write(old.join("roles"), "fix claude\nfix@Sam/Box claude\n").unwrap();
         cfg.legacy_roles = Some(old);
         assert!(
             set(&cfg, command).unwrap_err().contains("await"),
@@ -453,7 +539,14 @@ fn a_recovered_receipt_and_its_routing_are_one_durable_document() {
     cfg.migrate(
         Migration {
             routing: Roles {
-                roles: [("work".into(), route(&["codex"]).unwrap())].into(),
+                models: [(
+                    "work claude".into(),
+                    Tuning {
+                        model: None,
+                        effort: Some("low".into()),
+                    },
+                )]
+                .into(),
                 ..Default::default()
             },
             receipts: [(receipt.to_string_lossy().into_owned(), said.into())].into(),
@@ -462,10 +555,17 @@ fn a_recovered_receipt_and_its_routing_are_one_durable_document() {
         "test",
     )
     .unwrap();
-    set(&cfg, "role work claude").unwrap();
+    set(&cfg, "model work claude - high").unwrap();
     let args = ["engines".into(), "use".into(), "back".into()];
     assert_eq!(cfg.request(&receipt, &args, "retry").unwrap(), said);
-    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "claude");
+    assert_eq!(
+        cfg.roles()
+            .unwrap()
+            .tuning("work", None, "claude")
+            .effort
+            .as_deref(),
+        Some("high")
+    );
     // A visible post-rename receipt may not be acknowledged until the
     // publication's directory can be synced (including duplicate retries).
     burrow_test::permissions(d.path(), 0o300);
@@ -486,9 +586,9 @@ fn new_requests_and_all_answer_lookups_share_one_receipt_identity() {
     let alias = d.path().join("alias");
     std::os::unix::fs::symlink(&receipts, &alias).unwrap();
     for command in [
-        "role work claude",
+        "model work claude - low",
         "engines save one",
-        "role work codex",
+        "model work claude - high",
         "engines save two",
     ] {
         set(&cfg, command).unwrap();
@@ -514,7 +614,14 @@ fn new_requests_and_all_answer_lookups_share_one_receipt_identity() {
     );
     assert_eq!(cfg.answered(&linked).unwrap(), Some(answer.clone()));
     assert_eq!(cfg.legacy_answer(&canonical, None).unwrap(), Some(answer));
-    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "codex");
+    assert_eq!(
+        cfg.roles()
+            .unwrap()
+            .tuning("work", None, "claude")
+            .effort
+            .as_deref(),
+        Some("high")
+    );
     let document = overlay(&cfg);
     assert_eq!(document["receipts"].as_object().unwrap().len(), 1);
     assert!(

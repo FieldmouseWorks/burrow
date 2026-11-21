@@ -6,18 +6,16 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use burrow_switch::switch::{DOWNGRADE, PENDING};
+
 use crate::Broke;
 use crate::dispatch::{open, settled};
-use crate::run::{Run, Step, name};
+use crate::run::{End, Run, Step, name};
 use crate::status::Outcome;
 
 /// How long the health check waits for the box to settle after a switch,
 /// in seconds.
 const SETTLE: &str = "180";
-
-/// What the switch exits with when it refuses a system as built from an
-/// older nixpkgs than the running one, before anything went live.
-const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
     /// Whether the system that runs is a bump the updater before this one
@@ -97,7 +95,9 @@ impl Run<'_> {
         let mut switch_cmd = Command::new(&tools.switch);
         switch_cmd
             .env("BURROW_CONFIRM_WITHIN", &cfg.within)
-            .args(["--toplevel", &self.new]);
+            // Decided under the switch's own lock: one that went pending
+            // while this built is someone's, mid-change, and stays.
+            .args(["--toplevel", &self.new, "--unless-pending"]);
         if self.leaves_old_bump() {
             switch_cmd.arg("--allow-downgrade");
         }
@@ -111,7 +111,14 @@ impl Run<'_> {
         let what = self.what()?;
         match switched.and_then(|s| if s.success() { Some(0) } else { s.code() }) {
             Some(0) => {}
-            Some(DOWNGRADE) => {
+            // Nothing to take back: what's pending isn't this run's.
+            Some(c) if c == i32::from(PENDING) => {
+                return Err(self.end(
+                    Outcome::Held,
+                    &format!("a {switch} went pending while it built; trying again next run"),
+                ));
+            }
+            Some(c) if c == i32::from(DOWNGRADE) => {
                 let e = self.end(
                     Outcome::Failed,
                     "the switch refused it as a downgrade; nothing changed",
@@ -129,12 +136,16 @@ impl Run<'_> {
                 return Err(e);
             }
             _ => {
-                self.back(&log);
-                let e = self.end(Outcome::Failed, "activation failed; reverted");
+                let back = if self.back(&log) {
+                    "reverted"
+                } else {
+                    "a switch since replaced it, and stays"
+                };
+                let e = self.end(Outcome::Failed, &format!("activation failed; {back}"));
                 self.dispatch(
                     "activation",
                     &format!(
-                        "{}: switching to {} ({what}) failed during activation and was reverted. The output is {}; journalctl has the rest. Fix it. {}",
+                        "{}: switching to {} ({what}) failed during activation; {back}. The output is {}; journalctl has the rest. Fix it. {}",
                         cfg.update,
                         self.new,
                         log.display(),
@@ -150,14 +161,27 @@ impl Run<'_> {
             .arg(SETTLE)
             .stdin(Stdio::null())
             .output();
-        if let Some(bad) = compared.map_or(Some(String::new()), |o| {
-            (!o.status.success()).then(|| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_end_matches('\n')
-                    .to_string()
-            })
-        }) {
-            self.back(&log);
+        let (healthy, said) = compared.map_or((false, String::new()), |o| {
+            let said = String::from_utf8_lossy(&o.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            (o.status.success(), said)
+        });
+        if healthy {
+            // What it didn't count against the switch (what can't pass
+            // while a check fails, such as the Remote Control servers while
+            // Claude Code isn't logged in) goes in the journal; the
+            // heartbeat tells the owner about the failing check itself.
+            for line in said.lines().skip(1) {
+                self.warn(&format!("not the switch's doing: {line}"));
+            }
+        } else {
+            let bad = said;
+            if !self.back(&log) {
+                // What it measured was partly that one's: nothing to say
+                // about its own.
+                return Err(self.replaced());
+            }
             let e = self.end(
                 Outcome::Failed,
                 &format!("unhealthy after the switch ({bad}); reverted"),
@@ -195,12 +219,17 @@ impl Run<'_> {
 
         let (out, err) = to(&log, true)?;
         let confirmed = Command::new(&tools.confirm)
+            .arg(&self.new)
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
             .status()
-            .is_ok_and(|s| s.success());
-        if !confirmed {
+            .ok()
+            .and_then(|s| s.code());
+        if confirmed == Some(i32::from(PENDING)) {
+            return Err(self.replaced());
+        }
+        if confirmed != Some(0) {
             return Err(self.end(
                 Outcome::Failed,
                 &format!(
@@ -218,15 +247,29 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The switch taken back, saying so in its log: whatever that says, the
-    /// dead man's switch reverts it in the end.
-    fn back(&self, log: &Path) {
+    /// Its own switch taken back, saying so in its log: whatever that says,
+    /// the dead man's switch reverts it in the end. False when another
+    /// replaced it (a hand switch in its health settle, say): that one is
+    /// someone's, mid-change, and stays.
+    fn back(&self, log: &Path) -> bool {
         let mut c = Command::new(&self.cfg.tools.switch);
-        c.arg("--abort").stdin(Stdio::null());
+        c.args(["--abort", &self.new]).stdin(Stdio::null());
         if let Ok((out, err)) = to(log, true) {
             c.stdout(out).stderr(err);
         }
-        let _ = c.status();
+        c.status().ok().and_then(|s| s.code()) != Some(i32::from(PENDING))
+    }
+
+    /// Its switch replaced by another before it was kept: the run holds,
+    /// neither keeping nor taking back what's pending, and tries again.
+    fn replaced(&self) -> End {
+        self.end(
+            Outcome::Held,
+            &format!(
+                "a {} replaced its switch before it was kept; trying again next run",
+                name(&self.cfg.tools.switch)
+            ),
+        )
     }
 
     /// Claude Code's version, as the user runs it: nothing when it doesn't

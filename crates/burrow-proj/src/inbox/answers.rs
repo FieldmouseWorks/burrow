@@ -1,7 +1,8 @@
 //! Completed answers survive immediate parking and retry delivery independently.
 use super::{Pass, jobs::revived, trimmed};
-use crate::{Fail, cmd::told, io_fail, job::Job, read};
-use std::{fs, path::Path};
+use crate::inbox::record::files::{self, File};
+use crate::{Fail, cmd::told, job::Job};
+use std::path::Path;
 
 impl Pass<'_> {
     /// Publish completed turns in order. Retirement skips turns with no answer:
@@ -18,7 +19,7 @@ impl Pass<'_> {
         let id = job.id;
         let turns = job.turns().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let rv = revived(d);
-        let mut k = read(&d.join("answered"))
+        let mut k = files::answered(d)
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
         while k < last {
@@ -36,8 +37,7 @@ impl Pass<'_> {
                 match told(self.cfg, job.id, &k.to_string()) {
                     Ok(t) => trimmed(&t),
                     Err(_) if state.is_none() => {
-                        fs::write(d.join("answered"), format!("{k}\n"))
-                            .map_err(|e| io_fail(&d.join("answered"), e))?;
+                        files::mark(d, File::Answered).put(format!("{k}\n"))?;
                         continue;
                     }
                     Err(_) => {
@@ -58,8 +58,7 @@ impl Pass<'_> {
                 self.miss(repo);
                 return Ok(false);
             }
-            fs::write(d.join("answered"), format!("{k}\n"))
-                .map_err(|e| io_fail(&d.join("answered"), e))?;
+            files::mark(d, File::Answered).put(format!("{k}\n"))?;
         }
         Ok(true)
     }

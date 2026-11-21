@@ -1,18 +1,30 @@
 [package]
 name = "burrow-proof"
-description = "A proof check that's a command, run by the autoland steward in a unit of the machine user's own, with no Claude: systemd bounds and ends it, each command fenced in a cgroup of its own"
+description = "A proof check that's a program: run by the autoland steward in a unit of the machine user's own, or by Conary's proof plugin and its producer, which signs what it ran; systemd bounds and ends it, each command fenced in a cgroup of its own"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+burrow-github = { path = "../burrow-github" }
+burrow-producer = { path = "../burrow-producer" }
+# The plugin contract, the flow's recipes and settings are Conary's, pinned
+# with the kit's by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+burrow-producer = { path = "../burrow-producer", features = ["test-key"] }
 burrow-test = { path = "../burrow-test" }
+ed25519-dalek = "3.0.0"
+rustix = { version = "1.1.6", features = ["process"] }
 tempfile.workspace = true
 
 [lints]

@@ -1,10 +1,9 @@
-//! The engines' usage meters, as role overflow reads them (proj's
-//! engine::role): one file an engine in the meters dir, `claude.json` and
-//! `codex.json`, each the engine's last fresh reading whole, and `log`, one
-//! line a reading (`{"engine": ..., ...}`), for the history. Every limit
-//! window an engine has counts (a five-hour session and a week each), and
-//! so does paid usage that carries on past them (Codex's credits): an engine
-//! with credits is never short, whatever its windows say.
+//! The engines' usage meters, as proj and the probe read them: one file an
+//! engine in the meters dir (`claude.json`), its last fresh reading whole,
+//! and `log`, one line a reading (`{"engine": ..., ...}`), for the history.
+//! Every limit window an engine has counts (a five-hour session and a week),
+//! and so does paid usage that carries on past them: an engine with credits
+//! is never short, whatever its windows say.
 
 use crate::pass::{Account, Reading, Reset};
 use crate::store::write;
@@ -71,12 +70,12 @@ pub enum Span {
 
 impl Span {
     /// The span of a window by its engine's name for it: Claude's
-    /// (`five_hour`, `seven_day`, as [`claude`] keeps them) or Codex's
-    /// (its length in minutes); None for one of another length.
+    /// (`five_hour`, `seven_day`, as [`claude`] keeps them); None for one
+    /// of another length.
     pub fn of(name: &str) -> Option<Span> {
         match name {
-            "five_hour" | "300m" => Some(Span::FiveHour),
-            "seven_day" | "10080m" => Some(Span::Week),
+            "five_hour" => Some(Span::FiveHour),
+            "seven_day" => Some(Span::Week),
             _ => None,
         }
     }
@@ -246,9 +245,6 @@ mod tests {
         claude(&reading, 10000.0)
             .record(dir.path(), "claude")
             .unwrap();
-        snapshot(&[("300m", 100.0)], true, 10001.0)
-            .record(dir.path(), "codex")
-            .unwrap();
         claude(
             &Reading {
                 used: 82.0,
@@ -264,12 +260,11 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["engine"], "claude");
         assert_eq!(lines[0]["windows"]["five_hour"]["used"], 97.0);
         assert_eq!(lines[0]["windows"]["seven_day"]["used"], 81.0);
-        assert_eq!(lines[1]["engine"], "codex");
-        assert_eq!(lines[1]["credits"], true);
+        assert_eq!(lines[1]["engine"], "claude");
         // The last reading stands alone: a session that ended is gone.
         let last = Snapshot::read(dir.path(), "claude", 10003.0).unwrap();
         assert_eq!(last, snapshot(&[("seven_day", 82.0)], false, 10002.0));
@@ -300,7 +295,7 @@ mod tests {
         assert!(both.short(95.0));
         assert!(!both.short(97.0));
         assert!(both.room());
-        let out = snapshot(&[("300m", 100.0), ("10080m", 60.0)], false, 0.0);
+        let out = snapshot(&[("five_hour", 100.0), ("seven_day", 60.0)], false, 0.0);
         assert!(out.short(95.0) && !out.room());
         // Credits carry it past every window.
         let paid = Snapshot {

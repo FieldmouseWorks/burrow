@@ -199,7 +199,7 @@ fn default_admission_releases_the_registry_for_concurrent_publication() {
                     asks(&cfg, id, Some("subject"), false);
                     let record = cfg.inbox.as_ref().unwrap().state.join(".triage").join(id);
                     fs::create_dir_all(&record).unwrap();
-                    fs::write(record.join("job"), id).unwrap();
+                    fs::write(record.join(crate::inbox::record::File::Job), id).unwrap();
                 }
                 edit_group(&cfg, "subject", |g| g["due"] = (crate::now() - 1).into());
                 let other = Job::new(&cfg, scanned);

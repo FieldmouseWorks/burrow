@@ -24,6 +24,10 @@ pub enum Kind {
     Text,
     /// A number from 0 to 100, fractions included.
     Percent,
+    /// Dollars, 0 or more, to the cent.
+    Usd,
+    /// A calendar day, `YYYY-MM-DD`.
+    Date,
     /// One of these words.
     OneOf(&'static [&'static str]),
     /// A GitHub repository, OWNER/NAME.
@@ -33,8 +37,11 @@ pub enum Kind {
     List(&'static Kind),
     /// Any keys, each with a value of the kind.
     Map(&'static Kind),
-    /// These fields, every one of them, and no other.
+    /// These fields, every one of them but those [`Kind::Omitted`] may leave
+    /// out, and no other.
     Record(&'static [Field]),
+    /// A record's field that may be left out, and is the kind when it's there.
+    Omitted(&'static Kind),
     /// A JSON object the schema doesn't look inside (a per-repo override's
     /// settings, which its own module checks).
     Object,
@@ -127,18 +134,20 @@ pub fn find(name: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.name == name)
 }
 
+/// The API credit, beside it under the same lock (credit).
+const CREDIT_OVERLAY: &str = crate::credit::FILE;
 /// The one runtime settings overlay, under `burrow.stateDir`.
 const OVERLAY: &str = "settings/overlay.json";
 /// Role routing and tuning, beside it under the same lock (roles::store).
 const ROLES_OVERLAY: &str = "settings/overlay.roles.json";
 const REPOS: Kind = Kind::List(&Kind::Repo);
+const LANDING_OWNER: Kind = Kind::OneOf(&["steward", "conaryd"]);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
-const ENGINE: Kind = Kind::OneOf(&["claude", "codex"]);
+const ENGINE: Kind = Kind::OneOf(crate::roles::ENGINES);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
-const EFFORT: Kind = Kind::OneOf(&["low", "medium", "high", "xhigh"]);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
-const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
+const HOPS: Kind = Kind::Omitted(&Kind::List(&Kind::Record(&[
     Field {
         name: "pct",
         kind: &Kind::Percent,
@@ -147,7 +156,7 @@ const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
         name: "engine",
         kind: &ENGINE,
     },
-]));
+])));
 const ROUTE: Kind = Kind::Record(&[
     Field {
         name: "engine",
@@ -155,7 +164,7 @@ const ROUTE: Kind = Kind::Record(&[
     },
     Field {
         name: "over",
-        kind: &OVERFLOW,
+        kind: &HOPS,
     },
 ]);
 const ROLES: Kind = Kind::Map(&ROUTE);
@@ -221,6 +230,29 @@ const HOLD: Kind = Kind::Maybe(&Kind::Record(&[
     },
 ]));
 
+const CREDIT: Kind = Kind::Maybe(&Kind::Record(&[
+    Field {
+        name: "budgetUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "renews",
+        kind: &Kind::Date,
+    },
+    Field {
+        name: "monthlyUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "reserveUsd",
+        kind: &Kind::Usd,
+    },
+    Field {
+        name: "since",
+        kind: &STAMP,
+    },
+]));
+
 /// A flake option's entry.
 const fn flake(
     name: &'static str,
@@ -274,6 +306,12 @@ fn per_project(values: &Values) -> Option<Value> {
     Some(json!(left.max(1)))
 }
 
+/// modules/updates/renovate-identity.nix: `github.machinery`, the App
+/// Renovate acts as unless it has one of its own.
+fn renovate_app(values: &Values) -> Option<Value> {
+    values.get("github.machinery").cloned()
+}
+
 /// Every option, in the order `settings show` lists them.
 pub static SETTINGS: &[Setting] = &[
     // proj: its slots and what it holds back.
@@ -303,13 +341,6 @@ pub static SETTINGS: &[Setting] = &[
         },
         "proj",
         "The most slots one project's jobs hold at once.",
-    ),
-    flake(
-        "proj.codex.slots",
-        &SLOTS,
-        Is("2"),
-        "proj",
-        "How many Codex turns run at once, in a pool of their own.",
     ),
     flake(
         "proj.usageTrickle",
@@ -345,6 +376,21 @@ pub static SETTINGS: &[Setting] = &[
         "null",
         OVERLAY,
         "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
+    ),
+    // Who lands each repo's PRs: the steward or conaryd (Conary#313).
+    flake(
+        "landing.conaryd",
+        &REPOS,
+        Is("[]"),
+        "landing",
+        "Repos conaryd has a flow configuration for, and so may be given with settings landing OWNER/REPO conaryd; none is given to it by being listed.",
+    ),
+    live(
+        "settings.landing",
+        &Kind::Map(&LANDING_OWNER),
+        "{}",
+        OVERLAY,
+        "Each repo's configured landing owner where it isn't the steward (settings landing OWNER/REPO steward|conaryd). burrow-landing moves a repo once the one holding it has let go of its work there.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.
     flake(
@@ -454,69 +500,62 @@ pub static SETTINGS: &[Setting] = &[
         "The most baseline jobs one pass starts.",
     ),
     flake(
+        "autoland.askAsOwner.repos",
+        &REPOS,
+        Is("[]"),
+        "autoland",
+        "Repos where the steward asks Codex's connector for a late review as the owner, through its one door that acts as them (crates/burrow-review-ask).",
+    ),
+    flake(
+        "autoland.askAsOwner.perDay",
+        &Kind::Count { min: 1 },
+        Is("20"),
+        "autoland",
+        "The most review asks that door posts in any 24 hours.",
+    ),
+    flake(
         "autoland.repos",
         &Kind::Map(&Kind::Object),
         Is("{}"),
         "autoland",
         "Per-repo overrides (OWNER/NAME) of the steward's rounds, waits and checks.",
     ),
-    // The reviewers.
     flake(
-        "autoland.reviewers.codex.enable",
-        &Kind::Bool,
-        Is("false"),
-        "autoland-review",
-        "Whether Codex reviews every head.",
+        "github.machinery",
+        &MAYBE_TEXT,
+        Is("null"),
+        "github",
+        "The App, one of burrow.github.apps, the machine's own jobs act as on GitHub; null for the user's own login.",
     ),
     flake(
-        "autoland.reviewers.codex.effort",
-        &EFFORT,
-        Is(r#""high""#),
-        "autoland-review",
-        "How hard Codex thinks on a review.",
-    ),
-    flake(
-        "autoland.reviewers.codex.parallel",
-        &Kind::Count { min: 1 },
-        Is("2"),
-        "autoland-review",
-        "The most Codex reviews at once.",
-    ),
-    flake(
-        "autoland.reviewers.timeoutMinutes",
-        &MINUTES,
-        Is("30"),
-        "autoland-review",
-        "How long one review may run before it's a failed try.",
-    ),
-    flake(
-        "autoland.reviewers.skipPaths",
-        &Kind::List(&Kind::Text),
-        Is(
-            r#"["(^|/)secrets?/", "(^|/)\\.sops\\.yaml$", "\\.sops\\.(ya?ml|json|env)$", "(^|/)\\.env(\\..*)?$", "\\.(pem|key|p12|pfx)$"]"#,
-        ),
-        "autoland-review",
-        "Path regexes left out of what the reviewers read.",
+        "updates.renovate.app",
+        &MAYBE_TEXT,
+        Fallback::Derived {
+            says: "github.machinery",
+            from: renovate_app,
+        },
+        "renovate",
+        "The App Renovate acts as, and spends the allowance of: one of its own keeps a long pass from stalling every other job. Its bot authors Renovate's commits (gitAuthor) and is who the steward knows Renovate's PRs by.",
     ),
     // What changes live, in proj's files.
     live(
         "proj.roles",
         &ROLES,
-        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        r#"{"*": {"engine": "claude"}}"#,
         ROLES_OVERLAY,
-        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engines a turn moves on to, in order (over: once the engine before has used pct percent of its meter, or is out of usage, the turn takes the first after it with room). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
         &MODELS,
-        r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
+        r#"{"* claude": {"model": null, "effort": null}, "* claude-api": {"model": null, "effort": null}}"#,
         ROLES_OVERLAY,
         "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
     ),
     live(
         "proj.engineOffers",
         &OFFERS,
-        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "codex": {"models": [], "efforts": ["minimal", "low", "medium", "high", "xhigh"]}}"#,
+        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "claude-api": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}}"#,
         ROLES_OVERLAY,
         "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
@@ -528,11 +567,18 @@ pub static SETTINGS: &[Setting] = &[
         "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
+        "proj.apiCredit",
+        &CREDIT,
+        "null",
+        CREDIT_OVERLAY,
+        "The expiring API credit the claude-api engine spends (settings credit BUDGET RENEWS MONTHLY RESERVE, or off): budgetUsd is its balance at since (when it was set), renews the UTC day it expires and renews to monthlyUsd, again each month from that day, and reserveUsd is never spent. The engine has room while spent + reserve < budget and today's spend < (budget - spent before today) / UTC days left, today included. Null, or a value or turn cost that can't be read, is no room.",
+    ),
+    live(
         "proj.usageHold",
         &HOLD,
         "null",
         ".usage.json",
-        "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
+        "The usage hold in force: no turn on the plan (claude) takes a slot until it ends, and no claude-api turn either while it is the owner's pause. Null for none.",
     ),
 ];
 
@@ -544,15 +590,22 @@ impl Kind {
             Kind::Count { min } => json!({"type": "integer", "minimum": min}),
             Kind::Text => json!({"type": "string"}),
             Kind::Percent => json!({"type": "number", "minimum": 0, "maximum": 100}),
+            Kind::Usd => json!({"type": "number", "minimum": 0}),
+            Kind::Date => json!({"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}),
             Kind::OneOf(words) => json!({"enum": words}),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
+            Kind::Omitted(kind) => kind.schema(),
             Kind::List(kind) => json!({"type": "array", "items": kind.schema()}),
             Kind::Map(kind) => json!({"type": "object", "additionalProperties": kind.schema()}),
             Kind::Record(fields) => json!({
                 "type": "object",
                 "properties": fields.iter().map(|f| (f.name.to_owned(), f.kind.schema())).collect::<Map<_, _>>(),
-                "required": fields.iter().map(|f| f.name).collect::<Vec<_>>(),
+                "required": fields
+                    .iter()
+                    .filter(|f| !matches!(f.kind, Kind::Omitted(_)))
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>(),
                 "additionalProperties": false,
             }),
             Kind::Object => json!({"type": "object"}),
@@ -573,10 +626,17 @@ impl Kind {
             {
                 Ok(())
             }
+            (Kind::Usd, v @ Value::Number(_))
+                if serde_json::from_value::<crate::credit::Cents>(v.clone()).is_ok() =>
+            {
+                Ok(())
+            }
+            (Kind::Date, Value::String(s)) if crate::credit::Day::parse(s).is_some() => Ok(()),
             (Kind::OneOf(words), Value::String(s)) if words.contains(&s.as_str()) => Ok(()),
             (Kind::Repo, Value::String(s)) if repo(s) => Ok(()),
             (Kind::Maybe(_), Value::Null) => Ok(()),
             (Kind::Maybe(kind), v) => kind.check(v),
+            (Kind::Omitted(kind), v) => kind.check(v),
             (Kind::List(kind), Value::Array(items)) => items
                 .iter()
                 .enumerate()
@@ -590,6 +650,7 @@ impl Kind {
                 }
                 fields.iter().try_for_each(|f| match items.get(f.name) {
                     Some(v) => f.kind.check(v).map_err(|e| format!("{}: {e}", f.name)),
+                    None if matches!(f.kind, Kind::Omitted(_)) => Ok(()),
                     None => Err(format!("{}: missing", f.name)),
                 })
             }
@@ -603,9 +664,12 @@ impl Kind {
             Kind::Count { min } => format!("a whole number from {min}"),
             Kind::Text => "text".into(),
             Kind::Percent => "a number from 0 to 100".into(),
+            Kind::Usd => "dollars, 0 or more, to the cent".into(),
+            Kind::Date => "a YYYY-MM-DD date".into(),
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),
+            Kind::Omitted(kind) => kind.describe(),
             Kind::List(kind) => format!("a list of {}", kind.describe()),
             Kind::Map(_) | Kind::Record(_) | Kind::Object => "an object".into(),
         }
@@ -700,20 +764,31 @@ mod tests {
         assert!(HOLD.check(&json!({"until": -1})).is_err());
         assert!(REPOS.check(&json!(["sam/box"])).is_ok());
         assert!(REPOS.check(&json!(["sam"])).is_err());
-        assert!(DRAIN.check(&json!("codex")).is_ok());
+        let credit = json!({"budgetUsd": 214.37, "renews": "2026-12-05", "monthlyUsd": 200, "reserveUsd": 5.5, "since": 1});
+        assert!(CREDIT.check(&credit).is_ok());
+        assert!(CREDIT.check(&Value::Null).is_ok());
+        for (field, bad) in [
+            ("budgetUsd", json!(1.005)),
+            ("budgetUsd", json!(-1)),
+            ("renews", json!("2026-12-5")),
+            ("renews", json!("2026-02-30")),
+            ("reserveUsd", json!("5")),
+        ] {
+            let mut value = credit.clone();
+            value[field] = bad;
+            let err = CREDIT.check(&value).unwrap_err();
+            assert!(err.starts_with(&format!("{field}: ")), "{err}");
+        }
+        assert!(DRAIN.check(&json!("claude")).is_ok());
         assert!(DRAIN.check(&json!("gemini")).is_err());
         assert!(SLOTS.check(&json!(0)).is_err());
         let err = MODELS
-            .check(&json!({"fix codex": {"model": "m", "effort": 3}}))
+            .check(&json!({"fix claude": {"model": "m", "effort": 3}}))
             .unwrap_err();
-        assert!(err.starts_with("fix codex: effort: "), "{err}");
-        assert!(
-            ROLES
-                .check(&json!({"fix": {"engine": "codex", "over": null}}))
-                .is_ok()
-        );
+        assert!(err.starts_with("fix claude: effort: "), "{err}");
+        assert!(ROLES.check(&json!({"fix": {"engine": "claude"}})).is_ok());
         let err = ROLES
-            .check(&json!({"fix": {"engine": "gemini", "over": null}}))
+            .check(&json!({"fix": {"engine": "gemini"}}))
             .unwrap_err();
         assert!(err.starts_with("fix: engine: "), "{err}");
     }

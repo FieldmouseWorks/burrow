@@ -1,5 +1,6 @@
 //! Admission and wait records across terminal turns, holds and issue discovery.
 use super::{Box, issue};
+use crate::inbox::record::files;
 use crate::{inbox, job::Job};
 use serde_json::json;
 use std::{fs, path::PathBuf};
@@ -27,7 +28,7 @@ fn record(b: &Box, repo: &str, n: u64, id: &str) -> PathBuf {
         .join(".triage")
         .join(format!("{}-{n}", inbox::key(repo)));
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("job"), id).unwrap();
+    fs::write(d.join(files::File::Job), id).unwrap();
     d
 }
 
@@ -95,7 +96,7 @@ fn terminal_sorters_release_capacity_without_requiring_an_outcome() {
             _ => (),
         }
         let d = record(&b, "sam/game", 3, "s1");
-        assert!(!b.pass().sorting_slot(&d), "{terminal}");
+        assert!(!b.pass().holds_sorting_slot(&d), "{terminal}");
         decisions(&b, false);
     }
 }
@@ -180,11 +181,11 @@ fn existing_sorting_records_are_not_waiting_for_new_admission() {
                 }
             }
             "failed" => {
-                fs::remove_file(d.join("job")).unwrap();
-                fs::write(d.join("failed"), super::UPDATED).unwrap();
+                fs::remove_file(d.join(files::File::Job)).unwrap();
+                fs::write(d.join(files::File::Failed), super::UPDATED).unwrap();
             }
             "verdict-free" | "verdict-busy" => {
-                fs::write(d.join("plan"), "[]").unwrap();
+                fs::write(d.join(files::File::Plan), "[]").unwrap();
                 if existing == "verdict-busy" {
                     // Another sorter fills the lane while this verdict is pending.
                     b.job("s2", "done", "kept");
@@ -222,7 +223,7 @@ fn free_capacity_clears_wait_even_when_replacement_cannot_start() {
                 .state
                 .join(".triage/sam_box-9");
             fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("failed"), "older issue version").unwrap();
+            fs::write(d.join(files::File::Failed), "older issue version").unwrap();
         }
         let f = seed_wait(&b, "sam/box", "9");
         let next = seed_wait(&b, "sam/box", "10");
@@ -291,8 +292,8 @@ fn an_unfinished_verdict_does_not_hold_other_repos_slots() {
     let state = b.cfg.inbox.as_ref().unwrap().state.clone();
     let game = state.join(".triage/sam_game-3");
     fs::create_dir_all(&game).unwrap();
-    fs::write(game.join("job"), "s1\n").unwrap();
-    fs::write(game.join("plan"), "[]").unwrap();
+    fs::write(game.join(files::File::Job), "s1\n").unwrap();
+    fs::write(game.join(files::File::Plan), "[]").unwrap();
     let mut p = b.pass();
     p.triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
     assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);

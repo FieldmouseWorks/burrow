@@ -7,10 +7,27 @@ impl Job<'_> {
     /// There is no child until both records are written. A failed spawn rolls
     /// back only this attempt, preserving earlier invocations and their start.
     /// After a successful spawn there are no fallible recording operations.
+    /// The run is the subscription's (`claude`, as a sandbox's always is).
     pub(crate) fn start_run<T>(
         &self,
         n: &str,
         at: i64,
+        start: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.start_budgeted_run(n, at, crate::engine::Engine::Claude, None, start)
+    }
+
+    /// [`Self::start_run`] on `engine`, its marker saying which (a turn's
+    /// runs may be on both Claude engines, when its route moves it, and the
+    /// credit's meter charges each run by its own) and the most the run may
+    /// spend in micro-dollars when it has a budget (a `claude-api` run's
+    /// admission, engine/api.rs), which the meter holds until its cost is in.
+    pub(crate) fn start_budgeted_run<T>(
+        &self,
+        n: &str,
+        at: i64,
+        engine: crate::engine::Engine,
+        budget: Option<i64>,
         start: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
         let dir = Dir::open(&self.dir)?;
@@ -30,7 +47,17 @@ impl Job<'_> {
                 }
                 Err(e) => return Err(e),
             }
-            writeln!(stream, "{{\"type\":\"burrow.run\",\"at\":{at}}}")?;
+            let engine = engine.name();
+            match budget {
+                Some(b) => writeln!(
+                    stream,
+                    "{{\"type\":\"burrow.run\",\"at\":{at},\"engine\":\"{engine}\",\"budget\":{b}}}"
+                )?,
+                None => writeln!(
+                    stream,
+                    "{{\"type\":\"burrow.run\",\"at\":{at},\"engine\":\"{engine}\"}}"
+                )?,
+            }
             start()
         })();
         if let Err(error) = result {
@@ -74,9 +101,9 @@ mod tests {
                     // Enforce the ordering even if the child completes before its
                     // handle reaches the caller; no scheduler timing assumption.
                     let before = fs::read_to_string(job.turn("1", "jsonl"))?;
-                    assert!(
-                        before.ends_with(&format!("{{\"type\":\"burrow.run\",\"at\":{at}}}\n"))
-                    );
+                    assert!(before.ends_with(&format!(
+                        "{{\"type\":\"burrow.run\",\"at\":{at},\"engine\":\"claude\"}}\n"
+                    )));
                     let mut child = Command::new("sh")
                         .args(["-c", "printf '%s\\n' '{\"type\":\"result\"}'"])
                         .stdout(Stdio::from(

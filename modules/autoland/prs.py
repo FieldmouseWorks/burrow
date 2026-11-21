@@ -7,7 +7,7 @@ import subprocess
 import urllib.parse
 
 import common as C
-import reviewers as V
+import mirror as M
 import train as T
 from common import CFG, CONTEXT, DRY, log
 
@@ -33,7 +33,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus body
+        createdAt updatedAt mergeStateStatus body lastEditedAt
         author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
@@ -44,6 +44,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
+        retargets: timelineItems(last: 1, itemTypes: [BASE_REF_CHANGED_EVENT]) { nodes { ... on BaseRefChangedEvent { createdAt } } }
         timelineItems(last: 50, itemTypes: [UNLABELED_EVENT, RENAMED_TITLE_EVENT]) { pageInfo { hasPreviousPage } nodes { ... on UnlabeledEvent { createdAt label { name } } ... on RenamedTitleEvent { createdAt previousTitle } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -51,7 +52,7 @@ query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
             ... on CheckRun { databaseId externalId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id createdAt status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -66,8 +67,11 @@ OLDER = {"reviews": "author { login __typename } state body submittedAt commit {
 # The default branch's tip, read with the PRs each pass: how its CI stands,
 # and what repos.landed_alone asks of it (its first parent's CI, the PR it
 # landed, how its check runs ended), so a red one landing caused is undone
-# with no further call.
-TIP = ("oid statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { conclusion } } } } "
+# with no further call; and which checks failed on it, and in which runs,
+# the reason an undo of the red is asked with (repos.red_reason).
+TIP = ("oid statusCheckRollup { state contexts(first: 100) { nodes { "
+       "... on CheckRun { conclusion name databaseId detailsUrl title completedAt checkSuite { workflowRun { url workflow { name } } } } "
+       "... on StatusContext { context state targetUrl description createdAt } } } } "
        "parents(first: 1) { nodes { statusCheckRollup { state } } } "
        "associatedPullRequests(first: 5) { nodes { number state headRefName baseRefName body mergeCommit { oid } } }")
 PRS = PRS % (TIP, OLDER["reviews"], OLDER["comments"])
@@ -121,6 +125,20 @@ def open_prs(owner, name):
                 older = got["node"][field]
                 pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
     return info, prs
+
+
+def pushed(pr):
+    """When GitHub got the PR's head, as near as it says, or None: the
+    earliest check suite on it, each App that checks the repo getting one
+    as the push comes in. GraphQL has no push time, and the commit's own
+    dates say when it was made, which can be long before it was pushed.
+    None with no suite on it (nothing checks the repo yet), or when the
+    commit read isn't the head."""
+    nodes = pr["commits"]["nodes"]
+    commit = nodes[0]["commit"] if nodes else {}
+    if commit.get("oid") != pr["headRefOid"]:
+        return None
+    return min((C.ts(s["createdAt"]) for s in (commit.get("checkSuites") or {}).get("nodes", [])), default=None)
 
 
 def has_ci(pr, proofs=()):
@@ -276,9 +294,9 @@ def onto(repo, pr):
     if DRY:
         return None, False
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
-    mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
-    tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
-    if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
+    mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
+    tip = M.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
+    if M.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
         return tip, False
     merged = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
                             capture_output=True, text=True)
@@ -287,7 +305,7 @@ def onto(repo, pr):
         return tip, False
     if merged.returncode:
         raise RuntimeError(f"git merge-tree: {merged.stderr.strip()[-300:]}")
-    return tip, merged.stdout.split()[0] == V.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
+    return tip, merged.stdout.split()[0] == M.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
 
 
 def land(repo, pr, repo_info):
@@ -309,11 +327,17 @@ def land(repo, pr, repo_info):
     # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
-    if C.paused(repo):
+    # Read again right before it: a pause since the pass began stops it,
+    # and in a paused repo only a handoff of this PR at this head lets it by.
+    # Where the steward doesn't land the repo, nothing does.
+    handed = C.handed(repo, pr)
+    if not handed and C.held(repo):
         raise C.JobPaused(f"{repo}: repository work paused before merge")
     try:
         C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
                 "-f", f"merge_method={method}", *title, "-f", f"sha={pr['headRefOid']}")
     except RuntimeError as e:
         return C.said(e)
+    if handed and not DRY:
+        C.spend(repo, pr["number"], pr["headRefOid"])  # one-shot: it landed
     return None

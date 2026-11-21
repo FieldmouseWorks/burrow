@@ -16,11 +16,11 @@
 //!     has failed is started. Never while a switch is in flight, which
 //!     restarts what it changes itself, and at most RESTARTS times in
 //!     RECENT: past that, restarting isn't the fix.
-//!   - A push run on a runner repo's default branch that no job of has
-//!     started, with a later run of its workflow on that branch live, is
-//!     cancelled, so the later one takes its place on the runner. One that
-//!     has started finishes, so the branch always gets a result, and one
-//!     someone ran again is theirs. Each run is tried once in RECENT.
+//!   - A push run on a runner repo's default branch that hasn't finished
+//!     (queued, next in line or under way), with a later run of its
+//!     workflow on that branch live, is cancelled, so the later one takes
+//!     its place on the runner and gives the branch its result. One someone
+//!     ran again is theirs. Each run is tried once in RECENT.
 //!   - A job queued for the fresh runners, more than they have idle, gets
 //!     one: registered for that one job (GitHub's JIT config) and started
 //!     as a unit of its own, whose user and state nothing ran as before,
@@ -43,9 +43,11 @@
 //!     the running system wasn't built from, from the oldest, due
 //!     `deploy.after` later, kicking HOST-update; while a run that started
 //!     after that commit is at work, from its start, due `deploy.run` after
-//!     it last wrote to its logs (or started, if it hasn't since); the
-//!     item is `refresh`, so the watchdog waits for a pass to look again
-//!     after its kick before it counts a stall.
+//!     it last wrote to its logs (or started, if it hasn't since); while one
+//!     that started before it is, which hasn't got the commit and keeps the
+//!     next run from starting, from the commit still, and not due before
+//!     that either; both are `refresh`, so the watchdog waits for a pass to
+//!     look again after its kick before it counts a stall.
 //!   - github/OWNER/REPO: a repo its passes can't read from GitHub.
 //!
 //! burrow-events starts a pass on a runner repo's workflow_job events, a

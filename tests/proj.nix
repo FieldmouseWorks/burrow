@@ -26,10 +26,9 @@
 { self, pkgs }:
 import ./proj/test.nix { inherit self pkgs; } "proj" ''
 
-  with subtest("real machine units require roles while session and job units may omit them"):
+  with subtest("real machine units require roles while job units may omit them"):
       import shlex
       for starter_unit, role, job, expected in [
-          ("claude-rc@role-admission.service", False, False, 1),
           ("proj-role-admission-agent.service", False, True, 1),
           ("proj-role-admission-missing.service", False, False, 2),
           ("proj-role-admission-named.service", True, False, 1),
@@ -63,8 +62,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       assert "ended without an answer" in out and "refused" in out, out
 
   with subtest("a job's role runs it at the model and effort the settings give it, and only then"):
-      for change in ("offer claude models chosen", "offer codex models other", "role quick claude",
-                     "model quick claude chosen medium", "model quick codex other low"):
+      for change in ("offer claude models chosen", "role quick claude", "model quick claude chosen medium"):
           machine.succeed(f"su - dev -c 'proj settings {change}'")
       # The door refuses a model its engine doesn't offer.
       machine.fail("su - dev -c 'proj settings model quick claude unoffered'")
@@ -77,7 +75,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
       assert "--model" not in args and "--effort" not in args, args
-      for change in ("model quick claude unset", "model quick codex unset", "role quick unset"):
+      for change in ("model quick claude unset", "role quick unset"):
           machine.succeed(f"su - dev -c 'proj settings {change}'")
 
   with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):

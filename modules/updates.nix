@@ -5,7 +5,8 @@
 #     Claude Code), bump the flake's inputs and Claude Code, build, VM-test,
 #     switch with the dead man's switch, health-check, confirm, push to main.
 #     Breakage reverts itself and goes to a Claude job.
-#   - Renovate: dependency PRs for every repo you own, merged on green CI;
+#   - Renovate: dependency PRs for every repo you own, merged on green CI
+#     where the steward lands (docs/landing.md);
 #     renovate-sweep gives the stuck ones to a Claude job. A repo's push to
 #     its default branch, or its Renovate PRs moving or finishing CI, start
 #     both for that repo (burrow.events); all of them go hourly, for the
@@ -22,6 +23,10 @@ let
   cfg = config.burrow.updates;
   inherit (config.burrow) prefix user stateDir tools;
   inherit (config.burrow.github) machineApp machineGh;
+  # The App Renovate acts as (updates/renovate-identity.nix), and gh as it:
+  # its own, which needn't be the machinery's, else the user's login.
+  renovateApp = cfg.renovate.actor;
+  renovateGh = if renovateApp == null then pkgs.gh else renovateApp.gh;
   account = config.users.users.${user};
   system = pkgs.stdenv.hostPlatform.system;
   update = "${prefix}-update";
@@ -93,6 +98,7 @@ let
     name = health;
     dir = "/etc/${healthD}";
     required = cfg.requiredHealth;
+    explains = cfg.healthExplains;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 90;
@@ -125,6 +131,8 @@ let
     train = if train then {
       repo = githubRepo; branch = update; settled = vars.SETTLED;
       context = config.burrow.ledger.trainContext; steward = autoland.app.slug;
+      # Its PR is how pipeline fixes reach the machine: first in the line.
+      first = autoland.labels.first;
     } else null;
     inherit (cfg) origin checks;
     flake = config.burrow.flake;
@@ -185,6 +193,7 @@ let
       nixStore = "${config.nix.package}/bin/nix-store";
       vulnix = lib.getExe pkgs.vulnix;
       osvScanner = lib.getExe pkgs.osv-scanner;
+      cargo = "${pkgs.cargo}/bin/cargo";
       proj = "${tools.proj}/bin/proj";
     };
   });
@@ -290,13 +299,19 @@ let
     # The renovate handler's: what GitHub's rate limit holds off is booked
     # again there for when it lifts.
     wake = renovateWake;
-    app = if machineApp == null then null else {
-      inherit (machineApp) env;
+    app = if renovateApp == null then null else {
+      inherit (renovateApp) env;
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
     };
+    # Who lands each repo (autoland/landing.nix), read at each run: Renovate
+    # merges only where the steward does. None without autoland, where
+    # nothing hands landing over.
+    landing = if autoland.enable or false then lib.attrByPath [ "burrow" "landing" "record" ] null config else null;
+    # A full run as the user leaves out the repos it may not merge in.
+    inherit (renovateSettings) autodiscoverFilter;
     tools = {
-      gh = "${machineGh}/bin/gh";
+      gh = "${renovateGh}/bin/gh";
       renovate = "${renovatePackage}/bin/renovate";
       covers = "${coversTool}";
     };
@@ -320,7 +335,14 @@ let
     # The App the jobs it starts act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };
+    # Who Renovate comments as, as REST spells it: its own App's bot; null
+    # when it runs as the user.
+    renovate = if renovateApp == null then null else renovateApp.login;
     renovateRun = renovateRunFor;
+    # The labels that keep the steward off a PR, which keep the sweep off
+    # it too: none without the steward's module.
+    held = let a = config.burrow.autoland or { }; in
+      lib.optionals (a ? labels) [ a.labels.hold a.labels.owner ];
     tools = {
       gh = "${machineGh}/bin/gh";
       git = lib.getExe config.programs.git.package;
@@ -418,6 +440,7 @@ in
   imports = [
     ./updates/health-options.nix
     (import ./common.nix inputs)
+    (import ./updates/renovate-identity.nix inputs)
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
@@ -532,8 +555,8 @@ in
 
     renovate = {
       enable = lib.mkEnableOption ''
-        a self-hosted Renovate for every repo it can see: as the machine's own
-        App (burrow.github.machinery), else as the user, with gh's login'';
+        a self-hosted Renovate for every repo it can see: as `app`, else as
+        the user, with gh's login'';
       autodiscoverFilter = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         example = [ "sam/*" ];
@@ -545,9 +568,9 @@ in
         defaultText = lib.literalExpression "burrow.autoland.owners, when autoland is on";
         example = [ "sam" "sams-org" ];
         description = ''
-          As the machine's own App: the GitHub users and orgs its installations
-          are on, whose repos a full pass looks through (autodiscoverFilter
-          still says which it covers). An App's token is one installation's,
+          As `app`: the GitHub users and orgs its installations are on, whose
+          repos a full pass looks through (autodiscoverFilter still says
+          which it covers). An App's token is one installation's,
           so each repo's run gets its owner's.
         '';
       };
@@ -576,17 +599,6 @@ in
           refresh. autodiscoverFilter still has to take them.
         '';
       };
-      gitAuthor = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = "renovate <renovate@example.com>";
-        description = ''
-          Who Renovate's commits are by. Not the user's own email: Renovate
-          keeps a branch that has a commit by someone other than this, and
-          rebases over everything else, so fixes pushed as the user would be
-          lost.
-        '';
-      };
       timezone = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = config.time.timeZone;
@@ -601,7 +613,7 @@ in
       settings = lib.mkOption {
         type = lib.types.attrs;
         default = { };
-        description = "Merged into burrow's Renovate settings.";
+        description = "Merged into burrow's Renovate settings; its author is `gitAuthor`, and a different one here fails evaluation.";
       };
       path = lib.mkOption {
         type = lib.types.listOf lib.types.package;
@@ -661,8 +673,6 @@ in
         github = "curl -fsS -o /dev/null --max-time 15 https://github.com";
       } // lib.optionalAttrs config.services.openssh.enable {
         sshd = "systemctl -q is-active sshd.service";
-      } // lib.optionalAttrs (config.burrow.remoteControl.enable or false) {
-        operator = "systemctl --user -M ${user}@ -q is-active claude-rc@${project}.service";
       } // lib.optionalAttrs config.services.tailscale.enable {
         tailscale = "tailscale status --json | jq -e '.BackendState == \"Running\"'";
       } // lib.optionalAttrs config.burrow.events.enable {
@@ -695,8 +705,8 @@ in
         # Whether Claude Code can authenticate: a live reading of its usage
         # meter, which only an answer from its endpoint is (burrow-claude-login,
         # of crates/burrow-usage-reset; no model call, and the token never
-        # leaves Claude Code). An expired login fails every server and job turn
-        # at once, so this names it rather than its symptoms.
+        # leaves Claude Code). An expired login fails every job turn at once,
+        # so this names it rather than its symptoms.
         claude-login = let
           probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
           claude = lib.getExe' config.burrow.claude.package "claude";
@@ -753,14 +763,15 @@ in
         ${config.networking.hostName} keeps itself current; nobody runs updates by hand.
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
-          ${if train then "builds and runs the VM tests, then puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces its head). A bump is never switched to before it lands: only main goes live, so a pin goes live after it lands, like any other change" else "builds, runs the VM tests, switches, checks health, confirms and pushes to main"}.
+          ${if train then "builds and runs the VM tests, then puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, unless a check fails on it, a finding on it is left open or it stops merging into main: then a fresh bump replaces its head). A bump is never switched to before it lands: only main goes live, so a pin goes live after it lands, like any other change" else "builds, runs the VM tests, switches, checks health, confirms and pushes to main"}.
           It deploys main, so a merged PR goes live the same way, switched with the dead man's switch and a health check. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
           aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.
         - `${update} status` says what the last run did. When ${config.burrow.owner} asks how
           updates are going, start there${lib.optionalString (vars.BOOT != "") ", plus `${vars.BOOT} status`"}.
       '' + lib.optionalString rcfg.enable ''
-        - Renovate opens and merges dependency PRs in every repo; renovate-sweep
+        - Renovate opens dependency PRs in every repo, and merges them where the
+          steward lands (where conaryd does, conaryd lands them); renovate-sweep
           hands the stuck ones to Claude jobs.
       '' + lib.optionalString cfg.advisories.enable ''
         - advisory-watch hands new CVEs to Claude jobs. Jobs from it show up in
@@ -830,8 +841,27 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
-        assertion = machineApp == null || rcfg.owners != [ ];
-        message = "burrow.updates.renovate.owners: name the accounts the App ${machineApp.slug or ""} is installed on, whose repos Renovate looks through.";
+        # renovate-policy.nix merges settings over gitAuthor, so a gitAuthor
+        # there would be the author Renovate commits as while the steward
+        # (and renovate-identity.nix's checks) go by the option's: the
+        # option is its one home.
+        assertion = !(rcfg.settings ? gitAuthor) || rcfg.settings.gitAuthor == rcfg.gitAuthor;
+        message = ''
+          burrow.updates.renovate.settings.gitAuthor is ${builtins.toJSON rcfg.settings.gitAuthor or null},
+          but burrow.updates.renovate.gitAuthor, who the steward knows Renovate's
+          commits by, is ${builtins.toJSON rcfg.gitAuthor}. Set it through
+          burrow.updates.renovate.gitAuthor instead.'';
+      } {
+        assertion = renovateApp == null || rcfg.owners != [ ];
+        message = "burrow.updates.renovate.owners: name the accounts the App ${renovateApp.slug or ""} is installed on, whose repos Renovate looks through.";
+      } {
+        # renovate-sweep's gh is the machinery's App's, which can't learn the
+        # user's login to tell Renovate's comments by.
+        assertion = renovateApp != null || machineApp == null;
+        message = ''
+          burrow.updates.renovate.app is null, so Renovate acts as the user, but
+          burrow.github.machinery is ${machineApp.name or ""}: renovate-sweep, as that App, can't tell
+          Renovate's comments. Give Renovate an App (the machinery's, or its own).'';
       } {
         assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
         message = ''
@@ -865,8 +895,8 @@ in
         };
       };
 
-      # Renovate as the machine's own App, or as the user with gh's login,
-      # like the other jobs that talk to GitHub: every repo it covers, or
+      # Renovate as its App (renovate.app, the machinery's unless it has one
+      # of its own), or as the user with gh's login: every repo it covers, or
       # (renovate@) the one its instance names. One at a time, however
       # started: they share the clones.
       systemd.services = lib.genAttrs [ "renovate" "renovate@" ] (name: online // {

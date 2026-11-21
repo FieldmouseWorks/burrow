@@ -12,23 +12,26 @@ use std::collections::BTreeMap;
 mod store;
 pub use store::{Migration, View, legacy_file};
 
-/// The engines a role can run on.
-pub const ENGINES: &[&str] = &["claude", "codex"];
+/// The engines a role can run on: Claude Code on the subscription's login,
+/// and the same CLI on the API credit ([`crate::credit::ENGINE`]).
+pub const ENGINES: &[&str] = &["claude", crate::credit::ENGINE];
 
-/// Where a role's turns go: its engine, and the engine it moves to when its
-/// own is short by its meter (`over`).
+/// Where a role's turns go: its engine, then, in order, the engines it
+/// moves on to when the one before is short (`ENGINE over PCT ENGINE ...`).
+/// A route with no `over` is stored as it always was.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Route {
     pub engine: String,
-    pub over: Option<Overflow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over: Vec<Hop>,
 }
 
+/// One step along a route: once the engine before it has used `pct`
+/// percent by its meter, the turn may move on to `engine`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Overflow {
-    /// A meter window at this percent makes the engine short: any finite
-    /// number from 0 to 100.
+pub struct Hop {
     pub pct: f64,
     pub engine: String,
 }
@@ -245,13 +248,7 @@ impl Roles {
     pub fn check(&self, offers: &BTreeMap<String, Offer>) -> Result<(), String> {
         for (key, route) in &self.roles {
             canonical(key)?;
-            engine(&route.engine).map_err(|e| format!("role {key}: {e}"))?;
-            if let Some(over) = &route.over {
-                engine(&over.engine).map_err(|e| format!("role {key}: {e}"))?;
-                if !(0.0..=100.0).contains(&over.pct) {
-                    return Err(format!("role {key}: overflow percent must be 0 to 100"));
-                }
-            }
+            route.check().map_err(|e| format!("role {key}: {e}"))?;
         }
         for (key, tuning) in &self.models {
             let Some((role, on)) = key.split_once(' ') else {
@@ -284,41 +281,69 @@ fn canonical(key: &str) -> Result<String, String> {
     Ok(canonical)
 }
 
-/// The engine words of a route: `ENGINE [over PCT ENGINE]`.
+/// The engine words of a route: `ENGINE [over PCT ENGINE]...`.
 pub fn route(words: &[&str]) -> Result<Route, String> {
-    let (primary, over) = match words {
-        [e] => (*e, None),
-        [e, "over", pct, other] => {
-            let pct: f64 = pct
-                .parse()
-                .ok()
-                .filter(|p| (0.0..=100.0).contains(p))
-                .ok_or("overflow percent must be a number from 0 to 100")?;
-            engine(other)?;
-            (
-                *e,
-                Some(Overflow {
-                    pct,
-                    engine: (*other).into(),
-                }),
-            )
-        }
-        _ => return Err("expected ENGINE [over PCT ENGINE]".into()),
+    const EXPECTED: &str = "expected ENGINE [over PCT ENGINE]...";
+    let [first, rest @ ..] = words else {
+        return Err(EXPECTED.into());
     };
-    engine(primary)?;
-    Ok(Route {
-        engine: primary.into(),
+    if rest.len() % 3 != 0 {
+        return Err(EXPECTED.into());
+    }
+    let over = rest
+        .chunks(3)
+        .map(|hop| match hop {
+            ["over", pct, e] => Ok(Hop {
+                pct: pct
+                    .parse()
+                    .ok()
+                    .filter(|p: &f64| p.is_finite())
+                    .ok_or("over: PCT must be a number from 0 to 100")?,
+                engine: (*e).into(),
+            }),
+            _ => Err(EXPECTED.to_owned()),
+        })
+        .collect::<Result<_, _>>()?;
+    let route = Route {
+        engine: (*first).into(),
         over,
-    })
+    };
+    route.check()?;
+    Ok(route)
 }
 
 impl Route {
-    /// As a roles line said it: `ENGINE [over PCT ENGINE]`.
+    /// As a roles line said it: `ENGINE [over PCT ENGINE]...`.
     pub fn text(&self) -> String {
-        match &self.over {
-            Some(o) => format!("{} over {} {}", self.engine, o.pct, o.engine),
-            None => self.engine.clone(),
+        let mut text = self.engine.clone();
+        for hop in &self.over {
+            text += &format!(" over {} {}", hop.pct, hop.engine);
         }
+        text
+    }
+
+    /// Its engines in order: the first, then each it may move on to.
+    pub fn engines(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.engine.as_str()).chain(self.over.iter().map(|h| h.engine.as_str()))
+    }
+
+    /// Every engine known and named once, every percent from 0 to 100.
+    fn check(&self) -> Result<(), String> {
+        let mut seen = Vec::new();
+        for name in self.engines() {
+            engine(name)?;
+            if seen.contains(&name) {
+                return Err(format!("{name} is on the route twice"));
+            }
+            seen.push(name);
+        }
+        if let Some(hop) = self.over.iter().find(|h| !(0.0..=100.0).contains(&h.pct)) {
+            return Err(format!(
+                "over {} {}: PCT must be a number from 0 to 100",
+                hop.pct, hop.engine
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -438,7 +463,7 @@ pub(crate) fn apply(
     Ok(status(before.as_deref(), roles, setups))
 }
 
-pub(crate) const USAGE: &str = "usage: settings role ROLE ENGINE [over PCT ENGINE] | role ROLE unset | model ROLE ENGINE MODEL|- [EFFORT|-] | model ROLE ENGINE unset | offer ENGINE models|efforts WORD... | engines [save NAME [--replace] | use NAME | use back]";
+pub(crate) const USAGE: &str = "usage: settings role ROLE ENGINE [over PCT ENGINE]... | role ROLE unset | model ROLE ENGINE MODEL|- [EFFORT|-] | model ROLE ENGINE unset | offer ENGINE models|efforts WORD... | engines [save NAME [--replace] | use NAME | use back]";
 
 /// The setup whose values are the ones in force: the last one put in force
 /// while it still is, else any equal one.

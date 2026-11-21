@@ -2,7 +2,7 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `queue`, `why OWNER/REPO#N`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
@@ -131,7 +131,7 @@ in
       };
       userUnits = mkOption {
         type = types.listOf types.str;
-        default = [ "claude-rc@*.service" "claude-rc-*.service" "proj-*.service" "autoland-*.service" "rustup-update.service" ];
+        default = [ "proj-*.service" "autoland-*.service" "rustup-update.service" ];
         description = "The same, for `burrow.user`'s own units (`journalctl --user-unit`).";
       };
     };
@@ -191,7 +191,7 @@ in
       environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
-        # The user, for its user manager (`units`, `rc`) and proj (`queue`);
+        # The user, for its user manager (`units`) and proj (`queue`);
         # the journal's group for every unit's journal, which the allowlist
         # narrows.
         User = user;
@@ -207,7 +207,7 @@ in
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
-      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `queue`, `why OWNER/REPO#N`, `deployed`,
       `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';

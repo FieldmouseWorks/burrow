@@ -89,8 +89,17 @@ impl Run<'_> {
                     Outcome::Failed,
                     &format!("VM test {c} fails with {what} and passes on main"),
                 ));
-                self.dispatch(
+                // The inputs on top of main: the same test failing with the
+                // same ones is the same job.
+                let of: Vec<String> = self
+                    .inputs
+                    .iter()
+                    .filter(|i| self.changed && !self.failed.contains(i))
+                    .cloned()
+                    .collect();
+                self.dispatch_of(
                     &key,
+                    &of,
                     &format!(
                         "{}: the VM test {c} fails with these updates on top of main: {what}. It passes on main, so the updates break it. The log is {}; the tree is {} at {head} (don't edit there, it's reset every run). Make the updates pass it. {}",
                         cfg.update,

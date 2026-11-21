@@ -79,13 +79,12 @@ in
         reclaims the most once a slice spends 80% of its time stalled on
         memory for 30s: every slice but the root and the users' (a login
         session is watched on its own), and in each user's manager every
-        slice but its root, claude.slice and claude-rc.slice. The kernel's
+        slice but its root and claude.slice. The kernel's
         own OOM killer waits until memory and swap are gone, and with zram
         it can thrash first for as long as it likes. sshd (socket-activated or not),
-        tailscaled, the switch's own units (burrow.switch) and Remote Control
-        servers (burrow.remoteControl) are never picked, and proj's jobs
-        (claude-jobs.slice) are watched like any other slice. A server's own
-        pressure is the kernel's: past its backstop it kills there alone.
+        tailscaled and the switch's own units (burrow.switch) are never
+        picked, and proj's jobs (claude-jobs.slice) are watched like any
+        other slice.
       '';
     };
     protect = lib.mkOption {
@@ -174,17 +173,12 @@ in
       [ "$state" = active ] || { echo "$dev ($id) isn't armed"; exit 1; }
     '';
 
-    # Pressure is watched on every slice but the ones that hold Remote Control
-    # servers: the root, user.slice, user-UID.slice, and in a user's manager
-    # its root, claude.slice and claude-rc.slice. oomd honours a user's unit's
-    # ManagedOOMPreference only for a watch on a cgroup that user owns, so a
-    # watch on any of the first three would kill a whole server, every
-    # session on it, and one in the user's manager would kill a bystander for
-    # pressure inside a server: one at its own backstop. proj's jobs, in
-    # claude-jobs.slice, are watched like any other slice, and are what it
-    # kills first there. A login session, in user-UID.slice, is watched on
-    # its own. Swap is watched on the root: a server holds none, so that
-    # watch never picks one.
+    # Pressure is watched on every slice but the root, user.slice,
+    # user-UID.slice, and in a user's manager its root and claude.slice.
+    # oomd honours a user's unit's ManagedOOMPreference only for a watch on
+    # a cgroup that user owns. proj's jobs, in claude-jobs.slice, are watched
+    # like any other slice, and are what it kills first there. A login
+    # session, in user-UID.slice, is watched on its own.
     systemd.oomd = lib.mkIf cfg.oomd {
       enable = true;
       settings.OOM.DefaultMemoryPressureLimit = "80%";
@@ -196,7 +190,7 @@ in
       (pressure "user" "slice" "kill")
     ] ++ map (unit: pressure "system" unit "auto") [ "-.slice" "user.slice" "user-.slice" ]
       ++ map (unit: pressure "user" unit "auto")
-        [ "-.slice" "claude.slice" "claude-rc.slice" ]);
+        [ "-.slice" "claude.slice" ]);
     # The ways in. openssh always has sshd@ (each connection's sshd, with
     # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
     # have would make a stub of it.

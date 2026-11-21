@@ -6,13 +6,17 @@
 # or is reset, and a crash older than crashHours, leave the file.
 #
 # burrow-units-watch follows the journal for systemd's word that a unit
-# failed and systemd-coredump's that a program dumped core, and asks for a
-# pass: it kicks burrow-units' burrow-events handler, which also passes on
-# the hourly catch-up. No timer of its own, and no unit's OnFailure= or
+# failed or one in the watch file recovered and systemd-coredump's that a
+# program dumped core, and asks for a pass: it kicks burrow-units' burrow-events handler, which
+# also passes on the hourly catch-up. No timer of its own, and no unit's OnFailure= or
 # OnSuccess= touched, so whatever a service says of its own failures holds.
 # Only burrow-units.service passes, with the whole journal: `burrow-units`
 # run by hand, and its `clear`, ask it to. A burrow-units that stops
 # passing goes stale, which the watchdog catches.
+#
+# A crash that something running sees for itself isn't the machine's: one
+# in a Nix build fails that build, and one in a proj job's unit (a proof of
+# concept, a test binary) is the job's. Neither is an item.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -31,8 +35,9 @@ let
     inherit (cfg) ignore;
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
+    buildGid = if config.nix.enable then config.ids.gids.nixbld else null;
+    inherit (cfg) ownedSlices;
     systemctl = "${config.systemd.package}/bin/systemctl";
-    coredumpctl = "${config.systemd.package}/bin/coredumpctl";
     journalctl = "${config.systemd.package}/bin/journalctl";
     own = "${kick}/units";
     kick = if config.burrow.events.handlers ? watchdog then "${kick}/watchdog" else null;
@@ -76,6 +81,16 @@ in
       description = ''
         Globs (`*`, `?`, `[...]`) of unit names and program paths it never
         watches: ones that fail by design.
+      '';
+    };
+
+    ownedSlices = mkOption {
+      type = types.listOf types.str;
+      default = lib.optional (config.burrow.proj.enable or false) config.burrow.proj.slice;
+      defaultText = lib.literalExpression "[ config.burrow.proj.slice ] when proj is on";
+      description = ''
+        Slices whose units run someone's own work: a crash in one is theirs
+        to see (a job's proof of concept or test binary), never an item.
       '';
     };
 
@@ -149,7 +164,7 @@ in
       };
     };
     systemd.services."${name}-watch" = {
-      description = "burrow-units' watcher: a pass each time a unit fails or a program dumps core";
+      description = "burrow-units' watcher: a pass each time a unit fails, a watched one recovers or a program dumps core";
       wantedBy = [ "multi-user.target" ];
       after = [ "burrow-events.service" ];
       # A watcher that can't keep going fails for good, which the hourly
@@ -157,14 +172,17 @@ in
       startLimitIntervalSec = 300;
       startLimitBurst = 5;
       serviceConfig = {
-        DynamicUser = true;
+        # It reads the watch file, under its lock, to tell a watched unit's
+        # recovery from any other start: as the pass's user, since the state
+        # may be under /home, and only reading, everything read-only.
+        User = user;
         SupplementaryGroups = [ "systemd-journal" ];
         Environment = "UNITS_CONFIG=${configFile}";
         ExecStart = "${package}/bin/${name} watch";
         Restart = "always";
         RestartSec = 5;
         ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectHome = "read-only";
         NoNewPrivileges = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
       };

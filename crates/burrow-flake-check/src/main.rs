@@ -3,6 +3,7 @@
 //! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
+mod builds;
 mod gate;
 mod memory;
 mod negative;
@@ -84,6 +85,31 @@ fn string(c: Command) -> Result<String> {
 fn run(mut c: Command) -> Result<bool> {
     Ok(c.status()?.success())
 }
+/// A command whose stderr goes where its stdout does: one pipe, in the
+/// order it said them.
+fn merged(p: &str, args: &[&str]) -> Command {
+    let mut c = cmd("bash", &["-c", "exec \"$@\" 2>&1", "bash", p]);
+    c.args(args);
+    c
+}
+/// Run it, copying each line it says to this stdout and to `also` as it
+/// comes, so a long build is watched as it goes and its log kept whole; its
+/// exit code.
+fn tee(mut c: Command, also: &mut dyn Write) -> Result<i32> {
+    use std::io::BufRead;
+    let mut child = c.stdout(Stdio::piped()).spawn()?;
+    let mut pipe = io::BufReader::new(child.stdout.take().ok_or_else(|| err("no pipe"))?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if pipe.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        also.write_all(&line)?;
+        io::stdout().write_all(&line)?;
+    }
+    Ok(exit_code(child.wait()?))
+}
 fn show(o: &Output) -> Result<()> {
     io::stdout().write_all(&o.stdout)?;
     io::stderr().write_all(&o.stderr)?;
@@ -125,6 +151,13 @@ fn quote(v: &str) -> String {
 fn nix_string(v: &str) -> String {
     quote(v).replace('$', "\\$")
 }
+/// A build that prints nothing for this long has stopped making progress:
+/// nix kills it (its `max-silent-time`) and the gate fails, rather than hold
+/// its runner until the job's 6 hours run out (#1102). The rest of the
+/// builds go on (`--keep-going`), and a push's leg still keeps what they
+/// built. burrow's longest quiet stretch in a build that went on to pass
+/// was 14 to 16 minutes, codex linking on a hosted runner.
+const SILENT_SECONDS: u32 = 60 * 60;
 fn lines(v: &str) -> Vec<String> {
     v.lines().map(str::to_owned).collect()
 }
@@ -176,6 +209,17 @@ fn system() -> Result<String> {
         return Err(err(format!("can't evaluate for system {v}")));
     }
     Ok(v)
+}
+/// The nix config every build the worker starts reads: a caller's first,
+/// then a build's silence limit, and, in a run that may write the build
+/// store, what keeps a flake's own config out of it (builds.rs).
+fn worker_config(caller: &str, writes: bool) -> String {
+    let mut c = format!("{caller}\nmax-silent-time = {SILENT_SECONDS}");
+    if writes {
+        c.push('\n');
+        c.push_str(builds::NIX_CONFIG);
+    }
+    c
 }
 fn main() {
     let mode = env::args().nth(1).unwrap_or_default();
@@ -236,36 +280,19 @@ fn main() {
         if mode != "gate" && mode != "negative" {
             return Err(err("expected gate or negative"));
         }
-        use std::io::Read;
         let mut log = fs::File::create(temp().join(if mode == "gate" {
             "flake.log"
         } else {
             "negative.log"
         }))?;
-        let mut child = cmd(
-            "bash",
-            &[
-                "-c",
-                "exec \"$@\" 2>&1",
-                "bash",
-                s(&env::current_exe()?),
-                "--worker",
-                &mode,
-            ],
-        )
-        .stdout(Stdio::piped())
-        .spawn()?;
-        let mut pipe = child.stdout.take().unwrap();
-        let mut buf = [0; 8192];
-        loop {
-            let n = pipe.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            log.write_all(&buf[..n])?;
-            io::stdout().write_all(&buf[..n])?;
-        }
-        Ok(exit_code(child.wait()?))
+        let mut c = merged(s(&env::current_exe()?), &["--worker", &mode]);
+        // Every build the worker starts, its own and the nix and heavy
+        // processes it runs, reads this; a caller's settings come first.
+        c.env(
+            "NIX_CONFIG",
+            worker_config(&var("NIX_CONFIG"), builds::writes()),
+        );
+        tee(c, &mut log)
     })();
     match result {
         Ok(code) => std::process::exit(code),

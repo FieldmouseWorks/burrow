@@ -10,6 +10,9 @@ for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
 builds start. A negative evaluation failure must repeat in a private local
 store without substituters, with the comparison tree evaluating afterwards.
+That store gets each input that can be fetched, one by one, so an unrelated
+host's outage can't decide the PR (#1212); a second try that reaches for an
+input it wasn't given can't tell.
 
 ## Delivery and caller cost
 
@@ -74,20 +77,79 @@ Only an unfinished push of the same workflow at the merged base's exact SHA
 on the default branch justifies waiting, and only while that push's own leg
 (the job named as this one, `LEG_JOB`) is running on a runner. One still
 queued, or not created yet, may want the very runner this leg holds, so the
-leg builds cold rather than wait (#929). A leg on a runner is waited for to
-its end, with no cap: it ends by itself, and a wait cut off part way buys
-nothing. The waiter lists the push's runs once, then polls only their jobs
-(`WAIT_POLL`, 60 seconds), and reads the exact cache once the leg isn't
-building, which keeps a long wait inside the token's hourly requests. A
-leg that ended without saving, or no such run, ends the wait. A request
+leg builds cold rather than wait (#929). A leg on a runner isn't waited for: its deadline
+(`WAIT_DEADLINE`, in seconds, from that leg's own start) defaults to 0, so
+this leg builds cold now, and restores the base's builds only if they're
+already saved. The wait was for codex, whose cold build took 2 to 3 hours;
+since it left the machine (#1204), a waiting leg spent 12.3 minutes waiting
+to save 2.7 of building (45 PR legs, 2026-11-19). #989 retires the wait
+with the kept builds. A failed push is no reason not to wait: its legs keep their
+builds whether its gate passed or not (#812), under its own commit, which
+is the key this leg restores. A newer push's entry for the leg is: the
+base push's leg skips its save once one is listed, and deletes its own
+if one turns up after (`burrow_keep::prune`), so the waiter asks that
+same question of the leg's entries and, on a yes, stops and restores the
+newer entry, which holds every build of the base's that the newer push
+didn't change (#1164: a base leg compiling cold for three hours skipped
+its save that way, and the PR leg that had waited on it built cold into
+the job's six-hour limit). The waiter lists the push's runs once, then
+polls only their jobs (`WAIT_POLL`, 60 seconds), and reads the leg's
+entries on the first poll, every `WAIT_NEWER` (300 seconds) and once the
+leg isn't building, which keeps a long wait inside the token's hourly
+requests. A leg that ended without saving, with no newer entry, or no
+such run, ends the wait and this leg builds cold. A request
 past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
-which reports `degraded/kept-wait`.
+which reports `degraded/kept-wait`. A saved entry that then fails to
+restore (evicted, or unextractable) leaves the leg building without it and
+reports `degraded/kept-rewait` (#1161); what it left half extracted,
+Nix's `fallback` builds.
 
 The job inherits the caller's token permissions. Shipped callers grant
 `actions: read` for both runs and caches, including in private repositories;
 existing callers without it still run the gate and report a soft wait
 failure when GitHub denies an API read. A saved cache is restored with its
 exact key before the gate runs.
+
+## The build store's shadow
+
+With a build store named (the gate step's `BUILDS` and `BUILDS_KEY`, from
+the caller's Actions variables `BURROW_BUILDS_URL` and
+`BURROW_BUILDS_PUBLIC_KEY`, on a runner that installs its own Nix), a leg
+says before it builds what the store would have served of the derivations
+it builds cold (`src/builds.rs`): how many and which, their bytes, how long
+fetching them would take (estimated from one NAR's first 64 MiB, timed), and
+how long the kept builds' restore took. The last line is
+`builds-shadow {JSON}`, for a reader of the job's log. It reads narinfos
+only, through `nix path-info` and `nix store verify --no-contents` with a
+cache of its own, counts only what the store's key signs, and never fails
+or holds up the leg: each question has a deadline. Nothing substitutes
+from the store.
+
+Such a run's builds go to the store, so every nix the worker starts also
+gets `accept-flake-config = false` and `sandbox = true`, after the caller's
+config: a flake's own `nixConfig` can't add a substituter or a key, or turn
+the sandbox off, whatever the runner's config says. After the gate,
+flake-check.yml's builds-write step uploads what the leg built
+(crates/burrow-keep, `burrow-keep-upload`).
+
+## A build that stops making progress
+
+The gate and negative runs give every build Nix's `max-silent-time` of an
+hour (`SILENT_SECONDS` in `src/main.rs`), after the caller's own
+`NIX_CONFIG`: a build that prints nothing for that long is killed and the
+leg fails, rather than hold its runner until the job's 6 hours run out.
+The other builds go on (`--keep-going`), and a push's leg keeps what they
+built. The longest quiet stretch in a burrow build that went on to pass was
+14 to 16 minutes (codex linking, on a hosted runner).
+
+The negative builds each check it judges on its own, once what the check is
+built from has built under that hour, with Nix's shorter `timeout`
+(`CHECK_SECONDS` in `src/negative.rs`, which says why that figure), and keeps its
+log to say why it failed: no check is built a second time. A check that
+timed out there, where every build its log started was its own, is the new
+tests catching the base when the same check passes on the base and on the
+PR's head: a test that a wait ends waits forever on the code with that
+bug. Anything else about a timeout can't tell (#1212).
 
 ## Reusing an attested pass
 

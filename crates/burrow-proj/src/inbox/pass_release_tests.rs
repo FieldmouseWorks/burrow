@@ -4,6 +4,7 @@
 use super::resumption::{Permit, Wait};
 use super::sorting_tests::Box;
 use crate::held::Held;
+use crate::inbox::record::files;
 use crate::job::Job;
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
@@ -33,8 +34,8 @@ fn drained_pair(fixture: &mut Box) -> PathBuf {
         fixture.job_ending(id, "done", Some("await"), "kept");
         let d = fixture.cfg.inbox.as_ref().unwrap().state.join(id);
         fs::create_dir_all(&d).unwrap();
-        fs::write(d.join("drained"), "sam/box#1").unwrap();
-        fs::write(d.join("job"), id).unwrap();
+        fs::write(d.join(files::File::Drained), "sam/box#1").unwrap();
+        fs::write(d.join(files::File::Job), id).unwrap();
     }
     fs::write(&active, "").unwrap();
     fs::write(fixture.cfg.jobs.join("active/1.slot"), "1").unwrap();

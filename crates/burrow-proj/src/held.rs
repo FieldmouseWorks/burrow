@@ -36,6 +36,15 @@ impl Held {
         }
     }
 
+    /// `file`'s lock, shared, if nobody holds it exclusive now.
+    pub fn try_lock_shared(file: File) -> io::Result<Option<Self>> {
+        match file.try_lock_shared() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     /// `file`'s lock, exclusive, once whoever holds it lets go, if that's
     /// within `wait`.
     pub fn lock_within(file: File, wait: Duration) -> io::Result<Option<Self>> {

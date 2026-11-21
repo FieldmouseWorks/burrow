@@ -8,7 +8,7 @@ use std::path::Path;
 use super::{Machine, size};
 
 /// How deep the cgroup tree is read: deep enough for a user's units
-/// (user.slice/user-UID.slice/user@UID.service/claude.slice/claude-rc.slice/UNIT).
+/// (user.slice/user-UID.slice/user@UID.service/claude.slice/claude-jobs.slice/UNIT).
 const DEPTH: usize = 6;
 
 /// How many cgroups the answer lists.

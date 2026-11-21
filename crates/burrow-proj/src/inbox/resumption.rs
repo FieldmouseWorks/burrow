@@ -6,7 +6,8 @@
 //! parked before it lets go (`inbox::main`).
 use super::{Pass, dirs};
 use crate::held::Held;
-use crate::{config::Config, job::Job, read};
+use crate::inbox::record::files;
+use crate::{config::Config, job::Job};
 use std::{cell::Cell, collections::BTreeMap, fs::OpenOptions, path::Path};
 
 thread_local! {
@@ -90,14 +91,14 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     let Some(inbox) = &cfg.inbox else {
         return Ok(Resume::Ready(Permit::unlocked()));
     };
-    let mine = |d: &Path| read(&d.join("job")).as_deref() == Some(job.id);
+    let mine = |d: &Path| files::job(d).as_deref() == Some(job.id);
     let associated = dirs(&inbox.state, "")
         .iter()
-        .any(|d| mine(d) && d.join("drained").exists())
-        || dirs(&inbox.state.join(".triage"), "")
+        .any(|d| mine(d) && files::drained(d))
+        || dirs(&super::record::files::sorting_root(&inbox.state), "")
             .iter()
             .any(|d| mine(d));
-    if !associated || inbox.triage.is_none() || job.path("unstick").exists() {
+    if !associated || inbox.triage.is_none() || crate::record::unstuck(job) {
         return Ok(Resume::Ready(Permit::unlocked()));
     }
     let permit = if HELD.with(Cell::get) {
@@ -125,13 +126,13 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
         looked: Vec::new(),
         observe: false,
         scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
     };
-    let mine = |d: &Path| read(&d.join("job")).as_deref() == Some(job.id);
+    let mine = |d: &Path| files::job(d).as_deref() == Some(job.id);
     let drained = dirs(&inbox.state, "");
-    if drained
-        .iter()
-        .any(|d| mine(d) && d.join("drained").exists())
-        && !job.path("unstick").exists()
+    if drained.iter().any(|d| mine(d) && files::drained(d))
+        && !crate::record::unstuck(job)
         && drained
             .iter()
             .filter(|d| !mine(d) && pass.draining_record(d))
@@ -140,12 +141,12 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     {
         return Ok(Resume::Waiting(Wait::Drain));
     }
-    let sorting = dirs(&inbox.state.join(".triage"), "");
+    let sorting = dirs(&super::record::files::sorting_root(&inbox.state), "");
     if sorting.iter().any(|d| mine(d))
-        && !job.path("unstick").exists()
+        && !crate::record::unstuck(job)
         && sorting
             .iter()
-            .filter(|d| !mine(d) && pass.sorting_slot(d))
+            .filter(|d| !mine(d) && pass.holds_sorting_slot(d))
             .count()
             >= t.at_once
     {
@@ -162,7 +163,7 @@ impl Pass<'_> {
         let paused = name
             .rsplit_once('-')
             .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
-        if let Some(id) = read(&dir.join("job")) {
+        if let Some(id) = files::job(dir) {
             let job = Job::new(self.cfg, &id);
             if !job.dir.is_dir() {
                 return !paused;
@@ -244,14 +245,14 @@ mod tests {
                 .unwrap();
                 let root = &fixture.cfg.inbox.as_ref().unwrap().state;
                 let dir = if sorting {
-                    root.join(".triage").join(id)
+                    files::sorting_root(root).join(id)
                 } else {
                     root.join(id)
                 };
                 fs::create_dir_all(&dir).unwrap();
-                fs::write(dir.join("job"), id).unwrap();
+                fs::write(dir.join(files::File::Job), id).unwrap();
                 if !sorting {
-                    fs::write(dir.join("drained"), "sam/box#1").unwrap();
+                    fs::write(dir.join(files::File::Drained), "sam/box#1").unwrap();
                 }
             }
             let job = Job::new(&fixture.cfg, "parked");
@@ -310,8 +311,8 @@ mod turn_tests {
             fixture.job_ending(id, "done", Some("await"), "kept");
             let d = fixture.cfg.inbox.as_ref().unwrap().state.join(id);
             fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("drained"), "sam/box#1").unwrap();
-            fs::write(d.join("job"), id).unwrap();
+            fs::write(d.join(files::File::Drained), "sam/box#1").unwrap();
+            fs::write(d.join(files::File::Job), id).unwrap();
         }
         fs::write(fixture.path("active"), "").unwrap();
         fs::write(fixture.cfg.jobs.join("active/1.slot"), "1").unwrap();

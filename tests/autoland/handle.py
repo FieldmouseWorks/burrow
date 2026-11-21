@@ -1,18 +1,15 @@
-"""handle(), end to end on PRs shaped like the steward's query's, with the
-snapshot, the reviewers and the posting stood in for (review.py and post.py
-check those)."""
+"""handle(), end to end on PRs shaped like the steward's query's, Codex's
+connector's posts among them."""
 
 import hashlib
 import hmac
-import fcntl
 import json
 import os
-import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, HELD, JOBS, POSTED, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
+from harness import (C, CI_GREEN, FAIL, HELD, JOBS, OWNER_ASKS, P, R, H, S, SINCE, STATES, T0, UPKEEP_RAN,
                      WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
-                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
+                     found, gh_stub, mkpr, pr_state, run, said, stand_in, summary, swept, tmp)
 
 stand_in()
 fresh_pr_state()
@@ -22,7 +19,7 @@ fresh_pr_state()
 status, digest = run(mkpr(draft=True), 0)
 status, digest = run(clean(draft=True), 600)
 assert "state=pending" in status and "Draft: work in progress" in status, status
-assert WROTE == [x for x in WROTE if "/statuses/" in x] and queued() == [] and POSTED == [] and JOBS == [] and digest == [], WROTE
+assert WROTE == [x for x in WROTE if "/statuses/" in x] and JOBS == [] and digest == [], WROTE
 assert not any(x.startswith("pr ready") for x in WROTE)
 # Whoever's it is: an outside author's draft, or one with too much to read, isn't listed yet.
 outside = {**mkpr(draft=True), "author": {"login": "mallory"}}
@@ -39,332 +36,106 @@ status, digest = run(long, 600)
 assert "Too many comments to read" in status and digest and JOBS == [] and not merged(), (status, digest)
 
 
-# A head is reviewed by both once it has sat still: each queued (once) for
-# the reviewers' service, and no pass waits on them.
+# Codex's GitHub connector reviews each push on its own: until it says
+# something of this head, the PR waits on it, and no pass asks it to.
 fresh_pr_state()
+asks = lambda: [x for x in WROTE if "/issues/5/comments" in x and "@codex review" in x]  # noqa: E731
 status, _ = run(mkpr(), 0)
-assert queued() == [] and "Waiting for Codex's review" in status, status
+assert "Waiting for Codex's review of this commit" in status and not merged() and JOBS == [], status
 status, _ = run(mkpr(), 600)
-assert queued() == ["codex", "rival"], queued()
-assert "Codex is reviewing this commit" in status and "Rival is reviewing this commit" in status, status
-status, _ = run(mkpr(), 640)
-assert queued() == ["codex", "rival"] and "Rival is reviewing" in status
-# Their answers are posted by the next pass, which lands it on them.
-worker()
-status, _ = run(mkpr(), 650)
-assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 0)] and os.listdir(DDIR) == [], POSTED
-assert "Codex and Rival found nothing" in status and merged(), status
+assert asks() == [] and not merged(), WROTE
+# Its summary says it's under way: still waiting.
+status, _ = run(mkpr(comments=[summary(status="running")]), 900)
+assert "Codex is reviewing this commit" in status and not merged(), status
+# Clean on this head, CI green: it lands, in the same pass.
+status, _ = run(clean(), 960)
+assert "Codex found nothing in this commit's change" in status and merged() and JOBS == [], status
 
-# A review covers the description it was shown as much as the head: one
-# edited while they looked (a `Why not Rust:` line written in for CI, say)
-# isn't covered by what they said, so their answers are posted and both
-# look again; once they've been shown it, their word lands it.
+# Quiet QUIET minutes after its push, it's asked for once, as the owner
+# (owner_asks.py has the rest), never by the App; quiet LOST minutes, the
+# digest says so.
 fresh_pr_state()
 run(mkpr(), 0)
-run(mkpr(), 600)
-worker()
-weighed = "Why not Rust: quicker to write"
-status, _ = run(mkpr(body=weighed), 650)
-assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 0)] and not merged(), status
-assert queued() == ["codex", "rival"] and "Codex is reviewing this commit" in status, (status, queued())
-worker()
-status, _ = run(mkpr(body=weighed), 660)
-assert "Codex and Rival found nothing" in status and merged(), status
-# Edited after a clean review, the head's clean reviews don't land it either.
-fresh_pr_state()
-reviewed = [rv_review("codex", 0, body="Why not Rust: a generated file"), rv_review("rival", 0, body="Why not Rust: a generated file")]
-run(mkpr(reviews=reviewed, body=weighed), 0)
-status, _ = run(mkpr(reviews=reviewed, body=weighed), 600)
-assert not merged() and queued() == ["codex", "rival"], (status, queued())
-status, _ = run(mkpr(reviews=reviewed, body="Why not Rust: a generated file"), 610)
-assert merged(), status
+status, digest = run(mkpr(), 30 * 60)
+assert OWNER_ASKS == [("sam/r", 5, head)] and asks() == [] and digest == [], (WROTE, digest)
+status, digest = run(mkpr(), 31 * 60)
+assert OWNER_ASKS == [] and asks() == [] and digest == [], (WROTE, digest)
+status, digest = run(mkpr(), 120 * 60)
+assert [d[0] for d in digest] == ["Codex hasn't reviewed it"] and "no review of aaaaaaa since its push at " in digest[0][2], (status, digest)
+assert "Codex: no review since its push at " in status, status
+# The same stall only older is the same entry, known by the same words, so
+# the stuck issue gets no new comment and its job isn't resumed with it;
+# nor does the PR's status change (burrow#1228).
+later_status, later_digest = run(mkpr(), 127 * 60)
+assert later_digest == digest and [R.known_by(*d) for d in later_digest] == [R.known_by(*d) for d in digest], (digest, later_digest)
+assert later_status == status, (status, later_status)
 
-# A look at an earlier head that comes back after the PR moved on can't know
-# what the pushes since fixed: while its reviewer is still to look at the
-# new head, that look decides, so this one is dropped, and counts no round.
-# Not even after a hold, however long it sat: on unhold, it would raise again
-# what was fixed meanwhile.
-newer = "9" * 40
-for held in (False, True):
+# Only the connector's own posts count: its markers from anyone else, or
+# from a user who took its name, and its word on another head, aren't its
+# word on this one.
+mallory = {"login": "mallory", "__typename": "User"}
+posing = {"login": "chatgpt-codex-connector", "__typename": "User"}
+for pr in (mkpr(comments=[summary(who=mallory)]), mkpr(comments=[summary(who=posing)]),
+           mkpr(comments=[summary(sha="b" * 40)]), mkpr(reviews=[found(who=mallory)], comments=[summary(who=mallory)])):
     fresh_pr_state()
-    run(mkpr(), 0)
-    run(mkpr(), 600)
-    status, _ = run(mkpr(sha=newer, labels=["hold"] * held), 700)
-    assert queued() == ["codex", "rival"], status
-    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
-    if held:
-        status, _ = run(mkpr(sha=newer, labels=["hold"]), 705)
-        assert POSTED == [] and len(os.listdir(DDIR)) == 2 and "On hold" in status, (POSTED, status)
-    status, _ = run(mkpr(sha=newer), 710)
-    assert POSTED == [] and os.listdir(DDIR) == [] and queued() == [], (held, POSTED, os.listdir(DDIR))
-    assert not merged() and "review findings" not in status and "Waiting for Codex's review" in status, (held, status)
-    assert pr_state()["rv"]["rival"].get("fails") is None, pr_state()
-    # The new head's own looks come once it's sat still.
-    status, _ = run(mkpr(sha=newer), 1300)
-    assert queued() == ["codex", "rival"] and "Rival is reviewing this commit" in status, (held, status)
-# Retargeted since, what an earlier head got on the old base isn't posted.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-run(mkpr(sha=newer, base="release/1.x"), 700)
-assert POSTED == [] and os.listdir(DDIR) == [], POSTED
-# Nor do findings on an earlier head hold back a new one its reviewers
-# found clean: their looks at it decide.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-status, _ = run(clean(sha=newer), 700)
-assert POSTED == [] and os.listdir(DDIR) == [] and merged(), (POSTED, status)
-# One out of service won't look at the new head, so what it said of an
-# earlier one is its last word: posted on the commit it read, its findings
-# hold the pass back from landing, since the threads it read are from
-# before them. Its look came back before it went out.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
-assert ("rival", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, WROTE)
-assert f"review findings on {head[:7]}" in status, status
-# A finished look at this head by one out of service is posted too, and its
-# findings hold the pass back though its verdict isn't waited for.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-status, _ = run(mkpr(), 650)
-assert ("rival", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, WROTE)
-assert f"review findings on {head[:7]}" in status, status
-# So are they when an earlier head's answer puts it out in the same pass.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'rival', newer, 'main')}.json",
-       {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": newer, "base": "main"})
-status, _ = run(mkpr(), 650)
-assert V.out("rival") and ("rival", head, 1) in POSTED and not merged(), (POSTED, WROTE)
-assert f"review findings on {head[:7]}" in status, status
-# An earlier head's out answer that comes in after the pass began puts it
-# out too, rather than being dropped with the reviewer still taken for in.
-fresh_pr_state()
-run(mkpr(), 0)
-real_answered, late_out = V.answered, []
-def answered(key, r):
-    names = real_answered(key, r)
-    if r == "rival" and not late_out:
-        late_out.append(C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'rival', newer, 'main')}.json",
-                               {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": newer, "base": "main"}))
-    return names
-V.answered = answered
-run(mkpr(reviews=[rv_review("codex", 0)]), 600)
-V.answered = real_answered
-assert late_out and V.out("rival") and os.listdir(DDIR) == [], (os.listdir(DDIR), WROTE)
-os.remove(f"{tmp}/state/{V.OUT}")
-# Nor is an earlier head's review dropped for a look at this head that an
-# outage in the same listing means won't come, wherever its answer sorts: an
-# earlier head's in once outs() had looked (b sorts after a), or this head's
-# in once consume() had read it.
-for out_at in ("b" * 40, newer):
-    fresh_pr_state()
-    run(mkpr(), 0)
-    run(mkpr(), 600)
-    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-    listed = []
-    def answered(key, r, listed=listed, out_at=out_at):
-        listed.append(r)
-        if listed.count("rival") == 2 and r == "rival":  # overtaken()'s listing
-            C.save(f"{V.DONE}/{V.item_name(key, 'rival', out_at, 'main')}.json",
-                   {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": out_at, "base": "main"})
-        return real_answered(key, r)
-    V.answered = answered
-    status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
-    V.answered = real_answered
-    assert listed.count("rival") >= 2 and V.out("rival") and ("rival", head, 1) in POSTED, (out_at, POSTED, WROTE)
-    assert not merged() and f"review findings on {head[:7]}" in status and os.listdir(DDIR) == [], (out_at, status)
-    os.remove(f"{tmp}/state/{V.OUT}")
-# One GitHub wouldn't take is kept and tried again, and the PR waits for it.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-STUB["post"] = RuntimeError("HTTP 502")
-for t in (700, 760):
-    status, _ = run(clean(sha=newer), t)
-    # Codex's, in service, was dropped: its look at the new head decides.
-    assert not merged() and os.listdir(DDIR) == [f"{V.item_name('pr-sam_r-5.json', 'rival', head, 'main')}.json"] and C.WAKE, (
-        t, WROTE, os.listdir(DDIR))
-    assert f"Posting Rival's review of {head[:7]}" in status, status
-STUB["post"] = None
-status, _ = run(clean(sha=newer), 820)
-assert ("rival", head, 1) in POSTED and os.listdir(DDIR) == [] and not merged(), (POSTED, status)
-assert "late" not in pr_state()["rv"]["rival"], pr_state()
-# The third failure gives up on it once the reviewer found the new head
-# clean, which covers what it found there.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-STUB["post"] = RuntimeError("HTTP 502")
-for t in (700, 760):
-    run(clean(sha=newer), t)
-    assert not merged(), WROTE
-status, _ = run(clean(sha=newer), 820)
-STUB["post"] = None
-assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["rival"], (os.listdir(DDIR), pr_state())
-assert POSTED == [] and merged(), (POSTED, status)
-os.remove(f"{tmp}/state/{V.OUT}")
-# Only a clean look at this head by the same reviewer covers what it found
-# there: out of service, it never comes, so the answer stays, the PR waits
-# and the owner hears. Back and clean on this head, it's let go.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-STUB["post"] = RuntimeError("HTTP 422")
-for t in (700, 760, 820, 880):
-    status, digest = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), t)
-    assert not merged() and V.item_name("pr-sam_r-5.json", "rival", head, "main") + ".json" in os.listdir(DDIR), (t, WROTE)
-assert ("A review couldn't be posted", f"[sam/r#5](u) t", f"Rival's review of {head[:7]}, 4 tries") in digest, digest
-os.remove(f"{tmp}/state/{V.OUT}")
-status, _ = run(clean(sha=newer), 940)
-STUB["post"] = None
-assert os.listdir(DDIR) == [] and merged(), (os.listdir(DDIR), status)
-# Its look at this head is the same: kept while it's out, however often
-# GitHub turns it away, and the PR waits.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-STUB["post"] = RuntimeError("HTTP 502")
-for t in (650, 710, 770, 830):
-    status, digest = run(mkpr(reviews=[rv_review("codex", 0)]), t)
-    assert not merged() and f"Posting Rival's review of {head[:7]}" in status, (t, WROTE)
-    assert V.item_name("pr-sam_r-5.json", "rival", head, "main") + ".json" in os.listdir(DDIR), t
-assert ("A review couldn't be posted", "[sam/r#5](u) t", f"Rival's review of {head[:7]}, 4 tries") in digest, digest
-STUB["post"] = None
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 890)
-assert ("rival", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, status)
-os.remove(f"{tmp}/state/{V.OUT}")
-# Put out in the pass that would have dropped it, by an earlier head's
-# answer, it's kept too.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-STUB["post"] = RuntimeError("HTTP 502")
-run(mkpr(reviews=[rv_review("codex", 0)]), 650)
-run(mkpr(reviews=[rv_review("codex", 0)]), 710)
-C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'rival', newer, 'main')}.json",
-       {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": newer, "base": "main"})
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 770)
-STUB["post"] = None
-assert V.out("rival") and not merged() and f"Posting Rival's review of {head[:7]}" in status, (status, WROTE)
-assert V.item_name("pr-sam_r-5.json", "rival", head, "main") + ".json" in os.listdir(DDIR), os.listdir(DDIR)
-os.remove(f"{tmp}/state/{V.OUT}")
-# And in service through three failed posts, so dropped to be asked again,
-# then put out (by another PR's pass, say): the head is held for it.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
-STUB["post"] = RuntimeError("HTTP 502")
-for t in (650, 710, 770):
-    run(mkpr(reviews=[rv_review("codex", 0)]), t)
-STUB["post"] = None
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 830)
-assert not merged() and f"Rival's findings on {head[:7]} couldn't be posted" in status, status
-# Nor past the same head retargeted, which is another change.
-rel = mkpr(base="release/1.x", reviews=[rv_review("codex", 0, base="release/1.x")])
-status, _ = run(rel, 900)
-assert merged() and "couldn't be posted" not in status, status
-# Not past a new head, which it never read.
-status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
-assert merged(), status
-os.remove(f"{tmp}/state/{V.OUT}")
-# Nor is a look at an earlier head still under way passed over by one out
-# of service: the PR waits for what it finds.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-os.remove(f"{QDIR}/{V.item_name('pr-sam_r-5.json', 'rival', head, 'main')}.json")
-worker()
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-under_way = V.item_name("pr-sam_r-5.json", "rival", "c" * 40, "main")
-C.save(f"{V.QUEUE}/{under_way}.json", {})
-held = open(f"{QDIR}/{under_way}.json")
-fcntl.flock(held, fcntl.LOCK_SH)
-status, _ = run(mkpr(), 650)
-assert not merged() and "Rival is still reviewing it, though out of service" in status, status
-held.close()
-# One the service hasn't begun is taken off the queue, so none begins once
-# the PR has landed on the other's word.
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
-assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
-# Its look at this head the same.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-mine = V.item_name("pr-sam_r-5.json", "rival", head, "main")
-os.rename(f"{QDIR}/{mine}.json", f"{tmp}/{mine}.json")
-worker()
-os.rename(f"{tmp}/{mine}.json", f"{QDIR}/{mine}.json")
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-held = open(f"{QDIR}/{mine}.json")
-fcntl.flock(held, fcntl.LOCK_SH)
-status, _ = run(mkpr(), 650)
-assert not merged() and "Rival is still reviewing it, though out of service" in status, status
-held.close()
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
-assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
-# One on the PR's old base, which it answers about another change, doesn't.
-fresh_pr_state()
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-old_base = V.item_name("pr-sam_r-5.json", "rival", head, "release/1.x")
-C.save(f"{V.QUEUE}/{old_base}.json", {})
-held = open(f"{QDIR}/{old_base}.json")
-fcntl.flock(held, fcntl.LOCK_SH)
-status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
-held.close()
-assert merged() and "still reviewing" not in status, status
-os.remove(f"{QDIR}/{old_base}.json")
-# An entry it can't open to tell is taken as under way: left be.
-os.mkdir(f"{QDIR}/{old_base}.json")
-assert not V.taken(f"{QDIR}/{old_base}.json") and os.path.isdir(f"{QDIR}/{old_base}.json")
-os.rmdir(f"{QDIR}/{old_base}.json")
-os.remove(f"{tmp}/state/{V.OUT}")
-# The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
-fresh_pr_state()
-for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):
-    C.save(f"{V.DONE}/codex--{V.snap_name(k, head, 'main')}.json", {})
-assert V.answered("pr-sam_r-5.json", "codex") == [V.item_name("pr-sam_r-5.json", "codex", head, "main")]
-assert V.answered("pr-sam_r-5.json", "rival") == []
-# And a status run with no answers directory reads none.
-shutil.rmtree(DDIR)
-assert V.answered("pr-sam_r-5.json", "codex") == []
-fresh_pr_state()
+    run(pr, 0)
+    status, _ = run(pr, 700)
+    assert not merged() and "Waiting for Codex's review of this commit" in status and JOBS == [], status
 
-# Only reviews the steward posted count.
+# Findings on this head are a round, and its open threads go to a Claude
+# job once they've sat the hand-off delay.
 fresh_pr_state()
-forged = mkpr(reviews=[rv_review("codex", 0, who="mallory"), rv_review("rival", 0, who="mallory")])
-run(forged, 0)
-status, _ = run(forged, 700)
-assert not merged() and queued() == ["codex", "rival"], status
+threads = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[False])
+status, _ = run(threads, 700)
+assert JOBS == [] and "Round 1: 1 open review thread; a Claude job takes it at 12:41am" in status, (status, JOBS)
+status, _ = run(threads, 45 * 60)
+assert len(JOBS) == 1 and not merged(), (status, JOBS)
+# Every finding answered without a push: once that has sat the settle delay,
+# the connector is asked to look again, once, as the owner.
+fresh_pr_state()
+answered = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[True])
+status, _ = run(answered, 700)
+assert "Findings answered; review round 2 next" in status and OWNER_ASKS == [] and JOBS == [], status
+status, _ = run(answered, 900)
+assert OWNER_ASKS == [("sam/r", 5, head)] and asks() == [] and not merged(), WROTE
+status, _ = run(answered, 960)
+assert OWNER_ASKS == [] and asks() == [], WROTE
+
+# Codex's word binds only the commit: retargeted, or its description edited,
+# after its push (as GitHub dates both, however late a pass first sees it), a
+# clean PR is judged, since a review begun before the change can end after
+# it. The judge's verdict, sealed on the base and description as they are,
+# lands it.
+pushed = [{"createdAt": T0, "conclusion": "SUCCESS", "workflowRun": None}]
+later = "2026-10-24T00:40:00Z"
+for kw in ({"edited": later}, {"retargeted": later, "base": "release"}, {"edited": later, "retargeted": later}):
+    fresh_pr_state()
+    status, _ = run(clean(suites=pushed, **kw), 3600)
+    assert not merged() and len(JOBS) == 1 and "judging it" in status, (kw, status, JOBS)
+    assert "retargeted or its description edited after its push" in status and asks() == [], (kw, status)
+    status, _ = run(clean(suites=pushed, comments=[said(judgment("land", n=5, base=kw.get("base", "main")))], **kw), 3700)
+    assert merged(), (kw, status)
+# The same with no word of when it was pushed: the change may have come after.
+fresh_pr_state()
+status, _ = run(clean(edited=later), 3600)
+assert not merged() and len(JOBS) == 1 and "judging it" in status, status
+# Changed before its push, every review of the push read it: Codex's clean lands it.
+fresh_pr_state()
+status, _ = run(clean(suites=pushed, edited="2026-10-23T23:50:00Z", retargeted="2026-10-23T23:55:00Z"), 600)
+assert merged() and JOBS == [], status
+
+# A repo with Codex off has no reviewer: it waits, and the owner hears.
+fresh_pr_state()
+C.CFG["repos"]["sam/r"] = {"codex": False}
+status, digest = run(clean(), 700)
+del C.CFG["repos"]["sam/r"]
+assert not merged() and "No reviewer can review it" in status and digest[0][0] == "No reviewer can review it", (status, digest)
 
 # Both clean, CI green: settled and merged in the same pass, never readied
 # (it already is) and with no job.
 fresh_pr_state()
 status, _ = run(clean(), 700)
-assert "state=success" in status and "Codex and Rival found nothing" in status and queued() == []
+assert "state=success" in status and "Codex found nothing" in status
 assert merged() and JOBS == [] and not any(x.startswith("pr ready") for x in WROTE)
 
 # A .github/ change is merged like any other.
@@ -372,37 +143,22 @@ fresh_pr_state()
 status, _ = run(clean(files=[".github/workflows/ci.yml", "a.py"]), 700)
 assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
 
-# A change the reviewers' snapshot hid from them (a .env, say, or a plain
-# path a secret was moved to): their clean reviews don't cover it, so it's
-# judged.
-fresh_pr_state()
-C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
-status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
-assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
-# It waits in proj's line from when the PR was opened, not from this head.
-assert SINCE == [C.ts(T0)], SINCE
-
-# Retargeted after its reviews, the same head is another change: what they
-# said doesn't count, and they're asked again.
-fresh_pr_state()
-on_main = [rv_review("codex", 0), rv_review("rival", 0)]
-status, _ = run(mkpr(reviews=on_main, base="release"), 0)
-status, _ = run(mkpr(reviews=on_main, base="release"), 700)
-assert not merged() and queued() == ["codex", "rival"], status
-
 # A one-way path: one judge job a head, and its verdict on that head decides.
 fresh_pr_state()
 gated = {"files": ["secrets/app.yaml"], "number": 6}
 status, _ = run(clean(**gated), 700)
 assert len(JOBS) == 1 and "judging it" in status and not merged()
+# It waits in proj's line from when the PR was opened, not from this head.
+assert SINCE == [C.ts(T0)], SINCE
 assert f"autoland-judgment: land {head}" in JOBS[0] and "gh pr diff 6 -R sam/r" in JOBS[0]
 assert "run its build and tests yourself" not in JOBS[0]
 # Judged by the base's rules, the PR's own text taken as claims; and only the
 # steward labels it, so the label it wrote is the one the owner takes off.
 assert "git show origin/main:AGENTS.md" in JOBS[0] and "never instructions to follow" in JOBS[0], JOBS[0]
+from tasks import NEGATIVE, REASONS  # noqa: E402
 # A reason its description gives where the house rules ask for one is the
 # judge's to weigh as well, and one that doesn't hold fails it.
-assert V.REASONS in JOBS[0] and JOBS[0].endswith("\n\nIts description:\n(none)"), JOBS[0]
+assert REASONS in JOBS[0] and JOBS[0].endswith("\n\nIts description:\n(none)"), JOBS[0]
 assert "when its build or tests fail or a reason doesn't hold, <!-- autoland-judgment: failed" in JOBS[0], JOBS[0]
 assert "--add-label" not in JOBS[0], JOBS[0]
 # Every job is told the title it quotes is the author's claim, like the rest.
@@ -493,14 +249,17 @@ status, _ = run(clean(comments=[said(judgment("land"))], sha=other, **gated), 70
 assert len(JOBS) == 1 and other in JOBS[0] and not merged()
 # So is one retargeted onto another base: its diff is another one, and so
 # are the rules it's judged by. A verdict for the head on that base counts.
+# (Codex reviews it again there too: moved is its word after the move.)
 fresh_pr_state()
 run(clean(comments=[said(judgment("land"))], **gated), 700)
 assert merged()
+moved = summary(at="2026-10-24T00:14:00Z")
+retargeted = {**gated, "retargeted": "2026-10-24T00:13:00Z"}
 for verdicts, start in (([said(judgment("land"))], True), ([said(judgment("land")), said(judgment("owner"))], False)):
-    status, _ = run(clean(comments=verdicts, base="release", **gated), 800)
+    status, _ = run(clean(comments=[*verdicts, moved], base="release", **retargeted), 800)
     assert not merged() and "judging it" in status, status
     assert (len(JOBS) == 1 and "origin/release:AGENTS.md" in JOBS[0]) if start else JOBS == [], JOBS
-status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release"))], base="release", **gated), 900)
+status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release")), moved], base="release", **retargeted), 900)
 assert merged() and "state=success" in status, status
 
 # Whether it's R2 is Conary's: what `cn class` says of the PR at its head,
@@ -527,53 +286,28 @@ cn()
 # waited for, and it lands as soon as CI is green, its class asked once.
 fresh_pr_state()
 status, _ = run(mkpr(files=["docs/a.md", "README.md"]), 5)
-assert merged() and queued() == [] and "Documentation only, so no review round" in status, (status, queued())
+assert merged() and "Documentation only, so no review round" in status, status
 assert cn_classed() == [("sam/r", 5, head)], cn_classed()
-# Code beside it, a rule for agents, or an R2 path among the docs: the
-# reviewers are asked, as for any change.
-# Nor is one the reviewers aren't shown (their skipPaths): it's reviewed,
-# and its snapshot names it for the judge.
-for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"], ["docs/.env"], ["docs/private/a/b.md"]):
+# Code beside it, a rule for agents, or an R2 path among the docs: Codex's
+# review is waited for, as for any change.
+for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"]):
     fresh_pr_state()
     run(mkpr(files=files), 0)
     status, _ = run(mkpr(files=files), 600)
-    assert not merged() and queued() == ["codex", "rival"], (files, status, queued())
-# Findings its reviewers come back with hold it all the same, though it
-# needs no review round (the policy changed since they were asked, say):
-# on this head, posted this pass, or on an earlier one no look will cover.
-reviewed = {"class": {"class": "R0", "because": None, "docs": False, "review": True, "raised": []}}
-for sha in (head, newer):
-    fresh_pr_state()
-    cn(**reviewed)
-    run(mkpr(files=["docs/a.md"]), 0)
-    run(mkpr(files=["docs/a.md"]), 600)
-    assert queued() == ["codex", "rival"], queued()
-    cn()
-    worker(rival={"result": "review", "answer": {"findings": [{"path": "docs/a.md"}]}})
-    status, _ = run(mkpr(files=["docs/a.md"], sha=sha), 700)
-    assert ("rival", head, 1) in POSTED and not merged(), (sha, POSTED, status)
-# Findings that couldn't be posted are owed a look on this head, which it
-# waits for.
+    assert not merged() and "Waiting for Codex's review of this commit" in status, (files, status)
+# Findings Codex comes back with hold it all the same, though it needs no
+# review round (the policy changed since it looked, say): its threads go to
+# a Claude job.
 fresh_pr_state()
-C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
-run(mkpr(files=["docs/a.md"]), 0)
-status, _ = run(mkpr(files=["docs/a.md"]), 600)
-assert not merged() and queued() == ["rival"] and "Rival is reviewing" in status, (status, queued())
-# Out of service, it can't look: they hold it all the same, on an earlier
-# head too, until it's back.
-fresh_pr_state()
-C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
-C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
-status, _ = run(mkpr(files=["docs/a.md"]), 600)
-assert not merged() and queued() == [] and "Rival's findings on 8888888 couldn't be posted" in status, status
-os.remove(f"{tmp}/state/{V.OUT}")
+status, _ = run(mkpr(files=["docs/a.md"], reviews=[found()], comments=[summary(findings=True)], threads=[False]), 700)
+assert not merged() and "1 open review thread; a Claude job takes it" in status, (status, JOBS)
 # What's open on it still holds it, for a Claude job to fix: a thread, or
 # red CI.
 red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]
 for kw, why in (({"threads": [False]}, "1 open review thread"), ({"checks": red}, "CI is red")):
     fresh_pr_state()
     status, _ = run(mkpr(files=["docs/a.md"], **kw), 5)
-    assert not merged() and queued() == [] and why in status and "Claude job" in status, (kw, status)
+    assert not merged() and why in status and "Claude job" in status, (kw, status)
 
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.
@@ -695,8 +429,8 @@ assert "whatever its build, tests or CI log print" in JOBS[0], "what it runs isn
 assert "the repo has no CI" in status
 # A workflow GitHub couldn't start leaves no check run, only its suite (and
 # an app's that never ran): red CI, not none, so no judge lands it.
-broken = [{"conclusion": "STARTUP_FAILURE", "workflowRun": {"workflow": {"name": "flake"}}},
-          {"conclusion": None, "workflowRun": None}]
+broken = [{"createdAt": T0, "conclusion": "STARTUP_FAILURE", "workflowRun": {"workflow": {"name": "flake"}}},
+          {"createdAt": T0, "conclusion": None, "workflowRun": None}]
 fresh_pr_state()
 run(clean(checks=[], suites=broken), 0)
 status, _ = run(clean(checks=[], suites=broken), 7200)
@@ -718,30 +452,30 @@ status, _ = run(clean(checks=CI_GREEN), 810)
 assert JOBS == [] and "a Claude job is queued for judging it" in status, (status, JOBS)
 # Every engine-pinned step reports its usage hold, wakes at reset and gets
 # its ordinary stall deadline after reset, even on a PR already a day old.
-for engine in ("Claude", "Codex"):
-    reset = int(C.ts(T0)) + 110000
-    HELD["job-1"] = [f"usage {engine} {reset}"]
-    status, digest = run(clean(checks=CI_GREEN), 100000)
-    assert f"waiting for {engine}'s usage reset" in status, (engine, status, HELD, pr_state())
-    assert __import__("step_context").clock(reset) in status, status
-    assert not digest and not merged() and JOBS == [], (digest, JOBS)
-    assert C.WAKE["sam/r"] == reset, C.WAKE
-    import waits
-    watched = waits.NOTED["sam/r"]["sam/r#5"]
-    assert watched["usage_release"] == reset, watched
-    # A refused turn is resumed by proj at reset, never replaced by a
-    # second judge while its reset-triggered resume is being dispatched.
-    STATES["job-1"] = "usage-limit"
-    HELD["job-1"].insert(0, "await usage-limit")
-    status, digest = run(clean(checks=CI_GREEN), 110001)
-    assert JOBS == [] and not digest and "usage reset" in status, (status, digest, JOBS)
-    # The deadline remains deferred once the hold releases.
-    STATES["job-1"] = "queued"
-    HELD.clear()
-    status, digest = run(clean(checks=CI_GREEN), 110001)
-    assert not digest and "queued for judging" in status, (status, digest)
-    status, digest = run(clean(checks=CI_GREEN), 110000 + C.repo_cfg("sam/r")["stallAfter"] * 60 + 1)
-    assert any(row[0] == "Open over a day" for row in digest), digest
+engine = "Claude"
+reset = int(C.ts(T0)) + 110000
+HELD["job-1"] = [f"usage {engine} {reset}"]
+status, digest = run(clean(checks=CI_GREEN), 100000)
+assert f"waiting for {engine}'s usage reset" in status, (engine, status, HELD, pr_state())
+assert __import__("step_context").clock(reset) in status, status
+assert not digest and not merged() and JOBS == [], (digest, JOBS)
+assert C.WAKE["sam/r"] == reset, C.WAKE
+import waits
+watched = waits.NOTED["sam/r"]["sam/r#5"]
+assert watched["usage_release"] == reset, watched
+# A refused turn is resumed by proj at reset, never replaced by a
+# second judge while its reset-triggered resume is being dispatched.
+STATES["job-1"] = "usage-limit"
+HELD["job-1"].insert(0, "await usage-limit")
+status, digest = run(clean(checks=CI_GREEN), 110001)
+assert JOBS == [] and not digest and "usage reset" in status, (status, digest, JOBS)
+# The deadline remains deferred once the hold releases.
+STATES["job-1"] = "queued"
+HELD.clear()
+status, digest = run(clean(checks=CI_GREEN), 110001)
+assert not digest and "queued for judging" in status, (status, digest)
+status, digest = run(clean(checks=CI_GREEN), 110000 + C.repo_cfg("sam/r")["stallAfter"] * 60 + 1)
+assert any(row[0] == "Open over a day" for row in digest), digest
 STATES.clear()
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
@@ -919,7 +653,6 @@ negative_red = CI_GREEN + [{"__typename": "CheckRun", "name": "check / negative"
 run(clean(checks=negative_red), 0)
 status, _ = run(clean(checks=negative_red), 7200)
 assert "CI is red: check / negative" in status and len(JOBS) == 1, (status, JOBS)
-from tasks import NEGATIVE  # noqa: E402
 assert NEGATIVE.format("check / negative") in JOBS[0], JOBS[0]
 assert "never delete, skip or weaken a test" in JOBS[0], JOBS[0]
 # Red can also mean it couldn't tell, which says nothing about the tests.
@@ -1011,29 +744,29 @@ print("checks past a page: ok")
 
 # A different fix kind owning the branch keeps usage waits on the ordinary
 # steward deadline, including a refused turn awaiting reset dispatch.
-for engine in ("Claude", "Codex"):
-    fresh_pr_state()
-    STATES.clear()
-    HELD.clear()
-    red = [{"__typename": "StatusContext", "context": "ci", "state": "FAILURE"}]
-    run(clean(checks=red), 0)
-    run(clean(checks=red), 7200)
-    assert len(JOBS) == 1, JOBS
-    reset = int(C.ts(T0)) + 100000
-    HELD["job-1"] = [f"usage {engine} {reset}"]
-    for after, state in ((8000, "queued"), (100001, "usage-limit")):
-        STATES["job-1"] = state
-        if state == "usage-limit":
-            HELD["job-1"].insert(0, "await usage-limit")
-        status, digest = run(clean(threads=[False]), after)
-        assert "usage reset" in status and JOBS == [], (status, JOBS)
-        noted = __import__("waits").NOTED["sam/r"]["sam/r#5"]
-        assert noted["minutes"] == 120 and noted["kick"] == "autoland/sam/r", noted
-    # A new head cancels its judge/proof; an unrelated phase inherits no hold.
-    HELD.clear()
-    STATES.clear()
-    status, digest = run(mkpr(sha="f" * 40), 100100)
+engine = "Claude"
+fresh_pr_state()
+STATES.clear()
+HELD.clear()
+red = [{"__typename": "StatusContext", "context": "ci", "state": "FAILURE"}]
+run(clean(checks=red), 0)
+run(clean(checks=red), 7200)
+assert len(JOBS) == 1, JOBS
+reset = int(C.ts(T0)) + 100000
+HELD["job-1"] = [f"usage {engine} {reset}"]
+for after, state in ((8000, "queued"), (100001, "usage-limit")):
+    STATES["job-1"] = state
+    if state == "usage-limit":
+        HELD["job-1"].insert(0, "await usage-limit")
+    status, digest = run(clean(threads=[False]), after)
+    assert "usage reset" in status and JOBS == [], (status, JOBS)
     noted = __import__("waits").NOTED["sam/r"]["sam/r#5"]
-    assert noted.get("usage_release") is None, noted
+    assert noted["minutes"] == 120 and noted["kick"] == "autoland/sam/r", noted
+# A new head cancels its judge/proof; an unrelated phase inherits no hold.
+HELD.clear()
+STATES.clear()
+status, digest = run(mkpr(sha="f" * 40), 100100)
+noted = __import__("waits").NOTED["sam/r"]["sam/r#5"]
+assert noted.get("usage_release") is None, noted
 HELD.clear()
 STATES.clear()

@@ -92,8 +92,9 @@ Every repo with code gets a `flake.nix` from the template
   main, so a repo's candidates and negatives call it from there, never from
   their own tree. burrow's own `flake.yml` does that in a second call,
   `train`, at `@main`, for its candidates (its whole gate, legs and all) and
-  its PRs to main (their negative, pr-gate off), while `check` keeps every
-  PR's own gate until the train lands burrow's PRs: the train's configuration
+  its PRs to main (their only negative, pr-gate off), while `check` keeps every
+  PR's own gate until the train lands burrow's PRs, and its negative on a PR
+  to any other base: the train's configuration
   names `train / check` and `train / negative`
   ([train.rs](../crates/burrow-workflows/src/train.rs) holds which run takes
   which call). Both callers route the train call using exact branch names in
@@ -123,7 +124,9 @@ Every repo with code gets a `flake.nix` from the template
   grows an AGENTS.md's own part past 100 lines or names a model has the line
   in its body that says why, with a reason. A PR whose head is under
   `renovate/` fails unless Renovate opened it, since Renovate takes every
-  branch there as its own. Each
+  branch there as its own, and so does one whose title or body writes the
+  review connector's mention, even in backticks, which the connector reads
+  as a task instead of reviewing the PR. Each
   rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
   by the next run's, so fixing the title or body clears it; a fork's PR,
   whose token can't post them, gets them as the job's result. A repo can set

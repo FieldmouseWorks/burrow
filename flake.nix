@@ -35,10 +35,11 @@
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
       # The ledger's machines take Conary from its own flake; burrow's checks
-      # build theirs with a stand-in for its `cn`, which passes the policy
-      # file their build checks (`cn policy`) and nothing else.
-      cnStandIn = pkgs.writeShellScriptBin "cn" ''[ "$1" = policy ] && exit 0; exit 1'';
-      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" ];
+      # build theirs with a stand-in for its `cn`, which passes the files
+      # their build loads (`cn policy`, the shadow's `cn flow settings`) and
+      # nothing else.
+      cnStandIn = pkgs.writeShellScriptBin "cn" ''case "$1 $2" in "policy "*|"flow settings") exit 0;; esac; exit 1'';
+      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
       # Each module on its own, with only what it imports, in a check of its
       # own (standalone-NAME), so the gate's legs share the evaluations out:
       # evaluating is the check, so these build nothing. A service that says
@@ -76,17 +77,18 @@
             (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
             (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; rcloneConfigFile = "/run/secrets/backup-rclone"; datasets = [ "rpool/safe/data" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
-            (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; }; })
+            (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; }; })
             (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
             (nixpkgs.lib.optionalAttrs (name == "dashboard") { burrow.dashboard = { host = "burrow.tail1234.ts.net"; owner = { id = 583231; login = "sam"; }; }; services.tailscale.enable = true; })
             (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ { login = "sam"; id = 1; } ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
+            (nixpkgs.lib.optionalAttrs (name == "builds") { burrow.builds = { host = "example.org"; repos = [ "sam/homelab" ]; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; }; burrow.github = { machinery = "workers"; apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
             # github has no switch: it's on with an App to serve.
             (if name == "settings" then { }
              else if name == "github" then { burrow.github.apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-             else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
+             else { burrow.${{ rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
           ];
         };
       in pkgs.writeText "burrow-standalone-${name}" "${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n";
@@ -96,11 +98,15 @@
       # read these files and run git, jq and nix, and the gate's run its VM
       # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
       # to read their origins, gh-token's make keys with openssl, lock-age's
-      # check its wait against what the steward reads (lock_wait.py), and
+      # check its wait against what the steward reads (lock_wait.py),
+      # burrow-brief's that none of the steward's code holds its text, and
       # house-sync's read burrow's own house blocks, burrow-settings' the
       # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl. No test reads README.md,
       # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
+      # Their nix is the newest, as the hosted runners' install-nix is: the
+      # build store's shadow (burrow-flake-check) asks an HTTP store about
+      # paths nobody has, which only a newer nix fails on (burrow#1223).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -111,12 +117,11 @@
             ".github/flake-check"
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
-            "modules/autoland/lock_wait.py"
-            "modules/autoland/step_jobs.py"
+            "modules/autoland"
             "house"
             "docs/settings-reference.md"
           ];
-          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
+          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nixVersions.latest pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

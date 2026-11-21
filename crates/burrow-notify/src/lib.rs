@@ -4,8 +4,8 @@
 //! one comment a day, and it closes when the problem clears.
 //!
 //! ```text
-//! HOST-notify open KEY TITLE BODY
-//! HOST-notify ensure KEY TITLE BODY
+//! HOST-notify open [--handled] KEY TITLE BODY
+//! HOST-notify ensure [--handled] KEY TITLE BODY
 //! HOST-notify close KEY [WHAT FIXED IT]
 //! HOST-notify pending KEY
 //! ```
@@ -13,6 +13,16 @@
 //! `ensure` opens an absent notice without the daily reminder that `open`
 //! sends for a continuing problem. Both update an existing notice's title and
 //! body when the facts change. It is safe to retry after an ambiguous reply.
+//!
+//! `--handled` says its caller has the problem in hand: it closes the notice
+//! once it clears, with a Claude job of its own on it where there is one.
+//! The issue is the record of that, not work to take: its body carries [`HANDLED`],
+//! and [`handled`] is how the inbox knows to leave it alone.
+//!
+//! A notice someone closed by hand while its problem still stands isn't
+//! posted again at once, or a closer that keeps closing it (a job ending
+//! `proj done` on it, say) would loop: it waits a day from when the close
+//! was seen, then comes back as a new issue that says the old one was closed.
 //!
 //! GitHub never fails the caller: a notice that can't be sent goes to the
 //! journal and is dropped. With no repo, every notice only goes to the
@@ -63,12 +73,14 @@ pub enum Ask {
         key: String,
         title: String,
         body: String,
+        handled: bool,
     },
     /// Open if absent, with no daily reminders on retries.
     Ensure {
         key: String,
         title: String,
         body: String,
+        handled: bool,
     },
     Close {
         key: String,
@@ -79,8 +91,26 @@ pub enum Ask {
     },
 }
 
-pub const USAGE: &str =
-    "open KEY TITLE BODY | ensure KEY TITLE BODY | close KEY [WHAT] | pending KEY";
+pub const USAGE: &str = "open [--handled] KEY TITLE BODY | ensure [--handled] KEY TITLE BODY | close KEY [WHAT] | pending KEY";
+
+/// What a `--handled` notice's body ends with: hidden where GitHub shows it.
+pub const HANDLED: &str = "<!-- burrow-notify: handled by its opener -->";
+
+/// Whether an issue's `body` is a `--handled` notice's: its opener settles
+/// it, with a job of its own where there is one, so nothing hands it to
+/// another.
+pub fn handled(body: &str) -> bool {
+    body.lines().any(|l| l.trim() == HANDLED)
+}
+
+/// `body` as a notice's issue carries it.
+fn marked(body: &str, handled: bool) -> String {
+    if handled {
+        format!("{body}\n\n{HANDLED}")
+    } else {
+        body.to_owned()
+    }
+}
 
 impl Ask {
     /// The words after the config. A key names a file of its own, so it's
@@ -88,6 +118,14 @@ impl Ask {
     pub fn parse(args: &[String]) -> Result<Ask, String> {
         let usage = || format!("usage: {USAGE}");
         let (op, rest) = args.split_first().ok_or_else(usage)?;
+        let (handled, rest) = match rest.split_first() {
+            Some((flag, rest))
+                if flag == "--handled" && ["open", "ensure"].contains(&op.as_str()) =>
+            {
+                (true, rest)
+            }
+            _ => (false, rest),
+        };
         let (key, rest) = rest.split_first().ok_or_else(usage)?;
         if key.is_empty() || key == "." || key == ".." || key.contains('/') {
             return Err(format!("{key:?} can't be a notice's key: {}", usage()));
@@ -99,11 +137,13 @@ impl Ask {
                 key,
                 title: title.clone(),
                 body: body.clone(),
+                handled,
             }),
             ("ensure", [title, body]) if nonempty(title) && nonempty(body) => Ok(Ask::Ensure {
                 key,
                 title: title.clone(),
                 body: body.clone(),
+                handled,
             }),
             ("close", []) => Ok(Ask::Close {
                 key,
@@ -166,9 +206,12 @@ pub fn pending(cfg: &Config, key: &str) -> bool {
 pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal, now: u64) {
     let Some(repo) = cfg.repo.as_deref().filter(|r| !r.is_empty()) else {
         let words = match ask {
-            Ask::Open { key, title, body } | Ask::Ensure { key, title, body } => {
-                vec![key.as_str(), title, body]
+            Ask::Open {
+                key, title, body, ..
             }
+            | Ask::Ensure {
+                key, title, body, ..
+            } => vec![key.as_str(), title, body],
             Ask::Close { key, what } => vec![key.as_str(), what],
             Ask::Pending { key } => vec![key.as_str()],
         };
@@ -184,8 +227,18 @@ pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal
     };
     let notices = Notices { cfg, repo, api };
     let done = match ask {
-        Ask::Open { key, title, body } => notices.open(key, title, body, now, true),
-        Ask::Ensure { key, title, body } => notices.open(key, title, body, now, false),
+        Ask::Open {
+            key,
+            title,
+            body,
+            handled,
+        } => notices.open(key, title, &marked(body, *handled), now, true),
+        Ask::Ensure {
+            key,
+            title,
+            body,
+            handled,
+        } => notices.open(key, title, &marked(body, *handled), now, false),
         Ask::Close { key, what } => notices.close(key, what),
         Ask::Pending { .. } => Ok(()),
     };
@@ -211,69 +264,145 @@ struct Notices<'a> {
 impl Notices<'_> {
     fn open(self, key: &str, title: &str, body: &str, now: u64, remind: bool) -> Result<(), Error> {
         let Notices { cfg, repo, api } = self;
-        let stamp = cfg.dir.join(key);
+        let path = cfg.dir.join(key);
+        let stamp = Stamp::read(&path);
         // Fails when GitHub can't be asked, so that's never taken for "no
         // issue", which would open a second one.
         let open = github::open_issues(api, repo, &cfg.label, key)?;
         let Some(first) = open.first() else {
+            let mut body = body.to_owned();
+            if let Some(closed) = stamp.issue {
+                // Opened and shown open, and not closed by `close` (which
+                // forgets the number first): someone closed it by hand.
+                if !stamp.closed {
+                    return Stamp {
+                        said: now,
+                        issue: Some(closed),
+                        closed: true,
+                    }
+                    .write(&path);
+                }
+                if now.saturating_sub(stamp.said) <= DAY {
+                    return Ok(());
+                }
+                body = format!(
+                    "Posted again: #{closed} was closed by hand, but this still stands. It closes by itself once it clears.\n\n{body}"
+                );
+            }
             // Before the notice file: with no label there's no issue, and
             // nothing to close.
             github::label(api, repo, &cfg.label, &cfg.name)?;
             // Kept before it's asked for: GitHub can open the issue and the
             // answer still be lost, and then only this says it needs closing.
-            write_stamp(&stamp, now)?;
-            return github::create(
+            Stamp {
+                said: now,
+                issue: None,
+                closed: false,
+            }
+            .write(&path)?;
+            let made = github::create(
                 api,
                 repo,
                 &format!("[{key}] {title}"),
-                body,
+                &body,
                 &cfg.label,
                 cfg.assignee.as_deref().filter(|a| !a.is_empty()),
-            );
+            )?;
+            return Stamp {
+                said: now,
+                issue: Some(made),
+                closed: false,
+            }
+            .write(&path);
         };
+        let mut seen = Stamp {
+            issue: Some(first.number),
+            closed: false,
+            ..stamp
+        };
+        if seen != stamp {
+            seen.write(&path)?;
+        }
         let wanted = format!("[{key}] {title}");
         if first.title != wanted || first.body != body {
             github::update(api, repo, first.number, &wanted, body)?;
         }
-        if remind && now.saturating_sub(said(&stamp)) > DAY {
+        if remind && now.saturating_sub(seen.said) > DAY {
             github::comment(api, repo, first.number, &format!("Still happening: {body}"))?;
-            write_stamp(&stamp, now)?;
+            seen.said = now;
+            seen.write(&path)?;
         }
         Ok(())
     }
 
     fn close(self, key: &str, what: &str) -> Result<(), Error> {
         let Notices { cfg, repo, api } = self;
-        let stamp = cfg.dir.join(key);
+        let path = cfg.dir.join(key);
         // Only what this asked for, so a clear notice asks GitHub nothing.
-        if !stamp.exists() {
+        if !path.exists() {
             return Ok(());
+        }
+        // Its issue forgotten before it's closed: a close whose answer is
+        // lost isn't taken for one closed by hand.
+        let stamp = Stamp::read(&path);
+        if stamp.issue.is_some() {
+            Stamp {
+                issue: None,
+                closed: false,
+                ..stamp
+            }
+            .write(&path)?;
         }
         for n in github::open_issues(api, repo, &cfg.label, key)? {
             github::close(api, repo, n.number, what)?;
         }
         // Forgotten only once none is open, so a failed close is tried again
         // by the next one.
-        match fs::remove_file(&stamp) {
+        match fs::remove_file(&path) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
-                Err(Error::said(format!("{}: {e}", stamp.display())))
+                Err(Error::said(format!("{}: {e}", path.display())))
             }
             _ => Ok(()),
         }
     }
 }
 
-/// When the notice was last said; never, when its file can't say.
-fn said(stamp: &Path) -> u64 {
-    fs::read_to_string(stamp)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+/// A notice's file: when it was last said, the issue it was last seen open
+/// as, and whether that issue has since been seen closed by hand. Written
+/// `SAID [ISSUE [closed]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    said: u64,
+    issue: Option<u64>,
+    closed: bool,
 }
 
-fn write_stamp(stamp: &Path, now: u64) -> Result<(), Error> {
-    fs::write(stamp, format!("{now}\n"))
-        .map_err(|e| Error::said(format!("{}: {e}", stamp.display())))
+impl Stamp {
+    /// Said never, and no issue known, as far as its file can't say.
+    fn read(path: &Path) -> Stamp {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let mut words = text.split_whitespace();
+        let said = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+        let issue = words.next().and_then(|w| w.parse().ok());
+        let closed = issue.is_some() && words.next() == Some("closed");
+        Stamp {
+            said,
+            issue,
+            closed,
+        }
+    }
+
+    fn write(&self, path: &Path) -> Result<(), Error> {
+        let mut text = self.said.to_string();
+        if let Some(n) = self.issue {
+            text.push_str(&format!(" {n}"));
+            if self.closed {
+                text.push_str(" closed");
+            }
+        }
+        fs::write(path, format!("{text}\n"))
+            .map_err(|e| Error::said(format!("{}: {e}", path.display())))
+    }
 }
 
 #[cfg(test)]
@@ -291,7 +420,23 @@ mod tests {
             Ok(Ask::Open {
                 key: "k".into(),
                 title: "Stuck".into(),
-                body: "It's stuck.".into()
+                body: "It's stuck.".into(),
+                handled: false,
+            })
+        );
+        assert_eq!(
+            Ask::parse(&words(&[
+                "ensure",
+                "--handled",
+                "k",
+                "Stuck",
+                "It's stuck."
+            ])),
+            Ok(Ask::Ensure {
+                key: "k".into(),
+                title: "Stuck".into(),
+                body: "It's stuck.".into(),
+                handled: true,
             })
         );
         for close in [&["close", "k"][..], &["close", "k", ""]] {
@@ -323,6 +468,8 @@ mod tests {
             &["open", "k", "", "body"],
             &["open", "k", "Stuck", ""],
             &["open", "k", "Stuck", "body", "more"],
+            &["open", "--handled", "k", "Stuck"],
+            &["pending", "--handled", "k"],
             &["close", "k", "Fixed.", "more"],
             &["pending", "k", "more"],
             &["shout", "k"],

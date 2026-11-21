@@ -27,9 +27,9 @@ inputs:
             type = types.str;
             default = "/data/dev/src";
             description = ''
-              One folder per project. Each gets an always-on Remote Control server
-              (remote-control), jobs run in them (proj), and sandboxes clone them
-              (agents), so for those it has to live on burrow.agents.dataDataset.
+              One folder per project. Jobs run in them (proj), and sandboxes
+              clone them (agents), so for those it has to live on
+              burrow.agents.dataDataset.
             '';
           };
 
@@ -38,8 +38,8 @@ inputs:
             default = "${config.burrow.projectsDir}/${config.networking.hostName}";
             defaultText = lib.literalExpression ''"''${config.burrow.projectsDir}/''${config.networking.hostName}"'';
             description = ''
-              The checkout of this machine's own flake. Its Remote Control session is
-              the operator: the one you talk to about the machine itself.
+              The checkout of this machine's own flake, which HOST-switch builds
+              and the operator works in.
             '';
           };
 
@@ -69,8 +69,7 @@ inputs:
             description = ''
               Throwaway clones and worktrees: the update pipeline's own clone, and
               each proj job's own dir (jobs/ID), cleared once the job is over.
-              Outside projectsDir, so they get no Remote Control server. Keep it
-              out of rolling snapshots (a dataset of its own on ZFS): build
+              Keep it out of rolling snapshots (a dataset of its own on ZFS): build
               output churns through gigabytes, and a snapshot holds on to all of
               it until the snapshot goes.
             '';
@@ -145,18 +144,24 @@ inputs:
             type = types.lines;
             default = "";
             description = ''
-              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude and
-              the job user's .codex/AGENTS.md for Codex when proj is on.
+              Shared machine instructions: /etc/claude-code/CLAUDE.md for Claude.
               burrow's modules fill in their sections at lib.mkOrder 600 to 1400;
               put an intro in lib.mkBefore (500) and an ending in lib.mkAfter (1500).
             '';
           };
         };
 
-        # tmux for the Claudes that run in one (Remote Control servers, the
-        # usage watcher's Claude Code). Not tmux's usual build: that one moves
-        # each pane into a scope of its own, which takes a server and its
-        # sessions out of their unit and out from under its cap.
+        # The projects' folder, made here and nowhere else: proj and the
+        # steward work in it, whichever of them are on. It's the user's, so a
+        # machine without that account (one that runs only burrow.ops, say)
+        # has no folder to make.
+        config.systemd.tmpfiles.rules = lib.optional (config.users.users ? ${config.burrow.user})
+          "d ${config.burrow.projectsDir} 0755 ${config.burrow.user} ${config.users.users.${config.burrow.user}.group} -";
+
+        # tmux for the Claudes that run in one (the usage watcher's Claude
+        # Code). Not tmux's usual build: that one moves each pane into a scope
+        # of its own, which takes it out of its unit and out from under its
+        # cgroup.
         config.burrow.tools.tmux = pkgs.tmux.overrideAttrs (old: {
           configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
         });
@@ -171,11 +176,9 @@ inputs:
         };
 
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
-        # and Remote Control servers (claude-rc.slice) run. No limit of its
-        # own: the kernel shares memory out, the servers keep theirs back
-        # when the machine runs short (burrow.remoteControl.memoryLow), and
-        # the jobs are what it gives up. A ceiling or a throttle here killed
-        # and stalled Claudes on remi while memory sat free (10-30, 10-31).
+        # run. No limit of its own: the kernel shares memory out, and the jobs
+        # are what it gives up first. A ceiling or a throttle here killed and
+        # stalled Claudes on remi while memory sat free (10-30, 10-31).
         config.systemd.user.slices.claude.description = "Every Claude that runs on its own";
 
         # The git the machine and burrow's units run. curl 8.23 strips the

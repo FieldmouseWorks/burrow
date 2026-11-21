@@ -4,7 +4,7 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
 
 - [README](README.md): each module, grouped by job, with its options.
 - [docs/front-door.md](docs/front-door.md): the doors into a machine (probe,
-  undo, inbox jobs, Remote Control) and how a chat thread uses them.
+  engines, undo, inbox jobs) and how a chat thread uses them.
 - [docs/repo-baseline.md](docs/repo-baseline.md): the steward, the PR flow and
   what every repo is held to.
 - [docs/gate-design.md](docs/gate-design.md): the CI gate's design (one build
@@ -13,6 +13,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
   fixed and held.
+- [docs/landing.md](docs/landing.md): who lands each repo, the steward or
+  conaryd, the one setting that switches it and how a handover goes.
 - [docs/proj-design.md](docs/proj-design.md): proj's design (one record per
   job and issue, waits that say what ends them, one pass) and its stages.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
@@ -42,6 +44,10 @@ they're more specific.
   [settings reference](https://github.com/FieldmouseWorks/burrow/blob/main/docs/settings-reference.md)
   rather than restate a value or where one is kept.
 - Before you edit, say what done looks like and how it will be checked.
+- Keep your context small: every step re-sends all you've read, and a
+  long wait makes it pay again. Read the lines you need (`rg -n`, ranges,
+  a diff's stat then its hunks), not whole files or logs; cap command
+  output; hand broad searches to a subagent; don't re-read what you have.
 - Report only the checks you ran and what they said. Skipped, unavailable
   or "should pass" is never a pass. Keep local and CI results apart.
 - A new check comes with proof that it fails on the bug it's for.
@@ -57,6 +63,10 @@ they're more specific.
 CI's house check holds every PR to its title's style and to the rules below,
 each of which a PR can pass with a line in its body starting as shown and a
 reason of four words or more. Editing the body or title runs it again.
+No line passes one more: a PR's title and body never write the review
+connector's at-sign mention, even in backticks, as the connector then reads
+the PR as a task and doesn't review it. Write "the connector's bare review
+mention" in its place.
 
 - Rust by default, shell included: new code meant to last starts in Rust
   unless its platform picks the language, and a coin toss goes to Rust. A PR
@@ -151,9 +161,8 @@ For every reviewer, the steward's included. Flag as P1:
 - the steward merging what it shouldn't: a head whose own change its
   reviewers didn't check, or a head CI didn't check, a one-way path, or a
   PR with open threads
-- a review agent that reaches more than its snapshot: a GitHub token, a
-  secrets path (`reviewers.skipPaths`), the PR's own copy of its review
-  rules, or its own key in what gets posted
+- a secret a reviewer could read: anything committed outside sops's
+  encryption (Codex's GitHub connector reads every path GitHub holds)
 - `HOST-update` going live or confirming without the VM tests and health
   checks passing first, or pushing to main anything but what went live or
   that rebased onto a moved main and built (the push's own run tests the

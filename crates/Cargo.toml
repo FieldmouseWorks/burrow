@@ -10,7 +10,6 @@ members = [
     "burrow-boot",
     "burrow-browser-close",
     "burrow-codeql",
-    "burrow-codex",
     "burrow-dashboard",
     "burrow-dispatch",
     "burrow-door",
@@ -24,17 +23,25 @@ members = [
     "burrow-health",
     "burrow-heartbeat",
     "burrow-heavy",
+    "burrow-landing",
     "burrow-house",
+    "burrow-judge",
     "burrow-keep",
+    "burrow-ledger-access",
     "burrow-ledger-door",
     "burrow-notify",
     "burrow-probe",
     "burrow-proj",
     "burrow-settings",
     "burrow-process",
+    "burrow-brief",
+    "burrow-builds",
+    "burrow-producer",
+    "burrow-fix",
+    "burrow-flow-files",
     "burrow-proof",
     "burrow-renovate",
-    "burrow-review",
+    "burrow-review-ask",
     "burrow-robot",
     "burrow-rustc-wrapper",
     "burrow-switch",
@@ -46,7 +53,6 @@ members = [
     "burrow-usage-reset",
     "burrow-watchdog",
     "burrow-workflows",
-    "codex-stand-in",
     "flaky",
     "gh-token",
     "house-sync",
@@ -63,7 +69,7 @@ publish = false
 # What more than one crate uses, at one version.
 [workspace.dependencies]
 base64 = "0.23.1"
-jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
