@@ -84,7 +84,10 @@ let
     controller = controlledShadow.serviceConfig.User == "conary-flow"
       && controlledShadow.environment.CONARY_DATA == "${controlled.burrow.stateDir}/flow";
     ledger = shadow.environment.CONARY_LEDGER == machine.burrow.ledger.dir;
-    token = lib.hasSuffix "/bin/autoland-steward token" shadow.environment.CONARY_TOKEN_COMMAND;
+    # Conary's token command, the shadow's and conaryd's alike: burrow-upkeep's.
+    token = let t = shadow.environment.CONARY_TOKEN_COMMAND; in
+      t == machine.burrow.autoland.flow.token
+      && builtins.match "/nix/store/[^ ]+/bin/burrow-upkeep /nix/store/[^ ]+-burrow-upkeep[.]json token --bare" t != null;
     packageCarriesGit = !(lib.elem machine.programs.git.package shadow.path);
     key = lib.any (lib.hasPrefix "app-key:") shadow.serviceConfig.LoadCredential;
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];

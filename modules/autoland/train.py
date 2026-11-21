@@ -13,8 +13,8 @@ it. On each head it lands it posts its status (CONTEXT) first, which the
 repo's rules require; one red alone gets a failure, which a fix job takes,
 and one GitHub refused an error.
 
-cn asks this very command for the App's tokens (`autoland-steward token
-OWNER/REPO`, steward.py), one for each repo it calls: printed into cn's
+cn asks burrow-upkeep for the App's tokens (`token --bare`, its token
+command, CONARY["token"]), one for each repo it calls: printed into cn's
 pipe, never written anywhere.
 
 Python, not Rust, only because the steward still is: the train itself is
@@ -23,7 +23,6 @@ rest of the steward when that's ported."""
 
 import json
 import os
-import sys
 
 import common as C
 import stages as S
@@ -65,8 +64,7 @@ def rides(repo, pr, info):
 
 def cn(*args):
     """What cn answered, as JSON. GitHub unavailable (cn's exit 75): C.Unavailable."""
-    me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steward.py")
-    env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
+    env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": CONARY["token"]}
     if len(args) >= 3 and args[0] == "train" and args[1] in ("join", "step") and not admitted(*args[1:]):
         raise C.JobPaused(f"{args[2]}: repository work paused before train write")
     p = C.remote([CONARY["cn"], *args], timeout=300, env=env, capture_output=True, text=True)

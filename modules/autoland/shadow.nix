@@ -26,7 +26,7 @@
 # settings source declares, since a build reads no live settings: a role
 # set live (`proj settings role` or `model`) to anything else has its jobs
 # refuse the flow's choice, rebuilt or not (burrow#1274).
-{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles }:
+{ lib, pkgs, cfg, settings, ledger, credentials, tokenCommand, flowFiles }:
 let
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
@@ -236,7 +236,7 @@ in
     requires = needs;
     unitConfig.ConditionPathExists = config;
     environment = ledger.env // ledger.flow.env // {
-      CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
+      CONARY_TOKEN_COMMAND = tokenCommand;
     };
     serviceConfig = {
       Type = "oneshot";
@@ -246,7 +246,7 @@ in
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";
       Nice = 15;
-      # The App's key, which the steward's token reads.
+      # The App's key, which the token command reads.
       LoadCredential = credentials;
     };
   };
