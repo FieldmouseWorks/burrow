@@ -219,9 +219,13 @@ in
 
       burrow.events.landing = {
         forward = cfg.port;
-        # What Conary's docs/conaryd.md has a repo's hook send it.
+        # What Conary's docs/conaryd.md has a repo's hook send it: its
+        # events::EVENTS. A workflow job's start (`in_progress`) is the one
+        # event GitHub sends as a check's run leaves the queue, which starts
+        # the CI wait's stall clock; a workflow run finishing steps the train.
         events = [ "pull_request" "pull_request_review" "pull_request_review_comment"
-          "pull_request_review_thread" "issue_comment" "check_suite" "check_run" "status" "push" ];
+          "pull_request_review_thread" "issue_comment" "check_suite" "check_run" "workflow_run" "status"
+          "workflow_job" "push" ];
       };
 
       systemd.services = {
