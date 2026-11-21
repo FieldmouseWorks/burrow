@@ -36,7 +36,7 @@ let
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
     buildGid = if config.nix.enable then config.ids.gids.nixbld else null;
-    inherit (cfg) ownedSlices;
+    inherit (cfg) ownedSlices programs;
     systemctl = "${config.systemd.package}/bin/systemctl";
     journalctl = "${config.systemd.package}/bin/journalctl";
     own = "${kick}/units";
@@ -91,6 +91,19 @@ in
       description = ''
         Slices whose units run someone's own work: a crash in one is theirs
         to see (a job's proof of concept or test binary), never an item.
+      '';
+    };
+
+    programs = mkOption {
+      type = types.listOf types.str;
+      default = [ "${builtins.storeDir}/*" "/run/wrappers/*" ];
+      defaultText = lib.literalExpression ''[ "''${builtins.storeDir}/*" "/run/wrappers/*" ]'';
+      description = ''
+        Globs of where the machine's own programs are. A program anywhere
+        else is a build in someone's work tree (a release under test, a
+        test binary), and its crash is whoever ran it's, from whatever
+        slice: never an item. A service that crashes still fails its unit.
+        Empty: every program is the machine's.
       '';
     };
 

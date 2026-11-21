@@ -171,15 +171,29 @@ pub struct Owned {
     /// Slices whose units run someone's own work (proj's jobs): a crash
     /// in one, a proof of concept or a test binary, is that job's to see.
     pub slices: Vec<String>,
+    /// Globs of where the machine's own programs are (its Nix store): a
+    /// program anywhere else is a build in someone's work tree (a game's
+    /// release, a test binary), whoever ran it and from wherever, and its
+    /// crash is theirs, seen as the run fails. None: every program is the
+    /// machine's.
+    pub programs: Vec<String>,
 }
 
 impl Owned {
-    /// Whether a process of GID, in CGROUP, ran someone's own work.
-    fn owns(&self, gid: Option<u64>, cgroup: &str) -> bool {
+    /// Whether a process of GID, in CGROUP, running EXE (when its path is
+    /// known), ran someone's own work.
+    fn owns(&self, gid: Option<u64>, cgroup: &str, exe: Option<&str>) -> bool {
         (gid.is_some() && gid == self.build_gid)
             || cgroup
                 .split('/')
                 .any(|part| self.slices.iter().any(|s| s == part))
+            || exe.is_some_and(|exe| {
+                !self.programs.is_empty()
+                    && !self
+                        .programs
+                        .iter()
+                        .any(|g| burrow_events::glob::matches(g, exe))
+            })
     }
 }
 
@@ -198,14 +212,15 @@ pub fn cores(text: &str, owned: &Owned) -> Result<Vec<Core>, String> {
         // Whose it was comes first: an owned dump is left out whatever
         // else it lacks.
         let cgroup = field("COREDUMP_CGROUP").unwrap_or_default();
-        if owned.owns(number("COREDUMP_GID"), &cgroup) {
+        let exe = field("COREDUMP_EXE");
+        if owned.owns(number("COREDUMP_GID"), &cgroup, exe.as_deref()) {
             continue;
         }
         let core = || {
             Some(Core {
                 // As coredumpctl names it: a program whose path is gone
                 // (its main thread exited first) by its command name.
-                exe: field("COREDUMP_EXE").or_else(|| field("COREDUMP_COMM"))?,
+                exe: exe.clone().or_else(|| field("COREDUMP_COMM"))?,
                 pid: number("COREDUMP_PID")?,
                 sig: number("COREDUMP_SIGNAL").unwrap_or(0),
                 // When it was logged, in microseconds: COREDUMP_TIMESTAMP
@@ -411,6 +426,7 @@ mod tests {
         let owned = Owned {
             build_gid: Some(30000),
             slices: vec!["claude-jobs.slice".into()],
+            programs: Vec::new(),
         };
         let dumps = cores(
             concat!(
@@ -493,6 +509,7 @@ mod tests {
         let owned = Owned {
             build_gid: Some(30000),
             slices: vec!["claude-jobs.slice".into()],
+            programs: Vec::new(),
         };
         let dump = |exe: &str, gid: u64, cgroup: &str| {
             format!(
@@ -528,5 +545,48 @@ mod tests {
         );
         // Owning nothing, every crash is the machine's.
         assert_eq!(cores(&text, &Owned::default()).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_crash_of_a_program_built_outside_the_store_is_whoever_ran_its() {
+        let owned = Owned {
+            programs: vec!["/nix/store/*".into(), "/run/wrappers/*".into()],
+            ..Owned::default()
+        };
+        let dump = |exe: &str, cgroup: &str| {
+            format!(
+                r#"{{"COREDUMP_EXE":"{exe}","COREDUMP_PID":"1","__REALTIME_TIMESTAMP":"1793000000000000","COREDUMP_GID":"1001","COREDUMP_CGROUP":"{cgroup}"}}"#
+            )
+        };
+        let agent = "/user.slice/user-1001.slice/user@1001.service/app.slice/app-t3code.slice/app-t3code-agents.slice/t3code-acp-1.scope";
+        let text = [
+            // A game's release build, run by an agent no slice names.
+            dump(
+                "/data/dev/src/PSIV/build/release/PSIV-dev-e7a4-linux-x86_64/psiv.x86_64",
+                agent,
+            ),
+            // A test binary in a scratch directory, from a shell.
+            dump("/data/scratch/jobs/x/tmp.1/c", "/user.slice/user-1001.slice/session-4.scope"),
+            // The machine's own programs, wherever they ran.
+            dump("/nix/store/g/libexec/godot", agent),
+            dump("/run/wrappers/wrappers.a/sudo", "/system.slice/sshd.service"),
+            // Its path gone with its main thread: no path to judge, so the
+            // machine's.
+            r#"{"COREDUMP_COMM":"threads","COREDUMP_PID":"8","__REALTIME_TIMESTAMP":"1793000002000000"}"#.into(),
+        ]
+        .join("\n");
+        let exes: Vec<String> = cores(&text, &owned)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.exe)
+            .collect();
+        assert_eq!(
+            exes,
+            [
+                "/nix/store/g/libexec/godot",
+                "/run/wrappers/wrappers.a/sudo",
+                "threads"
+            ]
+        );
     }
 }

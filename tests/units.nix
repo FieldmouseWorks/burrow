@@ -125,18 +125,23 @@ pkgs.testers.runNixOSTest {
         assert asked() == asks, (asks, asked())
         assert json.loads(machine.succeed(f"cat {watch_file}"))["at"] == before
 
-    with subtest("a program that dumps core is in it too, whoever ran it, but a build's or a job's"):
+    with subtest("a program that dumps core is in it too, whoever ran it, but a build's, a job's or a work tree's"):
         # A build user's crash fails its build, and a job's is the job's:
         # logged first, so every pass after the two below reads them.
         machine.succeed("bash -c 'ulimit -c unlimited; setpriv --reuid=nixbld1 --regid=nixbld --clear-groups ${pkgs.dash}/bin/dash -c \"kill -SEGV \\$\\$\"' || true")
         machine.succeed("systemd-run --wait --slice=claude-jobs.slice -p LimitCORE=infinity ${pkgs.mksh}/bin/mksh -c 'kill -SEGV 0' || true")
         machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.dash}/bin/dash", timeout=60)
         machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.mksh}/bin/mksh", timeout=60)
+        # And a program built outside the store, in someone's work tree, is
+        # whoever ran it's, in no owned slice.
+        machine.succeed("install -D -m 755 ${pkgs.dash}/bin/dash /home/dev/build/dash && chown -R dev /home/dev/build")
+        machine.succeed("su - dev -c 'ulimit -c unlimited; /home/dev/build/dash -c \"kill -SEGV \\$\\$\"' || true")
+        machine.wait_until_succeeds("coredumpctl list --no-pager /home/dev/build/dash", timeout=60)
         dev_crash()
         root_crash()
         machine.wait_until_succeeds(f"[ $(grep -o '\"core:[^\"]*\"' {watch_file} | sort -u | wc -l) -eq 2 ]", timeout=120)
         cores = [k for k in watch() if k.startswith("core:")]
-        assert not any(k.endswith(("/bin/dash", "/bin/mksh")) for k in cores), cores
+        assert not any(k.endswith(("/bin/dash", "/bin/mksh", "/build/dash")) for k in cores), cores
         bash = next(k for k in cores if k.endswith("/bin/bash"))
         # sleep's own program: coreutils, where it's one binary for all.
         root = next(k for k in cores if k != bash)
