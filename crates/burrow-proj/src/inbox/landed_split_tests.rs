@@ -2,7 +2,7 @@
 //! children as GitHub has them (landed.rs, `split_landed`).
 use super::super::sorting_tests::{Box, issue};
 use super::landed_tests::{advanced, child, sequence, stored, stored_at};
-use super::tests::parent_fixture;
+use super::tests::{live_job, parent_fixture};
 use super::*;
 
 /// #7's child #8 split again into `children`, those given a PR already
@@ -37,6 +37,10 @@ fn split(b: &Box, children: &[(u64, Option<&str>)]) {
     list.rendered = list.checklist("sam/box", "8");
     fs::create_dir_all(p.plan_dir("sam/box", "8")).unwrap();
     assert!(p.save_list("sam/box", "8", &list));
+    // #8 as it was split: a change to it since holds its list.
+    fs::write(b.path("repos_sam_box_issues_8_comments"), "[[]]").unwrap();
+    let source = p.issue_text("sam/box", &issue(8, "sam", &[]), &[]);
+    p.keep_planned("sam/box", "8", &source).unwrap();
 }
 
 /// Issue N as GitHub has it now: `state`, and closed by `pr` if one.
@@ -106,6 +110,7 @@ fn a_split_child_closed_with_a_child_still_open_isnt_done() {
 fn an_open_split_childs_list_is_read_not_written() {
     let (b, _, _) = parent_fixture();
     split(&b, &[(11, None)]);
+    issue_now(&b, 8, "open", None);
     issue_now(
         &b,
         11,
@@ -162,4 +167,101 @@ fn a_closed_split_childs_checklist_that_didnt_render_holds_until_it_does() {
     assert!(advanced(&b));
     let own = stored_at(&b, "8");
     assert_eq!(own.rendered, own.checklist("sam/box", "8"));
+}
+
+/// FieldmouseWorks/burrow#1363: #8's scope changed after its split, then a
+/// PR closed it with its last child. Its own pass would hold its list for
+/// replanning, so the walk does too: nothing on #8's list is ticked and
+/// #7's doesn't move on past work that waits to be replanned.
+#[test]
+fn a_split_child_changed_after_its_split_holds_the_grandparent() {
+    let (b, parent, _) = parent_fixture();
+    split(&b, &[(11, None)]);
+    let pr = "https://github.com/sam/box/pull/519";
+    issue_now(&b, 8, "closed", Some(pr));
+    issue_now(&b, 11, "closed", Some(pr));
+    let mut eight: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_8")).unwrap()).unwrap();
+    eight["body"] = json!("A wider scope.");
+    fs::write(b.path("repos_sam_box_issues_8"), eight.to_string()).unwrap();
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b), "{}", b.log());
+    assert!(stored_at(&b, "8").children[0].merged_pr.is_none());
+    // A wait said to the owner, not a miss looked at again for ever.
+    assert!(stored(&b).children[0].waits);
+    assert!(!p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+}
+
+/// While #8's own job is live its list is that job's, as its own pass
+/// holds it: the walk reads nothing on it, and moves on once it ends.
+#[test]
+fn a_split_childs_own_live_job_holds_the_grandparent() {
+    let (b, parent, _) = parent_fixture();
+    split(&b, &[(11, None)]);
+    let pr = "https://github.com/sam/box/pull/519";
+    issue_now(&b, 8, "closed", Some(pr));
+    issue_now(&b, 11, "closed", Some(pr));
+    live_job(&b, "running", "8");
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b), "{}", b.log());
+    assert!(stored_at(&b, "8").children[0].merged_pr.is_none());
+    assert!(stored(&b).children[0].waits);
+    assert!(!p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+
+    fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
+    fs::remove_file(b.path("active")).unwrap();
+    sequence(&b, &parent);
+    assert!(advanced(&b), "{}", b.log());
+}
+
+/// #8 closed before a pass ticked its last child #11, still open with a
+/// landing an author recorded (`proj plan done`). Its own pass would close
+/// #11 and count it; nothing else will once #8 is closed, so the walk does,
+/// and #7 moves on. While #8 is open, #11 is its own pass's to close: the
+/// walk writes nothing, and #8 isn't done yet.
+#[test]
+fn an_open_last_child_recorded_landed_is_closed_and_counts() {
+    let pr = "https://github.com/sam/box/pull/519";
+    for state in ["open", "closed"] {
+        let (b, parent, _) = parent_fixture();
+        split(&b, &[(11, None)]);
+        issue_now(&b, 8, state, None);
+        issue_now(&b, 11, "open", None);
+        let d = b.pass().plan_dir("sam/box", "11");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("landed"), format!("{pr}\n")).unwrap();
+        if state == "open" {
+            assert_eq!(b.pass().landed_child("sam/box", 8, None), Some(None));
+            assert!(
+                !b.log().contains("issues/11 -f state=closed"),
+                "{}",
+                b.log()
+            );
+            continue;
+        }
+        // A close that doesn't go through is a miss: nothing ticked, and
+        // #7 neither waits nor moves on until it does.
+        fs::write(b.path("fail"), "state=closed\n").unwrap();
+        let mut p = b.pass();
+        p.sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+        assert!(stored_at(&b, "8").children[0].merged_pr.is_none());
+        assert!(!stored(&b).children[0].waits);
+        assert!(!advanced(&b));
+        fs::remove_file(b.path("fail")).unwrap();
+        sequence(&b, &parent);
+        assert!(
+            b.log()
+                .contains("-X PATCH repos/sam/box/issues/11 -f state=closed"),
+            "{}",
+            b.log()
+        );
+        assert!(advanced(&b), "{}", b.log());
+        assert_eq!(
+            stored_at(&b, "8").children[0].merged_pr.as_deref(),
+            Some(pr)
+        );
+    }
 }

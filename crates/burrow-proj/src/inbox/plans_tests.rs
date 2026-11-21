@@ -447,7 +447,7 @@ fn tracker_split_transactions_recover_every_durable_stage() {
 
 /// A live job (queued, running or awaiting) whose own issue is `of` and
 /// whose brief names parent #7.
-fn live_job(b: &Box, state: &str, of: &str) {
+pub(super) fn live_job(b: &Box, state: &str, of: &str) {
     b.job("lane", "done", "working");
     let record = b.record("lane");
     Pass::hand(&record, "Deliver #7").unwrap();

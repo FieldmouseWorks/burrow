@@ -38,6 +38,10 @@ engine label cannot admit a later child. Nested splits complete through
 their own lists, read from their children as GitHub has them: a split
 child closed with its last child, or before a pass ticked it, is done
 once every child on its list has landed, and that list is ticked then.
+Each child is read by the one rule its list's own pass reads it by (an
+open one an author recorded landed is closed then), and the list is read
+only when its own pass would move it: not while the split child's own job
+is live, nor once the split child changed after its split.
 Issue, PR and turn-completion events advance the list
 without a parent job.
 
