@@ -131,7 +131,6 @@ let
         bot_emails = [ settings.dependabotEmail ];
         renovate_email = settings.renovateEmail;
         renovate_login = settings.renovate;
-        batch_label = cfg.labels.batch;
         hold_label = cfg.labels.hold;
         # The steward's one priority: its first label, ahead of the rest.
         # It knows no other level, so Conary's own `priority: …` labels are
@@ -155,7 +154,6 @@ let
         };
         hold_stall_after = minutes rc.holdStallAfter;
         train_stall_after = minutes rc.trainStallAfter;
-        renovate_merge_after = minutes rc.renovateMergeAfter;
         renovate_sweep = settings.majorKey != null;
       } // lib.optionalAttrs (seals ? judge-seal) {
         # The judge's seal key, its sealFile, as the flow's controller alone
