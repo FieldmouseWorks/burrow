@@ -5,6 +5,7 @@
 use super::*;
 use world::{Pr, World, github, read, world};
 
+mod build;
 mod look;
 mod ran;
 mod world;
@@ -93,6 +94,8 @@ fn config_with(dir: &Path, key: serde_json::Value) -> Config {
         claude: dir.join("claude"),
         login: "claude-token".into(),
         hosts: vec!["api.anthropic.com".into()],
+        build: "autoland-judge-build".into(),
+        trees: dir.join("trees"),
     }
 }
 
@@ -823,7 +826,7 @@ fn a_restart_between_the_comment_and_the_check_run_publishes_the_run_once() {
 fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
     let w = world();
     let discussion = Discussion::read(&w, REPO, PR).unwrap();
-    let brief = |why: &[Trigger]| {
+    let brief_with = |why: &[Trigger], ci: &brief::Ci| {
         brief::task(&brief::Judge {
             repo: REPO,
             pr: PR,
@@ -835,8 +838,10 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
             owner: "Sam",
             discussion: &discussion,
             dir: Path::new("/looks/1"),
+            ci,
         })
     };
+    let brief = |why: &[Trigger]| brief_with(why, &brief::Ci::Green);
     for why in [
         vec![Trigger::Asked],
         vec![Trigger::R2],
@@ -865,7 +870,18 @@ fn a_brief_shows_every_thread_and_answer_whatever_the_flow_asked_for() {
     assert!(brief(&[Trigger::MajorDependency]).contains(burrow_brief::DEP_SEEN));
     assert!(brief(&[Trigger::Asked]).contains(burrow_brief::REVIEWED));
     assert!(brief(&[Trigger::Asked]).contains("CI is green"));
-    assert!(!brief(&[Trigger::Started]).contains("CI is green"));
+    // Green on the flow's word alone: what the producer read or built
+    // otherwise.
+    let reported = brief_with(
+        &[Trigger::Started],
+        &brief::Ci::Reported(vec!["flake: failure".into()]),
+    );
+    assert!(!reported.contains("CI is green"), "{reported}");
+    assert!(reported.contains("check it yourself"), "{reported}");
+    assert!(reported.contains("> flake: failure"), "{reported}");
+    let built = brief_with(&[Trigger::NoCi], &brief::Ci::Built(vec![]));
+    assert!(!built.contains("CI is green"), "{built}");
+    assert!(built.contains("No CI reported on its head"), "{built}");
 }
 
 #[test]

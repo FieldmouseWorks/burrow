@@ -21,7 +21,7 @@
 //!
 //! Every request runs new work: nothing here is cached, so another commit
 //! with the same tree runs again, and is signed for itself.
-use crate::plugin::{Config, ENGINE};
+use crate::plugin::{Bench, Config, ENGINE};
 use crate::work::{FAILED, Mode, PASSED, SPEC, Spec};
 use burrow_github::{Api, call};
 use burrow_producer::publish;
@@ -239,7 +239,7 @@ impl Producer {
     /// the digest of what it printed, read once nothing of it is left
     /// running. Its folder goes either way.
     fn run(&self, id: &str, spec: &Spec, work: &Work) -> Result<(Ended, String), String> {
-        let ran = lay(&self.cfg, id, spec).and_then(|()| {
+        let ran = lay(self.cfg.bench(), &self.cfg.mirror(&spec.repo), id, spec).and_then(|()| {
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
             self.units.run(id, work, until)
         });
@@ -394,11 +394,11 @@ fn id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Run `id`'s folder, laid out for its worker, which sees nothing else of
-/// the producer's: its spec, its log (empty, for the worker to write), and
-/// its own copy of the repo's mirror, hard links of its objects, as the one
-/// repo it reads. Only the producer writes the folder itself.
-pub fn lay(cfg: &Config, id: &str, spec: &Spec) -> Result<(), String> {
+/// Run `id`'s folder on `cfg`, laid out for its worker, which sees nothing
+/// else of the producer's: its spec, its log (empty, for the worker to
+/// write), and its own copy of `mirror`, hard links of its objects, as the
+/// one repo it reads. Only the producer writes the folder itself.
+pub fn lay(cfg: Bench, mirror: &Path, id: &str, spec: &Spec) -> Result<(), String> {
     let dir = cfg.run(id);
     let at = |e: std::io::Error, path: &Path| format!("{}: {e}", path.display());
     fs::DirBuilder::new()
@@ -413,9 +413,9 @@ pub fn lay(cfg: &Config, id: &str, spec: &Spec) -> Result<(), String> {
     fs::write(&log, b"")
         .and_then(|()| fs::set_permissions(&log, fs::Permissions::from_mode(0o660)))
         .map_err(|e| at(e, &log))?;
-    let out = Command::new(&cfg.git)
+    let out = Command::new(cfg.git)
         .args(["clone", "-q", "--mirror", "--local"])
-        .arg(cfg.mirror(&spec.repo))
+        .arg(mirror)
         .arg(cfg.repo(id))
         .stdin(Stdio::null())
         .output()

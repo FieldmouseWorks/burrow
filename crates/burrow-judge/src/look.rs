@@ -19,8 +19,14 @@
 //! - It answers what the look decided ([`Looked`]), by the session and
 //!   model the engine reported, at the effort it was run at.
 //!
-//! A head no CI ran on isn't judged here yet: the look can't build or test
-//! it (burrow#1190), so it's refused, never judged unbuilt.
+//! A head no CI reported on is built first, before the look's folder is
+//! laid out ([`crate::build`]), and the look is shown what came of it; so
+//! is one a judge was owed on with its reasons unrecorded, when the
+//! producer finds no CI reported on it either. The answer's reasons
+//! record what was built and how it came out. A head the repo's flow
+//! names nothing to build it with is refused: nothing is judged unbuilt.
+use crate::brief::Ci;
+use crate::build::{self, Built};
 use crate::discussion::{Discussion, current};
 use crate::egress::{Dial, Gate};
 use crate::producer::Judges;
@@ -90,6 +96,8 @@ pub struct Looks {
     pub cfg: Config,
     pub read: Read,
     pub units: Box<dyn Units>,
+    /// The builds' units, for a head no CI reported on.
+    pub builds: Box<dyn Units>,
     /// How the gates reach the engine's API.
     pub dial: Dial,
 }
@@ -109,8 +117,14 @@ impl Config {
 }
 
 impl Looks {
-    pub fn new(cfg: Config, read: Read, units: Box<dyn Units>, dial: Dial) -> Result<Self, String> {
-        for dir in ["git", "looks"] {
+    pub fn new(
+        cfg: Config,
+        read: Read,
+        units: Box<dyn Units>,
+        builds: Box<dyn Units>,
+        dial: Dial,
+    ) -> Result<Self, String> {
+        for dir in ["git", "looks", "runs"] {
             let dir = cfg.state.join(dir);
             fs::DirBuilder::new()
                 .recursive(true)
@@ -122,23 +136,45 @@ impl Looks {
             cfg,
             read,
             units,
+            builds,
             dial,
         })
     }
 
-    /// At startup: stop every look a restart left, and clear its folder
-    /// (its request went with it). How many it stopped.
+    /// At startup: stop every look and build a restart left, and clear
+    /// their folders (their requests went with them). How many it stopped.
     pub fn reconcile(&self) -> Result<usize, String> {
-        let loaded = self.units.loaded()?;
-        for id in &loaded {
-            self.units.stop(id)?;
+        let mut stopped = 0;
+        for (units, dir) in [(&self.units, "looks"), (&self.builds, "runs")] {
+            let loaded = units.loaded()?;
+            for id in &loaded {
+                units.stop(id)?;
+            }
+            stopped += loaded.len();
+            let dir = self.cfg.state.join(dir);
+            for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+                let path = entry.map_err(|e| e.to_string())?.path();
+                fs::remove_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
         }
-        let looks = self.cfg.state.join("looks");
-        for entry in fs::read_dir(&looks).map_err(|e| format!("{}: {e}", looks.display()))? {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            fs::remove_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        }
-        Ok(loaded.len())
+        Ok(stopped)
+    }
+
+    /// `head`'s tree, as the mirror has it once it's fetched.
+    fn tree(&self, repo: &str, head: &str) -> Result<String, String> {
+        let mirror = self.cfg.mirror(repo).to_string_lossy().into_owned();
+        let tree = git(
+            &self.cfg.git,
+            &[
+                "--git-dir",
+                &mirror,
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("{head}^{{tree}}"),
+            ],
+        )?;
+        Ok(tree.trim().to_owned())
     }
 
     /// `head` and `base` fetched into `repo`'s mirror, as the App, whose
@@ -169,16 +205,17 @@ impl Looks {
 }
 
 impl Judges for Looks {
-    /// A head no CI ran on, which a look can't build yet, or a role a look
-    /// can't run.
+    /// A head no CI reported on that the repo's flow names nothing to
+    /// build with, or a role a look can't run.
     fn refuses(&self, request: &Request) -> Result<(), String> {
-        let Task::Judge { head, why, .. } = &request.task else {
+        let Task::Judge {
+            repo, head, why, ..
+        } = &request.task
+        else {
             return Err("the judge judges alone".into());
         };
         if why.contains(&Trigger::NoCi) {
-            return Err(format!(
-                "no CI ran on {head}, and a judge's look can't build or test it yet (burrow#1190): nothing is judged unbuilt"
-            ));
+            build::unbuildable(&self.cfg.flow(repo)?, repo, head)?;
         }
         let offer = jobs::offered(&self.cfg.settings, &self.cfg.role)?;
         if offer.engine != ENGINE {
@@ -216,7 +253,37 @@ impl Judges for Looks {
                 "{repo}#{pr}'s discussion isn't the one the judgment was asked on"
             ));
         }
+        let reported = if why.contains(&Trigger::NoCi) {
+            Some(Vec::new())
+        } else if why.contains(&Trigger::Started) {
+            Some(reported(&*source, &self.cfg.flow(repo)?, repo, head)?)
+        } else {
+            None
+        };
         drop(source);
+
+        self.fetch(repo, head, &pull.base.sha)?;
+        // Built before the look's folder is laid out, so nothing a build
+        // does reaches what the look reads.
+        let ci = match reported {
+            None => Ci::Green,
+            Some(checks) if !checks.is_empty() => Ci::Reported(checks),
+            Some(_) => {
+                let tree = self.tree(repo, head)?;
+                let flow = self.cfg.flow(repo)?;
+                Ci::Built(build::build(
+                    &self.cfg,
+                    &*self.builds,
+                    &flow,
+                    (repo, head, &tree),
+                    work,
+                )?)
+            }
+        };
+        let built: &[Built] = match &ci {
+            Ci::Built(built) => built,
+            _ => &[],
+        };
 
         let id = run_id();
         let dir = self.cfg.look(&id);
@@ -232,11 +299,11 @@ impl Judges for Looks {
                 owner: &self.cfg.owner,
                 discussion: &discussion,
                 dir: &dir,
+                ci: &ci,
             }),
             model,
             effort: choice.effort.clone(),
         };
-        self.fetch(repo, head, &pull.base.sha)?;
         let ran = lay(&self.cfg, &id, repo, head, &pull.base.sha, &spec).and_then(|()| {
             let gate = Gate::open(&dir.join(GATE), &self.cfg.hosts, self.dial.clone())
                 .map_err(|e| format!("its gate: {e}"))?;
@@ -257,6 +324,18 @@ impl Judges for Looks {
         }
         stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
         let looked = Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)?;
+        if looked.verdict == Judgment::Pass && !built.is_empty() && !build::passed(built) {
+            return Err(
+                "the judge's look passed a head none of whose checks passed when it was built: nothing is judged unbuilt"
+                    .into(),
+            );
+        }
+        // What was built, recorded by the producer, whatever the look said.
+        let why = if built.is_empty() {
+            looked.why
+        } else {
+            format!("{}\n\n{}", looked.why.trim(), build::summary(built))
+        };
         Ok(Response {
             contract: request.contract.clone(),
             by: Identity {
@@ -270,10 +349,50 @@ impl Judges for Looks {
             }),
             answer: Answer::Judge {
                 verdict: looked.verdict,
-                why: looked.why,
+                why,
             },
         })
     }
+}
+
+/// What GitHub reports of CI on `repo`'s head `head`, as Conary's flow
+/// counts it (`flow::ci`): each check run but the judge's own, and each
+/// status but the steward's `review-settled`, the train's and one of the
+/// flow's proofs', with who posted it (anyone who can push can post one).
+fn reported(
+    source: &dyn conary_github::flow::Read,
+    flow: &conary_github::flow::Config,
+    repo: &str,
+    head: &str,
+) -> Result<Vec<String>, String> {
+    let runs = source
+        .check_runs(repo, head)
+        .map_err(|e| format!("{head}'s check runs: {e}"))?;
+    let statuses = source
+        .statuses(repo, head)
+        .map_err(|e| format!("{head}'s statuses: {e}"))?;
+    let runs = runs
+        .into_iter()
+        .filter(|r| r.name != crate::producer::CHECK)
+        .map(|r| format!("{}: {}", r.name, r.conclusion.unwrap_or(r.status)));
+    let not_ci = |context: &str| {
+        let context = context.to_lowercase();
+        context == "review-settled"
+            || context == conary_github::train::CONTEXT
+            || flow
+                .settings
+                .proofs
+                .keys()
+                .any(|p| p.eq_ignore_ascii_case(&context))
+    };
+    let statuses = statuses
+        .into_iter()
+        .filter(|s| !not_ci(&s.context))
+        .map(|s| {
+            let by = s.creator.map_or("no one GitHub names".into(), |u| u.login);
+            format!("{}: {} (a status, posted by {by})", s.context, s.state)
+        });
+    Ok(runs.chain(statuses).collect())
 }
 
 /// git with `args`: what it printed, or why it failed.

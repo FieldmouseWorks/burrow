@@ -351,7 +351,10 @@ Each has an entry below, and each can be imported on its own.
   own: Claude Code on the judging role's model (`plugins.judge.role`), in
   a fresh session, as a user systemd makes for it, reading a checkout the
   producer fetched, with its own login (`plugins.judge.claudeTokenFile`)
-  and no network but Anthropic's API, none of it burrow.user's; then
+  and no network but Anthropic's API, none of it burrow.user's (a head no
+  CI reported on is built first: each check the flow gives a program for,
+  run as the proof worker runs one, in a unit of its own with no network
+  and no Nix daemon, and the look shown what came of it); then
   published by the producer, a user of its own, as the sealed comment
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
   key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.
@@ -393,8 +396,10 @@ Each has an entry below, and each can be imported on its own.
   watches. With `units.enable` (on with the watchdog), what's broken on the
   machine itself is a source too (`burrow-units`): a failed unit, and a
   program that dumped core, whoever ran it, is a stall `units.graceMinutes`
-  after it's seen (but a crash in a Nix build, or in a proj job's slice,
-  `units.ownedSlices`, which what ran it sees for itself), and a crash counts for `units.crashHours`; `units.ignore`
+  after it's seen (but a crash in a Nix build, in a proj job's slice,
+  `units.ownedSlices`, or of a program built in a work tree,
+  `units.workTrees` (projects and job scratch), which what ran it sees
+  for itself), and a crash counts for `units.crashHours`; `units.ignore`
   takes globs of the units and programs that fail by design. A watcher
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The

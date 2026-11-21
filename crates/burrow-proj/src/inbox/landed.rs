@@ -1,8 +1,9 @@
 //! When a task list's child is done: a merged PR is tied to it
 //! (docs/task-planning.md). Tied is a closing reference from any repo, a PR
-//! the child's own job awaited before it said `proj done`, or one an author
-//! recorded with `proj plan done`. The host keeps the last two in the
-//! child's plan folder, and only the host writes them: `awaited`, every PR
+//! the child's own job awaited before it said `proj done`, the one its
+//! task names it to carry (`carries`, read from the parent's list), or one
+//! an author recorded with `proj plan done`. The host keeps the second and
+//! last in the child's plan folder, and only the host writes them: `awaited`, every PR
 //! or issue the job awaited, once the child is closed and the pass has
 //! accepted the job's completion ([`declared_done`] and the issue as it was
 //! handed it); `landed`, from `proj plan done` outside any job, under the
@@ -16,6 +17,7 @@
 //! owner's notice says that it doesn't count.
 use super::{List, Pass, key};
 use crate::inbox::record::files;
+use crate::planning::reference;
 use crate::record::TurnFile;
 use crate::{Fail, job::Job, read, swap};
 use serde_json::{Value, json};
@@ -129,25 +131,6 @@ fn awaited_targets(job: &Job) -> Vec<String> {
         .collect()
 }
 
-/// `OWNER/REPO#N`, as `proj await` and `proj plan done` take one.
-fn reference(s: &str) -> Option<(String, u64)> {
-    let (repo, n) = s.trim().split_once('#')?;
-    let (owner, name) = repo.split_once('/')?;
-    let part = |p: &str| {
-        !p.is_empty()
-            && p.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    };
-    (part(owner) && part(name))
-        .then(|| {
-            n.parse()
-                .ok()
-                .filter(|n| *n > 0)
-                .map(|n| (repo.to_owned(), n))
-        })
-        .flatten()
-}
-
 /// The successor a comment's text names ([`CONTINUED`]), `#N` being in `repo`.
 fn continued_as(repo: &str, body: &str) -> Option<(String, u64)> {
     body.lines().find_map(|l| {
@@ -198,17 +181,20 @@ impl Pass<'_> {
                     .then(|| format!("https://github.com/{repo}/issues/{n}")),
             );
         }
+        // What its finished job awaited, then the PR it was split to carry,
+        // which counts whatever its state and however it closed.
+        let mut targets = closed
+            .map(|issue| self.awaited_for(repo, n, issue))
+            .unwrap_or_default();
+        targets.extend(self.carried(repo, n));
         let mut unsure = false;
-        if let Some(issue) = closed {
-            let targets = self.awaited_for(repo, n, issue);
-            match self.first_merged(&targets) {
-                Some(Some(pr)) => return Some(Some(pr)),
-                Some(None) => {}
-                None => unsure = true,
-            }
-            if !targets.is_empty() {
-                self.book(repo, crate::now() + AWAITED_LOOK);
-            }
+        match self.first_merged(&targets) {
+            Some(Some(pr)) => return Some(Some(pr)),
+            Some(None) => {}
+            None => unsure = true,
+        }
+        if closed.is_some() && !targets.is_empty() {
+            self.book(repo, crate::now() + AWAITED_LOOK);
         }
         // A closing reference, from whichever repo.
         match self.closing_reference(repo, n) {
@@ -343,6 +329,16 @@ impl Pass<'_> {
         })
     }
 
+    /// The PR child N was split to carry (a task's `carries`), as its list
+    /// has it.
+    fn carried(&self, repo: &str, n: u64) -> Option<String> {
+        self.plan_dirs(repo).iter().find_map(|d| {
+            let list: List = serde_json::from_slice(&fs::read(d.join("tasks.json")).ok()?).ok()?;
+            let at = list.children.iter().position(|c| c.number == Some(n))?;
+            list.tasks.get(at)?.carries.clone()
+        })
+    }
+
     /// Keep what child N's job awaited, once N is `closed` with that job's
     /// completion accepted: bound to that closure (when it closed, and the
     /// title and body it closed with), so a reopened, edited or reclosed
@@ -375,19 +371,32 @@ impl Pass<'_> {
 
     /// The first of these that's a merged PR, as its URL. One that can't
     /// be read is passed over: None only when none has merged and one
-    /// couldn't be read.
+    /// couldn't be read. One GitHub says isn't there (a mistyped `carries`,
+    /// say) has not merged, so the list waits on it and says so.
     fn first_merged(&self, targets: &[String]) -> Option<Option<String>> {
         let mut unsure = false;
         for target in targets {
             let Some((at, m)) = reference(target) else {
                 continue;
             };
-            match crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}")) {
-                Some(issue) => {
-                    if let Some(pr) = merged(&issue) {
-                        return Some(Some(pr));
+            let got = crate::github::reported(burrow_github::call_allowing(
+                &mut crate::github::client(self.cfg),
+                "GET",
+                &format!("repos/{at}/issues/{m}"),
+                None,
+                None,
+                &[404, 410],
+            ));
+            match got {
+                Some(got) if got.status != 200 => {}
+                Some(got) => match got.json() {
+                    Ok(issue) => {
+                        if let Some(pr) = merged(&issue) {
+                            return Some(Some(pr));
+                        }
                     }
-                }
+                    Err(_) => unsure = true,
+                },
                 None => unsure = true,
             }
         }
@@ -640,11 +649,7 @@ mod parse_tests {
     use super::*;
 
     #[test]
-    fn references_and_pull_urls() {
-        assert_eq!(reference("sam/box#8"), Some(("sam/box".into(), 8)));
-        assert_eq!(reference("sam/box#0"), None);
-        assert_eq!(reference("sam#8"), None);
-        assert_eq!(reference("sam/b x#8"), None);
+    fn pull_urls() {
         assert_eq!(
             pull_url("https://github.com/sam/box/pull/10"),
             Some(("sam/box".into(), 10))

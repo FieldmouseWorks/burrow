@@ -57,9 +57,21 @@ impl Config {
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// What its runs' worker reads of it ([`crate::work`]).
+    pub fn bench(&self) -> Bench<'_> {
+        Bench {
+            state: &self.state,
+            git: &self.git,
+            nix: Some(&self.nix),
+            heavy: self.heavy.as_deref(),
+            trees: &self.trees,
+            offline: false,
+        }
+    }
+
     /// A run's own folder, which only the producer writes.
     pub fn run(&self, id: &str) -> PathBuf {
-        self.state.join("runs").join(id)
+        self.bench().run(id)
     }
 
     /// A repo's mirror, which only the producer writes.
@@ -74,7 +86,45 @@ impl Config {
 
     /// A run's log, which the producer makes and its worker writes.
     pub fn log(&self, id: &str) -> PathBuf {
-        self.run(id).join("log")
+        self.bench().log(id)
+    }
+
+    /// A run's own copy of its repo's mirror, the one repo its worker sees.
+    pub fn repo(&self, id: &str) -> PathBuf {
+        self.bench().repo(id)
+    }
+}
+
+/// What a run's worker reads of its producer's configuration: where its
+/// runs' folders are and the tools it runs them with. The proof
+/// producer's ([`Config::bench`]), and the judge producer's, whose builds
+/// are this worker's too (crates/burrow-judge).
+#[derive(Debug, Clone, Copy)]
+pub struct Bench<'a> {
+    /// The producer's state, whose `runs/ID` is run ID's folder.
+    pub state: &'a Path,
+    pub git: &'a Path,
+    /// nix's programs' directory; none, and it builds no flake.
+    pub nix: Option<&'a Path>,
+    /// The heavy slot's command, the words before the command it holds a
+    /// slot for, if the machine has one.
+    pub heavy: Option<&'a [String]>,
+    /// Where a run's clone and its home go.
+    pub trees: &'a Path,
+    /// Whether its runs have no network: a clone's LFS files stay their
+    /// pointers, which they couldn't fetch.
+    pub offline: bool,
+}
+
+impl Bench<'_> {
+    /// A run's own folder, which only the producer writes.
+    pub fn run(&self, id: &str) -> PathBuf {
+        self.state.join("runs").join(id)
+    }
+
+    /// A run's log, which the producer makes and its worker writes.
+    pub fn log(&self, id: &str) -> PathBuf {
+        self.run(id).join(crate::LOG)
     }
 
     /// A run's own copy of its repo's mirror, the one repo its worker sees.

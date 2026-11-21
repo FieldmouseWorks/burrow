@@ -17,6 +17,15 @@
 # look is burrow.user's, the user authoring sessions run as, so none of
 # them can answer in the judge's place (burrow#1186).
 #
+# A head no CI reported on is built before it's judged: each of the repo's
+# checks the flow gives a program for runs as burrow-proof's worker runs a
+# proof, in a build unit of its own the producer alone starts
+# (autoland-judge-build@ID), as a user systemd makes for it, on its own
+# copy of the producer's mirror, with no network and no Nix daemon, so
+# nothing it runs gets past the look's gate. It sees its run's folder and
+# nothing else of the producer's, and the look's folder is laid out only
+# once it's ended.
+#
 # Off by default: Conary#314 turns the flow's plugins on, with the
 # producer's key, the seal key, the look's login and the producer's line in
 # the machine's producers file. Part of burrow.autoland, which imports it.
@@ -33,6 +42,7 @@ let
   flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   producer = "autoland-judge";
   look = "autoland-judge-look";
+  build = "autoland-judge-build";
   state = "${stateDir}/${producer}";
   # Null with no controller, which the assertion below refuses.
   socket = if flow.producers == null then null else "${flow.producers}/judge/producer.sock";
@@ -179,6 +189,10 @@ in
         timeout = cfg.timeoutMinutes * 60;
         claude = lib.getExe' config.burrow.claude.package "claude";
         login = "claude-token";
+        inherit build;
+        # The build unit's own /var/tmp (PrivateTmp, which DynamicUser
+        # brings), gone when the unit is: a build's clone and its home.
+        trees = "/var/tmp";
       };
       description = "What the plugin, the producer and its looks read.";
     };
@@ -294,14 +308,64 @@ in
       };
     };
 
-    # The producer starts and stops its looks' units, and nothing else.
+    # One build of a head no CI reported on: burrow-proof's worker, whose
+    # exit, kept until the producer stops it, is how it came out
+    # (crates/burrow-judge, build.rs).
+    systemd.services."${build}@" = {
+      description = "A judge producer's build %i, of a head no CI reported on";
+      bindsTo = [ "${producer}.service" ];
+      after = [ "${producer}.service" ];
+      # Anything but 0 or 1 is no outcome: the unit fails, and goes.
+      unitConfig.CollectMode = "inactive-or-failed";
+      restartIfChanged = false;
+      path = [ pkgs.bash pkgs.coreutils config.programs.git.package ];
+      environment = {
+        # Its copy of its repo is the producer's, which git refuses to read
+        # unless it's named safe.
+        GIT_CONFIG_COUNT = "1";
+        GIT_CONFIG_KEY_0 = "safe.directory";
+        GIT_CONFIG_VALUE_0 = "${state}/runs/*";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        # A fail is an outcome too, and so is a check its worker couldn't
+        # run (2: a program it needs isn't here, it needed the network, it
+        # was killed), which the look is shown as that: each kept as the
+        # unit's success. A timeout or a stop is none.
+        SuccessExitStatus = "1 2";
+        # A user of its own, named for the build, and the producer's group,
+        # for its run's folder, the only part of the producer's state it
+        # sees: not the mirror, not a look's. Other users' processes it
+        # doesn't see.
+        DynamicUser = true;
+        User = "jbuild-%i";
+        ProtectProc = "invisible";
+        ProtectHome = true;
+        SupplementaryGroups = [ producer ];
+        TemporaryFileSystem = [ "${stateDir}:ro" "${config.burrow.projectsDir}:ro" ];
+        BindPaths = [ "${state}/runs/%i" ];
+        # No network, and no Nix daemon, whose fetches would be its way out:
+        # nothing it runs gets past the look's gate.
+        PrivateNetwork = true;
+        InaccessiblePaths = [ "-/nix/var/nix/daemon-socket" ];
+        ExecStart = "${lib.getExe package} build ${configFile} %i";
+        TimeoutStartSec = cfg.timeoutMinutes * 60;
+        # Its cgroup is the build's to fence its command in.
+        Delegate = true;
+        UMask = "0027";
+      };
+    };
+
+    # The producer starts and stops its looks' and builds' units, and
+    # nothing else.
     security.polkit.enable = true;
     security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${producer}") return polkit.Result.NOT_HANDLED;
         var verb = action.lookup("verb");
         if (verb != "start" && verb != "stop") return polkit.Result.NOT_HANDLED;
-        return /^${look}@[0-9a-f]+\.service$/.test(action.lookup("unit")) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
+        return /^(${look}|${build})@[0-9a-f]+\.service$/.test(action.lookup("unit")) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
       });
     '';
   };

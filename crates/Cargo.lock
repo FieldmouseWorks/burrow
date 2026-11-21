@@ -677,6 +677,7 @@ dependencies = [
  "burrow-brief",
  "burrow-github",
  "burrow-producer",
+ "burrow-proof",
  "burrow-settings",
  "burrow-test",
  "conary-core",
