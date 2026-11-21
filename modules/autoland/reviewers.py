@@ -70,8 +70,8 @@ def asked(repo, pr, said):
 def ask(repo, pr):
     """Have the owner's door ask the connector to review the PR's head:
     (when it was asked, or None; why not, or None; what failed, or None).
-    A door that failed (GitHub refused the comment, or systemd-run wouldn't
-    start it) is the caller's to strike; one whose checks said no isn't."""
+    A door that failed (GitHub refused the comment, or its broker didn't
+    answer) is the caller's to strike; one whose checks said no isn't."""
     if not door(repo):
         return None, "this repo isn't one the owner's door asks in", None
     n, head = pr["number"], pr["headRefOid"]
@@ -91,11 +91,11 @@ def ask(repo, pr):
 
 def ask_as_owner(repo, n, head):
     """The owner's door (burrow-review-ask, config.askAsOwner) on the PR's
-    head: what came of it, as it says (its Outcome). Its command starts it
-    as a unit of the machine user's own (autoland/review-ask.nix), as
-    conaryd's flow runs it too, so it acts as that user's gh login while
-    this unit never holds it, and nothing of this unit's environment (its
-    App token) goes with it. Waited for: it reads the PR and posts at most
+    head: what came of it, as it says (its Outcome). Its command asks the
+    door's broker (autoland/review-ask.nix), as conaryd's flow does too,
+    which runs it with the machine user's gh login while this unit never
+    holds it, and nothing of this unit's environment (its App token) goes
+    with it. Waited for: it reads the PR and posts at most
     one comment."""
     try:
         p = subprocess.run([*CFG["askAsOwner"]["command"], repo, str(n), head],

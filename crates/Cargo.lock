@@ -858,7 +858,9 @@ name = "burrow-review-ask"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-process",
  "burrow-upkeep",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

@@ -153,11 +153,11 @@ a pause, and a pause doesn't move ownership:
 A late review in a repo conaryd lands is asked for through the owner's door
 (burrow-review-ask), as the steward asks: the flow config's `review_ask`
 names its command and `burrow.autoland.askAsOwner.repos`, and the command
-starts the door as burrow.user's own unit. The door exits 0 only once the
-head is asked, so a no that may not last (the day's cap, a hold) leaves the
-flow to ask again on a later pass. The command reaches burrow.user's
-manager only from that user, so conaryd must run as burrow.user (no `burrow.ledger.controllerUser`) in a repo the door asks in,
-and a build that breaks this is refused.
+is a client of the door's broker, a service of burrow.user's that runs the
+door with that user's gh login for the steward and the flow's user (its
+controller, where it has one) and refuses anyone else by their socket's
+peer. The door exits 0 only once the head is asked, so a no that may not
+last (the day's cap, a hold) leaves the flow to ask again on a later pass.
 
 ## What it doesn't do yet
 
