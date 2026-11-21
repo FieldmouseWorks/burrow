@@ -111,14 +111,15 @@ fn opened(job: &Job, pr: &Value) -> bool {
 }
 
 /// gh as the job's turns run it: the user's gh, in its App's env when it
-/// has one (as `engine::command` starts them). None when the job's App is
+/// has one (as `engine::command` starts them), else with no App's socket,
+/// whatever App the process asking runs as. None when the job's App is
 /// gone, or it has no gh of its own configured.
 fn as_job(cfg: &Config, job: &Job) -> Option<burrow_github::Gh> {
     let job_gh = cfg.tools.job_gh.clone()?;
     let app = crate::job::Request::peek(job).ok()?.app;
     let env = match crate::turn::github_app(app) {
         Some(app) => cfg.app_environment(&app).filter(|e| !e.is_empty())?,
-        None => String::new(),
+        None => "unset GH_TOKEN_SOCKET".into(),
     };
     let mut gh = crate::github::client(cfg);
     gh.program = Some(job_gh.into_os_string());
