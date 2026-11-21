@@ -2,6 +2,31 @@ use super::*;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 
+thread_local! {
+    /// Every file and directory [`durable`] flushed, by device and inode:
+    /// a test's carry runs on its own thread.
+    pub(super) static SYNCED: std::cell::RefCell<std::collections::HashSet<(u64, u64)>> =
+        Default::default();
+}
+
+/// Each entry under `dir`, `dir` too, that the carry left unflushed.
+fn unsynced(dir: &Path) -> Vec<PathBuf> {
+    let mut left = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(path) = todo.pop() {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if !SYNCED.with(|s| s.borrow().contains(&(meta.dev(), meta.ino()))) {
+            left.push(path.clone());
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(&path).unwrap() {
+                todo.push(entry.unwrap().path());
+            }
+        }
+    }
+    left
+}
+
 /// The test's own user: the state is handed to it, which a user may do.
 fn me() -> Owner {
     Owner {
@@ -227,4 +252,25 @@ fn a_copy_cut_short_is_cleared_first() {
     symlink(&outside, &staging).unwrap();
     assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Moved);
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+}
+
+#[test]
+fn every_directory_and_file_carried_is_on_disk_before_the_old_goes() {
+    let (_root, data, other, _outside) = places();
+    write_state(&other);
+    SYNCED.with(|s| s.borrow_mut().clear());
+    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Moved);
+    assert!(!other.exists());
+    assert_eq!(unsynced(&data), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn every_directory_and_file_handed_in_place_is_on_disk() {
+    let (_root, data, other, _outside) = places();
+    write_state(&data);
+    // Not its owner's alone: a mode the flow never gives it.
+    burrow_test::permissions(&data, 0o755);
+    SYNCED.with(|s| s.borrow_mut().clear());
+    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Handed);
+    assert_eq!(unsynced(&data), Vec::<PathBuf>::new());
 }

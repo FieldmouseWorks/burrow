@@ -33,7 +33,7 @@ use rustix::io::Errno;
 use rustix::process::{Gid, Uid};
 use std::ffi::{CStr, CString};
 use std::io::Write;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -292,7 +292,7 @@ fn copy(
         let _ = remove(dp, STAGING);
         return Err(e);
     }
-    let placed = fs::fsync(&staged)
+    let placed = durable(&staged)
         .and_then(|()| own(&staged, owner, 0o700))
         .and_then(
             |()| match fs::renameat_with(dp, STAGING, dp, dn, RenameFlags::NOREPLACE) {
@@ -303,8 +303,20 @@ fn copy(
                 other => other,
             },
         )
-        .and_then(|()| fs::fsync(dp));
+        .and_then(|()| durable(dp));
     placed.map_err(fail)
+}
+
+/// Flush `fd` to disk: a file's contents, or a directory's entries. Each
+/// directory the copy makes is flushed once it's whole, as is each file,
+/// so nothing it holds is lost to a crash once the old copy is removed.
+fn durable(fd: impl AsFd) -> Result<(), Errno> {
+    #[cfg(test)]
+    {
+        let st = fs::fstat(&fd)?;
+        tests::SYNCED.with(|s| s.borrow_mut().insert((st.st_dev, st.st_ino)));
+    }
+    fs::fsync(fd)
 }
 
 /// Copy what `src` holds into `dst`, each entry made afresh, `owner`'s.
@@ -350,6 +362,7 @@ fn tree(src: &OwnedFd, dst: &OwnedFd, owner: Owner, at: &Path) -> Result<(), Ref
                 tree(&fd, &made, owner, &path)?;
                 own(&made, owner, mode.bits()).map_err(&fail)?;
                 fs::futimens(&made, &times).map_err(&fail)?;
+                durable(&made).map_err(&fail)?;
             }
             FileType::RegularFile if st.st_nlink == 1 => {
                 // A process of the flow's holds it: Conary's pass and
@@ -378,8 +391,7 @@ fn tree(src: &OwnedFd, dst: &OwnedFd, owner: Owner, at: &Path) -> Result<(), Ref
                     .map_err(|e| Refused::Failed(format!("{shown}: {e}")))?;
                 own_file(&to, owner, mode).map_err(&fail)?;
                 fs::futimens(&to, &times).map_err(&fail)?;
-                to.sync_all()
-                    .map_err(|e| Refused::Failed(format!("{shown}: {e}")))?;
+                durable(&to).map_err(&fail)?;
             }
             FileType::RegularFile => return Err(unsafe_entry("a file linked from elsewhere too")),
             _ => return Err(unsafe_entry("neither a directory nor a file")),
