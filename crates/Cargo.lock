@@ -859,6 +859,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-github",
  "burrow-process",
+ "burrow-test",
  "burrow-upkeep",
  "rustix",
  "serde",

@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -14,8 +13,7 @@ fn me() -> u32 {
 fn door(dir: &Path, body: &str) -> Vec<String> {
     let path = dir.join("door");
     let tools = std::env::var("PATH").unwrap_or_default();
-    std::fs::write(&path, format!("#!/bin/sh\nPATH='{tools}'\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&path, format!("#!/bin/sh\nPATH='{tools}'\n{body}\n"));
     vec![path.display().to_string()]
 }
 
@@ -27,6 +25,15 @@ fn broker(dir: &Path, askers: Vec<u32>, door: Vec<String>) -> (Arc<Broker>, Path
     let serving = broker.clone();
     thread::spawn(move || serving.serve(&listener));
     (broker, socket)
+}
+
+/// Wait for `path`, failing the test past a deadline rather than hanging it.
+fn wait_for(path: &Path) {
+    let until = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(Instant::now() < until, "{} never came", path.display());
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn request(pr: u64) -> Request {
@@ -108,9 +115,7 @@ fn a_second_ask_of_a_head_whose_door_runs_is_refused() {
         let socket = socket.clone();
         thread::spawn(move || ask(&socket, &request(5), WAIT))
     };
-    while !started.exists() {
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(&started);
     // The same head, its repo in another case: refused.
     let mut again = request(5);
     again.repo = "sam/r".into();
@@ -142,9 +147,7 @@ fn the_door_is_stopped_when_its_asker_goes() {
     let mut line = serde_json::to_vec(&request(5)).unwrap();
     line.push(b'\n');
     (&stream).write_all(&line).unwrap();
-    while !pid.exists() {
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(&pid);
     drop(stream);
     thread::sleep(Duration::from_secs(4));
     assert!(!posted.exists(), "a door its asker gave up on went on");
