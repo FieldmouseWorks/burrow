@@ -1,5 +1,5 @@
 # The checks of Renovate's setup, each as Renovate's own code reads it: what its
-# runs cover, what its config decides, and the sweep's seals and waits.
+# runs cover, what its config decides, and the sweep's waits.
 { self, pkgs }:
 {
   # Which repos a run of Renovate on one repo covers: the ones its
@@ -22,11 +22,11 @@
     ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-errors.mjs} ${pkgs.renovate}
     touch $out
   '';
-  # What renovate-sweep leaves to Python: major-seal's seals on a job's
-  # verdicts, and when lock-wait says a refresh can go again (the sweep
-  # itself is crates/burrow-renovate's, tested there).
+  # What renovate-sweep leaves to Python: when lock-wait says a refresh can
+  # go again (the sweep itself, its seals on a job's verdicts included, is
+  # crates/burrow-renovate's, tested there).
   renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-    python3 -I ${./renovate-sweep.py} ${../modules/updates/major-seal.py} ${../modules/autoland/seal.py} ${../modules/autoland/lock_wait.py}
+    python3 -I ${./renovate-sweep.py} ${../modules/autoland/lock_wait.py}
     touch $out
   '';
   # What decides a lock file refresh's release age in a Renovate config,

@@ -17,7 +17,7 @@ fresh_pr_state()
 major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
 status, _ = run(mkpr(**major), 700)
 assert not merged() and "waiting for renovate-sweep" in status and JOBS == []
-# Every Claude job posts as our login, so one without major-seal's seal (a
+# Every Claude job posts as our login, so one without renovate-sweep's seal (a
 # job quoting PR text), with another verdict's, PR's or base's, or under
 # another key doesn't count either.
 okmac = swept("ok").split()[-2]
