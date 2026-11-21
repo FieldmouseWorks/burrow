@@ -221,10 +221,24 @@ impl Pass<'_> {
     /// as GitHub has them now, each by the rule its own pass reads it by
     /// ([`Pass::child_now`]), not only from the ticks a pass of it kept: its
     /// list is sequenced only while N is open, and a PR may close N with its
-    /// last child (FieldmouseWorks/Conary#416). The ticks it finds are kept
+    /// last child (FieldmouseWorks/Conary#416). Like that pass, it reads none
+    /// while N's own job is live or once N changed after its split. The
+    /// ticks it finds are kept
     /// on the list and its checklist, and an open child it ticks is closed.
     /// None when one couldn't be asked about.
     fn split_done(&mut self, repo: &str, n: u64, mut list: List) -> Option<bool> {
+        if list.next().is_none() {
+            return Some(true);
+        }
+        // Walked only as its own pass would walk it: not while its own job
+        // holds it, nor once it changed after its split.
+        if self.owner(repo, &n.to_string()).is_some() {
+            return Some(false);
+        }
+        let split = api(self.cfg, &format!("repos/{repo}/issues/{n}"))?;
+        if !self.eligible(repo, &split) || !self.verified_source(repo, &split)? {
+            return Some(false);
+        }
         let at = format!("{repo}#{n}").to_lowercase();
         if self.splits.contains(&at) {
             return Some(false);

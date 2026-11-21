@@ -54,6 +54,10 @@ fn split(state: &str) -> (Box, Value) {
         )
         .unwrap();
     }
+    let eight: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_8")).unwrap()).unwrap();
+    let source = p.issue_text("sam/box", &eight, &[]);
+    p.keep_planned("sam/box", "8", &source).unwrap();
     (b, parent)
 }
 
@@ -160,4 +164,19 @@ fn a_split_list_naming_itself_is_not_done() {
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!moved_on(&b));
     assert!(list_of(&b, "7").children[0].waits);
+}
+
+/// A split child changed after its split is replanned, not walked: its
+/// list's pass pauses it, and so does its parent's.
+#[test]
+fn a_split_child_changed_after_its_split_holds_the_grandparent() {
+    let (b, parent) = split("closed");
+    closes(&b, 11);
+    let mut eight: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_8")).unwrap()).unwrap();
+    eight["body"] = json!("A wider scope.");
+    fs::write(b.path("repos_sam_box_issues_8"), eight.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert_eq!(list_of(&b, "8").children[1].merged_pr, None);
 }
