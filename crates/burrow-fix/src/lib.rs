@@ -17,8 +17,13 @@
 //! - [`answers`]: what the job says it did, held to the problems it was
 //!   handed.
 //! - [`brief`]: what the job is told.
+//! - [`stuck`]: the stuck role's handoff, the `job` kind's request and
+//!   answer (SJ): the same broker starts it as a proj job on the stuck
+//!   role, one live a PR, through its own plugin ([`job_plugin`]).
+//! - [`discussion`]: what of a PR's discussion a stuck-role job is shown,
+//!   its configured authors' alone.
 use conary_core::plugin::{
-    Answer, Capabilities, FindingAnswer, FixResult, Identity, Kind, Problem, Sandbox, Task,
+    Answer, Capabilities, FindingAnswer, FixResult, Identity, Kind, Next, Problem, Sandbox, Task,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -26,6 +31,8 @@ use std::path::{Path, PathBuf};
 pub mod answers;
 pub mod brief;
 pub mod broker;
+pub mod discussion;
+pub mod stuck;
 
 /// What the module tells the plugin and the broker, one file for both.
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +52,15 @@ pub struct Config {
     pub jobs: PathBuf,
     /// The fixing role, as the role map names it.
     pub role: String,
+    /// The stuck role, as the role map names it, when the broker serves
+    /// the `job` kind; null when it doesn't.
+    #[serde(default)]
+    pub stuck: Option<String>,
+    /// The flow's configurations, one a repo (`OWNER/NAME.json`,
+    /// lowercased), whose authors a stuck-role job is shown the discussion
+    /// of: needed when the broker serves the job kind.
+    #[serde(default)]
+    pub flow: Option<PathBuf>,
     /// The App the job acts on GitHub as, if the machine has one.
     pub app: Option<String>,
     /// How long a fix job's turn may run, and go quiet, as proj takes them.
@@ -63,18 +79,43 @@ impl Config {
     }
 }
 
-/// The plugin the flow runs, forwarding to the broker at `cfg.socket`. It
-/// names itself by the engine the fixing role is routed to, and offers
-/// what that engine offers: Conary holds every answer to both, so a fix
-/// job that ran elsewhere, or on a model it didn't offer, is refused there.
+/// The plugin the flow runs for fixes, forwarding to the broker at
+/// `cfg.socket`. It names itself by the engine the fixing role is routed
+/// to, and offers what that engine offers: Conary holds every answer to
+/// both, so a fix job that ran elsewhere, or on a model it didn't offer, is
+/// refused there.
 pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
+    serving(cfg, &cfg.role, vec![Kind::Fix], vec![], fixture)
+}
+
+/// The plugin the flow runs for the `job` kind, the stuck role's handoff,
+/// forwarding to the same broker. It names itself by the stuck role's
+/// engine and offers what that engine offers, as [`plugin`] does the
+/// fixing role's.
+pub fn job_plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
+    let role = cfg
+        .stuck
+        .as_ref()
+        .ok_or("the broker serves no job kind: no stuck role is configured")?;
+    // `job` is a v2 kind, which a v1 runner wouldn't read in `kinds`.
+    serving(cfg, role, vec![], vec![Kind::Job], job_fixture)
+}
+
+/// A plugin of the broker's whose work runs on `role`, for these kinds.
+fn serving(
+    cfg: &Config,
+    role: &str,
+    kinds: Vec<Kind>,
+    v2_kinds: Vec<Kind>,
+    fixture: fn(&Task) -> Option<Answer>,
+) -> Result<burrow_producer::plugin::Plugin, String> {
     let burrow_producer::jobs::Offer { engine, models } =
-        burrow_producer::jobs::offered(&cfg.settings, &cfg.role)?;
+        burrow_producer::jobs::offered(&cfg.settings, role)?;
     Ok(burrow_producer::plugin::Plugin {
         describe: Answer::Describe {
             versions: vec![conary_core::plugin::CONTRACT.into()],
-            kinds: vec![Kind::Fix],
-            v2_kinds: vec![],
+            kinds,
+            v2_kinds,
             v4_kinds: vec![],
             models,
             // The job runs in proj's own sandbox and engine, with the network
@@ -98,10 +139,20 @@ pub fn plugin(cfg: &Config) -> Result<burrow_producer::plugin::Plugin, String> {
 
 /// The proj the broker starts its fixes with.
 pub fn proj(cfg: &Config) -> burrow_producer::jobs::Proj {
+    proj_on(cfg, &cfg.role)
+}
+
+/// The proj the broker starts its stuck-role jobs with, when it serves
+/// them.
+pub fn stuck_proj(cfg: &Config) -> Option<burrow_producer::jobs::Proj> {
+    cfg.stuck.as_ref().map(|role| proj_on(cfg, role))
+}
+
+fn proj_on(cfg: &Config, role: &str) -> burrow_producer::jobs::Proj {
     burrow_producer::jobs::Proj {
         proj: cfg.proj.clone(),
         jobs: cfg.jobs.clone(),
-        role: cfg.role.clone(),
+        role: role.to_owned(),
         app: cfg.app.clone(),
         timeout: cfg.timeout.clone(),
         idle: cfg.idle.clone(),
@@ -136,6 +187,15 @@ pub fn fixture(task: &Task) -> Option<Answer> {
     })
 }
 
+/// Conary's job fixture, answered with no job: it asks the job to finish,
+/// and nothing runs on the reserved repository.
+pub fn job_fixture(task: &Task) -> Option<Answer> {
+    matches!(task, Task::Job { .. }).then(|| Answer::Job {
+        summary: "a conformance fixture: finished with no job".into(),
+        next: Next::Done,
+    })
+}
+
 /// The indexes of `problems` that are review findings: the ones a fix
 /// answers, in order.
 pub fn findings(problems: &[Problem]) -> impl Iterator<Item = usize> + '_ {
@@ -146,5 +206,7 @@ pub fn findings(problems: &[Problem]) -> impl Iterator<Item = usize> + '_ {
         .map(|(i, _)| i)
 }
 
+#[cfg(test)]
+mod stuck_tests;
 #[cfg(test)]
 mod tests;

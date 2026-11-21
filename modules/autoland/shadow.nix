@@ -32,7 +32,7 @@ let
   bot = lib.hasSuffix "[bot]";
   stewardLogin = "${cfg.app.slug}[bot]";
   # The plugins turned on, by the kind the flow knows each by.
-  enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix judge proof; };
+  enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix job judge proof; };
   # The flow's seal keys, in a directory of the flow's controller alone
   # for as long as a unit of its own is up: systemd reads each key file as
   # root and hands it to the unit as a credential, which the unit, as the
@@ -179,6 +179,8 @@ let
     # The producers its evidence trusts, as rendered, before Conary's loader
     # reads them: for a check to hold the loader to them.
     passthru.producers = rendered.evidence.producers or null;
+    # The plugins it names, by kind, read with no build.
+    passthru.plugins = rendered.plugins;
     # A train with no evidence, which Conary's train can't step on.
     passthru.trainWithoutEvidence = rendered.settings.train && rendered.evidence == null;
   } ''

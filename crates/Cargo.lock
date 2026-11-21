@@ -558,6 +558,7 @@ dependencies = [
  "burrow-settings",
  "burrow-test",
  "conary-core",
+ "conary-github",
  "rustix",
  "serde",
  "serde_json",
