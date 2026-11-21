@@ -389,19 +389,32 @@ impl Pass<'_> {
 
     /// The first of these that's a merged PR, as its URL. One that can't
     /// be read is passed over: None only when none has merged and one
-    /// couldn't be read.
+    /// couldn't be read. One GitHub says isn't there (a mistyped `carries`,
+    /// say) has not merged, so the list waits on it and says so.
     fn first_merged(&self, targets: &[String]) -> Option<Option<String>> {
         let mut unsure = false;
         for target in targets {
             let Some((at, m)) = reference(target) else {
                 continue;
             };
-            match crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}")) {
-                Some(issue) => {
-                    if let Some(pr) = merged(&issue) {
-                        return Some(Some(pr));
+            let got = crate::github::reported(burrow_github::call_allowing(
+                &mut crate::github::client(self.cfg),
+                "GET",
+                &format!("repos/{at}/issues/{m}"),
+                None,
+                None,
+                &[404, 410],
+            ));
+            match got {
+                Some(got) if got.status != 200 => {}
+                Some(got) => match got.json() {
+                    Ok(issue) => {
+                        if let Some(pr) = merged(&issue) {
+                            return Some(Some(pr));
+                        }
                     }
-                }
+                    Err(_) => unsure = true,
+                },
                 None => unsure = true,
             }
         }

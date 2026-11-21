@@ -460,6 +460,25 @@ fn a_carried_pr_that_merges_after_the_close_lands_it_then() {
     );
 }
 
+/// A carried PR GitHub says isn't there, a mistyped one say, hasn't
+/// merged: the list waits on the child and says so, never a silent miss.
+#[test]
+fn a_carried_pr_that_isnt_there_leaves_the_list_waiting_and_saying_so() {
+    let (b, d, parent) = child_job("", "done", "closed", &[]);
+    fs::remove_dir_all(&d).unwrap();
+    carries(&b, "sam/machine#4490");
+    fs::write(b.path("gone"), "api repos/sam/machine/issues/4490\n").unwrap();
+    assert_eq!(
+        b.pass().landed_child("sam/box", 7, Some(&now(&b))),
+        Some(None)
+    );
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(!p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+    assert!(stored_at(&b, "6").children[0].waits);
+}
+
 /// The child's job found its carried PR already merged and said `proj
 /// done` with nothing awaited: the child closes with its job.
 #[test]
