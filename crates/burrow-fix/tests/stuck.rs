@@ -10,7 +10,7 @@ use burrow_github::fake::{Fake as FakeGitHub, ok};
 use burrow_github::{Api, Failed, Response as GhResponse};
 use burrow_producer::jobs::{Jobs, Record, Turn};
 use burrow_producer::serve::{Controller, Server, Work};
-use conary_core::plugin::{Answer, Choice, Context, Kind, Limits, Next, Plugin, Request, Task};
+use conary_core::plugin::{Answer, Choice, Context, Limits, Next, Plugin, Request, Task};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
