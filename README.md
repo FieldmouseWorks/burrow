@@ -560,7 +560,10 @@ Each has an entry below, and each can be imported on its own.
   (under `below`, 2%, left), not left sitting while every Claude stops at the
   limit. It reads the weekly meter through Claude Code itself (its SDK's
   `get_usage`: no model call), counts an answer from Claude Code's cached copy
-  as no reading at all, and past the line types `/limit-reset weekly` into a
+  as no reading at all, except that when its endpoint refuses (every session
+  of the account shares its rate limit), a copy another session fetched since
+  its last reading can say the week still has room, never that the reset is
+  due or took. Past the line it types `/limit-reset weekly` into a
   Claude Code of its own in a tmux and confirms it, at most once a week; a
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
