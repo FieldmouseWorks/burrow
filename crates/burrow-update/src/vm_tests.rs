@@ -168,14 +168,14 @@ impl Run<'_> {
     }
 
     /// The VM test `c` on `commit`'s tree, while main is still the run's:
-    /// it looks before it waits for a slot, and once it has one
-    /// (`run_check`). A test that failed because the slot found main moved
-    /// is no failure: the run starts over.
+    /// it looks before it waits for a slot, once it has one (`run_check`),
+    /// and again when the test fails. A test that failed while main moved,
+    /// before it started or as it ran, is no failure: the run starts over.
     fn test(&self, c: &str, commit: &str, log: &Path) -> Result<bool, End> {
         self.still_main()?;
         let passed = run_check(self.cfg, c, commit, &self.main, log);
         if !passed {
-            self.moved_on()?;
+            self.still_main()?;
         }
         Ok(passed)
     }

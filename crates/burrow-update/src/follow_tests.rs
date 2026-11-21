@@ -143,3 +143,86 @@ fn a_vm_test_main_moved_under_counts_for_nothing() {
         "no result kept for a tree it left"
     );
 }
+
+/// `push` run as the `n`th VM test from now ends (1 is the next): each
+/// one's HOME/after-check leaves the next one's.
+fn as_test_ends(m: &Machine, n: usize, push: &str) {
+    let mut then = push.to_string();
+    for i in (1..n).rev() {
+        let next = m.home(&format!("after-check-{i}"));
+        fs::write(&next, then).unwrap();
+        then = format!(
+            "cp {} {}\n",
+            next.display(),
+            m.home("after-check").display()
+        );
+    }
+    fs::write(m.home("after-check"), then).unwrap();
+}
+
+/// A VM test that breaks on the first main's tree (nixpkgs at c).
+fn breaks_on_first(m: &Machine) {
+    fs::write(
+        m.home("check-breaks"),
+        format!(
+            "\"nixpkgs\": {{\"locked\": {{\"rev\": \"{}\"}}}}\n",
+            sha('c')
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn main_moving_under_a_vm_tests_second_try_counts_for_nothing() {
+    let (m, first) = landed();
+    let (head, push) = next_landing(&m, 'd');
+    breaks_on_first(&m);
+    // The first try fails with main where it was; main moves as the second
+    // one runs, after the slot's own look.
+    as_test_ends(&m, 2, &push);
+    assert_eq!(go(&m), 0);
+    assert_eq!(tested(&m), [first.clone(), first.clone(), head.clone()]);
+    assert_eq!(m.kept("proj.log"), "", "no job for a main it left");
+    assert_eq!(said(&m), format!("live and confirmed: main {}", &head[..7]));
+    assert_eq!(
+        crate::memo::Memo {
+            cfg: &m.cfg,
+            force: false
+        }
+        .result_of("vm", &first),
+        None,
+        "no result kept for a tree it left"
+    );
+}
+
+#[test]
+fn main_moving_under_the_vm_test_on_main_counts_for_nothing() {
+    let (m, first) = landed();
+    let (head, push) = next_landing(&m, 'd');
+    // Updates on top of main: burrow at e.
+    m.upstream("burrow", &sha('e'));
+    breaks_on_first(&m);
+    // The updates fail twice, then main moves as the test on main runs.
+    as_test_ends(&m, 3, &push);
+    assert_eq!(go(&m), 0);
+    let t = tested(&m);
+    assert_eq!(t.len(), 4, "{t:?}");
+    assert_eq!(t[2], first, "the test on main");
+    assert_eq!(
+        m.work(&["rev-parse", &format!("{}^", t[3])]),
+        head,
+        "then the updates on top of the new main"
+    );
+    assert_eq!(m.kept("proj.log"), "", "no job for a main it left");
+    assert!(said(&m).starts_with("live and confirmed"), "{}", said(&m));
+    assert!(locked(&m).contains(&sha('d')) && locked(&m).contains(&sha('e')));
+    assert_eq!(
+        crate::memo::Memo {
+            cfg: &m.cfg,
+            force: false
+        }
+        .result_of("vm", &first),
+        None,
+        "no result kept for main it left"
+    );
+}

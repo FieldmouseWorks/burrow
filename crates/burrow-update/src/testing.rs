@@ -45,7 +45,8 @@ pub const BRANCH: &str = "box-update";
 ///   what it ran on stdout and stderr both, and fails with HOME/check-fails
 ///   there, on a commit whose flake.lock has a line of HOME/check-breaks in
 ///   it, or once, with HOME/check-flaky there; it runs HOME/after-check
-///   once when that's there (main moving as it ends, say). Its flake's metadata is
+///   once when that's there (main moving as it ends, say), which may leave
+///   another for the next VM test. Its flake's metadata is
 ///   WORK/flake.lock's (a lock as `lock` writes one), and `flake update
 ///   INPUT` locks INPUT to HOME/upstream-INPUT's commit, when there is one,
 ///   or fails, with HOME/unfetchable-INPUT there.
@@ -127,7 +128,7 @@ esac
 case "$*" in *'#checks.'*)
   echo "ran $*"
   echo "a VM test's log" >&2
-  if [ -e "$HOME/after-check" ]; then sh "$HOME/after-check"; rm "$HOME/after-check"; fi
+  if [ -e "$HOME/after-check" ]; then mv "$HOME/after-check" "$HOME/after-check.now"; sh "$HOME/after-check.now"; rm "$HOME/after-check.now"; fi
   [ ! -e "$HOME/check-fails" ] || exit 1
   if [ -e "$HOME/check-flaky" ]; then rm "$HOME/check-flaky"; exit 1; fi
   ref=$(printf '%s\n' "$*" | sed -n 's|.*git+file://\([^?]*\)?rev=\([0-9a-f]*\)#.*|\1 \2|p')

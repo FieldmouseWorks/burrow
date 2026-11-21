@@ -30,13 +30,6 @@ impl Run<'_> {
             println!("{why}; going on with main as it was");
             return Ok(());
         }
-        self.moved_on()
-    }
-
-    /// That main is where the clone last heard it was, with nothing
-    /// fetched: after a VM test that failed, whether its slot's own look
-    /// (`unless-moved`) found main moved, which is no failure of the test.
-    pub(crate) fn moved_on(&self) -> Step {
         let now = self.git(&["rev-parse", "refs/remotes/origin/main"])?;
         if now == self.main {
             Ok(())
