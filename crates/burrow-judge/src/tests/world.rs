@@ -32,6 +32,10 @@ pub struct Pr {
     pub refusing: u32,
     /// The comments on another PR on the same head, by its number.
     pub others: BTreeMap<u64, Vec<Value>>,
+    /// What CI reports on the head: its check runs and its statuses, as
+    /// GitHub's REST API has them.
+    pub check_runs: Vec<Value>,
+    pub statuses: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -67,6 +71,8 @@ pub fn world() -> World {
             "user": {"login": "reviewer", "type": "Bot"}}),
         ],
         comments: vec![],
+        check_runs: vec![],
+        statuses: vec![],
         runs: vec![],
         refusing: 0,
         others: BTreeMap::new(),
@@ -214,10 +220,12 @@ impl conary_github::Source for World {
         unreachable!()
     }
     fn check_runs(&self, _: &str, _: &str) -> Result<Vec<CheckRun>, ApiError> {
-        unreachable!()
+        let runs = self.with(|p| p.check_runs.clone());
+        Ok(serde_json::from_value(Value::Array(runs)).unwrap())
     }
     fn statuses(&self, _: &str, _: &str) -> Result<Vec<Status>, ApiError> {
-        unreachable!()
+        let statuses = self.with(|p| p.statuses.clone());
+        Ok(serde_json::from_value(Value::Array(statuses)).unwrap())
     }
     fn commit(&self, _: &str, _: &str) -> Result<Commit, ApiError> {
         unreachable!()

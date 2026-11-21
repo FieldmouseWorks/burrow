@@ -30,6 +30,7 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
         "git": "git", "github": "https://github.com", "state": d.join("state"),
         "unit": "autoland-judge-look", "systemctl": "systemctl", "timeout": 3600,
         "claude": "claude", "login": "claude-token", "hosts": ["api.anthropic.com"],
+        "build": "autoland-judge-build", "trees": "/var/tmp",
     });
     std::fs::write(&config, cfg.to_string()).unwrap();
     let plugin = d.join("burrow-judge-plugin");

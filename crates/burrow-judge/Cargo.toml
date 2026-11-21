@@ -10,6 +10,7 @@ publish.workspace = true
 burrow-brief = { path = "../burrow-brief" }
 burrow-github = { path = "../burrow-github" }
 burrow-producer = { path = "../burrow-producer" }
+burrow-proof = { path = "../burrow-proof" }
 burrow-settings = { path = "../burrow-settings" }
 # The plugin contract, the seal, the receipts and the judging context are
 # Conary's, pinned with the kit's by Cargo.lock.

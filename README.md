@@ -351,7 +351,10 @@ Each has an entry below, and each can be imported on its own.
   own: Claude Code on the judging role's model (`plugins.judge.role`), in
   a fresh session, as a user systemd makes for it, reading a checkout the
   producer fetched, with its own login (`plugins.judge.claudeTokenFile`)
-  and no network but Anthropic's API, none of it burrow.user's; then
+  and no network but Anthropic's API, none of it burrow.user's (a head no
+  CI reported on is built first: each check the flow gives a program for,
+  run as the proof worker runs one, in a unit of its own with no network
+  and no Nix daemon, and the look shown what came of it); then
   published by the producer, a user of its own, as the sealed comment
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
   key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.

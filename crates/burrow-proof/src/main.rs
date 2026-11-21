@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         [word, config, id] if word == "work" => {
             let code = Config::read(Path::new(config)).and_then(|cfg| {
                 let mut fences = Cgroups::own(exe()?)?;
-                Ok(work(&cfg, id, &mut fences))
+                Ok(work(cfg.bench(), id, &mut fences))
             });
             return ExitCode::from(code.unwrap_or_else(|why| {
                 eprintln!("burrow-proof: {why}");
