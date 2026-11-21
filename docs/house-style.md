@@ -82,7 +82,7 @@ Every repo with code gets a `flake.nix` from the template
   pass there (Conary's
   [Negative runs](https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#negative-runs)
   says how). A test is a file by its path, so tests go in files of their
-  own (`tests/`, `tests.rs`, `test_*.py`), not inline. A
+  own (`tests/`, `tests.rs`, `*_tests.rs`, `test_*.py`), not inline. A
   repo whose PRs land through its merge train (autoland's `train`) runs it on
   pushes to `conary/train/**` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
