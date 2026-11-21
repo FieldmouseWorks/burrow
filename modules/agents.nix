@@ -9,8 +9,11 @@
 #                        the moment the VM was made
 #   /agents/ID/home      the VM's home (Claude's sessions and history)
 #
-# Egress goes through tinyproxy on 127.0.0.1: 3128 allows burrow.agents.allowlist,
-# 3129 (`agent new --open`) allows anything. Nothing else leaves a VM.
+# Each engine (burrow.agents.engines, agents/engines.nix) gets an image of its
+# own, with its packages alone, and a filtered proxy of its own. Egress goes
+# through tinyproxy on 127.0.0.1: an engine's proxyPort allows
+# burrow.agents.allowlist, extraAllow and that engine's hosts, 3129 (`agent
+# new --open`) allows anything. Nothing else leaves a VM.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -20,7 +23,9 @@ let
   account = config.users.users.${user};
   gid = config.users.groups.${account.group}.gid;
 
-  guest = inputs.nixpkgs.lib.nixosSystem {
+  # An engine's image: the shared guest, its packages and modules, nobody
+  # else's.
+  runner = engine: (inputs.nixpkgs.lib.nixosSystem {
     modules = [
       (import ./agents/guest.nix inputs)
       {
@@ -30,26 +35,27 @@ let
         burrow.agentGuest = {
           inherit (account) uid group home;
           inherit gid;
-          claudePackage = config.burrow.claude.package;
-          claudeEffort = config.burrow.claude.effort;
+          inherit (engine) packages credentialEnv;
         };
         microvm.mem = cfg.memory;
         microvm.vcpu = cfg.vcpus;
       }
-    ] ++ cfg.guestModules;
-  };
-  runner = guest.config.microvm.declaredRunner;
+    ] ++ engine.guestModules ++ cfg.guestModules;
+  }).config.microvm.declaredRunner;
 
-  allow = pkgs.writeText "agent-allow.txt"
-    (builtins.readFile cfg.allowlist + lib.concatMapStrings (h: "${h}\n") cfg.extraAllow);
+  # An engine's filter: the shared list and its own hosts, never another
+  # engine's.
+  allow = name: engine: pkgs.writeText "agent-allow-${name}.txt"
+    (builtins.readFile cfg.allowlist + lib.concatMapStrings (h: "${h}\n") (cfg.extraAllow ++ engine.hosts));
 
   # QEMU starts one of these per connection a VM opens to its proxy address.
   forward = port: pkgs.writeShellScript "agent-proxy-${toString port}" ''
     exec ${pkgs.socat}/bin/socat - TCP:127.0.0.1:${toString port}
   '';
 
-  proxy = { port, filtered }: {
-    description = "Egress proxy for agent sandboxes (${if filtered then "allowlist" else "open"})";
+  # filter: the allowlist file, or null for the open proxy.
+  proxy = { port, what, filter }: {
+    description = "Egress proxy for agent sandboxes (${what})";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
     serviceConfig = {
@@ -62,8 +68,8 @@ let
         DisableViaHeader Yes
         LogLevel Connect
         ConnectPort 443
-      '' + lib.optionalString filtered ''
-        Filter "${allow}"
+      '' + lib.optionalString (filter != null) ''
+        Filter "${filter}"
         FilterType fnmatch
         FilterDefaultDeny Yes
       '')}";
@@ -106,8 +112,12 @@ let
   # The binary with its config; it reads every field, and refuses one it
   # doesn't know.
   agentConfig = pkgs.writeText "agent.json" (builtins.toJSON {
-    inherit runner;
-    forwardFiltered = forward 3128;
+    engines = lib.mapAttrs (_: engine: {
+      runner = runner engine;
+      forward = forward engine.proxyPort;
+      inherit (engine) credentialFile;
+    }) cfg.engines;
+    inherit (cfg) defaultEngine;
     forwardOpen = forward 3129;
     root = cfg.stateDir;
     src = projectsDir;
@@ -115,7 +125,6 @@ let
     inherit (cfg) dataDataset dataset;
     inherit user;
     inherit (account) uid group home;
-    tokenFile = cfg.claudeTokenFile;
     sudo = "${config.security.wrapperDir}/sudo";
     path = lib.makeBinPath [
       zfs
@@ -171,23 +180,13 @@ in
     allowlist = lib.mkOption {
       type = lib.types.path;
       default = ./agents/allow.txt;
-      description = "Hosts a sandbox may reach (tinyproxy fnmatch patterns, one per line).";
+      description = "Hosts every sandbox may reach (tinyproxy fnmatch patterns, one per line); an engine's own are its entry's hosts.";
     };
     extraAllow = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "*.example.com" ];
       description = "More hosts for the allowlist, on top of allowlist.";
-    };
-    claudeTokenFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "/run/secrets/claude-agent-token";
-      description = ''
-        Claude's login for the sandboxes: a token from `claude setup-token`.
-        Never hand VMs the host's own ~/.claude/.credentials.json: its refresh
-        token rotates, and a VM refreshing it can log out the host's sessions.
-      '';
     };
 
     memory = lib.mkOption {
@@ -207,7 +206,13 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+  # Each engine's filtered proxy, agent-proxy-NAME.
+  {
+    systemd.services = lib.mapAttrs' (name: engine: lib.nameValuePair "agent-proxy-${name}"
+      (proxy { port = engine.proxyPort; what = "${name}'s allowlist"; filter = allow name engine; })) cfg.engines;
+  }
+  {
     assertions = [
       {
         assertion = lib.hasPrefix "${cfg.dataMountpoint}/" projectsDir;
@@ -216,6 +221,19 @@ in
       {
         assertion = account.uid != null && gid != null;
         message = "burrow.agents: give ${user} a fixed uid and its group a fixed gid; the sandboxes use the same ones.";
+      }
+      {
+        assertion = lib.all (n: builtins.match "[a-z0-9][a-z0-9-]*" n != null && n != "open") (lib.attrNames cfg.engines);
+        message = "burrow.agents.engines: name each engine in lowercase letters, digits and dashes, and not `open` (its proxy is agent-proxy-NAME).";
+      }
+      {
+        assertion = let ports = lib.mapAttrsToList (_: e: e.proxyPort) cfg.engines;
+          in lib.unique ports == ports && !(lib.elem 3129 ports);
+        message = "burrow.agents.engines: give each engine a proxyPort of its own, not 3129 (the open proxy's).";
+      }
+      {
+        assertion = cfg.defaultEngine == null || cfg.engines ? ${cfg.defaultEngine};
+        message = "burrow.agents.defaultEngine: ${toString cfg.defaultEngine} isn't in burrow.agents.engines.";
       }
     ];
 
@@ -264,8 +282,7 @@ in
       };
     };
 
-    systemd.services.agent-proxy = proxy { port = 3128; filtered = true; };
-    systemd.services.agent-proxy-open = proxy { port = 3129; filtered = false; };
+    systemd.services.agent-proxy-open = proxy { port = 3129; what = "open"; filter = null; };
 
     # Stop sandboxes nobody has used for a day; save and delete the ones past
     # their expiry (crates/burrow-agent).
@@ -324,12 +341,13 @@ in
       home, and any `--with ${cfg.dataMountpoint}/...` paths (clones too, e.g. a project's VM
       images; it has KVM). It holds no GitHub token: bring the work back with
       `agent fetch`, then merge and push from ${config.networking.hostName}. Its network goes through
-      a proxy that allows the package registries, GitHub and Anthropic
-      (burrow.agents.allowlist); `agent new --open` lifts that for one sandbox,
+      a proxy that allows the package registries, GitHub and its engine's own hosts
+      (burrow.agents.allowlist, and the engine's); `agent new --open` lifts that for one sandbox,
       and adding the host to burrow.agents.extraAllow in the flake is the better
       fix when a project needs a new one. A sandbox unused for a day is stopped;
       after a week its work is fetched and it's deleted. `agent rm` deletes after
       a day, and `agent keep` undoes it.
     '';
-  };
+  }
+  ]);
 }

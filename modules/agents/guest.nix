@@ -1,11 +1,13 @@
 # The agent sandbox: a microVM that `agent new` (../agents.nix) boots for one
-# task, on its own ZFS clone of the data dataset. Every sandbox runs this same
-# image; ../agents.nix builds it with the host's user, time zone and Claude.
-# What differs per VM (which project it sees, its vsock address, its network
-# policy, its Claude login) comes in at boot as systemd credentials and QEMU
-# arguments that `agent` writes next to the VM, so starting one builds nothing.
+# task, on its own ZFS clone of the data dataset. ../agents.nix builds one
+# image of it per engine (burrow.agents.engines), with the host's user and
+# time zone, that engine's packages and its guest modules, and no other
+# engine's. What differs per VM (which project it sees, its vsock address,
+# its network policy, its engine's login) comes in at boot as systemd
+# credentials and QEMU arguments that `agent` writes next to the VM, so
+# starting one builds nothing.
 #
-# Inside, Claude runs with permissions bypassed and the user has root: the VM
+# Inside, the engine runs with nothing to ask and the user has root: the VM
 # is the boundary. What it can touch outside is the project folder (a clone),
 # its own home, and the egress proxy. Files it writes land on the host as the
 # user's, whichever user wrote them.
@@ -23,7 +25,6 @@ in
   imports = [
     inputs.microvm.nixosModules.microvm
     (import ../toolbox.nix inputs)
-    ../claude/etc.nix
   ];
 
   options.burrow.agentGuest = {
@@ -37,8 +38,10 @@ in
     group = lib.mkOption { type = lib.types.str; };
     gid = lib.mkOption { type = lib.types.int; };
     home = lib.mkOption { type = lib.types.str; };
-    claudePackage = lib.mkOption { type = lib.types.package; };
-    claudeEffort = lib.mkOption { type = lib.types.nullOr lib.types.str; };
+    # The engine's (burrow.agents.engines.NAME): what it installs, and the
+    # variable its credential becomes.
+    packages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+    credentialEnv = lib.mkOption { type = lib.types.nullOr lib.types.str; };
   };
 
   config = {
@@ -116,14 +119,14 @@ in
       '';
     };
 
-    # The VM's name, and the Claude login if the host has one for agents.
+    # The VM's name, and its engine's login if the host has one for agents.
     systemd.services.agent-init = {
-      description = "Name this agent and hand ${user} its Claude login";
+      description = "Name this agent and hand ${user} its engine's login";
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ImportCredential = [ "agent.id" "agent.claude-token" ];
+        ImportCredential = [ "agent.id" "agent.credential" ];
       };
       path = [ pkgs.coreutils pkgs.hostname ];
       script = ''
@@ -131,15 +134,15 @@ in
           hostname "$(cat "$CREDENTIALS_DIRECTORY/agent.id")"
         fi
         mkdir -p /run/agent
-        if [ -s "$CREDENTIALS_DIRECTORY/agent.claude-token" ]; then
-          install -m 0400 -o ${user} -g ${cfg.group} "$CREDENTIALS_DIRECTORY/agent.claude-token" /run/agent/claude-token
+        if [ -s "$CREDENTIALS_DIRECTORY/agent.credential" ]; then
+          install -m 0400 -o ${user} -g ${cfg.group} "$CREDENTIALS_DIRECTORY/agent.credential" /run/agent/credential
         fi
       '';
     };
-    environment.extraInit = ''
-      if [ -r /run/agent/claude-token ]; then
-        CLAUDE_CODE_OAUTH_TOKEN=$(cat /run/agent/claude-token)
-        export CLAUDE_CODE_OAUTH_TOKEN
+    environment.extraInit = lib.optionalString (cfg.credentialEnv != null) ''
+      if [ -r /run/agent/credential ]; then
+        ${cfg.credentialEnv}=$(cat /run/agent/credential)
+        export ${cfg.credentialEnv}
       fi
     '';
 
@@ -208,33 +211,17 @@ in
     };
     nix.channel.enable = false;
 
-    # Claude, with nothing to ask: the VM is the boundary.
+    # proj's guest side, the engine's packages and a few tools.
     environment.systemPackages = [
       (pkgs.runCommand "proj-guest" {} ''
         mkdir -p $out/bin
         ln -s ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj-guest $out/bin/proj
       '')
-      cfg.claudePackage
       pkgs.curl
       pkgs.jq
       pkgs.htop
       pkgs.vim
-    ];
-    # A copy, not a link into the store (../claude/etc.nix).
-    environment.etc."claude-code/managed-settings.json" = {
-      mode = "0444";
-      text = builtins.toJSON ({
-        permissions.defaultMode = "bypassPermissions";
-        skipDangerousModePermissionPrompt = true;
-        env = {
-          DISABLE_AUTOUPDATER = "1";
-          # Telemetry and error reports only need more domains on the allowlist.
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-        };
-      } // lib.optionalAttrs (cfg.claudeEffort != null) {
-        effortLevel = cfg.claudeEffort;
-      });
-    };
+    ] ++ cfg.packages;
 
     documentation.enable = false;
     i18n.defaultLocale = "en_US.UTF-8";

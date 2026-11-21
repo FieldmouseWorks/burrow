@@ -23,8 +23,14 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let at = dir.path().canonicalize().unwrap();
         let cfg: Config = serde_json::from_value(serde_json::json!({
-            "runner": "/nix/store/x-runner",
-            "forwardFiltered": "/nix/store/x-proxy-3128",
+            "engines": {
+                "claude": {
+                    "runner": "/nix/store/x-runner",
+                    "forward": "/nix/store/x-proxy-3128",
+                    "credentialFile": null
+                }
+            },
+            "defaultEngine": "claude",
             "forwardOpen": "/nix/store/x-proxy-3129",
             "root": at.join("agents"),
             "src": at.join("data/dev/src"),
@@ -35,7 +41,6 @@ impl Machine {
             "uid": 1000,
             "group": "users",
             "home": at.join("home"),
-            "tokenFile": null,
             "sudo": "/run/wrappers/bin/sudo",
             "path": "/nonexistent"
         }))

@@ -5,8 +5,8 @@
 //!
 //! And whose runs it holds. A login is a credential, so it holds only the
 //! runs that share it: a sandbox runs on its own token
-//! (burrow.agents.claudeTokenFile), not this machine's login, so a sandbox's
-//! expired token holds no turn here ([`holds_machine`]), and this machine's
+//! (burrow.agents.engines.claude.credentialFile), not this machine's login,
+//! so a sandbox's expired token holds no turn here ([`holds_machine`]), and this machine's
 //! expired login holds no sandbox's turn ([`Spent::holds_run`]): it still
 //! takes a slot ([`out_for`]), routes as if nothing held it, and its answer
 //! proves nothing of the login here. A limit is the plan's, which every
@@ -147,7 +147,7 @@ pub(super) fn closed(s: &Spent) -> &'static str {
 
 /// What a sandbox's turn refused for it ends saying: its token, not this
 /// machine's login, is what's gone ([`holds_machine`]).
-pub(crate) const SANDBOX: &str = "Claude Code couldn't authenticate in the sandbox: its token (burrow.agents.claudeTokenFile, from `claude setup-token`) expired or was revoked; make a new one and run the job again";
+pub(crate) const SANDBOX: &str = "Claude Code couldn't authenticate in the sandbox: its token (burrow.agents.engines.claude.credentialFile, from `claude setup-token`) expired or was revoked; make a new one and run the job again";
 
 /// What a run refused for it is told in the next, once it's back, before
 /// the turn's prompt.
