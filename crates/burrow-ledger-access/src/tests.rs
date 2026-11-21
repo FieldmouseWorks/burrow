@@ -234,6 +234,30 @@ fn an_acl_stripped_leaves_no_class_more_than_it_had() {
 }
 
 #[test]
+fn a_chmod_after_the_acl_was_read_stays() {
+    // An answer a writer made under etags' default entries, as read before
+    // the writer's chmod 600: owning group r-x through the mask rw-.
+    let read = Base {
+        user: 6,
+        group: 5,
+        other: 4,
+    }
+    .with(&[(FLOW, 7)], 6);
+    // The chmod rewrote the mask, so with the ACL off the mode is 0600.
+    assert_eq!(stripped(0o100600, &read), 0o600, "the chmod isn't undone");
+    // With no chmod between, the group keeps what it had in effect.
+    assert_eq!(stripped(0o100664, &read), 0o644);
+}
+
+#[test]
+fn what_a_directory_holds_gets_no_class_it_can_not_reach() {
+    assert_eq!(reach(0o40700), 0o700);
+    assert_eq!(reach(0o40750), 0o770);
+    assert_eq!(reach(0o40755), 0o777);
+    assert_eq!(reach(0o40644), 0);
+}
+
+#[test]
 fn a_controller_changed_or_turned_off_keeps_nothing() {
     // Each entry as the first controller left it, and a file its default
     // entries gave it, with a named group someone added.
@@ -413,4 +437,60 @@ fn a_name_swapped_for_a_link_after_it_was_pinned_changes_only_what_was_pinned() 
     assert_eq!(mode(&outside), 0o600);
     let old = acl(&kept, ACCESS).expect("the file it pinned got the access");
     assert!(entries(&old).contains(&(USER, ME(), 6)));
+}
+
+#[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
+fn an_answer_chmodded_while_its_acl_comes_off_keeps_the_chmod() {
+    let (_root, dir, _) = ledger();
+    run(&dir, Some(ME()));
+    std::fs::remove_dir(dir.join("etags")).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(dir.join("etags"))
+        .unwrap();
+    // Made as a writer that chmods after it writes makes it: wide, under
+    // the default entries etags took.
+    let answer = dir.join("etags/h1");
+    std::fs::write(&answer, "etag").unwrap();
+    let (_, pins) = pin(&dir.join("etags")).unwrap().unwrap();
+    let [h1] = &pins[..] else { panic!("{pins:?}") };
+    let read = read(&h1.proc(), ACCESS)
+        .unwrap()
+        .expect("it took the default entries");
+    assert_ne!(mode(&answer) & 0o077, 0, "made wider than 0600");
+    // The writer's chmod, between the read and the ACL coming off.
+    burrow_test::permissions(&answer, 0o600);
+    unacl(h1, Some(&read), 0o777).unwrap();
+    assert_eq!(acl(&answer, ACCESS), None);
+    assert_eq!(mode(&answer), 0o600, "the writer's chmod stays");
+}
+
+#[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
+fn what_etags_holds_is_checked_once_etags_itself_names_no_one() {
+    let (_root, dir, _) = ledger();
+    run(&dir, Some(ME()));
+    std::fs::remove_dir(dir.join("etags")).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(dir.join("etags"))
+        .unwrap();
+    let late = dir.join("etags/late");
+    std::fs::write(&late, "etag").unwrap();
+    assert!(acl(&late, ACCESS).is_some());
+    // etags itself named no one by then: a run already took its entries.
+    let etags = dir.join("etags");
+    let etags = etags.to_str().unwrap();
+    fs::lremovexattr(etags, ACCESS).unwrap();
+    fs::lremovexattr(etags, DEFAULT).unwrap();
+    burrow_test::permissions(dir.join("etags"), 0o700);
+    // And an answer a run left wider than etags lets anyone but its owner reach.
+    let wide = dir.join("etags/wide");
+    std::fs::write(&wide, "etag").unwrap();
+    fs::lremovexattr(wide.to_str().unwrap(), ACCESS).unwrap();
+    burrow_test::permissions(&wide, 0o644);
+    run(&dir, Some(ME()));
+    assert_eq!(acl(&late, ACCESS), None, "what etags holds names no one");
+    assert_eq!(mode(&late) & 0o077, 0);
+    assert_eq!(mode(&wide), 0o600, "no wider than etags lets it be reached");
+    assert_eq!(mode(&dir.join("etags")), 0o700);
 }

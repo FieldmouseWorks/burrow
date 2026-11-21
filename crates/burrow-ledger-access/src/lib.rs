@@ -6,7 +6,11 @@
 //! nothing however the key was made; it reads and writes the files Conary's
 //! writer opens in place ([`WRITABLE`]); the directory's default entries let
 //! both writers append to and replace whatever the other made first; a
-//! directory in it (etags), and what it holds, names no one. It says what the access is, not
+//! directory in it (etags), and what it holds, names no one, and what it
+//! holds gives no class more than the directory lets that class reach:
+//! etags is 0700, so its answers are their owner's alone. Each run checks
+//! them all, so one a writer was still making when the last run came is
+//! narrowed on the next. It says what the access is, not
 //! what to add to it: no entry names anyone but the controller it has now,
 //! so a controller changed or turned off keeps nothing.
 //!
@@ -147,22 +151,12 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         (Some(_), true) => What::Dir,
         (Some(name), false) => What::File(name.to_bytes()),
     };
-    // A directory in the ledger that took its default entries when it was
-    // made (etags, from Conary's first sync) gave them to what was made in
-    // it since: they go with its own, once, as they're found.
-    if matches!(what, What::Dir) && (now.is_some() || default_now.is_some()) {
-        strip_entries(p)?;
-    }
     let want = want(access, what, st.st_mode, now.as_ref(), default_now.as_ref());
     match (&want.access, &now) {
         (Some(want), now) if now.as_ref() != Some(want) => {
             fs::setxattr(&path, ACCESS, &want.encode(), XattrFlags::empty())?;
         }
-        (None, Some(now)) => {
-            fs::removexattr(&path, ACCESS)?;
-            let mode = stripped(st.st_mode, now);
-            fs::chmod(&path, Mode::from_raw_mode(mode))?;
-        }
+        (None, Some(now)) => unacl(p, Some(now), 0o777)?,
         _ => {}
     }
     match (&want.default, &default_now) {
@@ -172,25 +166,61 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
         (None, Some(_)) => fs::removexattr(&path, DEFAULT)?,
         _ => {}
     }
+    // A directory in the ledger (etags) that took its default entries when
+    // it was made gave them to what was made in it, and a writer may still
+    // be making more: what it holds is checked on every run, against the
+    // directory as it is now its own entries are gone.
+    if matches!(what, What::Dir) {
+        strip_entries(p, reach(p.stat()?.st_mode))?;
+    }
     Ok(())
 }
 
-/// The mode an inode with `mode` and the ACL `acl` keeps once that ACL is
-/// gone: each class with what it had in effect, and no more. The owning
-/// group's bits are its entry's as far as the mask lets them through, so a
-/// directory Conary made 0700 under the ledger's default entries (owning
-/// group `r-x`, mask `---`) stays 0700, where `setfacl -b` would make it 0750.
-fn stripped(mode: u32, acl: &Acl) -> u32 {
-    let mut base = Base::of(mode, Some(acl));
-    if let Some(mask) = acl.perm(MASK) {
-        base.group &= mask;
+/// Take the access ACL `read` (if any) off the inode `p` pins, and leave
+/// its mode no wider than [`stripped`] and the permission bits `limit`.
+/// The mode is read once the ACL is off, never before: a writer's chmod
+/// since `read` rewrote the ACL's mask, and so the mode's group bits, and
+/// a mode from before it would set back what that chmod took away. A chmod
+/// between that read and this one's is still overwritten; what this sets
+/// is never wider than both, so it only narrows.
+fn unacl(p: &Pinned, read: Option<&Acl>, limit: u32) -> rustix::io::Result<()> {
+    let path = p.proc();
+    if read.is_some() {
+        fs::removexattr(&path, ACCESS)?;
     }
-    (mode & 0o7000) | base.mode()
+    let mode = p.stat()?.st_mode;
+    let narrowed = read.map_or(mode & 0o7777, |acl| stripped(mode, acl)) & (0o7000 | limit);
+    if narrowed != mode & 0o7777 {
+        fs::chmod(&path, Mode::from_raw_mode(narrowed))?;
+    }
+    Ok(())
+}
+
+/// The permission bits a file in a directory with `mode` may have: none
+/// for a class that can't search the directory, and so never reaches it.
+fn reach(mode: u32) -> u32 {
+    [6, 3, 0]
+        .into_iter()
+        .filter(|shift| (mode >> shift) & 1 == 1)
+        .map(|shift| 7 << shift)
+        .sum()
+}
+
+/// The mode an inode keeps once its ACL `acl` is gone, `mode` being its
+/// mode with the ACL off (whose group bits are what the mask was): each
+/// class with what it had in effect, and no more. The owning group's bits
+/// are its entry's as far as the mask lets them through, so a directory
+/// Conary made 0700 under the ledger's default entries (owning group
+/// `r-x`, mask `---`) stays 0700, where `setfacl -b` would make it 0750.
+/// It only clears bits `mode` has, so a chmod `acl` predates stays.
+fn stripped(mode: u32, acl: &Acl) -> u32 {
+    let group = acl.perm(GROUP_OBJ).map_or(7, u32::from);
+    mode & (0o7707 | group << 3)
 }
 
 /// No ACL on any regular file in the directory `dir`, each pinned as the
-/// ledger's entries are.
-fn strip_entries(dir: &Pinned) -> rustix::io::Result<()> {
+/// ledger's entries are, and no permission bit outside `limit`.
+fn strip_entries(dir: &Pinned, limit: u32) -> rustix::io::Result<()> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = fs::openat(&dir.fd, c".", flags, Mode::empty())?;
     for entry in fs::Dir::read_from(&fd)? {
@@ -207,15 +237,10 @@ fn strip_entries(dir: &Pinned) -> rustix::io::Result<()> {
             Err(Errno::NOENT) => continue,
             Err(e) => return Err(e),
         };
-        let st = file.stat()?;
-        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        if FileType::from_raw_mode(file.stat()?.st_mode) != FileType::RegularFile {
             continue;
         }
-        let path = file.proc();
-        if let Some(now) = read(&path, ACCESS)? {
-            fs::removexattr(&path, ACCESS)?;
-            fs::chmod(&path, Mode::from_raw_mode(stripped(st.st_mode, &now)))?;
-        }
+        unacl(&file, read(&file.proc(), ACCESS)?.as_ref(), limit)?;
     }
     Ok(())
 }
@@ -389,10 +414,6 @@ impl Base {
             group: from(GROUP_OBJ, 3),
             other: from(OTHER, 0),
         }
-    }
-
-    fn mode(&self) -> u32 {
-        u32::from(self.user) << 6 | u32::from(self.group) << 3 | u32::from(self.other)
     }
 
     /// This base, with `named` users each given their perms, through `mask`.
