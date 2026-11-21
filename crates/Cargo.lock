@@ -1102,7 +1102,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=f060d1b95b3da6ecc99eecafbc71b09f5c001829#f060d1b95b3da6ecc99eecafbc71b09f5c001829"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=585c52f964ba543ec13cfbd647aaf4fef721ce4d#585c52f964ba543ec13cfbd647aaf4fef721ce4d"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1119,7 +1119,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=f060d1b95b3da6ecc99eecafbc71b09f5c001829#f060d1b95b3da6ecc99eecafbc71b09f5c001829"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=585c52f964ba543ec13cfbd647aaf4fef721ce4d#585c52f964ba543ec13cfbd647aaf4fef721ce4d"
 dependencies = [
  "base64 0.23.1",
  "conary-core",

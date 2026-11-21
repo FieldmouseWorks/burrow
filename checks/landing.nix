@@ -7,13 +7,20 @@
 # refuses with a key it doesn't know; burrow-landing runs as that user too,
 # on each change of the setting, the steward's release and each deploy;
 # deliveries go on to conaryd's port, and each repo's hook sends what
-# conaryd takes. A repo not shadowed, or two repos that render different
-# flow configs, are refused. Being listed gives conaryd no repo: that's the
-# live setting's (crates/burrow-landing's tests show the handover).
+# conaryd takes. Each repo conaryd may have reads its own flow config, the
+# one its shadow reads, so a remi-shaped repo (its train's gate on runners
+# started fresh for its jobs) and a Conary-shaped one (on GitHub-hosted
+# runners) land through one conaryd, each on its own evidence, and Conary's
+# own loaders take the events file and each config. A repo not shadowed,
+# or with a train and no evidence, is refused. Being listed gives conaryd
+# no repo: that's the live setting's (crates/burrow-landing's tests show
+# the handover, and narrow the events file to the repos it gives).
 { self, pkgs, nixpkgs, system, ... }:
 let
   lib = nixpkgs.lib;
-  machine = modules: (self.nixosConfigurations.example.extendModules { inherit modules; }).config;
+  bare = modules: (self.nixosConfigurations.example.extendModules { inherit modules; }).config;
+  # homelab's train with its evidence, which conaryd's train steps on.
+  machine = modules: bare ([{ burrow.autoland.repos."sam/homelab".trainNegative = "check / negative"; }] ++ modules);
   failing = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
   plain = machine [ ];
   on = machine [{
@@ -42,6 +49,18 @@ let
     burrow.landing.conaryd = [ "sam/homelab" ];
   }];
   askedFlow = asked false;
+  # remi and Conary as remi runs them: each with its train, remi's gate on
+  # the machine's fresh runners, Conary's on GitHub's.
+  train = require: { train = true; trainRequire = [ require ]; trainNegative = "check / negative"; };
+  pair = machine [{
+    burrow.dispatch.fresh = { enable = true; owner = "Sam"; repos = [ "Sam/Remi" ]; };
+    burrow.autoland.shadow = [ "sam/remi" "sam/conary" ];
+    burrow.autoland.repos."sam/remi" = train "fresh / check";
+    burrow.autoland.repos."sam/conary" = train "check / check";
+    burrow.landing.conaryd = [ "sam/remi" "sam/conary" ];
+  }];
+  pairTemplate = pair.burrow.landing.eventsTemplate;
+  pairConfig = repo: "${pair.burrow.autoland.flowConfigs}/${repo}.json";
   door = askedFlow.burrow.autoland.askAsOwner.door;
   units = on.systemd.services;
   # There only while burrow-landing gives conaryd a repo.
@@ -78,11 +97,11 @@ let
     (if on.burrow.events.landing.forward != on.burrow.landing.port then "deliveries don't go where conaryd listens" else null)
     (if !(lib.all (e: lib.elem e on.burrow.events.hookEvents) [ "check_run" "pull_request_review_thread" "push" ]) then "the hooks don't send what conaryd takes" else null)
     (if !(lib.any (lib.hasInfix "shadow each repo first") (failing (machine [{ burrow.landing.conaryd = [ "sam/homelab" ]; }]))) then "a repo conaryd may have that was never shadowed is taken" else null)
-    (if !(lib.any (lib.hasInfix "render different flow configurations") (failing (machine [{
-      burrow.autoland.shadow = [ "sam/homelab" "sam/plain" ];
-      burrow.autoland.repos."sam/plain".settleDelay = 2;
-      burrow.landing.conaryd = [ "sam/homelab" "sam/plain" ];
-    }]))) then "two repos with different flow configs are both given to one conaryd" else null)
+    (if failing pair != [ ] then "two repos with different flow configs can't both be given to conaryd: ${toString (failing pair)}" else null)
+    (if !(lib.any (lib.hasInfix "a train with no trainNegative") (failing (bare [{
+      burrow.autoland.shadow = [ "sam/homelab" ];
+      burrow.landing.conaryd = [ "sam/homelab" ];
+    }]))) then "a repo whose train has no evidence, which conaryd's train can't step on, is given to it" else null)
     (if failing askedFlow != [ ] then "a machine whose flow asks through the owner's door fails: ${toString (failing askedFlow)}" else null)
     (if !(lib.any (lib.hasInfix "the owner's door") (failing (asked true))) then "conaryd running as a controller of its own is given the owner's door, which it can't start as burrow.user" else null)
     (if failing (machine [{
@@ -100,10 +119,30 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   # Conary's own type for conaryd's events file takes the one rendered, and
   # refuses what conaryd would.
   ${flowFiles} events ${template} || fail "Conary's events::Runtime refuses the rendered events file"
-  jq -e '.repos == [] and .listen == "127.0.0.1:${toString on.burrow.landing.port}"' ${template} >/dev/null \
-    || fail "conaryd is given a repo by the build, not the setting, or listens where nothing forwards: $(jq -c '[.repos, .listen]' ${template})"
-  cmp "$(jq -r .flow_config ${template})" ${on.burrow.autoland.flowConfigs}/sam/homelab.json \
+  jq -e '.repos == ["sam/homelab"] and .listen == "127.0.0.1:${toString on.burrow.landing.port}"' ${template} >/dev/null \
+    || fail "conaryd's events file isn't rendered for the repos it may have, or listens where nothing forwards: $(jq -c '[.repos, .listen]' ${template})"
+  jq -e '.flow_config | keys == ["sam/homelab"]' ${template} >/dev/null \
+    || fail "conaryd's events file gives flow configs to repos it may not have: $(jq -c .flow_config ${template})"
+  cmp "$(jq -r '.flow_config["sam/homelab"]' ${template})" ${on.burrow.autoland.flowConfigs}/sam/homelab.json \
     || fail "conaryd's flow config isn't the repo's rendered one"
+  # remi and Conary through one conaryd: the events file and each repo's
+  # config, as Conary's loaders read them, each repo reading its own, with
+  # its own evidence.
+  ${flowFiles} events ${pairTemplate} || fail "Conary's events::Runtime refuses remi's and Conary's events file"
+  ${flowFiles} flow ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} || fail "Conary's flow::Config refuses remi's or Conary's flow config"
+  for repo in sam/remi sam/conary; do
+    cmp "$(jq -r --arg r $repo '.flow_config[$r]' ${pairTemplate})" ${pair.burrow.autoland.flowConfigs}/$repo.json \
+      || fail "$repo doesn't read its own flow config"
+  done
+  jq -e '.evidence == {signer: "${pair.burrow.ledger.signerWorkflow}", fresh: "fresh-${pair.networking.hostName}-", require: ["fresh / check"], negative: "check / negative"}' ${pairConfig "sam/remi"} >/dev/null \
+    || fail "remi's evidence doesn't count its fresh runners: $(jq -c .evidence ${pairConfig "sam/remi"})"
+  jq -e '.evidence == {signer: "${pair.burrow.ledger.signerWorkflow}", fresh: null, require: ["check / check"], negative: "check / negative"}' ${pairConfig "sam/conary"} >/dev/null \
+    || fail "Conary's evidence counts a runner other than GitHub's: $(jq -c .evidence ${pairConfig "sam/conary"})"
+  # Conary refuses an events file whose flow configs don't match its repos.
+  jq '.flow_config |= del(.["sam/conary"])' ${pairTemplate} > missing.json
+  jq '.repos = ["sam/remi"]' ${pairTemplate} > unlisted.json
+  ! ${flowFiles} events missing.json || fail "an events file listing a repo with no flow config was taken"
+  ! ${flowFiles} events unlisted.json || fail "an events file giving a flow config to a repo it doesn't list was taken"
   # conaryd's flow asks through the owner's door, in its repos and with
   # its command, and Conary's flow::Config takes that; with no door, the
   # key is left out, and the flow asks with its own comment.

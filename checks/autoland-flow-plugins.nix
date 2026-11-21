@@ -49,8 +49,8 @@ let
     imports = [ controlled ];
     burrow.autoland.plugins.fix.enable = true;
     burrow.autoland.plugins.proof = proof;
-    # conaryd reads one flow config for every repo it lands, so plugins
-    # mustn't make the same settings render two.
+    # Two repos conaryd may have, with the same settings: the plugins add
+    # nothing of a repo's own to its flow config.
     burrow.landing.conaryd = [ "sam/bare" "sam/twin" ];
   };
   # The judge beside the proof producer, evaluated, never built.

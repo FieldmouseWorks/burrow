@@ -94,7 +94,7 @@ let
       evidence =
         if rc.trainNegative != null then {
           signer = ledger.signerWorkflow;
-          fresh = ledger.env.CONARY_FRESH_RUNNERS or null;
+          fresh = ledger.freshRunners repo;
           require = rc.trainRequire;
           negative = rc.trainNegative;
         } // lib.optionalAttrs (trusted != [ ]) {
@@ -181,6 +181,8 @@ let
     # The producers its evidence trusts, as rendered, before Conary's loader
     # reads them: for a check to hold the loader to them.
     passthru.producers = rendered.evidence.producers or null;
+    # A train with no evidence, which Conary's train can't step on.
+    passthru.trainWithoutEvidence = rendered.settings.train && rendered.evidence == null;
   } ''
     ${lib.optionalString (kinds != [ ]) ''
       ${lib.concatMapStrings (k: "${enabled.${k}.choice} > choice-${k}.json\n") kinds}

@@ -2,7 +2,8 @@
 //! moved as `settings landing OWNER/REPO steward|conaryd` says (Conary#313).
 //!
 //! It alone writes the record (burrow_settings::landing), and conaryd's
-//! events file, whose `repos` are the ones the record gives conaryd. A repo
+//! events file, whose `repos` are the ones the record gives conaryd, each
+//! with its own flow configuration (`flow_config`) and no other. A repo
 //! changes hands in two steps, so the two never land in it at once:
 //!
 //! 1. The handover starts: the record names who it goes to (`to`). From
@@ -37,7 +38,7 @@
 //! again, so one cut short (a restart, a crash) goes on from the record.
 
 use burrow_settings::landing::{Holding, Owner, Record};
-use conary_github::events::Runtime;
+use conary_github::events::{FlowConfig, Runtime};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -65,10 +66,12 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Conaryd {
-    /// conaryd's events file as burrow renders it, `repos` empty: checked
-    /// against Conary's types as the machine is built.
+    /// conaryd's events file as burrow renders it, for every repo conaryd
+    /// may have, each with its flow configuration: checked against
+    /// Conary's types as the machine is built.
     pub events_template: PathBuf,
-    /// The events file conaryd reads, the template with its repos.
+    /// The events file conaryd reads: the template, narrowed to the repos
+    /// it's given and their flow configurations.
     pub events: PathBuf,
     /// Counts the events file's publications, `N SHA256`: the count, and
     /// the hash of the file it counts. Written after each one, so the
@@ -313,6 +316,28 @@ fn publish(
                 .map_err(|e| format!("{repo}: not a repository: {e}"))
         })
         .collect::<Result<_, String>>()?;
+    // Each repo given keeps its own flow configuration, and no repo it
+    // isn't given is named: Conary refuses an events file that names one
+    // it doesn't list, or lists one with no file. One the template has no
+    // file for (it's rendered for every repo conaryd may have, so a build
+    // out of step with the settings) isn't given at all: nothing lands it,
+    // and the rest, and every handback, go on.
+    if let FlowConfig::Each(_) = &template.flow_config {
+        let mut files = BTreeMap::new();
+        runtime
+            .repos
+            .retain(|repo| match template.flow_config.of(repo) {
+                Ok(file) => {
+                    files.insert(repo.to_string(), file.to_path_buf());
+                    true
+                }
+                Err(e) => {
+                    eprintln!("{repo}: not given to conaryd: {e}");
+                    false
+                }
+            });
+        runtime.flow_config = FlowConfig::Each(files);
+    }
     let given = !runtime.repos.is_empty();
     let mut body = serde_json::to_vec_pretty(&runtime).map_err(|e| e.to_string())?;
     body.push(b'\n');

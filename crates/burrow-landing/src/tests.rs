@@ -25,24 +25,36 @@ const PATIENT: Patience = Patience {
 
 impl Machine {
     fn new() -> Self {
+        Self::with(&[REPO])
+    }
+
+    /// A machine whose conaryd may have `conaryd`, each repo with a flow
+    /// configuration of its own.
+    fn with(conaryd: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let p = |name: &str| dir.path().join(name);
         let settings = burrow_settings::Config {
             overlay: p("overlay.json"),
             allowed: vec![REPO.into(), "sam/web".into()],
             landing_record: Some(p("owners.json")),
-            conaryd: vec![REPO.into()],
+            conaryd: conaryd.iter().map(|r| r.to_string()).collect(),
             ..Default::default()
         };
         fs::write(p("settings.json"), serde_json::to_vec(&settings).unwrap()).unwrap();
-        // conaryd's events file as burrow renders it, loaded by Conary's own
-        // loader, as the machine's build does.
+        // conaryd's events file as burrow renders it, for every repo it may
+        // have, each with its own flow configuration (spelled in another
+        // case than the setting's, as GitHub's names may be), loaded by
+        // Conary's own loader, as the machine's build does.
+        let files: serde_json::Map<String, serde_json::Value> = conaryd
+            .iter()
+            .map(|r| (r.to_uppercase(), serde_json::json!(Self::file_of(r))))
+            .collect();
         let template = serde_json::json!({
             "listen": "127.0.0.1:8091",
             "secret_path": p("secret"),
-            "repos": [],
+            "repos": conaryd,
             "data": p("data"),
-            "flow_config": p("flow.json"),
+            "flow_config": files,
             "policy": p("policy.json"),
             "token_command": "/bin/false",
             "anchor_repo": null,
@@ -67,9 +79,18 @@ impl Machine {
         Self { dir, cfg, settings }
     }
 
+    /// The flow configuration burrow renders for `repo`.
+    fn file_of(repo: &str) -> String {
+        format!("/flow/{repo}.json")
+    }
+
     fn set(&self, owner: &str) {
+        self.set_repo(REPO, owner);
+    }
+
+    fn set_repo(&self, repo: &str, owner: &str) {
         self.settings
-            .command(&["landing".into(), REPO.into(), owner.into()], "test")
+            .command(&["landing".into(), repo.into(), owner.into()], "test")
             .unwrap();
     }
 
@@ -94,6 +115,17 @@ impl Machine {
     /// Never both: the steward lands only what the record gives it, and
     /// conaryd is given only what the record gives conaryd.
     fn exclusive(&self) {
+        // conaryd reads what it's given: Conary's own loader takes the
+        // events file, and each repo given reads its own configuration.
+        let (runtime, _) =
+            conary_github::flow::schema::load::<Runtime>(&fs::read(&self.c().events).unwrap())
+                .unwrap();
+        for repo in &runtime.repos {
+            assert_eq!(
+                runtime.flow_config.of(repo).unwrap(),
+                Path::new(&Self::file_of(&repo.to_string().to_lowercase()))
+            );
+        }
         let steward = self.holding().lands(Owner::Steward);
         let conaryd = self.given().iter().any(|r| r.eq_ignore_ascii_case(REPO));
         assert!(!(steward && conaryd), "both land {REPO}");
@@ -565,4 +597,61 @@ fn conaryd_runs_only_while_it_is_given_a_repo() {
     m.started();
     assert_eq!(m.run(&mut kicks).moved.get(REPO), Some(&Owner::Steward));
     assert!(!m.c().given.exists());
+}
+
+#[test]
+fn each_repo_given_reads_its_own_flow_configuration() {
+    const WEB: &str = "sam/web";
+    let m = Machine::with(&[REPO, WEB]);
+    let mut kicks = Kicks::default();
+    // The flow configurations conaryd's events file gives, by repo.
+    let files = || -> BTreeMap<String, PathBuf> {
+        let runtime: Runtime = read_json(&m.c().events).unwrap();
+        match runtime.flow_config {
+            FlowConfig::Each(files) => files,
+            FlowConfig::One(path) => panic!("one flow configuration for every repo: {path:?}"),
+        }
+    };
+    let release = |generations: serde_json::Value| {
+        fs::write(&m.cfg.steward_released, generations.to_string()).unwrap();
+    };
+    // Given none, conaryd's events file names none: the template's files
+    // for the repos it may have are left out with them.
+    m.run(&mut kicks);
+    assert!(m.given().is_empty() && files().is_empty());
+
+    m.set("conaryd");
+    m.run(&mut kicks);
+    release(serde_json::json!({ REPO: 1 }));
+    m.run(&mut kicks);
+    assert_eq!(m.given(), [REPO]);
+    assert_eq!(
+        files(),
+        BTreeMap::from([(REPO.to_string(), Machine::file_of(REPO).into())])
+    );
+
+    m.set_repo(WEB, "conaryd");
+    m.run(&mut kicks);
+    release(serde_json::json!({ REPO: 1, WEB: 1 }));
+    m.run(&mut kicks);
+    assert_eq!(m.given(), [REPO, WEB]);
+    assert_eq!(
+        files(),
+        BTreeMap::from([
+            (REPO.to_string(), Machine::file_of(REPO).into()),
+            (WEB.to_string(), Machine::file_of(WEB).into()),
+        ])
+    );
+
+    // A template with no file for one (a build out of step with the
+    // settings) gives conaryd that one not at all, and the other still.
+    let mut template: serde_json::Value = read_json(&m.c().events_template).unwrap();
+    template["flow_config"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&WEB.to_uppercase());
+    fs::write(&m.c().events_template, template.to_string()).unwrap();
+    m.run(&mut kicks);
+    assert_eq!(m.given(), [REPO]);
+    assert_eq!(files().len(), 1);
 }

@@ -42,7 +42,11 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
   has let go of are spent without a pass. Deliveries for a repo conaryd holds
   go to conaryd's listener exactly as GitHub signed them.
 - conaryd reads its events file. It lists the repos the record gives
-  conaryd whose automated work is allowed, and no others.
+  conaryd whose automated work is allowed, and no others, each with its own
+  flow configuration (`flow_config`), the one its shadow reads. Its
+  `evidence.fresh` is the machine's fresh runners
+  (`burrow.dispatch.fresh`) for a repo in their `repos`, and null,
+  GitHub-hosted runners only, for every other.
 - renovate-run ([crates/burrow-renovate](../crates/burrow-renovate/src/run.rs))
   reads it as each run of Renovate starts. Renovate merges only in a repo
   the steward lands; anywhere else, a handover under way included, it opens
@@ -148,9 +152,6 @@ and a build that breaks this is refused.
 
 ## What it doesn't do yet
 
-- conaryd reads one flow configuration for every repo it lands. Any repos
-  given to one conaryd must therefore render the same one, and a build that
-  breaks this is refused.
 - The overlay's `landing` entry is new. A burrow from before it refuses an
   overlay that has one. Hand every repo back to the steward
   (`settings landing OWNER/REPO steward`) before rolling back past it.

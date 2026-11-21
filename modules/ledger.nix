@@ -266,6 +266,24 @@ in
       '';
     };
 
+    freshRunners = mkOption {
+      type = types.functionTo (types.nullOr types.str);
+      readOnly = true;
+      internal = true;
+      default = repo:
+        if (fresh.enable or false) && fresh.fresh.enable
+          && lib.any (r: lib.toLower r == lib.toLower repo) fresh.fresh.repos
+        then fresh.fresh.prefix else null;
+      defaultText = lib.literalMD "burrow.dispatch.fresh's prefix for its repos, null for the rest";
+      description = ''
+        OWNER/NAME's runners started fresh for one job, as the start of their
+        names, whose results its evidence counts beside GitHub-hosted ones
+        (its flow configuration's `evidence.fresh`): this machine's
+        (burrow.dispatch.fresh) for a repo listed in its `repos`, and null,
+        GitHub-hosted only, for every other, whose jobs never run on them.
+      '';
+    };
+
     owners = mkOption {
       type = types.listOf types.str;
       default = if autoland.enable or false then autoland.owners else [ ];
