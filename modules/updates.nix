@@ -102,6 +102,11 @@ let
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 90;
+    # claude-login may wait out two copies of the meter before it asks
+    # (crates/burrow-usage-reset's LOGIN_BUDGET, 140s).
+    checkTimeouts = lib.optionalAttrs (config.burrow.claude.enable or false) {
+      claude-login = 150;
+    };
     settle = 20;
   });
   healthTool = pkgs.runCommand health {
