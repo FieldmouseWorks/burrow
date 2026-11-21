@@ -210,7 +210,7 @@ fn unposted(e: Error) -> Unposted {
 
 /// The job's answers, posted if the PR is still where the job left it.
 /// Everything is checked before anything goes up: a thread that isn't the
-/// PR's, or a fix claimed with no new commit, posts none of it.
+/// PR's, or a fix claimed with no commit it's in, posts none of it.
 ///
 /// `wrote` records what it did to the PR even when a later write fails: when
 /// each write that proj's fingerprint sees (github.rs: a reply on a thread,
