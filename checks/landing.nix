@@ -102,7 +102,13 @@ let
     (if !(lib.elem on.burrow.updates.renovate.runLock on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear a run of Renovate end" else null)
     (if on.systemd.tmpfiles.settings.burrow.${on.burrow.updates.renovate.runLock}.f.mode != "0644" then "Renovate's run lock may be unreadable to burrow-landing, which runs as the flow's user" else null)
     (if on.burrow.events.landing.forward != on.burrow.landing.port then "deliveries don't go where conaryd listens" else null)
-    (if !(lib.all (e: lib.elem e on.burrow.events.hookEvents) [ "check_run" "pull_request_review_thread" "push" ]) then "the hooks don't send what conaryd takes" else null)
+    # Every event Conary's own table kicks a pass on (conary-github's
+    # events::EVENTS, named in its docs/conaryd.md), workflow jobs' start
+    # among them: one missing is a kick conaryd never gets.
+    (let takes = [ "pull_request" "pull_request_review" "pull_request_review_comment" "pull_request_review_thread"
+      "issue_comment" "check_suite" "check_run" "workflow_run" "status" "workflow_job" "push" ];
+      missing = lib.filter (e: !(lib.elem e on.burrow.events.landing.events && lib.elem e on.burrow.events.hookEvents)) takes;
+    in if missing != [ ] then "the hooks don't send what conaryd takes: ${toString missing}" else null)
     (if !(lib.any (lib.hasInfix "shadow each repo first") (failing (machine [{ burrow.landing.conaryd = [ "sam/homelab" ]; }]))) then "a repo conaryd may have that was never shadowed is taken" else null)
     (if failing pair != [ ] then "two repos with different flow configs can't both be given to conaryd: ${toString (failing pair)}" else null)
     (if !(lib.any (lib.hasInfix "a train with no trainNegative") (failing (bare [{
