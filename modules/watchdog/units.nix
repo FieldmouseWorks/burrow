@@ -36,7 +36,7 @@ let
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
     buildGid = if config.nix.enable then config.ids.gids.nixbld else null;
-    inherit (cfg) ownedSlices;
+    inherit (cfg) ownedSlices workTrees;
     systemctl = "${config.systemd.package}/bin/systemctl";
     journalctl = "${config.systemd.package}/bin/journalctl";
     own = "${kick}/units";
@@ -91,6 +91,17 @@ in
       description = ''
         Slices whose units run someone's own work: a crash in one is theirs
         to see (a job's proof of concept or test binary), never an item.
+      '';
+    };
+
+    workTrees = mkOption {
+      type = types.listOf types.str;
+      default = [ "${config.burrow.projectsDir}/*" "${config.burrow.scratchDir}/*" ];
+      defaultText = lib.literalExpression ''[ "''${config.burrow.projectsDir}/*" "''${config.burrow.scratchDir}/*" ]'';
+      description = ''
+        Globs of the work trees people and jobs build in. A program there
+        is someone's build (a release under test, a test binary), and its
+        crash is whoever ran it's, from whatever slice: never an item.
       '';
     };
 
