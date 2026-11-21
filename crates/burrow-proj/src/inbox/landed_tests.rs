@@ -6,7 +6,7 @@ use super::*;
 use crate::inbox::record::files;
 
 /// The child, as GitHub has it now.
-fn child(b: &Box, state: &str) {
+pub(super) fn child(b: &Box, state: &str) {
     let mut child = issue(8, "sam", &["later"]);
     child["state"] = json!(state);
     fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
@@ -26,11 +26,11 @@ fn pr(b: &Box, repo: &str, n: u64, merged: bool) -> String {
 }
 
 /// Whether the parent's list has moved on to its second child.
-fn advanced(b: &Box) -> bool {
+pub(super) fn advanced(b: &Box) -> bool {
     b.pass().child_admissible("sam/box", "9")
 }
 
-fn stored(b: &Box) -> List {
+pub(super) fn stored(b: &Box) -> List {
     serde_json::from_slice(&fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap())
         .unwrap()
 }
@@ -175,7 +175,7 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
     }
 }
 
-fn stored_at(b: &Box, parent: &str) -> List {
+pub(super) fn stored_at(b: &Box, parent: &str) -> List {
     serde_json::from_slice(
         &fs::read(b.pass().plan_dir("sam/box", parent).join("tasks.json")).unwrap(),
     )
@@ -736,7 +736,7 @@ fn successor_landed(b: &Box) {
     .unwrap();
 }
 
-fn sequence(b: &Box, parent: &Value) {
+pub(super) fn sequence(b: &Box, parent: &Value) {
     b.pass().sequence("sam/box", std::slice::from_ref(parent));
 }
 

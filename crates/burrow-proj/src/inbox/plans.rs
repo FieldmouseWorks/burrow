@@ -958,6 +958,10 @@ mod tests;
 mod landed_tests;
 
 #[cfg(test)]
+#[path = "landed_split_tests.rs"]
+mod landed_split_tests;
+
+#[cfg(test)]
 #[path = "plans_review_tests.rs"]
 mod review_tests;
 
