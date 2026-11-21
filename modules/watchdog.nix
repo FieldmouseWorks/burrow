@@ -40,6 +40,7 @@ let
     notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
     inherit (config.burrow) owner;
     host = config.networking.hostName;
+    anomalies = cfg.anomaliesConfig;
   });
   # The command, with this machine's config, so its jobs can snooze and
   # anyone can ask for its status from any shell.
@@ -52,6 +53,7 @@ in
   imports = [
     (import ./common.nix inputs)
     (import ./watchdog/degradations.nix inputs)
+    ./watchdog/anomalies.nix
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
@@ -65,6 +67,13 @@ in
       and its job (the owner hears only when there's no steward, or the
       steward or that job is what's stuck)
     '';
+
+    anomaliesConfig = mkOption {
+      type = types.nullOr types.attrs;
+      default = null;
+      internal = true;
+      description = "The anomalies section of the watchdog's config, set by watchdog.anomalies.";
+    };
 
     project = mkOption {
       type = types.str;

@@ -38,6 +38,50 @@ pub struct Config {
     pub notify: String,
     pub owner: String,
     pub host: String,
+    /// Rolling baselines and anomalies (crate::anomaly); None for none.
+    #[serde(default)]
+    pub anomalies: Option<Anomalies>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Anomalies {
+    /// Files sources drop observations in.
+    pub inputs: Vec<PathBuf>,
+    /// The watch file its active anomalies are written to.
+    pub file: PathBuf,
+    /// The most samples, and the oldest (seconds), kept for a subject.
+    pub retention_samples: usize,
+    pub retention_seconds: f64,
+    /// The most source links an anomaly's evidence carries.
+    pub max_links: usize,
+    /// By check.
+    pub rules: BTreeMap<String, Rule>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    /// At least `threshold` times the baseline (the median of the healthy
+    /// samples kept).
+    Ratio,
+    /// At or above `threshold`.
+    Above,
+    /// At or below `threshold`.
+    Below,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rule {
+    pub mode: Mode,
+    pub threshold: f64,
+    /// Healthy samples needed before one is judged.
+    pub min_samples: usize,
+    /// How long a breach must hold to be an anomaly, and how long healthy
+    /// samples must hold to clear one.
+    pub min_breach_seconds: f64,
+    pub clear_seconds: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

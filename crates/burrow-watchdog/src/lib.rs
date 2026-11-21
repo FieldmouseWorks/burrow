@@ -58,9 +58,15 @@
 //! burrow-watchdog snooze SOURCE KEY MINUTES WHY
 //! ```
 //!
+//! Numbers its sources observe get rolling baselines (anomaly.rs): a sustained
+//! breach is one more item in a watch file of its own, so it takes the same
+//! ladder and the same notice as any stall. `burrow-watchdog dismiss CHECK
+//! SUBJECT` holds an active anomaly out of it until it clears.
+//!
 //! `burrow-watchdog status` prints what each source waits on and how far each
 //! stall has gone, changing nothing.
 
+pub mod anomaly;
 pub mod config;
 pub mod degradations;
 pub mod ladder;

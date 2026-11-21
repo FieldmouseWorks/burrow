@@ -186,6 +186,7 @@ impl Machine {
             notify: "notify".into(),
             owner: "Sam".into(),
             host: "box".into(),
+            anomalies: None,
         };
         Machine {
             _dir: dir,
