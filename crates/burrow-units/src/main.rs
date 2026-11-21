@@ -101,9 +101,9 @@ struct Config {
     build_gid: Option<u64>,
     /// Slices whose units run someone's own work, whose crashes are theirs.
     owned_slices: Vec<String>,
-    /// Globs of where the machine's programs are: any other's crash is
-    /// whoever built and ran it's.
-    programs: Vec<String>,
+    /// Globs of the work trees people and jobs build in, whose programs'
+    /// crashes are whoever ran them's.
+    work_trees: Vec<String>,
     systemctl: PathBuf,
     journalctl: PathBuf,
     /// Where to ask for a pass: burrow-units' own burrow-events handler.
@@ -391,7 +391,7 @@ fn pass(cfg: &Config) -> Result<(), String> {
     let owned = Owned {
         build_gid: cfg.build_gid,
         slices: cfg.owned_slices.clone(),
-        programs: cfg.programs.clone(),
+        work_trees: cfg.work_trees.clone(),
     };
     let dumped: Vec<String> = dumped().collect();
     let mut args = vec![
@@ -556,7 +556,7 @@ mod tests {
             systemctl: "systemctl".into(),
             build_gid: None,
             owned_slices: Vec::new(),
-            programs: Vec::new(),
+            work_trees: Vec::new(),
             journalctl: "journalctl".into(),
             own: String::new(),
             kick: None,

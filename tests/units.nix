@@ -74,7 +74,7 @@ pkgs.testers.runNixOSTest {
     };
   };
 
-  testScript = ''
+  testScript = { nodes, ... }: let scratch = nodes.machine.burrow.scratchDir; in ''
     import json
 
     watch_file = "/var/lib/burrow/units/watch.json"
@@ -132,11 +132,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemd-run --wait --slice=claude-jobs.slice -p LimitCORE=infinity ${pkgs.mksh}/bin/mksh -c 'kill -SEGV 0' || true")
         machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.dash}/bin/dash", timeout=60)
         machine.wait_until_succeeds("coredumpctl list --no-pager ${pkgs.mksh}/bin/mksh", timeout=60)
-        # And a program built outside the store, in someone's work tree, is
-        # whoever ran it's, in no owned slice.
-        machine.succeed("install -D -m 755 ${pkgs.dash}/bin/dash /home/dev/build/dash && chown -R dev /home/dev/build")
-        machine.succeed("su - dev -c 'ulimit -c unlimited; /home/dev/build/dash -c \"kill -SEGV \\$\\$\"' || true")
-        machine.wait_until_succeeds("coredumpctl list --no-pager /home/dev/build/dash", timeout=60)
+        # And a program built in a work tree (a job's scratch) is whoever
+        # ran it's, in no owned slice.
+        machine.succeed("install -D -m 755 ${pkgs.dash}/bin/dash ${scratch}/build/dash && chown -R dev ${scratch}/build")
+        machine.succeed("su - dev -c 'ulimit -c unlimited; ${scratch}/build/dash -c \"kill -SEGV \\$\\$\"' || true")
+        machine.wait_until_succeeds("coredumpctl list --no-pager ${scratch}/build/dash", timeout=60)
         dev_crash()
         root_crash()
         machine.wait_until_succeeds(f"[ $(grep -o '\"core:[^\"]*\"' {watch_file} | sort -u | wc -l) -eq 2 ]", timeout=120)

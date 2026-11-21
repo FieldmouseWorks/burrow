@@ -394,9 +394,9 @@ Each has an entry below, and each can be imported on its own.
   machine itself is a source too (`burrow-units`): a failed unit, and a
   program that dumped core, whoever ran it, is a stall `units.graceMinutes`
   after it's seen (but a crash in a Nix build, in a proj job's slice,
-  `units.ownedSlices`, or of a program from outside `units.programs` (the
-  Nix store: anything else is a build in someone's work tree), which what
-  ran it sees for itself), and a crash counts for `units.crashHours`; `units.ignore`
+  `units.ownedSlices`, or of a program built in a work tree,
+  `units.workTrees` (projects and job scratch), which what ran it sees
+  for itself), and a crash counts for `units.crashHours`; `units.ignore`
   takes globs of the units and programs that fail by design. A watcher
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The

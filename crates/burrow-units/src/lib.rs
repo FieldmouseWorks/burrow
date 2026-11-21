@@ -171,12 +171,11 @@ pub struct Owned {
     /// Slices whose units run someone's own work (proj's jobs): a crash
     /// in one, a proof of concept or a test binary, is that job's to see.
     pub slices: Vec<String>,
-    /// Globs of where the machine's own programs are (its Nix store): a
-    /// program anywhere else is a build in someone's work tree (a game's
-    /// release, a test binary), whoever ran it and from wherever, and its
-    /// crash is theirs, seen as the run fails. None: every program is the
-    /// machine's.
-    pub programs: Vec<String>,
+    /// Globs of the work trees people and jobs build in (projects, job
+    /// scratch): a program there is someone's build (a game's release, a
+    /// test binary), and its crash is whoever ran it's, from wherever,
+    /// seen as the run fails.
+    pub work_trees: Vec<String>,
 }
 
 impl Owned {
@@ -188,11 +187,9 @@ impl Owned {
                 .split('/')
                 .any(|part| self.slices.iter().any(|s| s == part))
             || exe.is_some_and(|exe| {
-                !self.programs.is_empty()
-                    && !self
-                        .programs
-                        .iter()
-                        .any(|g| burrow_events::glob::matches(g, exe))
+                self.work_trees
+                    .iter()
+                    .any(|g| burrow_events::glob::matches(g, exe))
             })
     }
 }
@@ -426,7 +423,7 @@ mod tests {
         let owned = Owned {
             build_gid: Some(30000),
             slices: vec!["claude-jobs.slice".into()],
-            programs: Vec::new(),
+            work_trees: Vec::new(),
         };
         let dumps = cores(
             concat!(
@@ -509,7 +506,7 @@ mod tests {
         let owned = Owned {
             build_gid: Some(30000),
             slices: vec!["claude-jobs.slice".into()],
-            programs: Vec::new(),
+            work_trees: Vec::new(),
         };
         let dump = |exe: &str, gid: u64, cgroup: &str| {
             format!(
@@ -548,9 +545,9 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_of_a_program_built_outside_the_store_is_whoever_ran_its() {
+    fn a_crash_of_a_program_built_in_a_work_tree_is_whoever_ran_its() {
         let owned = Owned {
-            programs: vec!["/nix/store/*".into(), "/run/wrappers/*".into()],
+            work_trees: vec!["/data/dev/src/*".into(), "/data/scratch/*".into()],
             ..Owned::default()
         };
         let dump = |exe: &str, cgroup: &str| {
@@ -565,11 +562,12 @@ mod tests {
                 "/data/dev/src/PSIV/build/release/PSIV-dev-e7a4-linux-x86_64/psiv.x86_64",
                 agent,
             ),
-            // A test binary in a scratch directory, from a shell.
+            // A test binary in a job's scratch, from a shell.
             dump("/data/scratch/jobs/x/tmp.1/c", "/user.slice/user-1001.slice/session-4.scope"),
-            // The machine's own programs, wherever they ran.
+            // The machine's own programs, wherever they ran, from the store
+            // or not (a runner that updates itself).
             dump("/nix/store/g/libexec/godot", agent),
-            dump("/run/wrappers/wrappers.a/sudo", "/system.slice/sshd.service"),
+            dump("/var/lib/ci/runner/bin/Runner.Listener", "/system.slice/github-runner-ci.service"),
             // Its path gone with its main thread: no path to judge, so the
             // machine's.
             r#"{"COREDUMP_COMM":"threads","COREDUMP_PID":"8","__REALTIME_TIMESTAMP":"1793000002000000"}"#.into(),
@@ -584,7 +582,7 @@ mod tests {
             exes,
             [
                 "/nix/store/g/libexec/godot",
-                "/run/wrappers/wrappers.a/sudo",
+                "/var/lib/ci/runner/bin/Runner.Listener",
                 "threads"
             ]
         );

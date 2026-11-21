@@ -36,7 +36,7 @@ let
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
     buildGid = if config.nix.enable then config.ids.gids.nixbld else null;
-    inherit (cfg) ownedSlices programs;
+    inherit (cfg) ownedSlices workTrees;
     systemctl = "${config.systemd.package}/bin/systemctl";
     journalctl = "${config.systemd.package}/bin/journalctl";
     own = "${kick}/units";
@@ -94,16 +94,14 @@ in
       '';
     };
 
-    programs = mkOption {
+    workTrees = mkOption {
       type = types.listOf types.str;
-      default = [ "${builtins.storeDir}/*" "/run/wrappers/*" ];
-      defaultText = lib.literalExpression ''[ "''${builtins.storeDir}/*" "/run/wrappers/*" ]'';
+      default = [ "${config.burrow.projectsDir}/*" "${config.burrow.scratchDir}/*" ];
+      defaultText = lib.literalExpression ''[ "''${config.burrow.projectsDir}/*" "''${config.burrow.scratchDir}/*" ]'';
       description = ''
-        Globs of where the machine's own programs are. A program anywhere
-        else is a build in someone's work tree (a release under test, a
-        test binary), and its crash is whoever ran it's, from whatever
-        slice: never an item. A service that crashes still fails its unit.
-        Empty: every program is the machine's.
+        Globs of the work trees people and jobs build in. A program there
+        is someone's build (a release under test, a test binary), and its
+        crash is whoever ran it's, from whatever slice: never an item.
       '';
     };
 
