@@ -223,11 +223,11 @@ pkgs.testers.runNixOSTest {
         producer(f"systemctl stop {unit('a1')} {unit('b1')} {unit('c1')}")
 
     with subtest("a build is a user of its own, writes its own copy alone, reaches nothing, and its exit is how it came out"):
-        lay("g1")
+        lay("f1")
         lay_build("b0", "\n".join([
             "echo uid $(id -u)",
             "echo built >f && grep -q built f && echo wrote its own copy",
-            "touch ${state}/looks/g1/head/f 2>/dev/null && echo WROTE a look checkout",
+            "touch ${state}/looks/f1/head/f 2>/dev/null && echo WROTE a look checkout",
             "touch ${state}/forged 2>/dev/null && echo WROTE the producer state",
             "ls ${state}/looks ${state}/git 2>/dev/null | sed 's/^/SEES /'",
             "test -e /run/credentials/autoland-judge.service/judge-key && echo SEES the producer key",
@@ -249,7 +249,7 @@ pkgs.testers.runNixOSTest {
         # names all it let through.
         reached = [l for l in printed if l.startswith(("WROTE", "SEES", "REACHED"))]
         assert reached == [], (reached, log)
-        assert producer("cat ${state}/looks/g1/head/f") == "code\n"
+        assert producer("cat ${state}/looks/f1/head/f") == "code\n"
 
         lay_build("b1", "echo 'test widget ... FAILED'; exit 1")
         machine.succeed(f"runuser -u autoland-judge -- systemctl start {build_unit('b1')}")
@@ -260,7 +260,7 @@ pkgs.testers.runNixOSTest {
         # Only the producer starts and stops them.
         machine.fail(f"runuser -u dev -- systemctl start {build_unit('b2')}")
         machine.fail(f"runuser -u dev -- systemctl stop {build_unit('b0')}")
-        producer(f"systemctl stop {build_unit('b0')} {build_unit('b1')} {unit('g1')}")
+        producer(f"systemctl stop {build_unit('b0')} {build_unit('b1')}")
 
     with subtest("its looks end with it, and a restart clears their folders"):
         lay("e1")
