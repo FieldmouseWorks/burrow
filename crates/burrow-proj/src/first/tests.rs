@@ -10,7 +10,8 @@ use crate::record::TurnFile;
 /// it answers the PR as open, says whether the asker opened it (`authored`
 /// in the dir), when (`created`, else long after now), with which labels
 /// (`labels`, a JSON array), and logs each call with the App socket it ran
-/// under to `calls`.
+/// under to `calls`. Its bash starts every call with an App socket of its
+/// own (`asker.sock`).
 fn fixture() -> (tempfile::TempDir, Config) {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().display();
@@ -54,7 +55,14 @@ esac
     v["jobs"] = serde_json::json!(d.path().join("jobs"));
     v["tools"]["gh"] = serde_json::json!(gh);
     v["tools"]["jobGh"] = serde_json::json!(gh);
-    v["tools"]["bash"] = serde_json::json!("sh");
+    // The asker runs as some App of its own, whoever runs the tests: the
+    // label goes as the job's identity all the same.
+    let bash = d.path().join("bash");
+    burrow_test::executable(
+        &bash,
+        format!("#!/bin/sh\nexport GH_TOKEN_SOCKET={p}/asker.sock\nexec sh \"$@\"\n"),
+    );
+    v["tools"]["bash"] = serde_json::json!(bash);
     v["apps"] = serde_json::json!({"workers": d.path().join("workers.env")});
     v["firstLabel"] = "first".into();
     (d, serde_json::from_value(v).unwrap())
