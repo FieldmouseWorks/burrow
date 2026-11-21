@@ -28,6 +28,9 @@ pub struct Unit {
     /// Whether systemd has a job for it still to run: a start queued
     /// behind what it's ordered after leaves it inactive until then.
     pub pending: bool,
+    /// The units that start it (systemd's TriggeredBy): a path unit that
+    /// starts a runner again each time it exits.
+    pub triggered_by: Vec<String>,
 }
 
 pub trait World {
@@ -43,7 +46,7 @@ pub trait World {
     /// Whether a switch is in flight: one awaiting its confirm, or its revert
     /// at work. It restarts what it changes, runners among them.
     fn switching(&self) -> bool;
-    /// `systemctl restart` (or `start`) the unit.
+    /// `systemctl restart` (or `start`, or `stop`) the unit.
     fn restart(&self, unit: &str, verb: &str) -> Result<(), String>;
     /// Cancel the repo's Actions run.
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String>;
@@ -167,6 +170,7 @@ impl World for Real<'_> {
             "InactiveExitTimestamp",
             "ControlGroup",
             "Job",
+            "TriggeredBy",
         ];
         let out = Command::new("systemctl")
             .arg("show")
@@ -208,6 +212,10 @@ impl World for Real<'_> {
             since,
             busy,
             pending: pending(&shown),
+            triggered_by: shown
+                .get("TriggeredBy")
+                .map(|v| v.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
         }
     }
 

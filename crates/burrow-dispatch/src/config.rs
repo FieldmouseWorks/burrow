@@ -81,6 +81,11 @@ pub struct Runner {
     /// defaults (self-hosted, its OS and its architecture) unless it was
     /// registered without them.
     pub labels: Vec<String>,
+    /// Its `.runner`, as config.sh wrote it: with it, a runner whose
+    /// registration GitHub has deleted is told apart from an idle one
+    /// (registration.rs).
+    #[serde(default)]
+    pub registration: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

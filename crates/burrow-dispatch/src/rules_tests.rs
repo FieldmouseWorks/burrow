@@ -30,6 +30,7 @@ fn seen(state: &str, since: f64, busy: bool, queued: &[(&str, f64)]) -> Seen {
                 at: *at,
             })
             .collect(),
+        ..Seen::default()
     }
 }
 
@@ -206,9 +207,6 @@ fn runner_states() {
     assert!(d.moves.is_empty() && d.wake == Some(T + Q), "{d:?}");
 }
 
-// A repo GitHub can't be read for keeps its runners' waits as they were,
-// and is a wait of its own from the first pass that couldn't, which the
-// watchdog kicks this handler for.
 #[test]
 fn unread_repo() {
     let dir = tempfile::tempdir().unwrap();
@@ -893,3 +891,6 @@ fn deploy_behind_an_earlier_run() {
         );
     }
 }
+
+#[path = "rules_gone_tests.rs"]
+mod gone;

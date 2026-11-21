@@ -10,6 +10,8 @@ use burrow_watchdog::watch::{self, File};
 use burrow_watchdog::words::{clock, line};
 
 use crate::config::Config;
+use crate::halt;
+use crate::registration::Registered;
 use crate::rules::{Decision, Move, decide};
 use crate::snapshot::{self, Snapshot};
 use crate::state::{Done, State};
@@ -45,7 +47,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut state,
     } = decide(cfg, &snap, &st, &was, now);
     for m in moves {
-        let result = match still(world, &m) {
+        let result = match still(cfg, world, &m) {
             Err(why) => format!("not made: {why}"),
             Ok(()) => {
                 // Kept before it's made, whatever comes of it, so a pass cut
@@ -57,7 +59,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     Move::Cancel { repo, run, .. } => {
                         state.cancels.insert(format!("{repo}#{run}"), now);
                     }
-                    Move::PrivateFresh { .. } | Move::Fresh { .. } | Move::Retire { .. } => {}
+                    Move::PrivateFresh { .. }
+                    | Move::Fresh { .. }
+                    | Move::Retire { .. }
+                    | Move::Halt { .. } => {}
                 }
                 save(dir, "state.json", &state)?;
                 let done = match &m {
@@ -78,6 +83,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                         }
                     }
                     Move::Retire { unit, .. } => world.restart(unit, "stop"),
+                    // What starts it first: stopped while that's up, it's
+                    // started again.
+                    Move::Halt {
+                        unit, reg, stop, ..
+                    } => halt::stop(cfg, world, unit, reg, stop),
                 };
                 done.map_or_else(|e| e, |()| "ok".to_owned())
             }
@@ -131,10 +141,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 /// Whether the move is still called for, looked at again just before it's
 /// made: what the pass saw may have moved on while it read the rest. A
 /// runner may have taken a job, or a switch begun; a run may have finished,
-/// been run again, or lost the run after it. What can't be read again isn't
-/// moved on.
-fn still(world: &dyn World, m: &Move) -> Result<(), String> {
+/// been run again, or lost the run after it; a runner registered again.
+/// What can't be read again isn't moved on.
+fn still(cfg: &Config, world: &dyn World, m: &Move) -> Result<(), String> {
     match m {
+        Move::Halt { unit, reg, .. } => halt::still(cfg, world, unit, reg),
         Move::Runner { unit, state, .. } => {
             let now = world.unit(unit);
             if world.switching() {
@@ -286,6 +297,22 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             if s.unit.busy { "at a job" } else { "idle" },
             s.queued.len()
         );
+        match &s.registered {
+            Registered::Gone(reg) => {
+                let _ = writeln!(
+                    out,
+                    "  its registration is gone at GitHub: {} lists no runner {} ({}); register it again ({})",
+                    reg.scope,
+                    reg.id,
+                    reg.name,
+                    reg.page()
+                );
+            }
+            Registered::Unknown(e) => {
+                let _ = writeln!(out, "  its registration can't be checked: {e}");
+            }
+            Registered::Unchecked | Registered::Listed => {}
+        }
     }
     for (f, pool) in &snap.private {
         match pool {
@@ -357,7 +384,7 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use burrow_watchdog::state::load;
@@ -368,9 +395,9 @@ mod tests {
     use crate::state::State;
     use crate::world::Unit;
 
-    const QUEUED: &str = "repos/sam/r/actions/runs?status=queued";
+    pub(crate) const QUEUED: &str = "repos/sam/r/actions/runs?status=queued";
 
-    fn idle(since: f64) -> Unit {
+    pub(crate) fn idle(since: f64) -> Unit {
         Unit {
             state: "active".into(),
             since: Some(since),
@@ -604,7 +631,7 @@ mod tests {
     }
 
     /// sam/r, on main, with nothing live.
-    fn repo() -> Fake {
+    pub(crate) fn repo() -> Fake {
         let mut w = Fake::default();
         w.github
             .insert("repos/sam/r".into(), Ok(json!({"default_branch": "main"})));

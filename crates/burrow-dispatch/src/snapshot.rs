@@ -10,6 +10,7 @@ use std::fs;
 use serde_json::Value;
 
 use crate::config::{Config, Fresh, Runner};
+use crate::registration::{Lists, Registered};
 use crate::rules::short;
 use crate::world::{Unit, World};
 
@@ -54,6 +55,11 @@ pub struct Seen {
     pub unit: Unit,
     /// The jobs queued that it could take, oldest first.
     pub queued: Vec<Job>,
+    /// Whether GitHub still has its registration.
+    pub registered: Registered,
+    /// The units that start it, as they are, when its registration is gone:
+    /// what would start it again once it's stopped.
+    pub triggers: BTreeMap<String, Unit>,
 }
 
 /// The runners started fresh for one job each, and the jobs queued for
@@ -128,6 +134,7 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
     if let Some(f) = &cfg.fresh {
         snap.fresh = Some(pool(world, f, &queues));
     }
+    let mut lists = Lists::default();
     for (unit, r) in &cfg.runners {
         let Some(q) = queues.get(r.repo.as_str()) else {
             continue;
@@ -138,12 +145,27 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .map(|j| j.job.clone())
             .collect();
         takes.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let seen = world.unit(unit);
+        let registered = r
+            .registration
+            .as_deref()
+            .map_or(Registered::Unchecked, |p| lists.check(world, p));
+        let triggers = match registered {
+            Registered::Gone(_) => seen
+                .triggered_by
+                .iter()
+                .map(|t| (t.clone(), world.unit(t)))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
         snap.runners.insert(
             unit.clone(),
             Seen {
                 repo: r.repo.clone(),
-                unit: world.unit(unit),
+                unit: seen,
                 queued: takes,
+                registered,
+                triggers,
             },
         );
     }
