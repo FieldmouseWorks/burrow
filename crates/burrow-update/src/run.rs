@@ -16,7 +16,9 @@
 //! its head is stuck (train.rs says when): then a fresh bump replaces it.
 //!
 //! Its steps, in order: this file's, to the build; vm_tests.rs, the VM
-//! tests; live.rs, live and confirmed; and this file's again, put up.
+//! tests; live.rs, live and confirmed; and this file's again, put up. Before
+//! each VM test and the switch it looks at main again, and starts over from
+//! it when it moved (follow.rs).
 
 use std::fs::{self, File};
 use std::path::Path;
@@ -37,11 +39,14 @@ use crate::{Broke, Config, is_name, push};
 /// owner hears of it.
 const HELD_FOR: i64 = 6 * 3600;
 
-/// Why a run stops short: it's said what it did (`note`) and exits so, or
-/// something it needed broke.
+/// Why a run stops short: it's said what it did (`note`) and exits so,
+/// something it needed broke, or origin's main moved on to this commit
+/// under it (follow.rs): it starts over from there, saying nothing of the
+/// main it left.
 pub(crate) enum End {
     Exit(u8),
     Broke(Broke),
+    Moved(String),
 }
 
 impl From<Broke> for End {
@@ -126,7 +131,7 @@ pub fn run(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
 /// a copy of the lock until it execs: a run straight after another can
 /// find it held.)
 pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
-    let checks = match std::env::var("BURROW_UPDATE_CHECKS") {
+    let checks: Vec<String> = match std::env::var("BURROW_UPDATE_CHECKS") {
         Ok(c) if !c.is_empty() => c.split_whitespace().map(String::from).collect(),
         _ => cfg.checks.clone(),
     };
@@ -135,37 +140,51 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         eprintln!("{}: {c}: not a VM test's name", cfg.update);
         return 2;
     }
-    let mut r = Run {
-        rules: rules(cfg, &checks),
-        cfg,
-        api,
-        memo: Memo { cfg, force },
-        checks,
-        main: String::new(),
-        running: Running {
-            current: String::new(),
-            rev: None,
-        },
-        inputs: Vec::new(),
-        replacing: None,
-        behind: None,
-        off_main: None,
-        bumping: false,
-        changed: false,
-        unfetched: Vec::new(),
-        failed: Vec::new(),
-        new: String::new(),
-        live: false,
-        untested: Vec::new(),
-        fixes: Vec::new(),
-        url: None,
-    };
-    match r.steps() {
-        Ok(()) => 0,
-        Err(End::Exit(code)) => code,
-        Err(End::Broke(Broke(why))) => {
-            eprintln!("{}: {why}", cfg.update);
-            1
+    // Each pass afresh: nothing the one before found or did carries over,
+    // but what the memo kept of the trees it built and tested.
+    loop {
+        let mut r = Run::new(cfg, &mut *api, force, &checks);
+        match r.steps() {
+            Ok(()) => return 0,
+            Err(End::Exit(code)) => return code,
+            Err(End::Moved(to)) => {
+                println!("main moved on to {to} under it; starting over from there");
+            }
+            Err(End::Broke(Broke(why))) => {
+                eprintln!("{}: {why}", cfg.update);
+                return 1;
+            }
+        }
+    }
+}
+
+impl<'a> Run<'a> {
+    /// A run as it begins, with nothing found yet.
+    fn new(cfg: &'a Config, api: &'a mut dyn Api, force: bool, checks: &[String]) -> Run<'a> {
+        Run {
+            rules: rules(cfg, checks),
+            cfg,
+            api,
+            memo: Memo { cfg, force },
+            checks: checks.to_vec(),
+            main: String::new(),
+            running: Running {
+                current: String::new(),
+                rev: None,
+            },
+            inputs: Vec::new(),
+            replacing: None,
+            behind: None,
+            off_main: None,
+            bumping: false,
+            changed: false,
+            unfetched: Vec::new(),
+            failed: Vec::new(),
+            new: String::new(),
+            live: false,
+            untested: Vec::new(),
+            fixes: Vec::new(),
+            url: None,
         }
     }
 }

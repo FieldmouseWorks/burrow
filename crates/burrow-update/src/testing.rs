@@ -44,11 +44,17 @@ pub const BRANCH: &str = "box-update";
 ///   of HOME/build-breaks in it doesn't build. A VM test (#checks.) says
 ///   what it ran on stdout and stderr both, and fails with HOME/check-fails
 ///   there, on a commit whose flake.lock has a line of HOME/check-breaks in
-///   it, or once, with HOME/check-flaky there. Its flake's metadata is
+///   it, or once, with HOME/check-flaky there; it runs HOME/after-check
+///   once when that's there (main moving as it ends, say), which may leave
+///   another for the next VM test. Its flake's metadata is
 ///   WORK/flake.lock's (a lock as `lock` writes one), and `flake update
 ///   INPUT` locks INPUT to HOME/upstream-INPUT's commit, when there is one,
 ///   or fails, with HOME/unfetchable-INPUT there.
-/// - heavy takes a slot (HOME/nix.log says so) and runs what follows `--`.
+/// - heavy takes a slot (HOME/nix.log says so), runs HOME/in-slot once
+///   when it's there (what happens while it waits: main moving, say), and
+///   runs what follows `--`.
+/// - burrow-update stands in for the program itself (CARGO_BIN_EXE_ isn't
+///   a unit test's), doing as `unless-moved` does with plain git.
 /// - proj logs each call to HOME/proj.log and says its job's id, unless
 ///   HOME/proj-down is there: then it fails. A run under a --key whose job
 ///   is at work (HOME/keys/KEY, `/` as `+`, holds its id) joins it: says
@@ -122,6 +128,7 @@ esac
 case "$*" in *'#checks.'*)
   echo "ran $*"
   echo "a VM test's log" >&2
+  if [ -e "$HOME/after-check" ]; then mv "$HOME/after-check" "$HOME/after-check.now"; sh "$HOME/after-check.now"; rm "$HOME/after-check.now"; fi
   [ ! -e "$HOME/check-fails" ] || exit 1
   if [ -e "$HOME/check-flaky" ]; then rm "$HOME/check-flaky"; exit 1; fi
   ref=$(printf '%s\n' "$*" | sed -n 's|.*git+file://\([^?]*\)?rev=\([0-9a-f]*\)#.*|\1 \2|p')
@@ -166,6 +173,19 @@ echo "$sys"
 [ "$1" = -- ] || exit 9
 shift
 echo "slot taken" >>"$HOME/nix.log"
+if [ -e "$HOME/in-slot" ]; then sh "$HOME/in-slot"; rm "$HOME/in-slot"; fi
+exec "$@"
+"#,
+            ),
+            (
+                "burrow-update",
+                r#"#!/bin/sh
+[ "$1" = unless-moved ] && [ "$4" = -- ] || exit 9
+work=$2 main=$3
+shift 4
+if git -C "$work" fetch -q origin main && now=$(git -C "$work" rev-parse refs/remotes/origin/main); then
+  [ "$now" = "$main" ] || { echo "main moved to $now" >&2; exit 1; }
+fi
 exec "$@"
 "#,
             ),
@@ -400,6 +420,7 @@ impl Machine {
             configuration: "box".into(),
             system: "x86_64-linux".into(),
             heavy: None,
+            program: bin().join("burrow-update"),
             project: "homelab".into(),
             app: None,
             train: Some(train()),

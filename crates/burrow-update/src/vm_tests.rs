@@ -10,6 +10,9 @@
 //! serious known vulnerability from what runs now (CVSS 7+, per vulnix).
 //! Those go live without the test, under the same dead man's switch and
 //! health check as everything else.
+//!
+//! A VM test that main moves on under (follow.rs) counts for nothing: the
+//! run starts over from the new main.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -21,7 +24,7 @@ use serde_json::Value;
 use crate::check::run_check;
 use crate::dispatch::{age, open, settled};
 use crate::memo::{Verdict, clean};
-use crate::run::{Run, Step};
+use crate::run::{End, Run, Step};
 use crate::status::Outcome;
 use crate::{Broke, Config};
 
@@ -64,7 +67,7 @@ impl Run<'_> {
                 base
             } else {
                 let on_main = logs.join(format!("check-{c}-main.log"));
-                let base = verdict(run_check(cfg, &c, &self.main, &on_main));
+                let base = verdict(self.test(&c, &self.main, &on_main)?);
                 self.memo.record(&c, &self.main, base)?;
                 base
             };
@@ -164,14 +167,27 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// The VM test `c` on `commit`'s tree, while main is still the run's:
+    /// it looks before it waits for a slot, once it has one (`run_check`),
+    /// and again when the test fails. A test that failed while main moved,
+    /// before it started or as it ran, is no failure: the run starts over.
+    fn test(&self, c: &str, commit: &str, log: &Path) -> Result<bool, End> {
+        self.still_main()?;
+        let passed = run_check(self.cfg, c, commit, &self.main, log);
+        if !passed {
+            self.still_main()?;
+        }
+        Ok(passed)
+    }
+
     /// The VM test `c` on `head`'s tree, and once more when it fails: a
     /// pass the second time is a flaky test, and a job's to make reliable.
     /// `log` is what the run that counts said.
-    fn twice(&self, c: &str, head: &str, log: &Path) -> Result<Verdict, Broke> {
+    fn twice(&self, c: &str, head: &str, log: &Path) -> Result<Verdict, End> {
         let cfg = self.cfg;
         let logs = cfg.state.join("logs");
         let flaky = format!("flaky-{c}");
-        if run_check(cfg, c, head, log) {
+        if self.test(c, head, log)? {
             if clean(cfg, c, true)? >= STEADY {
                 settled(
                     cfg,
@@ -182,7 +198,7 @@ impl Run<'_> {
             return Ok(Verdict::Pass);
         }
         let again = logs.join(format!("check-{c}.log.again"));
-        if !run_check(cfg, c, head, &again) {
+        if !self.test(c, head, &again)? {
             moved(&again, log)?;
             return Ok(Verdict::Fail);
         }

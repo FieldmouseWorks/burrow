@@ -1,5 +1,7 @@
 //! burrow-update CONFIG [--force | status]: HOST-update (lib.rs), as
-//! modules/updates.nix builds it in with its config.
+//! modules/updates.nix builds it in with its config. And, with no config,
+//! `burrow-update unless-moved WORK MAIN -- COMMAND...`, which a VM test
+//! runs through in its heavy slot, as the user (follow.rs).
 //!
 //!   HOST-update            one run; burrow-events starts one for each push
 //!                          to main (or a watched input), and hourly
@@ -18,7 +20,8 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use burrow_update::{Config, run, status};
+use burrow_update::follow::{UNLESS_MOVED, unless_moved};
+use burrow_update::{Config, is_commit, run, status};
 
 /// The word a HOST-update that isn't root starts again with, through sudo.
 /// sudo makes it root. Where it doesn't (a runas default, or the tests'
@@ -49,6 +52,27 @@ fn parse(words: &[String]) -> Option<(bool, Word)> {
 }
 
 fn main() -> ExitCode {
+    // As the user, in a heavy slot: never through sudo, and no config.
+    let raw: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|w| w == UNLESS_MOVED) {
+        return match &raw[1..] {
+            [work, main, dashes, command @ ..]
+                if dashes == "--"
+                    && !command.is_empty()
+                    && main.to_str().is_some_and(is_commit) =>
+            {
+                ExitCode::from(unless_moved(
+                    Path::new(work),
+                    &main.to_string_lossy(),
+                    command,
+                ))
+            }
+            _ => {
+                eprintln!("usage: burrow-update {UNLESS_MOVED} WORK MAIN -- COMMAND...");
+                ExitCode::from(2)
+            }
+        };
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     let Some((config, words)) = args.split_first() else {
         eprintln!("usage: burrow-update CONFIG [--force | status]");
