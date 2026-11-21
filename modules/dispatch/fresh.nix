@@ -66,7 +66,7 @@ in
     repos = mkOption {
       type = types.listOf types.str;
       example = [ "sam-org/homelab" ];
-      description = "OWNER/REPO, whose queued jobs the dispatcher reads for their label, and whose evidence counts these runners' results (burrow.ledger.freshRunners).";
+      description = "OWNER/REPO, whose queued jobs the dispatcher reads for their label, and whose evidence counts these runners' results (burrow.ledger.freshRunners), as a discovered private repo's does when its trainFresh setting says so.";
     };
 
     label = mkOption {

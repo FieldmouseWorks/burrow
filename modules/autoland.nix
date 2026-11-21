@@ -173,6 +173,7 @@ let
       trainSize = 8;
       trainRequire = [ ];
       trainNegative = null;
+      trainFresh = false;
       trainStallAfter = cfg.trainStallAfterMinutes;
     };
     # The merge train's status, which a repo's baseline requires while its
@@ -794,6 +795,11 @@ in
         train only once that run's attested result on the head it joins at
         is that the tests failed there, or that it adds none to code;
         Conary's `cn train join --negative`. Unset, none is asked for),
+        trainFresh (true: the train's evidence counts the results of the
+        machine's runners started fresh for one job, burrow.dispatch.fresh,
+        beside GitHub-hosted ones, as a private repo's CI on the runners
+        dispatch registers for it needs; a repo in burrow.dispatch.fresh.repos
+        counts them anyway, and every other counts GitHub-hosted ones only),
         trainStallAfter (minutes, trainStallAfterMinutes). Any
         other setting is refused, a typo or a newer burrow's alike, rather
         than doing nothing.
@@ -840,6 +846,12 @@ in
       # whatever it replaces (a check's proof) until the burrow catches up.
       assertion = unknown == [ ];
       message = "burrow.autoland.repos: no such setting: ${lib.concatStringsSep ", " unknown}. A repo's settings are the ones the option's description lists; a newer burrow's need that burrow.";
+    } {
+      # Without them there's no prefix to count, and its evidence would
+      # count GitHub-hosted runners only, without a word.
+      assertion = config.burrow.dispatch.fresh.enable or false
+        || !lib.any (rc: rc.trainFresh or false) (lib.attrValues cfg.repos);
+      message = "burrow.autoland.repos: trainFresh counts the machine's fresh runners, and burrow.dispatch.fresh isn't enabled.";
     } {
       # Its rules are what keep anything but the train off its default branch.
       assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;

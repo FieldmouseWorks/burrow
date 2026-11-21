@@ -10,8 +10,10 @@
 # conaryd takes. Each repo conaryd may have reads its own flow config, the
 # one its shadow reads, so a remi-shaped repo (its train's gate on runners
 # started fresh for its jobs) and a Conary-shaped one (on GitHub-hosted
-# runners) land through one conaryd, each on its own evidence, and Conary's
-# own loaders take the events file and each config. A repo not shadowed,
+# runners) land through one conaryd, each on its own evidence, as does a
+# private one whose trainFresh says its gate runs on the runners dispatch
+# registers for it, and Conary's own loaders take the events file and each
+# config. A trainFresh with no fresh runners is refused. A repo not shadowed,
 # or with a train and no evidence, is refused. Being listed gives conaryd
 # no repo: that's the live setting's (crates/burrow-landing's tests show
 # the handover, and narrow the events file to the repos it gives).
@@ -50,14 +52,17 @@ let
   }];
   askedFlow = asked false;
   # remi and Conary as remi runs them: each with its train, remi's gate on
-  # the machine's fresh runners, Conary's on GitHub's.
+  # the machine's fresh runners, Conary's on GitHub's. And a private repo
+  # dispatch discovers (burrow.dispatch.privateOwners), not in the fresh
+  # runners' repos, whose gate runs on the runners it registers for it.
   train = require: { train = true; trainRequire = [ require ]; trainNegative = "check / negative"; };
   pair = machine [{
     burrow.dispatch.fresh = { enable = true; owner = "Sam"; repos = [ "Sam/Remi" ]; };
-    burrow.autoland.shadow = [ "sam/remi" "sam/conary" ];
+    burrow.autoland.shadow = [ "sam/remi" "sam/conary" "sam/vault" ];
     burrow.autoland.repos."sam/remi" = train "fresh / check";
     burrow.autoland.repos."sam/conary" = train "check / check";
-    burrow.landing.conaryd = [ "sam/remi" "sam/conary" ];
+    burrow.autoland.repos."Sam/Vault" = train "fresh / check" // { trainFresh = true; };
+    burrow.landing.conaryd = [ "sam/remi" "sam/conary" "sam/vault" ];
   }];
   pairTemplate = pair.burrow.landing.eventsTemplate;
   pairConfig = repo: "${pair.burrow.autoland.flowConfigs}/${repo}.json";
@@ -102,6 +107,9 @@ let
       burrow.autoland.shadow = [ "sam/homelab" ];
       burrow.landing.conaryd = [ "sam/homelab" ];
     }]))) then "a repo whose train has no evidence, which conaryd's train can't step on, is given to it" else null)
+    (if !(lib.any (lib.hasInfix "trainFresh counts the machine's fresh runners") (failing (machine [{
+      burrow.autoland.repos."sam/homelab".trainFresh = true;
+    }]))) then "a repo whose evidence is to count the machine's fresh runners is taken with none" else null)
     (if failing askedFlow != [ ] then "a machine whose flow asks through the owner's door fails: ${toString (failing askedFlow)}" else null)
     (if !(lib.any (lib.hasInfix "the owner's door") (failing (asked true))) then "conaryd running as a controller of its own is given the owner's door, which it can't start as burrow.user" else null)
     (if failing (machine [{
@@ -129,8 +137,8 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   # config, as Conary's loaders read them, each repo reading its own, with
   # its own evidence.
   ${flowFiles} events ${pairTemplate} || fail "Conary's events::Runtime refuses remi's and Conary's events file"
-  ${flowFiles} flow ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} || fail "Conary's flow::Config refuses remi's or Conary's flow config"
-  for repo in sam/remi sam/conary; do
+  ${flowFiles} flow ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} ${pairConfig "sam/vault"} || fail "Conary's flow::Config refuses remi's, Conary's or vault's flow config"
+  for repo in sam/remi sam/conary sam/vault; do
     cmp "$(jq -r --arg r $repo '.flow_config[$r]' ${pairTemplate})" ${pair.burrow.autoland.flowConfigs}/$repo.json \
       || fail "$repo doesn't read its own flow config"
   done
@@ -138,6 +146,8 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
     || fail "remi's evidence doesn't count its fresh runners: $(jq -c .evidence ${pairConfig "sam/remi"})"
   jq -e '.evidence == {signer: "${pair.burrow.ledger.signerWorkflow}", fresh: null, require: ["check / check"], negative: "check / negative"}' ${pairConfig "sam/conary"} >/dev/null \
     || fail "Conary's evidence counts a runner other than GitHub's: $(jq -c .evidence ${pairConfig "sam/conary"})"
+  jq -e '.evidence == {signer: "${pair.burrow.ledger.signerWorkflow}", fresh: "fresh-${pair.networking.hostName}-", require: ["fresh / check"], negative: "check / negative"}' ${pairConfig "sam/vault"} >/dev/null \
+    || fail "a private repo's evidence doesn't count the runners dispatch registers for it: $(jq -c .evidence ${pairConfig "sam/vault"})"
   # Conary refuses an events file whose flow configs don't match its repos.
   jq '.flow_config |= del(.["sam/conary"])' ${pairTemplate} > missing.json
   jq '.repos = ["sam/remi"]' ${pairTemplate} > unlisted.json

@@ -45,8 +45,9 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
   conaryd whose automated work is allowed, and no others, each with its own
   flow configuration (`flow_config`), the one its shadow reads. Its
   `evidence.fresh` is the machine's fresh runners
-  (`burrow.dispatch.fresh`) for a repo in their `repos`, and null,
-  GitHub-hosted runners only, for every other.
+  (`burrow.dispatch.fresh`) for a repo in their `repos` or whose
+  `trainFresh` setting is true (a private repo, on the runners dispatch
+  registers for it), and null, GitHub-hosted runners only, for every other.
 - renovate-run ([crates/burrow-renovate](../crates/burrow-renovate/src/run.rs))
   reads it as each run of Renovate starts. Renovate merges only in a repo
   the steward lands; anywhere else, a handover under way included, it opens
