@@ -34,12 +34,8 @@ let
   # burrow-proof, what runs a proof that's a command (a repo's proofRuns).
   burrowProof = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof;
 
-  # The baseline and what it links to (the house style, the settings, the
-  # rules, the project template and lib), together, so the links resolve for
-  # the job that reads them. Only these: every machine's build reads them, so
-  # a doc outside the list is free to take CI's docs lane
-  # (.github/workflows/flake.yml's docs-paths leaves each of them out).
-  # crates/burrow-workflows' baseline_docs holds the list to both.
+  # The baseline and what it links to, so the links resolve: the list is
+  # autoland/baseline-docs.json, which burrow-workflows' baseline_docs tests.
   baselineDocs = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions
