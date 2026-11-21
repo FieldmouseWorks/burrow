@@ -167,6 +167,18 @@ impl Pass<'_> {
         n: u64,
         closed: Option<&Value>,
     ) -> Option<Option<String>> {
+        self.landed_at(repo, n, closed, &mut Vec::new())
+    }
+
+    /// [`Pass::landed_child`], `walking` the split children whose lists
+    /// are being read above it, as `OWNER/REPO#N`.
+    fn landed_at(
+        &mut self,
+        repo: &str,
+        n: u64,
+        closed: Option<&Value>,
+        walking: &mut Vec<String>,
+    ) -> Option<Option<String>> {
         if let Some(pr) = self.recorded_landing(repo, n) {
             return Some(Some(pr));
         }
@@ -175,11 +187,7 @@ impl Pass<'_> {
             && let Ok(list) = serde_json::from_slice::<List>(&bytes)
             && !list.children.is_empty()
         {
-            return Some(
-                list.next()
-                    .is_none()
-                    .then(|| format!("https://github.com/{repo}/issues/{n}")),
-            );
+            return self.split_landed(repo, n, closed.is_some(), list, walking);
         }
         // What its finished job awaited, then the PR it was split to carry,
         // which counts whatever its state and however it closed.
@@ -204,6 +212,88 @@ impl Pass<'_> {
         }
     }
 
+    /// Whether split child N's own `list` is done, read from its children
+    /// as GitHub has them now rather than from the ticks alone: its list
+    /// stops moving once N closes ([`Pass::sequence`] reads open parents
+    /// only), so a PR that closes N with its last child would leave it
+    /// waiting for good (FieldmouseWorks/Conary#416). Each closed child
+    /// done as [`Pass::landed_child`] says, or by its successor, counts; an
+    /// open one is its list's own to move on, so it's not done, and so is
+    /// one whose list is already being read above (a successor naming an
+    /// ancestor). What counts is ticked and kept only once N is `closed`:
+    /// an open N's list is [`Pass::sequence`]'s to write.
+    fn split_landed(
+        &mut self,
+        repo: &str,
+        n: u64,
+        closed: bool,
+        mut list: List,
+        walking: &mut Vec<String>,
+    ) -> Option<Option<String>> {
+        let at = format!("{repo}#{n}").to_lowercase();
+        if walking.contains(&at) {
+            return Some(None);
+        }
+        walking.push(at);
+        let (done, ticked) = self.split_walk(repo, n, &mut list, walking);
+        walking.pop();
+        if closed && ticked {
+            let parent = n.to_string();
+            if !self.save_list(repo, &parent, &list) {
+                self.retry(repo);
+                return None;
+            }
+            if !self.render_list(repo, &parent, &mut list) {
+                self.miss(repo);
+            }
+        }
+        done
+    }
+
+    /// Ticks split child N's `list` on from its children as GitHub has
+    /// them ([`Pass::split_landed`]): whether it's done, and whether any
+    /// child was ticked.
+    fn split_walk(
+        &mut self,
+        repo: &str,
+        n: u64,
+        list: &mut List,
+        walking: &mut Vec<String>,
+    ) -> (Option<Option<String>>, bool) {
+        let parent = n.to_string();
+        let mut ticked = false;
+        while let Some(index) = list.next() {
+            let Some(child) = list.children[index].number else {
+                return (Some(None), ticked);
+            };
+            let Some(issue) = crate::github::api(self.cfg, &format!("repos/{repo}/issues/{child}"))
+            else {
+                return (None, ticked);
+            };
+            if issue["state"] != "closed" || !self.eligible(repo, &issue) {
+                return (Some(None), ticked);
+            }
+            let pr = match self.landed_at(repo, child, Some(&issue), walking) {
+                Some(Some(pr)) => pr,
+                Some(None) => {
+                    match self.successor_at(repo, &issue, &list.refs(repo, &parent), walking) {
+                        Successor::Landed(pr) => pr,
+                        Successor::Unknown => return (None, ticked),
+                        _ => return (Some(None), ticked),
+                    }
+                }
+                None => return (None, ticked),
+            };
+            let at = &mut list.children[index];
+            at.merged_pr = Some(pr);
+            at.waits = false;
+            at.continued = None;
+            ticked = true;
+        }
+        let done = format!("https://github.com/{repo}/issues/{n}");
+        (Some(Some(done)), ticked)
+    }
+
     /// Where closed child `issue` (as REST gives it) went on: the successor
     /// its newest author's comment naming one names, in one of this
     /// machine's projects and off its own list (`list`, the parent and its
@@ -214,6 +304,17 @@ impl Pass<'_> {
     /// editor an author. While one is open the repo is looked at again in a
     /// while, since a merge elsewhere sends no event here.
     pub(super) fn successor(&mut self, repo: &str, issue: &Value, list: &[String]) -> Successor {
+        self.successor_at(repo, issue, list, &mut Vec::new())
+    }
+
+    /// [`Pass::successor`], `walking` as [`Pass::landed_at`] is.
+    fn successor_at(
+        &mut self,
+        repo: &str,
+        issue: &Value,
+        list: &[String],
+        walking: &mut Vec<String>,
+    ) -> Successor {
         let mut from = (repo.to_owned(), issue.clone());
         let list: std::collections::BTreeSet<String> =
             list.iter().map(|r| r.to_lowercase()).collect();
@@ -278,7 +379,7 @@ impl Pass<'_> {
                 self.book(repo, crate::now() + AWAITED_LOOK);
                 return Successor::Open(format!("{at}#{m}"));
             }
-            match self.landed_child(&at, m, closed.then_some(&next)) {
+            match self.landed_at(&at, m, closed.then_some(&next), walking) {
                 Some(Some(pr)) => return Successor::Landed(pr),
                 None => return Successor::Unknown,
                 Some(None) if !closed => {

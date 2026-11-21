@@ -35,7 +35,10 @@ drain and worker admission both check the parent list. A child is offered
 once; a later deferral is retained instead of repeatedly paying to replan
 unchanged work. A manually applied
 engine label cannot admit a later child. Nested splits complete through
-their own lists. Issue, PR and turn-completion events advance the list
+their own lists, read from their children as GitHub has them: a split
+child closed with its last child, or before a pass ticked it, is done
+once every child on its list has landed, and that list is ticked then.
+Issue, PR and turn-completion events advance the list
 without a parent job.
 
 A child is done when a merged PR is tied to it, whatever the PR's body
