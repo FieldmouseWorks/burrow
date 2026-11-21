@@ -89,7 +89,9 @@ fn a_pr_closing_a_split_child_with_its_last_child_moves_the_grandparent_on() {
     let mut p = b.pass();
     p.sequence("sam/box", std::slice::from_ref(&parent));
     assert!(moved_on(&b), "{}", b.log());
-    assert_eq!(list_of(&b, "8").children[1].merged_pr.as_deref(), Some(PR));
+    let eight = list_of(&b, "8");
+    assert_eq!(eight.children[1].merged_pr.as_deref(), Some(PR));
+    assert!(eight.rendered.contains(&format!("[x] #11: task 11 — {PR}")));
     let seven = list_of(&b, "7");
     assert!(seven.children[0].merged_pr.is_some());
     assert!(!seven.children[0].waits);
@@ -125,4 +127,37 @@ fn an_unreadable_last_child_is_a_miss_not_a_wait() {
     assert!(!moved_on(&b));
     assert!(p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
     assert!(!list_of(&b, "7").children[0].waits);
+}
+
+/// An open last child an author recorded a landing for is closed with it,
+/// as its list's own pass would close it, and counts.
+#[test]
+fn an_open_last_child_recorded_landed_is_closed_and_counts() {
+    let (b, parent) = split("open");
+    let d = b.pass().plan_dir("sam/box", "11");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("landed"), format!("{PR}\n")).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(
+        b.log()
+            .contains("-X PATCH repos/sam/box/issues/11 -f state=closed"),
+        "{}",
+        b.log()
+    );
+    assert!(moved_on(&b));
+    assert_eq!(list_of(&b, "8").children[1].merged_pr.as_deref(), Some(PR));
+}
+
+/// A split list that names its own split child is a cycle: not done, and
+/// the pass returns.
+#[test]
+fn a_split_list_naming_itself_is_not_done() {
+    let (b, parent) = split("closed");
+    closes(&b, 8);
+    let mut eight = list_of(&b, "8");
+    eight.children[1].number = Some(8);
+    assert!(b.pass().save_list("sam/box", "8", &eight));
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(list_of(&b, "7").children[0].waits);
 }

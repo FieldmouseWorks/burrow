@@ -222,7 +222,8 @@ impl Pass<'_> {
     /// ([`Pass::child_now`]), not only from the ticks a pass of it kept: its
     /// list is sequenced only while N is open, and a PR may close N with its
     /// last child (FieldmouseWorks/Conary#416). The ticks it finds are kept
-    /// on the list. None when one couldn't be asked about.
+    /// on the list and its checklist, and an open child it ticks is closed.
+    /// None when one couldn't be asked about.
     fn split_done(&mut self, repo: &str, n: u64, mut list: List) -> Option<bool> {
         let at = format!("{repo}#{n}").to_lowercase();
         if self.splits.contains(&at) {
@@ -246,6 +247,13 @@ impl Pass<'_> {
             }
             match self.child_now(repo, child, &issue, &refs) {
                 Some(Now::Landed(pr)) => {
+                    // An open one recorded so is closed with it, as its
+                    // list's own pass would.
+                    if issue["state"] != "closed"
+                        && !self.close(repo, &child.to_string(), "completed")
+                    {
+                        break None;
+                    }
                     let at = &mut list.children[index];
                     at.merged_pr = Some(pr);
                     at.waits = false;
@@ -257,8 +265,12 @@ impl Pass<'_> {
             }
         };
         self.splits.pop();
-        if ticked && !self.save_list(repo, &n.to_string(), &list) {
-            self.retry(repo);
+        if ticked {
+            if !self.save_list(repo, &n.to_string(), &list) {
+                self.retry(repo);
+            } else if !self.render_list(repo, &n.to_string(), &mut list) {
+                self.miss(repo);
+            }
         }
         done
     }
