@@ -8,7 +8,7 @@ import os
 import shutil
 import stat
 
-from harness import (DOOR, OWNER_ASKS, REAL, WROTE, C, S, T, T0, found, fresh_pr_state, head, mkpr, pr_state, run,
+from harness import (DOOR, OWNER_ASKS, REAL, STATES, WROTE, C, S, T, T0, found, fresh_pr_state, head, mkpr, pr_state, run,
                      stand_in, summary, tmp)
 
 stand_in()
@@ -151,6 +151,25 @@ for unasked in ("unlisted", "declined"):
     S.CFG["askAsOwner"]["repos"] = repos
     DOOR.clear()
 print("once a head, the digest after: ok")
+
+# A head a conflict's Claude job holds is one it must push over: no review
+# is asked of it while the job works, though GitHub's word on the merge goes
+# quiet a while (UNKNOWN: burrow#1324, where the review that came opened a
+# thread after the job had read the PR), and the owner doesn't hear of the
+# missing one. Once the job is over without a push, the head is asked for.
+fresh()
+step({**mkpr(), "mergeStateStatus": "DIRTY"}, 0)
+assert pr_state()["conflictFixed"] == f"{head} main", pr_state()
+quiet = {**mkpr(), "mergeStateStatus": "UNKNOWN"}
+for at in (30, 60, 120):
+    status, digest = step(quiet, at * 60)
+    assert heard["owner"] == [] and digest == [], (at, heard, digest)
+assert "a Claude job is replacing it" in status, status
+STATES[pr_state()["conflictFixedJob"]] = "done"
+step(quiet, 121 * 60)
+assert heard["owner"] == [("sam/r", 5, head)], heard
+STATES.clear()
+print("no ask of a head a conflict's job replaces: ok")
 
 # The steward runs the door's command (which starts it as a unit of the
 # machine user's own: checks/autoland-review-ask.nix) with only the PR it's

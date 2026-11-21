@@ -102,6 +102,7 @@ fn handed(answers: Option<String>) -> Handed {
         head: HANDED.into(),
         description: BODY.into(),
         also: Vec::new(),
+        own: false,
         at: 1_793_558_866.0,
         answers,
     }
@@ -242,6 +243,61 @@ fn a_fix_with_no_new_commit_is_no_answer() {
             Err(Unposted::Wrong(
                 "its answers say it fixed thread PRRT_a, but it pushed no new commit".into()
             ))
+        );
+        assert_eq!(changed(&hub), vec![]);
+    }
+}
+
+// burrow#1324: a review asked of the head a conflict's job was replacing
+// opened a thread after the job read the PR. Its push is up and its first
+// answers went with it; the next turn says that push fixed the late thread,
+// pushing nothing more. That's an answer, naming the push, but only for a
+// thread opened on a commit before the job's own push, and only when the
+// head really is that push.
+#[test]
+fn a_later_turn_names_its_own_push_for_a_thread_opened_before_it() {
+    let late = |on: Option<&str>| {
+        json!({"id": "PRRT_late", "isResolved": false,
+               "comments": {"nodes": [{"body": "**Codex · P2** a late one"}]},
+               "opened": {"nodes": [{"originalCommit": on.map(|c| json!({"oid": c}))}]}})
+    };
+    let fix = json!([{"id": "PRRT_late", "fixed": true, "reply": "The merge already drops it."}]);
+    let later = |pushed: Option<&str>, own: bool| Handed {
+        head: PUSHED.into(),
+        own,
+        ..handed(left(pushed, fix.clone()))
+    };
+    for pushed in [None, Some(PUSHED)] {
+        let mut hub = github(pr("OPEN", PUSHED, BODY, vec![late(Some(HANDED))]));
+        assert_eq!(
+            answered(&mut hub, &later(pushed, true)),
+            Ok(Posted::Answers(Took {
+                head: PUSHED.into(),
+                description: None,
+                own: true,
+            }))
+        );
+        assert_eq!(
+            changed(&hub),
+            vec![
+                (
+                    "reply".into(),
+                    json!({"t": "PRRT_late", "b": format!("**Codex job** · fixed in {PUSHED}\n\nThe merge already drops it.")})
+                ),
+                ("resolve".into(), json!({"t": "PRRT_late"})),
+            ]
+        );
+    }
+    // Opened on the job's own push, on no commit GitHub names, or with a
+    // head the job was handed and never pushed over: a fix needs a new one.
+    for (on, own) in [(Some(PUSHED), true), (None, true), (Some(HANDED), false)] {
+        let mut hub = github(pr("OPEN", PUSHED, BODY, vec![late(on)]));
+        assert_eq!(
+            answered(&mut hub, &later(None, own)),
+            Err(Unposted::Wrong(
+                "its answers say it fixed thread PRRT_late, but it pushed no new commit".into()
+            )),
+            "{on:?} {own}"
         );
         assert_eq!(changed(&hub), vec![]);
     }

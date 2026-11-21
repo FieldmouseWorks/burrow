@@ -39,6 +39,7 @@ fn handing() -> Handing {
         resumes: false,
         retiring: false,
         owns: false,
+        own: false,
     }
 }
 
@@ -586,6 +587,60 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
     assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
     assert!(s.answering.is_empty());
+}
+
+// burrow#1324: a conflict's job pushed and answered; a review of the head it
+// replaced had opened a thread meanwhile, after it read the PR. Its next
+// turn says its push fixed that thread and pushes nothing: the claim knows
+// its head is the job's own push, so that answer goes up, on that push.
+#[test]
+fn a_late_thread_on_the_head_a_push_replaced_is_answered_by_that_push() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    let mut l = at(PUSHED, jobs.path(), true);
+    let thread = |id: &str, resolved: bool, on: &str| {
+        json!({"id": id, "isResolved": resolved, "comments": {"nodes": [{"body": "**Codex · P1** x"}]},
+               "opened": {"nodes": [{"originalCommit": {"oid": on}}]}})
+    };
+    let answers = |pushed: Option<&str>, id: &str| {
+        let a =
+            json!({"pushed": pushed, "threads": [{"id": id, "fixed": true, "reply": "Fixed."}]});
+        std::fs::write(dir.join("answers.json"), a.to_string()).unwrap();
+    };
+    // Turn 1: its push, and its answer on the thread it read.
+    std::fs::write(dir.join("turns"), "1").unwrap();
+    answers(Some(PUSHED), "T1");
+    let open = json!([thread("T1", false, HANDED), thread("T2", false, HANDED)]);
+    let mut hub = github(PUSHED, "Does it.", open);
+    let (s, _) = seen(&mut hub, "done", &l);
+    assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
+    let kept = &s.answering["job-1"];
+    assert!(kept.head == PUSHED && kept.own, "{kept:?}");
+    l.answering = s.answering.clone();
+    l.pushed_by = s.pushed_by.clone();
+    // Turn 2: the late thread, fixed by that push.
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    answers(None, "T2");
+    let open = json!([thread("T1", true, HANDED), thread("T2", false, HANDED)]);
+    let mut hub = github(PUSHED, "Does it.", open);
+    let (s, _) = seen(&mut hub, "done", &l);
+    assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
+    assert_eq!(writes(&hub), ["reply", "resolve"]);
+    let said = hub.asked.iter().find_map(|(_, _, _, b)| {
+        let b = b.as_ref()?;
+        b["query"]
+            .as_str()?
+            .contains("addPullRequestReviewThreadReply")
+            .then(|| b["variables"]["b"].clone())
+    });
+    assert_eq!(
+        said,
+        Some(json!(format!(
+            "**Claude job** · fixed in {PUSHED}\n\nFixed."
+        )))
+    );
 }
 
 // Every answers file taken stays taken: A, then B, then A again is not A

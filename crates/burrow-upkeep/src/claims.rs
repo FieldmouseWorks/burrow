@@ -73,6 +73,9 @@ pub struct Handing {
     pub head: String,
     pub body: String,
     pub at: f64,
+    /// `head` is the job's own push, which answers of its went up on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
     /// How many times its pass has looked for who pushed each head.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looked: BTreeMap<String, u32>,
@@ -326,14 +329,20 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 head: rec.head.clone(),
                 description: rec.body.clone(),
                 also: also.clone(),
+                own: rec.own,
                 at: rec.at,
                 answers: Some(text),
             };
             also.extend(described);
             let mut wrote = Wrote::default();
             let (outcome, why) = match answer::answer(p, &h, &mut wrote) {
-                Ok(Posted::Answers(Took { head, description })) => {
+                Ok(Posted::Answers(Took {
+                    head,
+                    description,
+                    own,
+                })) => {
                     rec.head = head;
+                    rec.own = own;
                     if let Some(d) = description {
                         rec.body = d;
                     }

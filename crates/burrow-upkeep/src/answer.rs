@@ -6,7 +6,10 @@
 //! only while the PR's head is the job's own push, or the head it was handed
 //! when it pushed nothing. So a job can't say it fixed something in a commit
 //! GitHub doesn't have, and a job whose PR someone else moved on meanwhile
-//! says nothing at all: the new head is theirs.
+//! says nothing at all: the new head is theirs. A later turn that pushes
+//! nothing may still say its earlier push, the head, fixed a thread opened on
+//! an older commit (one a review of a head it was replacing opened after it
+//! read the PR: burrow#1324), and the reply names that push.
 //!
 //! `pusher` says who pushed a branch's head, from GitHub's own record of the
 //! branch's pushes, so a pass can tell a job's own push from anyone else's
@@ -34,6 +37,9 @@ pub struct Handed {
     /// kept what it did): the PR's description is the job's own when it is
     /// one of these, and an edit to anything else is someone else's.
     pub also: Vec<String>,
+    /// `head` is the job's own push, which an earlier turn's answers went up
+    /// on, not the head it was handed.
+    pub own: bool,
     /// When, in Unix seconds.
     pub at: f64,
     /// The job's answers file as it left it, or None for none.
@@ -97,6 +103,8 @@ pub enum Posted {
 pub struct Took {
     pub head: String,
     pub description: Option<String>,
+    /// The head is the job's own push (this turn's, or an earlier one's).
+    pub own: bool,
 }
 
 /// Why nothing (more) went up.
@@ -121,10 +129,11 @@ pub enum Unposted {
 }
 
 /// The PR as `answer` checks it: its state, head, description and review
-/// threads, each with its last comment.
+/// threads, each with its last comment and the commit its first was on.
 const PR: &str = "query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { \
 pullRequest(number: $n) { state headRefOid headRefName body \
-reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(last: 1) { nodes { body } } } } } } }";
+reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(last: 1) { nodes { body } } \
+opened: comments(first: 1) { nodes { originalCommit { oid } } } } } } } }";
 const REPLY: &str = "mutation($t: ID!, $b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $t, body: $b}) { comment { id } } }";
 const RESOLVE: &str =
     "mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }";
@@ -285,11 +294,22 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
         )));
     }
     let pushed = a.pushed.as_deref().filter(|c| *c != h.head);
-    // A fix needs a commit new since the claim's head, but for a thread an
-    // earlier turn's answers fixed and resolved, which a later turn keeps in
-    // its file.
+    // The commit a fix is in: a commit new since the claim's head, or, when
+    // that head is this job's own earlier push, that push for a thread opened
+    // on a commit before it (a review of the head it replaced, come after
+    // the job read the PR). A thread opened on that push, or on no commit
+    // GitHub names, needs a new one.
+    let fixed_in = |t: &Value| {
+        pushed.or_else(|| {
+            let on = t["opened"]["nodes"][0]["originalCommit"]["oid"].as_str();
+            (h.own && on.is_some_and(|c| c != h.head)).then_some(h.head.as_str())
+        })
+    };
+    // A fix needs that commit, but for a thread an earlier turn's answers
+    // fixed and resolved, which a later turn keeps in its file.
     if let Some(r) = a.threads.iter().find(|r| {
-        r.fixed && pushed.is_none() && threads[r.id.as_str()]["isResolved"] != json!(true)
+        let t = threads[r.id.as_str()];
+        r.fixed && fixed_in(t).is_none() && t["isResolved"] != json!(true)
     }) {
         return Err(Unposted::Wrong(format!(
             "its answers say it fixed thread {}, but it pushed no new commit",
@@ -303,7 +323,7 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
         if t["isResolved"] == json!(true) {
             continue;
         }
-        let text = reply_text(r, pushed, &h.engine);
+        let text = reply_text(r, fixed_in(t), &h.engine);
         let last = t["comments"]["nodes"][0]["body"].as_str();
         if !last.is_some_and(|l| same(l, &text)) {
             let said = mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}));
@@ -363,6 +383,7 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
     Ok(Posted::Answers(Took {
         head: want.to_owned(),
         description: left,
+        own: pushed.is_some() || h.own,
     }))
 }
 

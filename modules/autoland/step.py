@@ -271,7 +271,10 @@ class Pass(Context, Jobs, Actions):
         save(self.key, self.st)
 
     def reviewed(self, open_threads, changes, swept):
-        # The reviewers (review_step.py).
+        # The reviewers (review_step.py). A conflict's job on this head must
+        # push a new one over it: it's asked no review meanwhile.
+        on = self.st.get("conflictFixed") or ""
+        replacing = on.split(" ")[0] == self.head and bool(self.running("conflictFixed", on))
         looked = review_step.look(
             self.repo,
             self.pr,
@@ -282,6 +285,7 @@ class Pass(Context, Jobs, Actions):
             self.after,
             self.tried,
             lambda: T.review(self.repo, self.pr),
+            replacing,
         )
 
         live, said, rounds, clean, capped, waiting, stuck, unreviewed, changed = looked

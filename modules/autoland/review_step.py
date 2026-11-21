@@ -31,12 +31,16 @@ class Looked(NamedTuple):
     changed: bool  # retargeted or edited after its push: clean isn't the reviewers' to settle alone
 
 
-def look(repo, pr, st, digest, line, age, after, tried, needed):
+def look(repo, pr, st, digest, line, age, after, tried, needed, replacing=False):
     """The reviewers' part of the PR's step this pass. st is its state;
     digest and line its listing; age how long its head has been still (since
     its push, as near as GitHub says); after books its next pass, and tried
     strikes the ask when the owner's door failed or clears it (step.py's); needed,
-    whether its head needs a review round at all (train.review)."""
+    whether its head needs a review round at all (train.review); replacing,
+    whether a fix job that must push a new head over this one holds it (a
+    conflict's): no review is asked of it, nor is its missing one listed,
+    since what a review found would land on a head already on its way out,
+    after the job read the PR (burrow#1324). Its push is asked about anew."""
     rc = repo_cfg(repo)
     names = V.on(repo)
     said = {r: V.verdict(repo, pr) for r in names}
@@ -59,6 +63,8 @@ def look(repo, pr, st, digest, line, age, after, tried, needed):
         v = said[r][0]
         if v == "running":
             waiting.append(f"{V.NAMES[r]} is reviewing this commit")
+        elif v == "none" and replacing:
+            waiting.append(f"No {V.NAMES[r]} review asked of this commit: a Claude job is replacing it")
         elif v == "none":
             waiting.append(f"Waiting for {V.NAMES[r]}'s review of this commit")
             at, unasked = V.asked(repo, pr, 0), None
