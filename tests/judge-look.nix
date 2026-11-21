@@ -257,10 +257,18 @@ pkgs.testers.runNixOSTest {
         assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "1"), s
         assert "test widget ... FAILED" in producer("cat ${state}/runs/b1/log")
 
+        # A program it needs isn't in the unit: its worker's word that it
+        # couldn't run it, kept as the unit's success, an outcome the look
+        # is shown.
+        lay_build("b2", "python3 -c 'print(1)'")
+        machine.succeed(f"runuser -u autoland-judge -- systemctl start {build_unit('b2')}")
+        s = build_shown("b2")
+        assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "2"), s
+
         # Only the producer starts and stops them.
-        machine.fail(f"runuser -u dev -- systemctl start {build_unit('b2')}")
+        machine.fail(f"runuser -u dev -- systemctl start {build_unit('b9')}")
         machine.fail(f"runuser -u dev -- systemctl stop {build_unit('b0')}")
-        producer(f"systemctl stop {build_unit('b0')} {build_unit('b1')}")
+        producer(f"systemctl stop {build_unit('b0')} {build_unit('b1')} {build_unit('b2')}")
 
     with subtest("its looks end with it, and a restart clears their folders"):
         lay("e1")

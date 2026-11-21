@@ -17,11 +17,16 @@
 //!
 //! What each came to goes to the look as data in its brief ([`quoted`]),
 //! and the judgment's own reasons record what was built and how it came
-//! out ([`summary`]), whatever the look says.
+//! out ([`summary`]), whatever the look says. A check that couldn't run
+//! here (a program it needs isn't in the unit, it needed the network, or
+//! it was killed) is shown as that, never as a pass or a fail; a look
+//! that passes a head none of whose checks passed is refused ([`passed`]).
+//! A build that ends with nothing of its worker's kept (its unit timed
+//! out or broke, or its request ended) judges nothing.
 use crate::Config;
 use burrow_producer::serve::Work;
 use burrow_producer::units::{Ended, Units, run_id};
-use burrow_proof::work::{FAILED, Mode, PASSED, Spec};
+use burrow_proof::work::{BROKE, FAILED, Mode, PASSED, Spec};
 use conary_github::flow::{self, Recipe};
 use std::fs;
 use std::io::{Read as _, Seek, SeekFrom};
@@ -46,15 +51,47 @@ pub struct Built {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Came {
-    /// Its program ran here: whether it passed, and the end of what it
+    /// Its program was run here: how it came out, and the end of what it
     /// printed.
     Ran {
         argv: Vec<String>,
-        passed: bool,
+        outcome: Outcome,
         tail: String,
     },
     /// It wasn't run here, and why.
     NotRun(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Passed,
+    Failed,
+    /// The worker couldn't run it here: no outcome either way.
+    Broke,
+}
+
+impl Outcome {
+    fn said(self) -> &'static str {
+        match self {
+            Outcome::Passed => "passed",
+            Outcome::Failed => "failed",
+            Outcome::Broke => "couldn't run here",
+        }
+    }
+}
+
+/// Whether any of `built` passed: a look may pass a head it built only
+/// then.
+pub fn passed(built: &[Built]) -> bool {
+    built.iter().any(|b| {
+        matches!(
+            b.came,
+            Came::Ran {
+                outcome: Outcome::Passed,
+                ..
+            }
+        )
+    })
 }
 
 /// Each of the flow's checks, and the program a build runs for it, or why
@@ -111,8 +148,12 @@ pub fn build(
                     check: check.clone(),
                     recipe: Recipe::Run(argv.clone()),
                 };
-                let (passed, tail) = run(cfg, units, &spec, work)?;
-                Came::Ran { argv, passed, tail }
+                let (outcome, tail) = run(cfg, units, &spec, work)?;
+                Came::Ran {
+                    argv,
+                    outcome,
+                    tail,
+                }
             }
         };
         built.push(Built { check, came });
@@ -120,7 +161,7 @@ pub fn build(
     Ok(built)
 }
 
-/// One check's build, run to its end and let go of: whether it passed, and
+/// One check's build, run to its end and let go of: how it came out, and
 /// the end of its log, read once nothing of it is left running. Its folder
 /// goes either way.
 fn run(
@@ -128,7 +169,7 @@ fn run(
     units: &dyn Units,
     spec: &Spec,
     work: &Work,
-) -> Result<(bool, String), String> {
+) -> Result<(Outcome, String), String> {
     let bench = cfg.bench();
     let id = run_id();
     let ran =
@@ -140,9 +181,12 @@ fn run(
     let tail = tail(&bench.log(&id));
     let _ = fs::remove_dir_all(bench.run(&id));
     let check = &spec.check;
-    let passed = match ran.map_err(|why| format!("{check}'s build: {why}"))? {
-        Ended::Exited(PASSED) => true,
-        Ended::Exited(FAILED) => false,
+    let outcome = match ran.map_err(|why| format!("{check}'s build: {why}"))? {
+        Ended::Exited(PASSED) => Outcome::Passed,
+        Ended::Exited(FAILED) => Outcome::Failed,
+        // Its worker's own word that it couldn't run it, which the unit
+        // keeps (judge.nix): what the look is shown, not an error.
+        Ended::Exited(BROKE) => Outcome::Broke,
         Ended::Exited(n) => {
             return Err(format!(
                 "{check}'s build exited {n}, the machine failing, not an outcome: nothing is judged unbuilt"
@@ -151,7 +195,7 @@ fn run(
         Ended::Broke(why) => return Err(format!("{check}'s build broke: {why}")),
     };
     stopped.map_err(|e| format!("{check}'s build wouldn't stop: {e}"))?;
-    Ok((passed, tail?))
+    Ok((outcome, tail?))
 }
 
 /// The last [`TAIL`] bytes of the log at `path`, from a line's start.
@@ -185,11 +229,15 @@ pub fn quoted(built: &[Built]) -> String {
     built
         .iter()
         .map(|b| match &b.came {
-            Came::Ran { argv, passed, tail } => format!(
+            Came::Ran {
+                argv,
+                outcome,
+                tail,
+            } => format!(
                 "- {}: ran `{}` and it {}. The end of what it printed:\n{}",
                 b.check,
                 command(argv),
-                if *passed { "passed" } else { "failed" },
+                outcome.said(),
                 burrow_brief::quote(tail),
             ),
             Came::NotRun(why) => format!("- {}: not run here: {why}.", b.check),
@@ -203,12 +251,9 @@ pub fn summary(built: &[Built]) -> String {
     let each: Vec<String> = built
         .iter()
         .map(|b| match &b.came {
-            Came::Ran { argv, passed, .. } => format!(
-                "{} (`{}`) {}",
-                b.check,
-                command(argv),
-                if *passed { "passed" } else { "failed" },
-            ),
+            Came::Ran { argv, outcome, .. } => {
+                format!("{} (`{}`) {}", b.check, command(argv), outcome.said())
+            }
             Came::NotRun(why) => format!("{} not run: {why}", b.check),
         })
         .collect();

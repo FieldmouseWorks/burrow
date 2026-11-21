@@ -329,8 +329,11 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        # A fail is an outcome too, kept as the unit's success.
-        SuccessExitStatus = "1";
+        # A fail is an outcome too, and so is a check its worker couldn't
+        # run (2: a program it needs isn't here, it needed the network, it
+        # was killed), which the look is shown as that: each kept as the
+        # unit's success. A timeout or a stop is none.
+        SuccessExitStatus = "1 2";
         # A user of its own, named for the build, and the producer's group,
         # for its run's folder, the only part of the producer's state it
         # sees: not the mirror, not a look's. Other users' processes it

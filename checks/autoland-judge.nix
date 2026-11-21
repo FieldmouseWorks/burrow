@@ -72,7 +72,7 @@ let
       && build.serviceConfig.SupplementaryGroups == [ "autoland-judge" ]
       && lib.elem "${on.burrow.stateDir}:ro" build.serviceConfig.TemporaryFileSystem
       && build.serviceConfig.BindPaths == [ "${state}/runs/%i" ]
-      && build.serviceConfig.Delegate && build.serviceConfig.SuccessExitStatus == "1"
+      && build.serviceConfig.Delegate && build.serviceConfig.SuccessExitStatus == "1 2"
       && build.bindsTo == [ "autoland-judge.service" ]
       && lib.hasSuffix "/bin/burrow-judge build ${configFile} %i" (plain build.serviceConfig.ExecStart);
     # The producer alone starts and stops looks and builds.

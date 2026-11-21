@@ -256,7 +256,7 @@ impl Judges for Looks {
         let reported = if why.contains(&Trigger::NoCi) {
             Some(Vec::new())
         } else if why.contains(&Trigger::Started) {
-            Some(reported(&*source, repo, head)?)
+            Some(reported(&*source, &self.cfg.flow(repo)?, repo, head)?)
         } else {
             None
         };
@@ -324,6 +324,12 @@ impl Judges for Looks {
         }
         stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
         let looked = Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)?;
+        if looked.verdict == Judgment::Pass && !built.is_empty() && !build::passed(built) {
+            return Err(
+                "the judge's look passed a head none of whose checks passed when it was built: nothing is judged unbuilt"
+                    .into(),
+            );
+        }
         // What was built, recorded by the producer, whatever the look said.
         let why = if built.is_empty() {
             looked.why
@@ -349,10 +355,13 @@ impl Judges for Looks {
     }
 }
 
-/// What GitHub reports on `repo`'s head `head` besides the judge's own
-/// run: each check run's and status's name and how it stands.
+/// What GitHub reports of CI on `repo`'s head `head`, as Conary's flow
+/// counts it (`flow::ci`): each check run but the judge's own, and each
+/// status but the steward's `review-settled`, the train's and one of the
+/// flow's proofs', with who posted it (anyone who can push can post one).
 fn reported(
     source: &dyn conary_github::flow::Read,
+    flow: &conary_github::flow::Config,
     repo: &str,
     head: &str,
 ) -> Result<Vec<String>, String> {
@@ -362,16 +371,28 @@ fn reported(
     let statuses = source
         .statuses(repo, head)
         .map_err(|e| format!("{head}'s statuses: {e}"))?;
-    let runs = runs.into_iter().map(|r| {
-        let stands = r.conclusion.unwrap_or(r.status);
-        (r.name, stands)
-    });
-    let statuses = statuses.into_iter().map(|s| (s.context, s.state));
-    Ok(runs
-        .chain(statuses)
-        .filter(|(name, _)| name != crate::producer::CHECK)
-        .map(|(name, stands)| format!("{name}: {stands}"))
-        .collect())
+    let runs = runs
+        .into_iter()
+        .filter(|r| r.name != crate::producer::CHECK)
+        .map(|r| format!("{}: {}", r.name, r.conclusion.unwrap_or(r.status)));
+    let not_ci = |context: &str| {
+        let context = context.to_lowercase();
+        context == "review-settled"
+            || context == conary_github::train::CONTEXT
+            || flow
+                .settings
+                .proofs
+                .keys()
+                .any(|p| p.eq_ignore_ascii_case(&context))
+    };
+    let statuses = statuses
+        .into_iter()
+        .filter(|s| !not_ci(&s.context))
+        .map(|s| {
+            let by = s.creator.map_or("no one GitHub names".into(), |u| u.login);
+            format!("{}: {} (a status, posted by {by})", s.context, s.state)
+        });
+    Ok(runs.chain(statuses).collect())
 }
 
 /// git with `args`: what it printed, or why it failed.

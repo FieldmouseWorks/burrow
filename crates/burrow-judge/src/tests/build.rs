@@ -3,7 +3,7 @@
 //! (the VM test, tests/judge-look.nix, is the unit's half: its user, its
 //! read-only view and its missing network), and the look shown what came
 //! of it.
-use super::look::{Rig, rig};
+use super::look::{Rig, printed, rig};
 use super::{ask, judge_request};
 use crate::Config;
 use burrow_producer::serve::Work;
@@ -48,6 +48,9 @@ pub(super) struct Asked {
     pub loaded: Vec<String>,
     /// How many looks' folders there were as each build ran.
     pub looks: Vec<usize>,
+    /// Whether each unit breaks, keeping nothing of its worker's (a
+    /// timeout, a stop).
+    pub broke: bool,
 }
 
 impl Builds {
@@ -67,6 +70,9 @@ impl Units for Builds {
         let mut asked = self.asked.lock().unwrap();
         asked.ran.push(id.into());
         asked.looks.push(looks);
+        if asked.broke {
+            return Ok(Ended::Broke("its unit ended failed (timeout)".into()));
+        }
         drop(asked);
         let code = burrow_proof::work::work(self.cfg.bench(), id, &mut Bare);
         if code > 1 {
@@ -236,12 +242,49 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
 }
 
 #[test]
-fn a_build_that_ends_with_no_outcome_judges_nothing() {
+fn a_check_that_couldnt_run_here_is_shown_as_that_and_never_passes_the_head() {
+    // A program the unit doesn't have, as most checks that need the
+    // network or Nix are here.
+    let proofs = json!({"gate": bash("echo no python3 here >&2; exit 127")});
     let r = rig();
     let p = r.producer();
-    r.proofs(json!({"gate": bash("exit 127")}));
+    r.proofs(proofs.clone());
+    // The look passes it anyway: refused, and nothing is posted.
     let got = ask(r.dir.path(), &p, &judge_request(&r.w, vec![Trigger::NoCi]));
-    assert!(got.unwrap_err().contains("the machine failing"));
+    assert!(
+        got.unwrap_err().contains("none of whose checks passed"),
+        "a pass of a head nothing passed on"
+    );
+    let prompt = r.seen("prompt");
+    assert!(
+        prompt.contains(
+            "- gate: ran `bash -c echo no python3 here >&2; exit 127` and it couldn't run here"
+        ),
+        "{prompt}"
+    );
+    assert!(prompt.contains("> no python3 here"), "{prompt}");
+    assert!(r.w.posted().is_empty());
+
+    // Sent to the owner, it's published, with what was built.
+    let r = rig();
+    r.prints(&printed("owner", "a-model"));
+    let (got, _) = judged(&r, proofs, vec![Trigger::NoCi]);
+    assert_eq!(got["answer"]["verdict"], "owner", "{got}");
+    let why = got["posted"].as_str().unwrap();
+    assert!(
+        why.contains("gate (`bash -c echo no python3 here >&2; exit 127`) couldn't run here."),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_build_whose_unit_keeps_no_outcome_judges_nothing() {
+    let r = rig();
+    let p = r.producer();
+    r.proofs(json!({"gate": bash("echo the gate held")}));
+    r.builds().broke = true;
+    let got = ask(r.dir.path(), &p, &judge_request(&r.w, vec![Trigger::NoCi]));
+    assert!(got.unwrap_err().contains("gate's build broke"));
     assert!(r.asked().ran.is_empty());
     assert!(r.w.posted().is_empty());
 }
@@ -254,7 +297,10 @@ fn a_judge_owed_with_its_reasons_unrecorded_is_shown_the_heads_ci() {
             json!({"id": 1, "name": "flake", "status": "completed", "conclusion": "failure"}),
             json!({"id": 2, "name": "conary/judgment", "status": "completed", "conclusion": "success"}),
         ];
-        p.statuses = vec![json!({"context": "lint", "state": "success"})];
+        p.statuses = vec![
+            json!({"context": "lint", "state": "success", "creator": {"login": "alice", "type": "User"}}),
+            json!({"context": "review-settled", "state": "success"}),
+        ];
     });
     let (_, prompt) = judged(
         &r,
@@ -263,18 +309,25 @@ fn a_judge_owed_with_its_reasons_unrecorded_is_shown_the_heads_ci() {
     );
     assert!(!prompt.contains("CI is green"), "{prompt}");
     assert!(
-        prompt.contains("> flake: failure\n> lint: success\n"),
+        prompt.contains("> flake: failure\n> lint: success (a status, posted by alice)\n"),
         "{prompt}"
     );
     assert!(!prompt.contains("conary/judgment:"), "{prompt}");
+    assert!(!prompt.contains("review-settled"), "{prompt}");
     // CI reported, so nothing was built.
     assert!(r.builds().ran.is_empty());
 
-    // With nothing but the judge's own run on it, it's built, as a head no
-    // CI reported on.
+    // With nothing but the judge's own run, the steward's word and a
+    // proof's on it, none of them CI, it's built, as a head no CI reported
+    // on.
     let r = rig();
     r.w.with(|p| {
         p.check_runs = vec![json!({"id": 2, "name": "conary/judgment", "status": "completed", "conclusion": "success"})];
+        p.statuses = vec![
+            json!({"context": "review-settled", "state": "success"}),
+            json!({"context": "conary/train", "state": "success"}),
+            json!({"context": "Gate", "state": "success"}),
+        ];
     });
     let (got, prompt) = judged(
         &r,
