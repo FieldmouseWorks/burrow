@@ -2,6 +2,7 @@
 //! its gate and runs it, here in this process through a stand-in for
 //! Claude Code, the worker's real work but for systemd (the VM test,
 //! tests/judge-look.nix, is systemd's and the users' half).
+use super::build::Builds;
 use super::world::{World, github, read, world};
 use super::{PRODUCER, REPO, SECRET, ask, ask_with, config, judge_request, seal};
 use crate::egress::Dial;
@@ -23,7 +24,7 @@ use std::time::Instant;
 
 /// What the stand-in prints when the test doesn't say: a verdict, by its
 /// session, on the model it was asked for.
-fn printed(verdict: &str, model: &str) -> Value {
+pub(super) fn printed(verdict: &str, model: &str) -> Value {
     json!({"type": "result", "subtype": "success", "is_error": false,
         "session_id": "look-session",
         "structured_output": {"verdict": verdict, "why": "Read the diff and every thread."},
@@ -89,13 +90,13 @@ struct InProcess {
 }
 
 #[derive(Default)]
-struct Asked {
-    ran: Vec<String>,
-    stopped: Vec<String>,
-    loaded: Vec<String>,
+pub(super) struct Asked {
+    pub ran: Vec<String>,
+    pub stopped: Vec<String>,
+    pub loaded: Vec<String>,
     /// What each look's folder held when it ran: its spec, and its head's
     /// and its base's files.
-    laid: Vec<(Spec, String, String, String)>,
+    pub laid: Vec<(Spec, String, String, String)>,
     /// Whether the head's link was laid out as a plain file.
     link_is_file: Vec<bool>,
     /// Whether a look's request ends while it runs.
@@ -229,14 +230,15 @@ fn api(dialed: Arc<Mutex<Vec<String>>>) -> Dial {
     })
 }
 
-struct Rig {
-    dir: tempfile::TempDir,
-    w: World,
+pub(super) struct Rig {
+    pub dir: tempfile::TempDir,
+    pub w: World,
     units: InProcess,
+    pub builds: Builds,
     dialed: Arc<Mutex<Vec<String>>>,
 }
 
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let w = world();
     repo(dir.path(), &w);
@@ -248,26 +250,29 @@ fn rig() -> Rig {
         home,
         asked: Arc::default(),
     };
+    let builds = Builds::new(config(dir.path()));
     Rig {
         dir,
         w,
         units,
+        builds,
         dialed: Arc::default(),
     }
 }
 
 impl Rig {
-    fn looks(&self) -> Looks {
+    pub fn looks(&self) -> Looks {
         Looks::new(
             config(self.dir.path()),
             read(&self.w),
             Box::new(self.units.clone()),
+            Box::new(self.builds.clone()),
             api(self.dialed.clone()),
         )
         .unwrap()
     }
 
-    fn producer(&self) -> Producer {
+    pub fn producer(&self) -> Producer {
         Producer::new(
             config(self.dir.path()),
             read(&self.w),
@@ -279,16 +284,16 @@ impl Rig {
         .unwrap()
     }
 
-    fn seen(&self, name: &str) -> String {
+    pub fn seen(&self, name: &str) -> String {
         std::fs::read_to_string(self.dir.path().join("seen").join(name)).unwrap_or_default()
     }
 
-    fn prints(&self, printed: &Value) {
+    pub fn prints(&self, printed: &Value) {
         std::fs::write(self.dir.path().join("prints"), printed.to_string()).unwrap();
     }
 
     /// A look's judgment of `request`, asked as the producer asks it.
-    fn judge(&self, request: &Request) -> Result<Value, String> {
+    pub fn judge(&self, request: &Request) -> Result<Value, String> {
         let looks = self.looks();
         let dir = self.dir.path().join("asking");
         std::fs::create_dir_all(&dir).unwrap();
@@ -300,7 +305,7 @@ impl Rig {
         )
     }
 
-    fn asked(&self) -> std::sync::MutexGuard<'_, Asked> {
+    pub fn asked(&self) -> std::sync::MutexGuard<'_, Asked> {
         self.units.asked.lock().unwrap()
     }
 }
@@ -505,8 +510,9 @@ fn the_producer_takes_only_the_answer_its_look_left() {
 #[test]
 fn a_head_no_ci_ran_on_or_a_discussion_that_isnt_the_requests_runs_no_look() {
     let r = rig();
+    // Its flow names nothing to build it with.
     let got = r.judge(&judge_request(&r.w, vec![Trigger::NoCi, Trigger::Asked]));
-    assert!(got.unwrap_err().contains("burrow#1190"));
+    assert!(got.unwrap_err().contains("nothing is judged unbuilt"));
     let request = judge_request(&r.w, vec![Trigger::Asked]);
     r.w.with(|p| p.threads.clear());
     assert!(r.judge(&request).is_err());
@@ -577,7 +583,8 @@ fn a_judgment_a_look_cant_take_is_refused_before_it_burns_a_generation() {
         &p,
         &judge_request(&r.w, vec![Trigger::NoCi, Trigger::Asked]),
     );
-    assert!(got.unwrap_err().contains("burrow#1190"));
+    // No CI, and its flow names nothing to build it with.
+    assert!(got.unwrap_err().contains("nothing is judged unbuilt"));
     // No generation was allocated, no look ran, nothing was posted.
     assert!(!r.dir.path().join("state/generations").exists());
     assert!(r.asked().ran.is_empty());

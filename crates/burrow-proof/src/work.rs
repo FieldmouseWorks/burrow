@@ -20,7 +20,7 @@
 //! arguments, as the flow's settings give it), in a fresh clone of the
 //! commit, in a fence of its own.
 use crate::fence::Fence;
-use crate::plugin::Config;
+use crate::plugin::Bench;
 use crate::verdict;
 use conary_github::flow::Recipe;
 use serde::{Deserialize, Serialize};
@@ -62,25 +62,25 @@ pub enum Mode {
 /// The spec's file in a run's folder.
 pub const SPEC: &str = "spec.json";
 
-/// The worker's configuration, with its run's home, which every command
-/// it starts is given.
+/// The worker's bench, with its run's home, which every command it
+/// starts is given.
 struct Worker<'a> {
-    cfg: &'a Config,
+    bench: Bench<'a>,
     home: PathBuf,
 }
 
-impl Deref for Worker<'_> {
-    type Target = Config;
-    fn deref(&self) -> &Config {
-        self.cfg
+impl<'a> Deref for Worker<'a> {
+    type Target = Bench<'a>;
+    fn deref(&self) -> &Bench<'a> {
+        &self.bench
     }
 }
 
-/// Run `id`'s work, each command fenced by `fence`: its exit.
-pub fn work(cfg: &Config, id: &str, fence: &mut dyn Fence) -> u8 {
+/// Run `id`'s work on `bench`, each command fenced by `fence`: its exit.
+pub fn work(bench: Bench, id: &str, fence: &mut dyn Fence) -> u8 {
     let cfg = Worker {
-        cfg,
-        home: cfg.home(id),
+        bench,
+        home: bench.home(id),
     };
     let ended = within(&cfg, id, fence);
     let _ = fs::remove_dir_all(&cfg.home);
@@ -136,6 +136,10 @@ fn within(cfg: &Worker, id: &str, fence: &mut dyn Fence) -> u8 {
     }
     note(&format!("{} on {} at {}", spec.check, spec.repo, spec.head));
     match (&spec.recipe, spec.mode) {
+        (Recipe::Build(_), _) if cfg.nix.is_none() => {
+            note("this worker builds no flake: it has no Nix");
+            BROKE
+        }
         (Recipe::Build(attr), mode) => match derivation(cfg, &spec, &mirror, attr, &log) {
             Ok(drv) if mode == Mode::Proof => realise(cfg, &drv, &log),
             Ok(drv) => prepare(cfg, &drv, &log),
@@ -161,14 +165,20 @@ fn command(cfg: &Worker, program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 fn git(cfg: &Worker, dir: &Path) -> Command {
-    let mut c = command(cfg, &cfg.git);
+    let mut c = command(cfg, cfg.git);
     c.arg("-C").arg(dir);
     c
 }
 
 /// `program` in nix's programs' directory.
 fn nix(cfg: &Worker, program: &str) -> Command {
-    command(cfg, cfg.nix.join(program))
+    command(cfg, nix_program(cfg, program))
+}
+
+/// `program`'s path in nix's programs' directory, which a worker that
+/// builds has (`within` refuses a build to one without).
+fn nix_program(cfg: &Worker, program: &str) -> PathBuf {
+    cfg.nix.unwrap_or(Path::new("/")).join(program)
 }
 
 /// What `command` printed, its errors going to `log`, or why it failed.
@@ -237,7 +247,7 @@ fn derivation(
 fn heavy(cfg: &Worker, argv: &[String]) -> Command {
     let words: Vec<String> = cfg
         .heavy
-        .iter()
+        .into_iter()
         .flatten()
         .cloned()
         .chain(argv.iter().cloned())
@@ -290,7 +300,7 @@ fn prepare(cfg: &Worker, drv: &str, log: &File) -> u8 {
             return Ok(FAILED);
         }
         let realise = [
-            cfg.nix.join("nix-store").to_string_lossy().into_owned(),
+            nix_program(cfg, "nix-store").to_string_lossy().into_owned(),
             "--realise".into(),
         ];
         let mut c = heavy(cfg, &[&realise[..], &inputs[..]].concat());
@@ -324,7 +334,7 @@ fn realise(cfg: &Worker, drv: &str, log: &File) -> u8 {
         let _ = writeln!(&mut &*log, "burrow-proof: {text}");
     };
     let argv = [
-        cfg.nix.join("nix-store").to_string_lossy().into_owned(),
+        nix_program(cfg, "nix-store").to_string_lossy().into_owned(),
         "--realise".into(),
         drv.into(),
     ];
@@ -457,13 +467,18 @@ fn run(
     let tree = cfg.trees.join(id);
     let cloned = (|| -> Result<(), String> {
         let _ = fs::remove_dir_all(&tree);
-        let mut c = command(cfg, &cfg.git);
+        let mut c = command(cfg, cfg.git);
         c.args(["clone", "-q", "--shared", "--no-checkout"])
             .arg(cfg.repo(id))
             .arg(&tree);
         read(c, log)?;
         let mut c = git(cfg, &tree);
         c.args(["checkout", "-q", "--detach", &spec.head]);
+        // With no network, an LFS file stays its pointer: it can't be
+        // fetched.
+        if cfg.offline {
+            c.env("GIT_LFS_SKIP_SMUDGE", "1");
+        }
         read(c, log).map(drop)
     })();
     if let Err(why) = cloned {

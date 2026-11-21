@@ -689,9 +689,9 @@ fn a_run_recipe_is_its_command_in_a_fresh_clone_and_its_exit_the_verdict() {
         };
         // Laid out as the producer lays a run out: the worker reads its
         // own copy of the repo, never the mirror.
-        lay(&r.cfg, &id, &spec).unwrap();
+        lay(r.cfg.bench(), &r.cfg.mirror(REPO), &id, &spec).unwrap();
         std::fs::rename(r.cfg.mirror(REPO), r.dir.path().join("hidden")).unwrap();
-        let code = work::work(&r.cfg, &id, &mut Bare);
+        let code = work::work(r.cfg.bench(), &id, &mut Bare);
         let log = std::fs::read_to_string(r.cfg.log(&id)).unwrap();
         std::fs::rename(r.dir.path().join("hidden"), r.cfg.mirror(REPO)).unwrap();
         (code, log)

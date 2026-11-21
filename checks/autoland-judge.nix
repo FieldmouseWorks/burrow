@@ -4,7 +4,10 @@
 # enter, which alone gets the signing key and the seal key; a look unit a
 # judgment at a time, as a user systemd makes for it, with its login and
 # neither key, seeing only its folder of the producer's state, with no
-# network of its own, and that only the producer may start; and a plugin
+# network of its own, and that only the producer may start; a build unit
+# for each check of a head no CI reported on, as a user systemd makes for it, with
+# no key, no login, no network and no Nix daemon, seeing only its run's
+# folder; and a plugin
 # wrapper the flow configuration names. With no controller it's refused:
 # the producer would trust burrow.user, the user authoring jobs run as.
 # Nothing of it is burrow.user's: tests/judge-look.nix tries, as that user,
@@ -29,12 +32,14 @@ let
   failed = failing uncontrolled;
   producer = on.systemd.services.autoland-judge;
   look = on.systemd.services."autoland-judge-look@";
+  build = on.systemd.services."autoland-judge-build@";
   read = on.burrow.autoland.plugins.judge.config;
   configFile = builtins.unsafeDiscardStringContext (lib.last (lib.splitString " " producer.serviceConfig.ExecStart));
   plain = builtins.unsafeDiscardStringContext;
   state = "${on.burrow.stateDir}/autoland-judge";
   wiring = {
-    offByDefault = !(off.systemd.services ? autoland-judge) && !(off.systemd.services ? "autoland-judge-look@");
+    offByDefault = !(off.systemd.services ? autoland-judge) && !(off.systemd.services ? "autoland-judge-look@")
+      && !(off.systemd.services ? "autoland-judge-build@");
     # On, with a controller, nothing fails: the judging engine is out of
     # authoring sessions' reach.
     builds = failing on == [ ];
@@ -57,9 +62,22 @@ let
       && lib.elem "/etc/claude-code:ro" look.serviceConfig.TemporaryFileSystem
       && look.serviceConfig.BindPaths == [ "${state}/looks/%i" ]
       && look.bindsTo == [ "autoland-judge.service" ];
-    # The producer alone starts and stops looks.
+    # A build is a user of its own too, with no credential, seeing its run's
+    # folder alone, with no network and no Nix daemon: nothing it runs gets
+    # past the look's gate.
+    build = build.serviceConfig.DynamicUser && build.serviceConfig.User == "jbuild-%i"
+      && !(build.serviceConfig ? LoadCredential)
+      && build.serviceConfig.PrivateNetwork && build.serviceConfig.ProtectHome
+      && build.serviceConfig.InaccessiblePaths == [ "-/nix/var/nix/daemon-socket" ]
+      && build.serviceConfig.SupplementaryGroups == [ "autoland-judge" ]
+      && lib.elem "${on.burrow.stateDir}:ro" build.serviceConfig.TemporaryFileSystem
+      && build.serviceConfig.BindPaths == [ "${state}/runs/%i" ]
+      && build.serviceConfig.Delegate && build.serviceConfig.SuccessExitStatus == "1"
+      && build.bindsTo == [ "autoland-judge.service" ]
+      && lib.hasSuffix "/bin/burrow-judge build ${configFile} %i" (plain build.serviceConfig.ExecStart);
+    # The producer alone starts and stops looks and builds.
     polkit = lib.hasInfix ''subject.user != "autoland-judge"'' on.security.polkit.extraConfig
-      && lib.hasInfix "/^autoland-judge-look@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
+      && lib.hasInfix "/^(autoland-judge-look|autoland-judge-build)@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
     # No runner, and nothing of proj's: a judgment is no burrow.user job.
     noRunner = !(on.systemd.services ? burrow-judge-runner) && !(read ? proj) && !(read ? runner);
     producerCommand = lib.hasSuffix "/bin/burrow-judge producer ${configFile}" (plain producer.serviceConfig.ExecStart);
@@ -72,6 +90,7 @@ let
       && read.role == "judge" && read.producer == "sam/judge" && read.credential == "judge-key"
       && read.seal == "judge-seal" && read.login == "claude-token" && read.unit == "autoland-judge-look"
       && read.hosts == [ "api.anthropic.com" ] && lib.hasSuffix "/bin/claude" read.claude
+      && read.build == "autoland-judge-build" && read.trees == "/var/tmp"
       && read.settings == on.burrow.settings.effective
       && read.state == state && read.token != null;
   };

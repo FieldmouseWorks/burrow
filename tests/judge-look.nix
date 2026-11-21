@@ -10,7 +10,13 @@
 # authoring session runs as, tries to answer in the judge's place, by
 # writing a look's answer or its spec, replacing its checkout, starting a
 # look of its own, reading a look's login, reaching its process or asking
-# the producer, and every way is refused. The crate's tests run the same
+# the producer, and every way is refused.
+#
+# And a build of a head no CI reported on (autoland-judge-build@ID), as
+# burrow-proof's worker runs it: a user of its own, which writes its own
+# copy of the head and nothing of the producer's (not the mirror, not a
+# look's checkout), reaches no network and no Nix daemon, and whose exit
+# is how it came out. The crate's tests run the same
 # look with fakes for systemd and GitHub, through the gate, to the
 # producer's publishing; this is systemd's, polkit's and the users' half.
 #
@@ -47,6 +53,7 @@ let
     printf '{"type":"result","subtype":"success","is_error":false,"session_id":"look-session","structured_output":{"verdict":"pass","why":"Read it."},"modelUsage":{"%s":{}}}\n' "$model"
   '';
   cn = pkgs.writeShellScriptBin "cn" "exit 0";
+  git = "${pkgs.git}/bin/git";
 in
 pkgs.testers.runNixOSTest {
   name = "judge-look";
@@ -116,6 +123,31 @@ pkgs.testers.runNixOSTest {
 
     def said(id):
         return machine.succeed(f"journalctl -u {shlex.quote(unit(id))} -o cat")
+
+    def build_unit(id):
+        return f"autoland-judge-build@{id}.service"
+
+    # A build's folder as the producer lays it out (build.rs, burrow-proof's
+    # `lay`): its spec, its log for it to write, and its own copy of the
+    # head, a mirror of a repo.
+    def lay_build(id, script):
+        run = f"${state}/runs/{id}"
+        producer(" && ".join([
+            "src=$(mktemp -d) && cd $src",
+            "${git} init -q . && echo code >f && ${git} add f",
+            "${git} -c user.name=t -c user.email=t@t commit -qm head",
+            f"mkdir -m 0750 -p {run} && ${git} clone -q --mirror . {run}/repo.git",
+            f": >{run}/log && chmod 0660 {run}/log",
+            f"${git} rev-parse HEAD HEAD^{{tree}} >{run}/.ids",
+        ]))
+        head, tree = producer(f"cat {run}/.ids").split()
+        spec = {"mode": "proof", "repo": "acme/widget", "head": head, "tree": tree,
+                "check": "gate", "recipe": {"Run": ["bash", "-c", script]}}
+        producer(f"printf %s {shlex.quote(json.dumps(spec))} >{run}/spec.json")
+
+    def build_shown(id):
+        out = machine.succeed(f"systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus {build_unit(id)}")
+        return dict(l.split("=", 1) for l in out.splitlines())
 
     machine.wait_for_unit("multi-user.target")
     # Something to reach on the host, were a look able to.
@@ -189,6 +221,44 @@ pkgs.testers.runNixOSTest {
         producer("systemctl restart autoland-judge.service", ok=False)
         producer("systemctl stop nix-daemon.service", ok=False)
         producer(f"systemctl stop {unit('a1')} {unit('b1')} {unit('c1')}")
+
+    with subtest("a build is a user of its own, writes its own copy alone, reaches nothing, and its exit is how it came out"):
+        lay("g1")
+        lay_build("b0", "\n".join([
+            "echo uid $(id -u)",
+            "echo built >f && grep -q built f && echo wrote its own copy",
+            "touch ${state}/looks/g1/head/f 2>/dev/null && echo WROTE a look checkout",
+            "touch ${state}/forged 2>/dev/null && echo WROTE the producer state",
+            "ls ${state}/looks ${state}/git 2>/dev/null | sed 's/^/SEES /'",
+            "test -e /run/credentials/autoland-judge.service/judge-key && echo SEES the producer key",
+            "test -S /nix/var/nix/daemon-socket/socket && echo REACHED the Nix daemon",
+            "(exec 3<>/dev/tcp/192.168.1.1/8080) 2>/dev/null && echo REACHED the network",
+            "(exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && echo REACHED the host loopback",
+            "true",
+        ]))
+        machine.succeed(f"runuser -u autoland-judge -- systemctl start {build_unit('b0')}")
+        s = build_shown("b0")
+        log = producer("cat ${state}/runs/b0/log")
+        assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "0"), (s, log)
+        uid = int(log.split("uid ")[1].split()[0])
+        assert uid not in (0, int(machine.succeed("id -u autoland-judge")), int(machine.succeed("id -u dev"))), log
+        assert "wrote its own copy" in log, log
+        # Every way past its folder, at once, so a run with a guard removed
+        # names all it let through.
+        reached = [l for l in log.splitlines() if l.startswith(("WROTE", "SEES", "REACHED"))]
+        assert reached == [], (reached, log)
+        assert producer("cat ${state}/looks/g1/head/f") == "code\n"
+
+        lay_build("b1", "echo 'test widget ... FAILED'; exit 1")
+        machine.succeed(f"runuser -u autoland-judge -- systemctl start {build_unit('b1')}")
+        s = build_shown("b1")
+        assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "1"), s
+        assert "test widget ... FAILED" in producer("cat ${state}/runs/b1/log")
+
+        # Only the producer starts and stops them.
+        machine.fail(f"runuser -u dev -- systemctl start {build_unit('b2')}")
+        machine.fail(f"runuser -u dev -- systemctl stop {build_unit('b0')}")
+        producer(f"systemctl stop {build_unit('b0')} {build_unit('b1')} {unit('g1')}")
 
     with subtest("its looks end with it, and a restart clears their folders"):
         lay("e1")

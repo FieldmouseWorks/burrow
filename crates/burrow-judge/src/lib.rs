@@ -21,8 +21,11 @@
 //! checkout the producer laid out, with no network but its gate to the
 //! engine's API ([`egress`]). Nothing of a look is `burrow.user`'s, the
 //! user authoring sessions run as, so none of them can answer in the
-//! judge's place.
+//! judge's place. A head no CI reported on is built first, in units of
+//! their own as burrow-proof's worker runs a proof ([`build`]), and the
+//! look judges what came of it.
 pub mod brief;
+pub mod build;
 pub mod discussion;
 pub mod egress;
 pub mod look;
@@ -87,12 +90,31 @@ pub struct Config {
     pub login: String,
     /// The hosts a look's gate lets it reach, on 443.
     pub hosts: Vec<String>,
+    /// The builds' unit (`BUILD@ID.service`), each a check of a head no
+    /// CI reported on, run before it's judged ([`build`]), and where a
+    /// build's clone and home go, in its unit.
+    pub build: String,
+    pub trees: PathBuf,
 }
 
 impl Config {
     pub fn read(path: &Path) -> Result<Self, String> {
         let text = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// What a build's worker reads of it: burrow-proof's, with no Nix, no
+    /// heavy slot and no network, as a build runs a program, offline, and
+    /// nothing else.
+    pub fn bench(&self) -> burrow_proof::plugin::Bench<'_> {
+        burrow_proof::plugin::Bench {
+            state: &self.state,
+            git: &self.git,
+            nix: None,
+            heavy: None,
+            trees: &self.trees,
+            offline: true,
+        }
     }
 
     /// A repo's flow configuration, read now.
