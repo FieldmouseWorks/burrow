@@ -847,11 +847,10 @@ in
       assertion = unknown == [ ];
       message = "burrow.autoland.repos: no such setting: ${lib.concatStringsSep ", " unknown}. A repo's settings are the ones the option's description lists; a newer burrow's need that burrow.";
     } {
-      # Without them there's no prefix to count, and its evidence would
-      # count GitHub-hosted runners only, without a word.
-      assertion = config.burrow.dispatch.fresh.enable or false
-        || !lib.any (rc: rc.trainFresh or false) (lib.attrValues cfg.repos);
-      message = "burrow.autoland.repos: trainFresh counts the machine's fresh runners, and burrow.dispatch.fresh isn't enabled.";
+      # Without them (burrow.dispatch and its fresh runners) there's no prefix
+      # to count, and its evidence would count GitHub-hosted ones, silently.
+      assertion = lib.all (r: !(cfg.repos.${r}.trainFresh or false) || ledger.freshRunners r != null) (lib.attrNames cfg.repos);
+      message = "burrow.autoland.repos: trainFresh counts the machine's fresh runners, and burrow.dispatch with its fresh runners isn't enabled.";
     } {
       # Its rules are what keep anything but the train off its default branch.
       assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;

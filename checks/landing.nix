@@ -107,9 +107,11 @@ let
       burrow.autoland.shadow = [ "sam/homelab" ];
       burrow.landing.conaryd = [ "sam/homelab" ];
     }]))) then "a repo whose train has no evidence, which conaryd's train can't step on, is given to it" else null)
-    (if !(lib.any (lib.hasInfix "trainFresh counts the machine's fresh runners") (failing (machine [{
-      burrow.autoland.repos."sam/homelab".trainFresh = true;
-    }]))) then "a repo whose evidence is to count the machine's fresh runners is taken with none" else null)
+    (if !(lib.all (m: lib.any (lib.hasInfix "trainFresh counts the machine's fresh runners") (failing (machine [
+      { burrow.autoland.repos."sam/homelab".trainFresh = true; } m ]))) [
+      { }
+      { burrow.dispatch.enable = lib.mkForce false; burrow.dispatch.fresh = { enable = true; owner = "Sam"; repos = [ ]; }; }
+    ]) then "a repo whose evidence is to count the machine's fresh runners is taken with none" else null)
     (if failing askedFlow != [ ] then "a machine whose flow asks through the owner's door fails: ${toString (failing askedFlow)}" else null)
     (if !(lib.any (lib.hasInfix "the owner's door") (failing (asked true))) then "conaryd running as a controller of its own is given the owner's door, which it can't start as burrow.user" else null)
     (if failing (machine [{
