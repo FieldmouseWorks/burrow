@@ -19,6 +19,7 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
         tasks: (0..2)
             .map(|i| Task {
                 issue: None,
+                carries: None,
                 title: format!("task {i}"),
                 body: "one PR".into(),
                 check: "regression".into(),

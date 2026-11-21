@@ -258,7 +258,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             let file = arg(
                 args,
                 1,
-                "usage: proj split FILE (JSON title/body/check tasks)",
+                "usage: proj split FILE (JSON title/body/check tasks, each optionally carries OWNER/REPO#N)",
             )?;
             let max = crate::planning::MAX_TASKS * (crate::planning::MAX_BODY + 1000);
             let mut bytes = Vec::new();
