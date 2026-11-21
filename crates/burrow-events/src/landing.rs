@@ -172,8 +172,9 @@ mod tests {
         handlers: Handlers,
         hooks: u16,
         kicks: u16,
-        /// conaryd's outbox.
+        /// conaryd's outbox, and what sends it on.
         outbox: PathBuf,
+        forwarder: Option<Arc<Outbox>>,
     }
 
     impl Ports {
@@ -212,6 +213,7 @@ mod tests {
                 tune(&mut o);
                 Arc::new(o)
             });
+        let forwarder = held.clone();
         if let Some(o) = held.clone() {
             thread::spawn(move || o.forward());
         }
@@ -236,6 +238,7 @@ mod tests {
             hooks,
             kicks,
             outbox,
+            forwarder,
         }
     }
 
@@ -436,7 +439,47 @@ mod tests {
         assert!(soon(|| p.held() == 0));
     }
 
-    // (g) A delivery for conaryd that can't be held is answered 502, so
+    // (g) The forwarder rests between tries: after conaryd refused a
+    // connection and then answered other than 2xx, and once what it held
+    // is given up while conaryd is away.
+    #[test]
+    fn the_forwarder_waits_between_tries() {
+        let rounds = |p: &Ports| {
+            p.forwarder
+                .as_ref()
+                .unwrap()
+                .rounds
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let port = closed();
+        let p = setup(&record, Some(port));
+        assert_eq!(deliver(p.hooks), 202);
+        thread::sleep(Duration::from_millis(300));
+        let got = conaryd_on(
+            TcpListener::bind(("127.0.0.1", port)).unwrap(),
+            Duration::ZERO,
+            &[500],
+        );
+        assert!(soon(|| !got.lock().unwrap().is_empty()));
+        let before = rounds(&p);
+        thread::sleep(Duration::from_millis(1500));
+        assert!(rounds(&p) - before < 10, "{} rounds", rounds(&p) - before);
+
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let p = setup_with(&record, Some(closed()), |o| o.give_up = 0.5);
+        assert_eq!(deliver(p.hooks), 202);
+        assert!(soon(|| p.held() == 0));
+        let before = rounds(&p);
+        thread::sleep(Duration::from_millis(1000));
+        assert!(rounds(&p) - before < 3, "{} rounds", rounds(&p) - before);
+    }
+
+    // (h) A delivery for conaryd that can't be held is answered 502, so
     // GitHub's log shows it; one about a repo conaryd doesn't land is
     // still taken.
     #[test]
@@ -454,7 +497,7 @@ mod tests {
         assert!(got.lock().unwrap().is_empty());
     }
 
-    // (h) A record that can't be read lets the steward's handler through
+    // (i) A record that can't be read lets the steward's handler through
     // (the steward refuses itself) and sends conaryd nothing.
     #[test]
     fn an_unreadable_record_forwards_nothing() {

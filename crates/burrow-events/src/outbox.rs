@@ -121,6 +121,8 @@ pub struct Outbox {
     pub(crate) timeout: Duration,
     pub(crate) give_up: f64,
     count: AtomicU64,
+    /// The forwarder's rounds so far: one a send, retry or new delivery.
+    pub(crate) rounds: AtomicU64,
     /// Deliveries held so far, which the forwarder waits on.
     held: Mutex<u64>,
     wake: Condvar,
@@ -153,6 +155,7 @@ impl Outbox {
             timeout: SEND_TIMEOUT,
             give_up: GIVE_UP,
             count: AtomicU64::new(0),
+            rounds: AtomicU64::new(0),
             held: Mutex::new(0),
             wake: Condvar::new(),
         }))
@@ -241,6 +244,7 @@ impl Outbox {
         // conaryd not answering: when to try again, and why.
         let mut down: Option<Retry> = None;
         loop {
+            self.rounds.fetch_add(1, Ordering::Relaxed);
             let seen = *self.held.lock().unwrap_or_else(|p| p.into_inner());
             let names = self.names();
             retries.retain(|n, _| names.binary_search(n).is_ok());
@@ -281,6 +285,8 @@ impl Outbox {
                         }
                     }
                     Err(Missed::Answered(code)) => {
+                        // conaryd answers, so the rest go on.
+                        down = None;
                         // Said once, so a refusal that lasts (a secret
                         // that isn't conaryd's) shows before it's given up.
                         if !retries.contains_key(name) {
@@ -305,11 +311,17 @@ impl Outbox {
                     }
                 }
             }
+            let now_i = Instant::now();
+            if down.as_ref().is_some_and(|d| d.at <= now_i) {
+                // Nothing tried conaryd again this round (nothing held
+                // was due): the next delivery finds out afresh.
+                down = None;
+            }
             // conaryd not answering: until the retry, whatever comes in.
             // Otherwise until a delivery waiting on its own is due, or a
             // new one comes.
             if let Some(d) = &down {
-                std::thread::sleep(d.at.saturating_duration_since(Instant::now()));
+                std::thread::sleep(d.at.saturating_duration_since(now_i));
                 continue;
             }
             let held = self.held.lock().unwrap_or_else(|p| p.into_inner());

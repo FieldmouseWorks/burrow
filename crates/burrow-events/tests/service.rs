@@ -362,3 +362,29 @@ fn a_delivery_waits_for_conaryd_across_a_restart() {
     assert!(svc.never_says("not taken", Duration::from_millis(500)));
     assert_eq!(*got.lock().unwrap(), vec![String::from_utf8_lossy(BODY)]);
 }
+
+// One held since before conaryd would still know its id is given up, said
+// once, and never sent.
+#[test]
+fn a_delivery_held_too_long_is_given_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let got = conaryd(listener, Duration::ZERO);
+    let (config, creds) = landing(dir.path(), port);
+    let outbox = dir.path().join("outbox");
+    fs::create_dir(&outbox).unwrap();
+    let head = json!({"repo": "sam/r", "received": 1.0,
+        "headers": [["X-GitHub-Event", "push"], ["X-GitHub-Delivery", "d-old"]]});
+    fs::write(
+        outbox.join("00000000000001000000-00000000"),
+        [head.to_string().as_bytes(), b"\n", BODY].concat(),
+    )
+    .unwrap();
+    let svc = Service::start(dir.path(), config, &creds);
+    let line = svc.said("sam/r: delivery d-old (push) not taken by conaryd");
+    assert!(line.ends_with("never sent"), "{line}");
+    assert_eq!(held(dir.path()), 0);
+    assert!(svc.never_says("not taken", Duration::from_millis(500)));
+    assert!(got.lock().unwrap().is_empty());
+}
