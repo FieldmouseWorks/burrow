@@ -1,8 +1,9 @@
 //! When a task list's child is done: a merged PR is tied to it
 //! (docs/task-planning.md). Tied is a closing reference from any repo, a PR
-//! the child's own job awaited before it said `proj done`, or one an author
-//! recorded with `proj plan done`. The host keeps the last two in the
-//! child's plan folder, and only the host writes them: `awaited`, every PR
+//! the child's own job awaited before it said `proj done`, the one its
+//! task names it to carry (`carries`, read from the parent's list), or one
+//! an author recorded with `proj plan done`. The host keeps the second and
+//! last in the child's plan folder, and only the host writes them: `awaited`, every PR
 //! or issue the job awaited, once the child is closed and the pass has
 //! accepted the job's completion ([`declared_done`] and the issue as it was
 //! handed it); `landed`, from `proj plan done` outside any job, under the
@@ -198,17 +199,20 @@ impl Pass<'_> {
                     .then(|| format!("https://github.com/{repo}/issues/{n}")),
             );
         }
+        // What its finished job awaited, then the PR it was split to carry,
+        // which counts whatever its state and however it closed.
+        let mut targets = closed
+            .map(|issue| self.awaited_for(repo, n, issue))
+            .unwrap_or_default();
+        targets.extend(self.carried(repo, n));
         let mut unsure = false;
-        if let Some(issue) = closed {
-            let targets = self.awaited_for(repo, n, issue);
-            match self.first_merged(&targets) {
-                Some(Some(pr)) => return Some(Some(pr)),
-                Some(None) => {}
-                None => unsure = true,
-            }
-            if !targets.is_empty() {
-                self.book(repo, crate::now() + AWAITED_LOOK);
-            }
+        match self.first_merged(&targets) {
+            Some(Some(pr)) => return Some(Some(pr)),
+            Some(None) => {}
+            None => unsure = true,
+        }
+        if closed.is_some() && !targets.is_empty() {
+            self.book(repo, crate::now() + AWAITED_LOOK);
         }
         // A closing reference, from whichever repo.
         match self.closing_reference(repo, n) {
@@ -340,6 +344,16 @@ impl Pass<'_> {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<List>(&bytes).ok())
                 .is_some_and(|list| list.children.iter().any(|c| c.number == Some(n)))
+        })
+    }
+
+    /// The PR child N was split to carry (a task's `carries`), as its list
+    /// has it.
+    fn carried(&self, repo: &str, n: u64) -> Option<String> {
+        self.plan_dirs(repo).iter().find_map(|d| {
+            let list: List = serde_json::from_slice(&fs::read(d.join("tasks.json")).ok()?).ok()?;
+            let at = list.children.iter().position(|c| c.number == Some(n))?;
+            list.tasks.get(at)?.carries.clone()
         })
     }
 
