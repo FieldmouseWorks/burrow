@@ -60,9 +60,9 @@ let
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
-    settings = [ "batch_label" "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
+    settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
       "job_login" "job_timeout" "judge_engines" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
-      "renovate_email" "renovate_login" "renovate_merge_after" "renovate_sweep" "require_ci"
+      "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
       "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
