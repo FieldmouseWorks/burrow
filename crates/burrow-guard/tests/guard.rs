@@ -2,14 +2,16 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+
 use std::time::{Duration, Instant, SystemTime};
 
+use burrow_guard::Guard;
 use burrow_guard::config::Config;
-use burrow_guard::{Guard, Hook, Input};
 use tempfile::TempDir;
 
 mod common;
+
+use common::{bash, clone_on, clone_tracking};
 
 /// A machine for the guard: a zfs that writes down what it's asked to do
 /// (and fails, saying `fail`, when that file is there), two undo datasets,
@@ -66,67 +68,6 @@ impl Box {
         let _ = fs::remove_file(self.dir.path().join("zfs.log"));
         let _ = fs::remove_file(self.mark());
     }
-}
-
-fn bash(cmd: &str, cwd: &Path) -> Hook {
-    Hook {
-        tool_name: Some("Bash".to_owned()),
-        tool_input: Some(Input {
-            command: Some(cmd.to_owned()),
-        }),
-        cwd: Some(cwd.to_string_lossy().into_owned()),
-    }
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args([
-            "-c",
-            "user.name=Invented",
-            "-c",
-            "user.email=invented@example.invalid",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .stdout(Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "git {args:?}");
-}
-
-/// A clone on `branch`, tracking origin's `branch`.
-fn clone_on(branch: &str) -> TempDir {
-    clone_tracking(branch, branch)
-}
-
-/// A clone on `branch`, tracking origin's `upstream`.
-fn clone_tracking(branch: &str, upstream: &str) -> TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    git(d, &["init", "-q", "-b", branch]);
-    git(d, &["commit", "-q", "--allow-empty", "-m", "invented"]);
-    git(d, &["remote", "add", "origin", "/dev/null"]);
-    git(
-        d,
-        &[
-            "update-ref",
-            &format!("refs/remotes/origin/{upstream}"),
-            "HEAD",
-        ],
-    );
-    git(d, &["config", &format!("branch.{branch}.remote"), "origin"]);
-    git(
-        d,
-        &[
-            "config",
-            &format!("branch.{branch}.merge"),
-            &format!("refs/heads/{upstream}"),
-        ],
-    );
-    dir
 }
 
 const SHARED: &str = "(R2: rewrites history other clones depend on).";

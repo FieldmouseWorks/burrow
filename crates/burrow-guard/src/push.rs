@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::shell;
+use crate::place::Place;
+use crate::shell::{self, unknown};
 use crate::walk::{self, Unread};
 
 /// Branches other clones build on. HEAD and @ are whatever is checked out,
@@ -52,9 +53,9 @@ fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
 /// Each push in `cmd`, with where it runs.
 fn pushes(cmd: &str, cwd: &Path) -> Result<Vec<(PathBuf, Push)>, Unread> {
     let mut found = Vec::new();
-    walk::walk(cmd, &mut |word, rest, budget, more| {
+    walk::walk(cmd, cwd, &mut |word, rest, place, budget, more| {
         if runs_git(word, rest.iter(budget).next())
-            && let Some((at, mut push)) = after_git(cwd, rest.iter(budget))
+            && let Some((at, mut push)) = after_git(place, rest.iter(budget))
         {
             push.more = more;
             found.push((at, push));
@@ -80,13 +81,17 @@ pub fn runs_git(word: &str, next: Option<&String>) -> bool {
         && (word.trim_end_matches('}').ends_with("git") || next.is_some_and(|n| n == "push"))
 }
 
-/// What follows `git`, if it's a push: git's own options (each `-C DIR`
-/// taken in turn for where it runs), then `push` and its words. An
+/// What follows `git`, run at `place`, if it's a push: git's own options
+/// (each `-C DIR` taken in turn for where it runs), then `push` and its
+/// words; a push from a place the guard can't read is unread. An
 /// expansion among them may be an option, or nothing at all; a glob may be
 /// any number of words, `push` and its words among them, so it's read as
 /// a push the guard can't read.
-fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<(PathBuf, Push)> {
-    let mut at = cwd.to_path_buf();
+fn after_git<'a>(
+    place: &Place,
+    words: impl Iterator<Item = &'a String>,
+) -> Option<(PathBuf, Push)> {
+    let mut at = place.clone();
     let mut repo = Repo::default();
     // Every word it reads, an option's value too.
     let globbed = Cell::new(false);
@@ -103,7 +108,7 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
             globbed: true,
             ..Push::default()
         };
-        Some((cwd.to_path_buf(), push))
+        Some((place.path.clone(), push))
     };
     while let Some(w) = words.next() {
         match w.as_str() {
@@ -111,8 +116,8 @@ fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<
             "push" => {
                 let mut push = Push::read(words);
                 push.repo = repo;
-                push.unread = expanded.get();
-                return Some((at, push));
+                push.unread = expanded.get() || at.unread;
+                return Some((at.path, push));
             }
             "-C" => at = at.join(words.next()?),
             "-c" => repo.config(words.next()?),
@@ -200,12 +205,6 @@ fn configures_a_push(setting: &str) -> bool {
     let key = setting.split('=').next().unwrap_or_default();
     let key = key.to_ascii_lowercase();
     key.starts_with("remote.") || key.starts_with("include")
-}
-
-/// Whether `word` holds an expansion the guard doesn't read: a parameter
-/// or a substitution.
-fn unknown(word: &str) -> bool {
-    word.contains(['$', shell::UNKNOWN])
 }
 
 /// What a push forces with, as git reads its options: the last of each
