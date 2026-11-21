@@ -343,7 +343,10 @@ Each has an entry below, and each can be imported on its own.
   has the same broker serve the flow's `job` kind through a plugin of its
   own: a PR the flow can't settle, handed to the stuck role
   (`plugins.job.role`) as one proj job a PR, with the handoff and answer
-  crates/burrow-fix/src/stuck.rs gives. `plugins.proof.enable` (off)
+  crates/burrow-fix/src/stuck.rs gives; it needs the machinery's App too,
+  the account the job opens the PR's follow-up issue as, and the broker
+  hands the job only a follow-up issue that App or the flow opened.
+  `plugins.proof.enable` (off)
   runs Conary's proof plugin and its producer (crates/burrow-proof): a
   check's recipe from the repo's flow settings, run as a program on the
   exact commit, each run as a user systemd makes for it, and its verdict
