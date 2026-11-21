@@ -17,7 +17,11 @@
 //! It serves the stuck role's `job` the same way ([`Broker::handle_job`],
 //! the handoff in [`crate::stuck`]): the PR read from GitHub, the job on
 //! the stuck role, one live a PR, stopped with its request, and its answer
-//! held to the head GitHub shows and the follow-up issue it names.
+//! held to the head GitHub shows and the follow-up issue it names. The
+//! broker finds that issue before the job starts, by its marker among the
+//! issues the flow's own accounts opened ([`Broker::find_followup`]), and
+//! hands the job its number: the job never looks for it, so it never reads
+//! or edits one anyone else opened.
 //!
 //! The fixes it's waiting on are kept, by their keys, until each ends: a
 //! restart stops the jobs whose connections it lost ([`Broker::reconcile`]).
@@ -26,7 +30,7 @@
 use crate::answers::Said;
 use crate::stuck::{self, Ask, Outcome};
 use crate::{Config, brief, discussion};
-use burrow_github::{Api, call};
+use burrow_github::{Api, call, pages};
 use burrow_producer::jobs::{self, Jobs};
 use burrow_producer::serve::Work;
 use conary_core::plugin::{
@@ -86,6 +90,43 @@ impl Drop for Held<'_> {
             live.remove(&self.pr);
         }
     }
+}
+
+/// Whether `issue`, as GitHub's REST gives it, may be `repo`'s PR `pr`'s
+/// follow-up: an open issue, not a PR, with the PR's marker in its body,
+/// that one of `accounts`' follow-up openers opened. Why not, if it isn't.
+fn followup_of(
+    issue: &serde_json::Value,
+    repo: &str,
+    pr: u64,
+    accounts: &discussion::Accounts,
+) -> Result<(), String> {
+    if issue.get("pull_request").is_some_and(|p| !p.is_null()) {
+        return Err("is a PR, not an issue".into());
+    }
+    if issue["state"] != "open" {
+        return Err("isn't open".into());
+    }
+    match issue["user"]["login"].as_str() {
+        Some(login) if accounts.opened(login) => {}
+        by => {
+            return Err(format!(
+                "was opened by {}, not by one of {:?}, the accounts a follow-up is opened as",
+                by.unwrap_or("no one GitHub names"),
+                accounts.followup
+            ));
+        }
+    }
+    if !issue["body"]
+        .as_str()
+        .is_some_and(|b| stuck::marks(b, repo, pr))
+    {
+        return Err(format!(
+            "isn't {repo}#{pr}'s: its body has no line {}",
+            stuck::marker(repo, pr)
+        ));
+    }
+    Ok(())
 }
 
 /// The PR key a job key is beneath.
@@ -374,14 +415,24 @@ impl Broker {
             .flow
             .as_deref()
             .ok_or("the broker has no flow configurations to read a repo's authors from")?;
-        let authors = discussion::authors(flow, repo)?;
+        let accounts = discussion::accounts(flow, repo)?;
         let held = self.hold(
             stuck_key(repo, pr),
             &format!("a stuck-role job on {repo}#{pr}"),
         )?;
         let (head, branch) = self.pr(repo, pr)?;
-        let shown = discussion::read(&mut *(self.github)(), repo, pr, &authors)?;
-        let task = brief::stuck(repo, pr, &head, &branch, &ask, &shown, &self.cfg.jobs);
+        let shown = discussion::read(&mut *(self.github)(), repo, pr, &accounts.discussion)?;
+        let handed = self.find_followup(repo, pr, &accounts)?;
+        let task = brief::stuck(
+            repo,
+            pr,
+            &head,
+            &branch,
+            &ask,
+            &shown,
+            handed,
+            &self.cfg.jobs,
+        );
         let kept = self.kept(&held.job);
         fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
         let id = match starter.start(repo, &held.job, &task) {
@@ -415,7 +466,7 @@ impl Broker {
         }
         let followup = said
             .followup
-            .map(|n| self.followup(repo, pr, n))
+            .map(|n| self.followup(repo, pr, n, handed, &accounts))
             .transpose()?;
         let turn = record
             .turn
@@ -442,9 +493,49 @@ impl Broker {
         })
     }
 
+    /// `repo`'s PR `pr`'s follow-up issue, if it has one: the first opened
+    /// of the open issues that carry its marker and that one of
+    /// `accounts`' follow-up openers opened. An issue anyone else opened is
+    /// never one, whatever its body says.
+    fn find_followup(
+        &self,
+        repo: &str,
+        pr: u64,
+        accounts: &discussion::Accounts,
+    ) -> Result<Option<u64>, String> {
+        let mut api = (self.github)();
+        let open = pages(
+            &mut *api,
+            &format!("repos/{repo}/issues?state=open&per_page=100"),
+        )
+        .map_err(|e| format!("{repo}'s open issues can't be read: {e}"))?;
+        Ok(open
+            .iter()
+            .flat_map(|page| page.as_array().cloned().unwrap_or_default())
+            .filter(|i| followup_of(i, repo, pr, accounts).is_ok())
+            .filter_map(|i| i["number"].as_u64())
+            .min())
+    }
+
     /// The follow-up issue `n` of `repo`'s PR `pr`, by its link, once
-    /// GitHub shows it's an open issue (not a PR) with the PR's marker.
-    fn followup(&self, repo: &str, pr: u64, n: u64) -> Result<String, String> {
+    /// GitHub shows it's the one the job was `handed`, if it was handed one,
+    /// and an open issue (not a PR) with the PR's marker that one of
+    /// `accounts`' follow-up openers opened.
+    fn followup(
+        &self,
+        repo: &str,
+        pr: u64,
+        n: u64,
+        handed: Option<u64>,
+        accounts: &discussion::Accounts,
+    ) -> Result<String, String> {
+        if let Some(handed) = handed
+            && handed != n
+        {
+            return Err(format!(
+                "the stuck-role job names {repo}#{n} as the follow-up, and it was handed {repo}#{handed}"
+            ));
+        }
         let mut api = (self.github)();
         let got = call(
             &mut *api,
@@ -455,21 +546,8 @@ impl Broker {
         )
         .and_then(|r| r.json())
         .map_err(|e| format!("the follow-up issue {repo}#{n} can't be read: {e}"))?;
-        let marker = stuck::marker(repo, pr);
-        if got.get("pull_request").is_some_and(|p| !p.is_null()) {
-            return Err(format!("the follow-up {repo}#{n} is a PR, not an issue"));
-        }
-        if got["state"] != "open" {
-            return Err(format!("the follow-up issue {repo}#{n} isn't open"));
-        }
-        if !got["body"]
-            .as_str()
-            .is_some_and(|b| b.lines().any(|l| l.trim() == marker))
-        {
-            return Err(format!(
-                "the follow-up issue {repo}#{n} isn't {repo}#{pr}'s: its body has no line {marker}"
-            ));
-        }
+        followup_of(&got, repo, pr, accounts)
+            .map_err(|why| format!("the follow-up {repo}#{n} {why}"))?;
         got["html_url"]
             .as_str()
             .map(str::to_owned)

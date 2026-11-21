@@ -15,16 +15,30 @@
 //! the outcome (`pushed SHA`, `unchanged` or `unable: WHY`), then
 //! `follow-up: URL` for the PR's follow-up issue the job opened or added
 //! to, or `follow-up: none`. Its `next` is `done`: the job is one turn.
+//!
+//! The follow-up issue is the broker's to find, never the job's: the open
+//! issue carrying the PR's [`marker`] that the account the machine's jobs
+//! act as, or the flow's own, opened
+//! ([`crate::discussion::Accounts::followup`]). The job is handed its
+//! number, or told to open one, and the issue it names is held to the same.
 use burrow_brief::Stuck;
 use serde::Deserialize;
 
-/// The marker a PR's one follow-up issue carries in its body, by which a
-/// job finds it again rather than open another.
+/// The marker a PR's one follow-up issue carries in its body, by which the
+/// broker finds it again, among the issues its own accounts opened, rather
+/// than have another opened.
 pub fn marker(repo: &str, pr: u64) -> String {
     format!(
         "<!-- conary-stuck-followup {}#{pr} -->",
         repo.to_ascii_lowercase()
     )
+}
+
+/// Whether an issue's `body` carries `repo`'s PR `pr`'s [`marker`], on a
+/// line of its own.
+pub fn marks(body: &str, repo: &str, pr: u64) -> bool {
+    let marker = marker(repo, pr);
+    body.lines().any(|l| l.trim() == marker)
 }
 
 /// The flow's handoff, from its request's `prompt`.

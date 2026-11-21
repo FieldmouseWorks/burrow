@@ -5,7 +5,9 @@
 # names. With no controller it's refused: the broker would trust
 # burrow.user, the user authoring jobs run as. The stuck role's job plugin
 # (burrow.autoland.plugins.job) runs the same broker, fix on or off, and
-# names the stuck role in its config only when on.
+# names the stuck role in its config only when on, and only on a machine
+# with the machinery's App, the account its jobs open a PR's follow-up
+# issue as.
 { self, pkgs, nixpkgs, ... }:
 let
   lib = nixpkgs.lib;
@@ -24,6 +26,12 @@ let
   }];
   jobUncontrolled = machine [{ burrow.autoland.plugins.job.enable = true; }];
   jobFailed = map (a: a.message) (lib.filter (a: !a.assertion) jobUncontrolled.assertions);
+  jobAppless = machine [{
+    burrow.ledger.controllerUser = "conary-flow";
+    burrow.autoland.plugins.job.enable = true;
+    burrow.github.machinery = lib.mkForce null;
+  }];
+  jobApplessFailed = map (a: a.message) (lib.filter (a: !a.assertion) jobAppless.assertions);
   jobBroker = jobbed.systemd.services.burrow-fix;
   jobConfigFile = plain (lib.last (lib.splitString " " jobBroker.serviceConfig.ExecStart));
   broker = on.systemd.services.burrow-fix;
@@ -50,6 +58,7 @@ let
     noStuck = read.stuck == null;
     jobHolds = lib.all (a: a.assertion) jobbed.assertions;
     jobRefusedWithoutController = lib.any (lib.hasInfix "only the flow's controller may ask") jobFailed;
+    jobRefusedWithoutApp = lib.any (lib.hasInfix "plugins.job: a stuck-role job opens a PR's follow-up issue") jobApplessFailed;
     jobBroker = lib.hasSuffix "/bin/burrow-fix broker ${jobConfigFile}" (plain jobBroker.serviceConfig.ExecStart)
       && jobBroker.serviceConfig.RuntimeDirectory == "conary-producers/fix";
     jobPlugin = lib.hasInfix "/bin/burrow-fix job /etc/burrow/autoland-fix-plugin.json" (plain jobbed.burrow.autoland.plugins.job.plugin.text)
