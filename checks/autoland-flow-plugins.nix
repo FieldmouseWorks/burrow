@@ -66,9 +66,9 @@ let
       publicKey = keys.judge;
     };
   };
-  # The stuck role's job plugin beside the fix plugin, evaluated: Conary's
-  # flow config names no `job` plugin until FP11 (Conary#422), so its
-  # loader refuses the file, as the build below shows.
+  # The stuck role's job plugin beside the fix plugin. Conary's flow config
+  # names no `job` plugin until FP11 (Conary#422), so its loader refuses
+  # the file, as below, and so would a machine's build with it on.
   jobbed = machine {
     imports = [ controlled ];
     burrow.autoland.plugins.fix.enable = true;
@@ -126,8 +126,6 @@ let
   flowFiles = "${self.packages.${system}.burrow-flow-files}/bin/burrow-flow-files";
   # Homelab's producers file, as the machine builds it, with its producer
   # trusted for no check.
-  # Homelab's flow config with the job plugin on, as the machine builds it.
-  jobRefused = pkgs.testers.testBuildFailure (entries jobbed)."sam/homelab.json";
   untrusted = pkgs.testers.testBuildFailure ((producers on "sam/homelab").overrideAttrs {
     producers = builtins.toJSON [ { name = "sam/proof"; key = keys.proof; checks = [ ]; } ];
   });
@@ -161,11 +159,20 @@ in pkgs.runCommand "autoland-flow-plugins-check" { nativeBuildInputs = [ pkgs.jq
   ${flowFiles} flow $homelab ${file on "sam/plain"} ${file on "sam/bare"} || fail "Conary's flow::Config refuses a config with plugins"
   [ -e ${on.burrow.autoland.flowConfigs}/sam/bare.json ] || fail "the machine's configs don't all build"
 
-  # Until Conary's flow config takes `plugins.job` (FP11), a machine with
-  # the job plugin on fails its build, rather than every pass once live.
-  grep -q "unknown field \`job\`" ${jobRefused}/testBuildFailure.log \
-    || fail "the flow config with the job plugin on wasn't refused for its job key: $(cat ${jobRefused}/testBuildFailure.log)
-(once Conary's flow config takes plugins.job, check here that it loads, with execution.job the stuck role's choice)"
+  # With the job plugin on: named for `job`, and asked to run as the stuck
+  # role's choice.
+  jobbed=${file jobbed "sam/homelab"}
+  ${jobbed.burrow.autoland.plugins.job.choice} > job.json
+  jq -e --slurpfile job job.json '.execution.job == $job[0]' $jobbed >/dev/null \
+    || fail "execution.job isn't the stuck role's choice: $(jq -c .execution $jobbed), not $(cat job.json)"
+  # Until Conary's flow config takes `plugins.job` (FP11), its loader
+  # refuses the file, so a machine with the job plugin on fails its build
+  # rather than every pass once live.
+  if ${flowFiles} flow $jobbed; then
+    fail "Conary's flow::Config now takes plugins.job: check here that it loads instead (SJ, FP11)"
+  fi
+  jq -c 'del(.plugins.job, .execution.job)' $jobbed > unjobbed.json
+  ${flowFiles} flow unjobbed.json || fail "the flow config with the job plugin on is refused for more than its job key"
 
   # A producer trusted for no check fails the build that renders it.
   grep -q "names no check" ${untrusted}/testBuildFailure.log \

@@ -309,18 +309,6 @@ fn choosing(
 const STALL: &str = "the proof stage stalled twice on one tree: GitHub said 422";
 
 #[test]
-fn the_plugin_advertises_the_job_kind_by_the_stuck_roles_engine() {
-    let r = rig();
-    let runner = r.runner();
-    assert_eq!(runner.kinds(), [Kind::Job]);
-    // Conary's own check: its job fixture answered with no broker.
-    assert_eq!(
-        runner.check().expect("it passes Conary's check"),
-        [Kind::Job]
-    );
-}
-
-#[test]
 fn each_reason_starts_one_job_on_the_stuck_role_with_its_brief() {
     let r = rig();
     r.serve();
@@ -520,7 +508,10 @@ fn what_the_job_says_is_held_to_github() {
     let Answer::Job { summary, .. } = got.answer else {
         panic!()
     };
-    assert_eq!(summary, "unable: the blocker needs the owner\nstopped");
+    assert_eq!(
+        summary,
+        "unable: the blocker needs the owner\nfollow-up: none\nstopped"
+    );
 }
 
 #[test]

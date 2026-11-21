@@ -11,10 +11,10 @@
 //! `why` is one of [`Stuck`]'s words, and `detail`, the flow's own account
 //! (a stall's stage and the error it quoted), is required for a stall and
 //! optional otherwise. `workdir` is `.`: proj picks the job's clone. The
-//! answer's `summary` starts with the outcome on a line of its own
-//! (`pushed SHA`, `unchanged` or `unable: WHY`), then `follow-up: URL`
-//! when the job opened or reused the PR's follow-up issue, then the job's
-//! own account. Its `next` is `done`: the job is one turn.
+//! answer's `summary` is two fixed lines and then the job's own account:
+//! the outcome (`pushed SHA`, `unchanged` or `unable: WHY`), then
+//! `follow-up: URL` for the PR's follow-up issue the job opened or added
+//! to, or `follow-up: none`. Its `next` is `done`: the job is one turn.
 use burrow_brief::Stuck;
 use serde::Deserialize;
 
@@ -134,17 +134,14 @@ impl Said {
 }
 
 /// The plugin's `summary`: the outcome's line, the follow-up's, then the
-/// job's own.
+/// job's own, so no account of the job's reads as either line.
 pub fn summary(outcome: &Outcome, followup: Option<&str>, said: &str) -> String {
     let mut out = match outcome {
         Outcome::Pushed(head) => format!("pushed {head}"),
         Outcome::Unchanged => "unchanged".into(),
         Outcome::Unable(why) => format!("unable: {}", one_line(why)),
     };
-    if let Some(url) = followup {
-        out.push_str(&format!("\nfollow-up: {url}"));
-    }
-    out.push('\n');
+    out.push_str(&format!("\nfollow-up: {}\n", followup.unwrap_or("none")));
     out.push_str(said.trim());
     out
 }

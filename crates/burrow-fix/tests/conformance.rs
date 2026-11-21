@@ -1,40 +1,66 @@
 //! The plugin passes Conary's own `cn plugin check` (`Plugin::check`), run
 //! as the flow runs it: an executable with no arguments, which the module
 //! makes a one-line wrapper of `burrow-fix plugin CONFIG`. The fixtures
-//! need no broker: none listens here.
+//! need no broker: none listens here. So does the stuck role's job plugin
+//! (`burrow-fix job CONFIG`), with `job` advertised.
 use conary_core::plugin::{Kind, Limits, Plugin};
+use std::path::Path;
 use std::time::Duration;
 
 #[test]
 fn the_plugin_passes_conarys_check_with_no_broker() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("fix.json");
-    let cfg = serde_json::json!({
-        "socket": dir.path().join("none.sock"),
+    let runner = described(dir.path(), "plugin", None);
+    assert_eq!(
+        runner.check().expect("it passes Conary's check"),
+        [Kind::Fix]
+    );
+}
+
+#[test]
+fn the_job_plugin_passes_conarys_check_with_job_advertised() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = described(dir.path(), "job", Some("stuck"));
+    assert_eq!(runner.kinds(), [Kind::Job]);
+    assert_eq!(
+        runner.check().expect("it passes Conary's check"),
+        [Kind::Job]
+    );
+}
+
+/// The runner the flow holds for `burrow-fix VERB`, with the stuck role
+/// `stuck` configured or none.
+fn described(dir: &Path, verb: &str, stuck: Option<&str>) -> Plugin {
+    let config = dir.join("fix.json");
+    let mut cfg = serde_json::json!({
+        "socket": dir.join("none.sock"),
         "controller": "flow",
-        "settings": {"overlay": dir.path().join("overlay.json")},
+        "settings": {"overlay": dir.join("overlay.json")},
         "proj": ["proj"],
-        "jobs": dir.path().join("jobs"),
+        "jobs": dir.join("jobs"),
         "role": "fix",
         "app": null,
         "timeout": "60m",
         "idle": "20m",
         "gh": "gh",
-        "state": dir.path().join("state"),
+        "state": dir.join("state"),
     });
+    if let Some(role) = stuck {
+        cfg["stuck"] = role.into();
+    }
     std::fs::write(&config, cfg.to_string()).unwrap();
-    // The fixing role on claude, which offers one model.
+    // Every role on claude, which offers one model.
     std::fs::write(
-        dir.path().join("overlay.roles.json"),
+        dir.join("overlay.roles.json"),
         serde_json::json!({"offers": {"claude": {"models": ["a-model"], "efforts": ["high"]}}, "migrated": 1})
             .to_string(),
     )
     .unwrap();
-    let plugin = dir.path().join("burrow-fix-plugin");
+    let plugin = dir.join("burrow-fix-plugin");
     burrow_test::executable(
         &plugin,
         format!(
-            "#!/bin/sh\nexec {} plugin {}\n",
+            "#!/bin/sh\nexec {} {verb} {}\n",
             env!("CARGO_BIN_EXE_burrow-fix"),
             config.display()
         ),
@@ -43,9 +69,5 @@ fn the_plugin_passes_conarys_check_with_no_broker() {
         deadline: Duration::from_secs(30),
         response_bytes: 1 << 20,
     };
-    let runner = Plugin::describe(&plugin, limits).expect("it describes itself");
-    assert_eq!(
-        runner.check().expect("it passes Conary's check"),
-        [Kind::Fix]
-    );
+    Plugin::describe(&plugin, limits).expect("it describes itself")
 }
