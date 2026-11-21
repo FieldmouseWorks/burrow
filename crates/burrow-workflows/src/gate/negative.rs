@@ -459,6 +459,8 @@ fn test_files_are_known_by_their_paths() {
     let r = Repo::new();
     for (f, test) in [
         ("crates/a/src/tests.rs", true),
+        ("crates/a/src/inbox/landed_split_tests.rs", true),
+        ("a_tests.rs", true),
         ("crates/a/tests/it.rs", true),
         ("tools/x/test_y.py", true),
         ("pkg/z_test.go", true),
@@ -471,6 +473,8 @@ fn test_files_are_known_by_their_paths() {
         ("web/src/a.test.ts", true),
         ("src/test/java/A.java", true),
         ("src/testing.rs", false),
+        ("src/contests.rs", false),
+        ("src/a_tests.rs.md", false),
         ("contest/x.rs", false),
         ("tests.md", false),
     ] {
