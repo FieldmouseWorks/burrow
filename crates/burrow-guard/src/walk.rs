@@ -1,11 +1,14 @@
 //! Every command a command line runs, as far as the guard reads it: each
 //! command word, with the words after it, through quotes, substitutions,
 //! `sh -c` and `eval` scripts, assignments' values and `${…}` texts
-//! (shell.rs). push.rs finds a line's pushes in it.
+//! (shell.rs), each at the place it runs (place.rs). push.rs finds a
+//! line's pushes in it.
 
 use std::cell::Cell;
+use std::path::Path;
 
-use crate::shell;
+use crate::place::{Place, Shells};
+use crate::shell::{self, Script, assigned};
 
 /// Why a command wasn't read to its end.
 #[derive(Debug)]
@@ -55,8 +58,11 @@ impl Budget {
 /// before the reading gives up.
 const NESTED: usize = 16;
 
-/// Each word of `cmd` that may run something, with the words after it
-/// (`visit`'s [`Rest`]) and whether more of them come from its input,
+/// Each word of `cmd`, run in `cwd`, that may run something, with the words
+/// after it (`visit`'s [`Rest`]), where it runs (`cd` moves its shell, and
+/// a reading `eval` runs moves the shell that runs it, but no other
+/// reading moves the shell it's read from) and whether more of them come
+/// from its input,
 /// unseen (`xargs`). A word that reads as more than itself (a script for
 /// `bash -c`, `ssh` or `eval`) is read the same way, since it may run, and
 /// so is the value of `NAME=value`, since it may be run later (`eval
@@ -66,28 +72,58 @@ const NESTED: usize = 16;
 /// linked, not copied, and every step of it comes off the budget: a command
 /// that reads too long for the hook's timeout, which would let it run
 /// unchecked, isn't read to its end.
-pub fn walk(cmd: &str, visit: &mut Visit<'_>) -> Result<(), Unread> {
+pub fn walk(cmd: &str, cwd: &Path, visit: &mut Visit<'_>) -> Result<(), Unread> {
     let budget = Budget(Cell::new(WORDS));
-    read(shell::commands(cmd)?, 0, None, &budget, visit)
+    let line = Line {
+        cdpath: cmd.contains("CDPATH") || std::env::var_os("CDPATH").is_some_and(|p| !p.is_empty()),
+        evals: cmd.contains("eval"),
+    };
+    read(
+        shell::script(cmd)?,
+        Place::at(cwd),
+        0,
+        None,
+        &budget,
+        line,
+        visit,
+    )?;
+    Ok(())
 }
 
-/// What [`walk`] calls for each word: the word, the words after it, the
-/// budget their reading comes off, and whether more come from its input.
-pub type Visit<'v> = dyn FnMut(&String, Rest<'_>, &Budget, bool) -> Result<(), Unread> + 'v;
+/// What the whole command line says about every reading of it.
+#[derive(Clone, Copy)]
+struct Line {
+    /// `CDPATH` may be set (place.rs).
+    cdpath: bool,
+    /// It may `eval` an assignment's value.
+    evals: bool,
+}
 
+/// What [`walk`] calls for each word: the word, the words after it, where
+/// it runs, the budget their reading comes off, and whether more come from
+/// its input.
+pub type Visit<'v> = dyn FnMut(&String, Rest<'_>, &Place, &Budget, bool) -> Result<(), Unread> + 'v;
+
+/// `script`'s words, its own shell starting at `place`; where that shell
+/// ends.
 fn read(
-    commands: Vec<Vec<String>>,
+    script: Script,
+    place: Place,
     depth: usize,
     trailing: Option<&Rest<'_>>,
     budget: &Budget,
+    line: Line,
     visit: &mut Visit<'_>,
-) -> Result<(), Unread> {
+) -> Result<Place, Unread> {
     if depth > NESTED {
         return Err(Unread::Deep);
     }
-    let last = commands.len().saturating_sub(1);
-    for (n, words) in commands.into_iter().enumerate() {
-        let words = with_parameter_texts(words)?;
+    let mut shells = Shells::new(&script, place, line.cdpath);
+    let last = script.runs.len().saturating_sub(1);
+    for (n, run) in script.runs.into_iter().enumerate() {
+        let mut here = shells.enter(&run);
+        let words = with_parameter_texts(run.words)?;
+        let evals = words.iter().any(|w| w == "eval");
         let trailing = if n == last { trailing } else { None };
         let shell = words.iter().position(|w| is_shell(w));
         let input_as_words = words.iter().position(|w| takes_input_as_words(w));
@@ -100,36 +136,55 @@ fn read(
                 then: trailing,
             };
             let inner = reading(word)?;
-            if !reads_as_itself(&inner, word) {
+            if !reads_as_itself(&inner.runs, word) {
                 if !script_read && shell.is_some_and(|at| at + 1 < i) && is_c(&words[i - 1]) {
                     script_read = true;
                     let inner = given_params(inner, word, rest, budget)?;
-                    read(inner, depth + 1, None, budget, visit)?;
-                } else {
-                    read(inner, depth + 1, Some(&rest), budget, visit)?;
+                    read(inner, here.clone(), depth + 1, None, budget, line, visit)?;
+                } else if read(
+                    inner,
+                    here.clone(),
+                    depth + 1,
+                    Some(&rest),
+                    budget,
+                    line,
+                    visit,
+                )? != here
+                    && (evals || (line.evals && assigned(word).is_some()))
+                {
+                    // `eval` runs it here, and an assignment's value may
+                    // be run here later by one (`eval "$x"`).
+                    shells.moved(run.scope);
+                    here = here.unread();
                 }
             }
-            visit(word, rest, budget, input_as_words.is_some_and(|at| at < i))?;
+            visit(
+                word,
+                rest,
+                &here,
+                budget,
+                input_as_words.is_some_and(|at| at < i),
+            )?;
             if budget.spent() {
                 return Err(Unread::Long);
             }
         }
     }
-    Ok(())
+    Ok(shells.end())
 }
 
 /// `word` read as a command line: an assignment's value, or all of it.
-fn reading(word: &str) -> Result<Vec<Vec<String>>, shell::TooDeep> {
-    shell::commands(assigned(word).unwrap_or(word))
+fn reading(word: &str) -> Result<Script, shell::TooDeep> {
+    shell::script(assigned(word).unwrap_or(word))
 }
 
 /// Whether `word` read again is just itself. Reading a word again marks the
 /// globs it holds as unquoted ones (shell.rs's `bare`), whatever quoting it
 /// had the first time, so the marks don't count. (A brace list it holds
 /// expands into more words, which aren't just itself.)
-fn reads_as_itself(reading: &[Vec<String>], word: &str) -> bool {
+fn reads_as_itself(reading: &[shell::Run], word: &str) -> bool {
     let bare = |w: &str| w.replace(shell::UNKNOWN, "");
-    matches!(reading, [only] if only.len() == 1 && bare(&only[0]) == bare(word))
+    matches!(reading, [only] if only.words.len() == 1 && bare(&only.words[0]) == bare(word))
 }
 
 /// A command's words, each `${…}`'s text read in ahead of the word holding
@@ -143,7 +198,7 @@ fn with_parameter_texts(words: Vec<String>) -> Result<Vec<String>, shell::TooDee
     }
     let mut all = Vec::with_capacity(words.len());
     for word in words {
-        if reads_as_itself(&reading(&word)?, &word) {
+        if reads_as_itself(&reading(&word)?.runs, &word) {
             for text in shell::parameter_texts(&word) {
                 for command in shell::commands(text)? {
                     all.extend(with_parameter_texts(command)?);
@@ -197,16 +252,6 @@ impl<'a> Iterator for Words<'a, '_> {
     }
 }
 
-/// The value of a `NAME=value` word.
-fn assigned(word: &str) -> Option<&str> {
-    let (name, value) = word.split_once('=')?;
-    let name = name.strip_suffix('+').unwrap_or(name);
-    let is_name = !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    is_name.then_some(value)
-}
-
 /// Whether `word` names a shell, which runs the script its `-c` gives it.
 fn is_shell(word: &str) -> bool {
     let name = word.rsplit('/').next().unwrap_or(word);
@@ -224,19 +269,19 @@ fn is_c(flag: &str) -> bool {
 /// A word that still expands after that may hold any of them, by a spelling
 /// not worked out here (`"${@:1}"`, `$a` after `a=("$@")`), so they follow it.
 fn given_params(
-    commands: Vec<Vec<String>>,
+    mut commands: Script,
     script: &str,
     args: Rest<'_>,
     budget: &Budget,
-) -> Result<Vec<Vec<String>>, Unread> {
+) -> Result<Script, Unread> {
     if !script.contains(['$', shell::UNKNOWN]) {
         return Ok(commands);
     }
     let numbered: Vec<&String> = args.iter(budget).take(10).collect();
     let after_zero: Vec<&String> = args.iter(budget).skip(1).collect();
-    let mut given_commands = Vec::with_capacity(commands.len());
-    for words in commands {
-        let mut given = Vec::with_capacity(words.len());
+    for run in &mut commands.runs {
+        let words = std::mem::take(&mut run.words);
+        let given = &mut run.words;
         for word in words {
             let mut word = word;
             if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
@@ -257,9 +302,8 @@ fn given_params(
                 given.extend(after_zero.iter().map(|w| (*w).clone()));
             }
         }
-        given_commands.push(given);
     }
-    Ok(given_commands)
+    Ok(commands)
 }
 
 /// A program that turns its input into the words of what it runs.

@@ -12,11 +12,16 @@
 //! (`bash <<EOF`). An unquoted brace list or sequence expands into the
 //! words it makes, as bash expands it (shell/brace.rs), and an unquoted glob
 //! character marks its word [`UNKNOWN`] (a quoted one is text: see
-//! [`globs`]). Nothing else is expanded.
+//! [`globs`]). Nothing else is expanded. Each command keeps the shell it
+//! runs in and what joins it to the one before (shell/flow.rs).
 
 use crate::ansi_c;
 
 mod brace;
+mod flow;
+
+use flow::{Flow, Sep};
+pub use flow::{Joined, Opened, Run, Script, script};
 
 /// What a substitution's output is, in the word that holds it: unknown
 /// until it runs.
@@ -38,19 +43,44 @@ pub fn globs(word: &str) -> bool {
         .any(|(at, mark)| word[at + mark.len()..].starts_with(['*', '?', '[']))
 }
 
+/// Whether `word` holds an expansion the guard doesn't read: a parameter
+/// or a substitution.
+pub fn unknown(word: &str) -> bool {
+    word.contains(['$', UNKNOWN])
+}
+
+/// The value of a `NAME=value` word.
+pub fn assigned(word: &str) -> Option<&str> {
+    let (name, value) = word.split_once('=')?;
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let is_name = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    is_name.then_some(value)
+}
+
 /// Each command in `text` as its words, a substitution's commands among
 /// them, ahead of the command that holds them.
 pub fn commands(text: &str) -> Result<Vec<Vec<String>>, TooDeep> {
-    let mut lexer = Lexer::new(text);
-    lexer.list(0, false)?;
-    Ok(lexer.commands)
+    Ok(script(text)?
+        .runs
+        .into_iter()
+        .map(|run| run.words)
+        .collect())
 }
 
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
     /// Every command read, from every scope.
-    commands: Vec<Vec<String>>,
+    runs: Vec<Run>,
+    /// [`Script::shells`].
+    shells: Vec<Opened>,
+    /// The last list read ended with a subshell or a `case` still open.
+    torn: bool,
+    /// The shells open at `pos`, innermost last: the one the text there
+    /// runs in, and those it's in.
+    flows: Vec<Flow>,
     /// Here-documents whose bodies start at the next newline.
     heredocs: Vec<Heredoc>,
 }
@@ -224,6 +254,8 @@ struct Command {
     target: bool,
     /// That target is a here-string's text.
     here_string: bool,
+    /// It has a redirect, which may fail before it runs.
+    redirected: bool,
     /// Here-strings' texts: a shell given one runs it.
     scripts: Vec<String>,
     /// Inside a `${…}`, where a glob or brace character is the
@@ -282,17 +314,20 @@ impl Command {
         Ok(())
     }
 
-    fn end(&mut self, commands: &mut Vec<Vec<String>>) -> Result<(), TooDeep> {
+    /// The command ends: its words, and its here-strings' texts.
+    /// The command ends: its words, its here-strings' texts, and whether
+    /// it has a redirect.
+    fn end(&mut self) -> Result<(Vec<String>, Vec<String>, bool), TooDeep> {
         self.end_word()?;
         // A redirect with no target before the command ends takes nothing
         // from the next command.
         self.target = false;
         self.here_string = false;
-        if !self.words.is_empty() {
-            commands.push(std::mem::take(&mut self.words));
-        }
-        commands.extend(self.scripts.drain(..).map(|script| vec![script]));
-        Ok(())
+        Ok((
+            std::mem::take(&mut self.words),
+            std::mem::take(&mut self.scripts),
+            std::mem::take(&mut self.redirected),
+        ))
     }
 }
 
@@ -373,7 +408,18 @@ impl Lexer {
         Lexer {
             chars: text.chars().collect(),
             pos: 0,
-            commands: Vec::new(),
+            runs: Vec::new(),
+            shells: vec![Opened {
+                parent: 0,
+                joined: Joined::First,
+                apart: false,
+                torn: false,
+            }],
+            torn: false,
+            flows: vec![Flow {
+                scope: 0,
+                pending: None,
+            }],
             heredocs: Vec::new(),
         }
     }
@@ -401,7 +447,11 @@ impl Lexer {
             return Err(TooDeep);
         }
         let mut cmd = Command::default();
+        let cmd = &mut cmd;
         let mut grammar = Grammar::default();
+        // This list's own shell's place among the open ones: the `( … )`
+        // subshells opened here come after it.
+        let own = self.flows.len();
         while let Some(c) = self.next() {
             let in_word = cmd.in_word;
             let process = matches!(c, '<' | '>') && self.peek() == Some('(');
@@ -410,59 +460,103 @@ impl Lexer {
                 ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
             ) && !process
             {
-                grammar.word(&cmd);
+                grammar.word(cmd);
             }
             match c {
                 ' ' | '\t' | '\r' => cmd.end_word()?,
                 '(' => {
+                    let open = grammar.open.len();
                     grammar.opens(in_word);
-                    cmd.end(&mut self.commands)?;
+                    self.end(cmd, Sep::Opens)?;
+                    if grammar.open.len() > open {
+                        // The subshell is a command, joined as its `(` is.
+                        let scope = self.child(false);
+                        self.flows.push(Flow {
+                            scope,
+                            pending: None,
+                        });
+                    }
                 }
                 ')' => {
+                    let subshell = matches!(grammar.open.last(), Some(Open::Subshell));
                     if grammar.closes() && closes {
                         break;
                     }
-                    cmd.end(&mut self.commands)?;
+                    self.end(cmd, Sep::Seq)?;
+                    if subshell && self.flows.len() > own {
+                        self.flows.pop();
+                        self.flow().pending = None;
+                    }
                 }
                 '#' if !in_word => self.comment(depth)?,
                 // `&>` and `&>>` send both outputs: a redirect, not the end.
-                '&' if self.peek() == Some('>') => self.redirect(c, &mut cmd, depth)?,
+                '&' if self.peek() == Some('>') => self.redirect(c, cmd, depth)?,
                 ';' if grammar.in_body() && matches!(self.peek(), Some(';' | '&')) => {
                     self.pos += 1;
                     if self.chars.get(self.pos) == Some(&'&') && self.chars[self.pos - 1] == ';' {
                         self.pos += 1;
                     }
                     grammar.next_pattern();
-                    cmd.end(&mut self.commands)?;
+                    self.end(cmd, Sep::Seq)?;
                 }
                 '\n' => {
                     grammar.separator(c);
-                    cmd.end(&mut self.commands)?;
+                    self.end(cmd, Sep::Seq)?;
                     self.heredoc_bodies(depth, closes)?;
                 }
                 ';' | '&' | '|' => {
                     grammar.separator(c);
-                    cmd.end(&mut self.commands)?;
+                    let sep = match c {
+                        ';' => Sep::Seq,
+                        '&' if self.next_if(|c| c == '&').is_some() => Sep::And,
+                        '&' => Sep::Background,
+                        _ if self.next_if(|c| c == '|').is_some() => Sep::Or,
+                        _ => {
+                            self.next_if(|c| c == '&');
+                            Sep::Pipe
+                        }
+                    };
+                    self.end(cmd, sep)?;
                 }
                 '<' | '>' if process => {
                     self.pos += 1;
-                    self.list(depth + 1, true)?;
+                    self.substitution(depth)?;
                     cmd.push(UNKNOWN);
                 }
-                '<' | '>' => self.redirect(c, &mut cmd, depth)?,
-                c => self.word(c, &mut cmd, depth)?,
+                '<' | '>' => self.redirect(c, cmd, depth)?,
+                c => self.word(c, cmd, depth)?,
             }
         }
-        cmd.end(&mut self.commands)?;
-        Ok(())
+        let read = self.end(cmd, Sep::Seq);
+        self.torn = self.flows.len() > own || !grammar.open.is_empty();
+        self.flows.truncate(own);
+        read
     }
 
     /// `text` read as a script of its own, its commands joining these.
-    fn read_apart(&mut self, text: &str, depth: usize) -> Result<(), TooDeep> {
+    /// It runs in a shell of its own, which may not be this one's at all.
+    /// `apart`: it's a text of its own ([`Script::apart`]), not a
+    /// backquoted substitution.
+    fn read_apart(&mut self, text: &str, depth: usize, apart: bool) -> Result<(), TooDeep> {
+        let mut flow = Flow {
+            scope: self.child(apart),
+            pending: None,
+        };
+        self.read_in(text, depth, &mut flow)
+    }
+
+    /// `text` read as more of the script `flow` is reading, which goes on
+    /// past it: a here-document's lines are one script.
+    fn read_in(&mut self, text: &str, depth: usize, flow: &mut Flow) -> Result<(), TooDeep> {
         let mut inner = Lexer::new(text);
-        inner.list(depth + 1, false)?;
-        self.commands.append(&mut inner.commands);
-        Ok(())
+        inner.shells = std::mem::take(&mut self.shells);
+        inner.flows[0] = *flow;
+        let read = inner.list(depth + 1, false);
+        *flow = inner.flows[0];
+        self.shells = inner.shells;
+        self.shells[flow.scope].torn |= inner.torn;
+        self.runs.append(&mut inner.runs);
+        read
     }
 
     /// The rest of the line, after its `#`.
@@ -471,11 +565,12 @@ impl Lexer {
         while let Some(c) = self.next_if(|c| c != '\n') {
             text.push(c);
         }
-        self.read_apart(&text, depth)
+        self.read_apart(&text, depth, true)
     }
 
     /// The bodies of the here-documents waiting on this newline, each line
-    /// read on its own: a quote in one doesn't reach the next. In a
+    /// read on its own: a quote in one doesn't reach the next, but each
+    /// document's lines are one script, in one shell of its own. In a
     /// substitution (`closes`), the end word with the substitution's `)`
     /// straight after it ends the body too, as it does in bash. Where the
     /// end word was unquoted, a line that ends in a backslash goes on into
@@ -484,6 +579,10 @@ impl Lexer {
     /// read as one.
     fn heredoc_bodies(&mut self, depth: usize, closes: bool) -> Result<(), TooDeep> {
         for doc in std::mem::take(&mut self.heredocs) {
+            let mut flow = Flow {
+                scope: self.child(true),
+                pending: None,
+            };
             let mut script = String::new();
             while self.peek().is_some() {
                 // The line, and where each of its characters is.
@@ -524,9 +623,9 @@ impl Lexer {
                     script.pop();
                     continue;
                 }
-                self.read_apart(&std::mem::take(&mut script), depth)?;
+                self.read_in(&std::mem::take(&mut script), depth, &mut flow)?;
             }
-            self.read_apart(&script, depth)?;
+            self.read_in(&script, depth, &mut flow)?;
         }
         Ok(())
     }
@@ -571,7 +670,7 @@ impl Lexer {
                 }
                 Some('(') => {
                     self.pos += 1;
-                    self.list(depth + 1, true)?;
+                    self.substitution(depth)?;
                     cmd.push(UNKNOWN);
                 }
                 Some('{') => {
@@ -620,7 +719,7 @@ impl Lexer {
                     cmd.word.push(UNKNOWN);
                 }
                 '$' if self.next_if(|c| c == '(').is_some() => {
-                    self.list(depth + 1, true)?;
+                    self.substitution(depth)?;
                     cmd.word.push(UNKNOWN);
                 }
                 c => cmd.word.push(c),
@@ -649,7 +748,7 @@ impl Lexer {
                 c => text.push(c),
             }
         }
-        self.read_apart(&text, depth)
+        self.read_apart(&text, depth, false)
     }
 
     /// The rest of a `$'…'` string, after its `'`. Its end is found first,
@@ -669,6 +768,7 @@ impl Lexer {
             cmd.in_word = false;
         }
         cmd.end_word()?;
+        cmd.redirected = true;
         let mut operator = String::from(first);
         while let Some(c) = self.next_if(|c| matches!(c, '<' | '>' | '&' | '|')) {
             operator.push(c);

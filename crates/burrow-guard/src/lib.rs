@@ -22,6 +22,7 @@
 mod ansi_c;
 pub mod config;
 mod doors;
+mod place;
 mod push;
 mod shell;
 mod undo;
