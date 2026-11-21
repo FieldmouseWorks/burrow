@@ -790,59 +790,50 @@ impl Pass<'_> {
         }
         let mut advanced = false;
         let mut sure = true;
+        // Reopened: its own work again, whatever it was continued as.
+        if issue["state"] != "closed"
+            && list.children[index].continued.take().is_some()
+            && !(self.save_list(repo, n, &list) && self.render_list(repo, n, &mut list))
+        {
+            self.retry(repo);
+            return Hold::Unknown;
+        }
         // A sibling its newest `Continued as` names, which hands nothing on.
         let mut named = None;
         // A child is done when a merged PR is tied to it, whatever its
         // issue's state: an open one recorded so is closed with it.
-        let landed = if issue["state"] == "closed" {
-            let Some(landed) = self.landed_child(repo, child, Some(&issue)) else {
-                self.miss(repo);
-                return Hold::Unknown;
-            };
-            match landed {
-                Some(pr) => Some(pr),
-                None => match self.successor(repo, &issue, &list.refs(repo, n)) {
-                    Successor::Landed(pr) => Some(pr),
-                    Successor::None => None,
-                    Successor::OnList(sibling) => {
-                        named = Some(sibling);
-                        None
-                    }
-                    Successor::Unknown => {
-                        self.miss(repo);
+        let Some(now) = self.child_now(repo, child, &issue, &list.refs(repo, n), &mut Vec::new())
+        else {
+            self.miss(repo);
+            return Hold::Unknown;
+        };
+        let landed = match now {
+            Now::Landed(pr) => Some(pr),
+            Now::Open => None,
+            Now::Closed(sibling) => {
+                named = sibling;
+                None
+            }
+            // Its place is the successor's: no notice, nothing to record
+            // by hand.
+            Now::Continues(to) => {
+                let at = &mut list.children[index];
+                if at.continued.as_ref() != Some(&to) || at.waits {
+                    at.continued = Some(to.clone());
+                    at.waits = false;
+                    if !self.save_list(repo, n, &list) {
+                        self.retry(repo);
                         return Hold::Unknown;
                     }
-                    // Its place is the successor's: no notice, nothing to
-                    // record by hand.
-                    Successor::Open(to) => {
-                        let at = &mut list.children[index];
-                        if at.continued.as_ref() != Some(&to) || at.waits {
-                            at.continued = Some(to.clone());
-                            at.waits = false;
-                            if !self.save_list(repo, n, &list) {
-                                self.retry(repo);
-                                return Hold::Unknown;
-                            }
-                        }
-                        if !self.render_list(repo, n, &mut list) {
-                            self.miss(repo);
-                        }
-                        self.reconcile_notice(repo, n, None);
-                        return Hold::Yes(format!(
-                            "its next child #{child} continues as {to}, which hasn't landed"
-                        ));
-                    }
-                },
+                }
+                if !self.render_list(repo, n, &mut list) {
+                    self.miss(repo);
+                }
+                self.reconcile_notice(repo, n, None);
+                return Hold::Yes(format!(
+                    "its next child #{child} continues as {to}, which hasn't landed"
+                ));
             }
-        } else {
-            // Reopened: its own work again, whatever it was continued as.
-            if list.children[index].continued.take().is_some()
-                && !(self.save_list(repo, n, &list) && self.render_list(repo, n, &mut list))
-            {
-                self.retry(repo);
-                return Hold::Unknown;
-            }
-            self.recorded_landing(repo, child)
         };
         if let Some(pr) = landed {
             if issue["state"] == "open" && !self.close(repo, &child.to_string(), "completed") {
@@ -947,7 +938,7 @@ enum Hold {
 #[path = "landed.rs"]
 mod landed;
 pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
-use landed::{Stall, Successor};
+use landed::{Now, Stall};
 
 #[cfg(test)]
 #[path = "plans_tests.rs"]
