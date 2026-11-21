@@ -432,7 +432,7 @@ fn notifier(b: &mut Box) {
     burrow_test::executable(
         &notify,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$1 $2\" >>'{log}'\ncase \"$1\" in\n  ensure) touch '{at}'/\"$2\".stamp; [ -e '{efails}' ] || touch '{at}'/\"$2\" ;;\n  close) [ -e '{fails}' ] || rm -f '{at}'/\"$2\" '{at}'/\"$2\".stamp ;;\n  pending) [ -e '{at}'/\"$2\".stamp ] && exit 0; exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$1 $2\" >>'{log}'\ncase \"$1\" in\n  ensure) printf '%s\\n%s\\n' \"$3\" \"$4\" >'{at}'/\"$2\".text; touch '{at}'/\"$2\".stamp; [ -e '{efails}' ] || touch '{at}'/\"$2\" ;;\n  close) [ -e '{fails}' ] || rm -f '{at}'/\"$2\" '{at}'/\"$2\".stamp ;;\n  pending) [ -e '{at}'/\"$2\".stamp ] && exit 0; exit 1 ;;\nesac\n",
             log = b.path("notices").display(),
             at = at.display(),
             fails = b.path("close-fails").display(),
@@ -444,6 +444,11 @@ fn notifier(b: &mut Box) {
 
 fn notice_open(b: &Box) -> bool {
     b.path("notices.d/proj-plan-sam_box-7").exists()
+}
+
+/// The title and body the notice was last ensured with.
+fn notice_text(b: &Box) -> String {
+    fs::read_to_string(b.path("notices.d/proj-plan-sam_box-7.text")).unwrap_or_default()
 }
 
 #[test]
@@ -750,4 +755,113 @@ fn a_successor_that_is_a_pr_lands_when_it_merges() {
             .checklist("sam/box", "7")
             .contains(&format!("[x] #8: task 0 — {open}"))
     );
+}
+
+/// Comments on #8 by sam, oldest first, as GitHub gives them.
+fn comments_on_child(b: &Box, bodies: &[&str]) {
+    let comments: Vec<Value> = bodies
+        .iter()
+        .zip(5..)
+        .map(|(body, id)| {
+            json!({"id": id, "user": burrow_github::fake::actor("sam"), "body": body,
+                "created_at": "2026-11-13T17:22:33Z"})
+        })
+        .collect();
+    fs::write(
+        b.path("repos_sam_box_issues_8_comments"),
+        json!([comments]).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_continuation_written_on_a_waiting_child_hands_its_place_on_next_pass() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    // Its sibling is named first: that hands nothing on, and the notice
+    // says why, as well as what would.
+    comments_on_child(&b, &["Continued as sam/box#9, the next task."]);
+    sequence(&b, &parent);
+    assert!(!advanced(&b));
+    assert!(stored(&b).children[0].waits);
+    let said = notice_text(&b);
+    assert!(
+        said.contains("names sam/box#9, which is on this task list itself"),
+        "{said}"
+    );
+    assert!(
+        said.contains("neither sam/box#7 nor another child of its list"),
+        "{said}"
+    );
+    // Then a merged PR, on the child already closed and waiting: the next
+    // pass hands its place on and the notice goes.
+    let url = pr(&b, "sam/box", 950, true);
+    comments_on_child(
+        &b,
+        &[
+            "Continued as sam/box#9, the next task.",
+            "Continued as sam/box#950, which landed what was left.",
+        ],
+    );
+    sequence(&b, &parent);
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains(&format!("[x] #8: task 0 — {url}"))
+    );
+    assert!(!notice_open(&b));
+}
+
+#[test]
+fn a_parent_changed_after_its_split_pauses_its_list_and_says_so() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    let url = pr(&b, "sam/box", 950, true);
+    comments_on_child(&b, &["Continued as #950."]);
+    let mut changed = parent.clone();
+    changed["body"] = json!("a new scope");
+    fs::write(b.path("repos_sam_box_issues_7"), changed.to_string()).unwrap();
+    for _ in 0..2 {
+        sequence(&b, &changed);
+    }
+    // Paused: no child is read or handed on, and what holds them is the
+    // pause, not the closed child.
+    assert!(!advanced(&b));
+    assert!(!stored(&b).children[0].waits);
+    for n in ["8", "9"] {
+        let held = b.pass().place("sam/box", n);
+        assert!(
+            matches!(&held, Some(Place::Stuck(why)) if why.contains("sam/box#7 changed after its split")),
+            "{n}: {held:?}"
+        );
+    }
+    let why = b.pass().look().record("sam/box", "7", Some(&changed));
+    assert!(
+        matches!(&why.wait, Some(crate::inbox::record::Wait::Stuck(w)) if w.contains("changed after its split")),
+        "{why:?}"
+    );
+    assert!(notice_open(&b));
+    assert!(notice_text(&b).contains("sam/box#7's task list is paused"));
+    assert_eq!(
+        b.posted()
+            .matches("The parent task changed after its split")
+            .count(),
+        1,
+        "said once on the parent"
+    );
+    // Its text goes back: the list goes on, the continuation hands #8's
+    // place on, and the notice closes.
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    sequence(&b, &parent);
+    assert!(!b.pass().paused("sam/box", "7"));
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains(&format!("[x] #8: task 0 — {url}"))
+    );
+    assert!(!notice_open(&b));
 }

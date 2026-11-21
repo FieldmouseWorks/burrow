@@ -746,11 +746,7 @@ impl Pass<'_> {
         let Some(same) = self.verified_source(repo, parent) else {
             return Hold::Unknown;
         };
-        if !same {
-            let stale = d.join("stale-notice");
-            if !stale.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
-                let _ = fs::write(stale, "paused\n");
-            }
+        if !self.pause(repo, n, d, !same) {
             return Hold::Yes("the parent changed after its split".into());
         }
         if !self.render_list(repo, n, &mut list) {
@@ -769,8 +765,8 @@ impl Pass<'_> {
             return Hold::No;
         };
         let child = list.children[index].number.unwrap();
-        // Moved on, or replanned, past the child a notice was about.
-        if self.notice_owed(repo, n).is_some_and(|on| on != child) {
+        // Moved on, or replanned, past what a notice was about.
+        if self.notice_moved_on(repo, n, child) {
             self.reconcile_notice(repo, n, None);
         }
         let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{child}")) else {
@@ -794,6 +790,8 @@ impl Pass<'_> {
         }
         let mut advanced = false;
         let mut sure = true;
+        // A sibling its newest `Continued as` names, which hands nothing on.
+        let mut named = None;
         // A child is done when a merged PR is tied to it, whatever its
         // issue's state: an open one recorded so is closed with it.
         let landed = if issue["state"] == "closed" {
@@ -806,6 +804,10 @@ impl Pass<'_> {
                 None => match self.successor(repo, &issue, &list.refs(repo, n)) {
                     Successor::Landed(pr) => Some(pr),
                     Successor::None => None,
+                    Successor::OnList(sibling) => {
+                        named = Some(sibling);
+                        None
+                    }
                     Successor::Unknown => {
                         self.miss(repo);
                         return Hold::Unknown;
@@ -870,7 +872,7 @@ impl Pass<'_> {
             if !self.render_list(repo, n, &mut list) {
                 self.miss(repo);
             }
-            self.reconcile_notice(repo, n, Some(child));
+            self.reconcile_notice(repo, n, Some(Stall::Child { child, named }));
             return Hold::Yes(format!(
                 "its next child #{child} was closed with no merged PR"
             ));
@@ -944,8 +946,8 @@ enum Hold {
 
 #[path = "landed.rs"]
 mod landed;
-use landed::Successor;
 pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
+use landed::{Stall, Successor};
 
 #[cfg(test)]
 #[path = "plans_tests.rs"]

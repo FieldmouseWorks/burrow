@@ -3,9 +3,17 @@
 //! its children, and the part of a child's admission
 //! ([`Pass::child_admissible`]) that needs nothing but the lists.
 
-use std::fs;
+use std::{fs, path::Path};
 
-use super::{List, Pass};
+use super::{List, Pass, Stall};
+
+/// In a parent's plan folder while its list is paused: the parent changed
+/// after its split ([`Pass::pause`]).
+const PAUSED: &str = "paused";
+
+/// In a parent's plan folder once the pause is said on the parent, for as
+/// long as that pause lasts.
+const PAUSE_SAID: &str = "stale-notice";
 
 /// Where an issue stands on the task lists ([`Pass::place`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +37,48 @@ pub(in crate::inbox) enum Place {
 }
 
 impl Pass<'_> {
+    /// Parent N's list, in `d`, is paused while the parent's text isn't what
+    /// was split (`changed`): kept so on disk for [`Pass::place`], said once
+    /// on the parent and to the owner through the list's notice while it
+    /// lasts. It goes on once the parent is replanned from its new text, or
+    /// its text goes back. Whether the list goes on.
+    pub(in crate::inbox) fn pause(&mut self, repo: &str, n: &str, d: &Path, changed: bool) -> bool {
+        if !changed {
+            if self.notice_paused(repo, n) {
+                self.reconcile_notice(repo, n, None);
+            }
+            for f in [PAUSE_SAID, PAUSED] {
+                match fs::remove_file(d.join(f)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        eprintln!("proj-inbox: couldn't remove {}: {e}", d.join(f).display());
+                        self.retry(repo);
+                    }
+                }
+            }
+            return true;
+        }
+        if let Err(e) = crate::swap(&d.join(PAUSED), "paused\n") {
+            eprintln!(
+                "proj-inbox: couldn't keep {}: {e}",
+                d.join(PAUSED).display()
+            );
+            self.retry(repo);
+        }
+        let said = d.join(PAUSE_SAID);
+        if !said.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
+            let _ = fs::write(said, "paused\n");
+        }
+        self.reconcile_notice(repo, n, Some(Stall::Paused));
+        false
+    }
+
+    /// Whether parent N's list is paused, as the last pass found it.
+    pub(in crate::inbox) fn paused(&self, repo: &str, n: &str) -> bool {
+        self.plan_dir(repo, n).join(PAUSED).exists()
+    }
+
     /// Where issue N stands on the task lists, from the lists alone (no
     /// GitHub, nothing written): a parent with a list of its own
     /// ([`Place::Parent`]) waits on its next child, and a child on what
@@ -95,6 +145,12 @@ impl Pass<'_> {
             };
             if let Some(id) = self.owner(repo, parent) {
                 return Some(Place::ParentJob(id));
+            }
+            if list.next().is_some_and(|next| next <= index) && self.paused(repo, parent) {
+                return Some(Place::Stuck(format!(
+                    "its parent {} changed after its split, so its list is paused until the parent is replanned or its text goes back",
+                    named()
+                )));
             }
             match list.next() {
                 Some(next) if next == index => {}
