@@ -209,7 +209,9 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
     let looks = r.dir.path().join("state/looks");
     let mirror = r.dir.path().join("state/git/acme/widget.git");
     let github = r.dir.path().join("github/acme/widget.git");
-    // Every commit a repo has, and what each holds.
+    // Every commit a repo has, and what each holds, sorted: commits made
+    // in the same second come out in its refs' order, which differs
+    // between the two.
     let commits = |repo: &Path| {
         let out = Command::new("git")
             .arg("--git-dir")
@@ -217,7 +219,12 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
             .args(["log", "--all", "--format=%H %T %s"])
             .output()
             .unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        lines.sort();
+        lines.join("\n")
     };
     // It rewrites and commits what it has, and every look's checkout it
     // can find.
