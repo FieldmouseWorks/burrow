@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         [verb, path, id] if verb == "look" => (verb, path, Some(id)),
         [verb, path, id] if verb == "build" => return build(path, id),
         [verb, fence, dashes, program, rest @ ..] if verb == "enter" && dashes == "--" => {
-            let e = burrow_proof::fence::enter(Path::new(fence), program, rest);
+            let e = burrow_process::fence::enter(Path::new(fence), program, rest);
             eprintln!("burrow-judge: enter {fence}: {program}: {e}");
             // What a shell says of a command it can't run.
             return ExitCode::from(126);

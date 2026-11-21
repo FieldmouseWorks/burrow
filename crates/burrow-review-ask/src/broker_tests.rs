@@ -21,7 +21,7 @@ fn door(dir: &Path, body: &str) -> Vec<String> {
 fn broker(dir: &Path, askers: Vec<u32>, door: Vec<String>) -> (Arc<Broker>, PathBuf) {
     let socket = dir.join("door.sock");
     let listener = bind(&socket).unwrap();
-    let broker = Arc::new(Broker::new(askers, door));
+    let broker = Arc::new(Broker::bare(askers, door));
     let serving = broker.clone();
     thread::spawn(move || serving.serve(&listener));
     (broker, socket)
@@ -160,7 +160,7 @@ fn a_door_past_its_limit_is_stopped_and_fails() {
     let body = format!("sleep 3\ntouch {}", posted.display());
     let socket = dir.path().join("door.sock");
     let listener = bind(&socket).unwrap();
-    let mut broker = Broker::new(vec![me()], door(dir.path(), &body));
+    let mut broker = Broker::bare(vec![me()], door(dir.path(), &body));
     broker.limit = Duration::from_millis(300);
     thread::spawn(move || Arc::new(broker).serve(&listener));
     let reply = ask(&socket, &request(5), WAIT);

@@ -9,8 +9,13 @@
 //!
 //! One request a connection: one line of JSON ([`Request`]), and nothing
 //! more, so the connection's end is the asker gone (Conary's flow killed it
-//! past its deadline), and the door is killed with it, process group and
-//! all: a door the asker gave up on never posts. The answer is one line
+//! past its deadline), and the door is killed with it, and all it started:
+//! a door the asker gave up on never posts. Each door runs in a fence of
+//! its own (burrow_process::fence), a cgroup under the broker's unit's,
+//! since what it runs (gh, through burrow-github's bounded transport) is in
+//! a process group of its own, out of reach of a kill of the door's. The
+//! fence is emptied whenever the door is done with, before its head may be
+//! asked again or its asker hears. The answer is one line
 //! ([`Reply`]): what the door printed, its one JSON line, and its exit,
 //! which the client prints and exits with as the door would. What the door
 //! says on stderr stays in the broker's journal.
@@ -25,7 +30,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -85,8 +90,59 @@ pub struct Broker {
     pub door: Vec<String>,
     /// How long a door may run ([`DOOR`]).
     pub limit: Duration,
+    /// Where each door's fence is made: None only in the crate's tests,
+    /// which have no cgroup to divide.
+    fences: Option<Fences>,
     /// The heads whose doors are running, by [`key`].
     live: Mutex<HashSet<String>>,
+}
+
+/// The doors' fences, `door-N` under the broker's own cgroup, each entered
+/// through `burrow-review-ask enter` so nothing of the door runs outside it.
+pub struct Fences {
+    dir: PathBuf,
+    /// This program, which `enter`s.
+    exe: PathBuf,
+    next: AtomicU64,
+}
+
+impl Fences {
+    /// The fences under the broker's own cgroup: any a broker before it
+    /// left emptied, and one made and emptied, so a cgroup it may not
+    /// divide (no `Delegate=yes`) stops it from starting rather than
+    /// leaving a door unfenced.
+    pub fn own(exe: PathBuf) -> Result<Self, String> {
+        let dir = burrow_process::fence::own()?;
+        let shown = dir.display().to_string();
+        let at = |e: io::Error| format!("{shown}: {e}");
+        for entry in std::fs::read_dir(&dir).map_err(at)? {
+            let path = entry.map_err(at)?.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("door-"))
+            {
+                burrow_process::fence::empty(&path).map_err(at)?;
+            }
+        }
+        let fences = Self {
+            dir,
+            exe,
+            next: AtomicU64::new(0),
+        };
+        let first = fences.make().map_err(at)?;
+        burrow_process::fence::empty(&first).map_err(at)?;
+        Ok(fences)
+    }
+
+    /// A new fence, made now.
+    fn make(&self) -> io::Result<PathBuf> {
+        let fence = self
+            .dir
+            .join(format!("door-{}", self.next.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir(&fence)?;
+        Ok(fence)
+    }
 }
 
 /// A head's key: a repo's name is GitHub's in any case.
@@ -126,11 +182,24 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 impl Broker {
-    pub fn new(askers: Vec<u32>, door: Vec<String>) -> Self {
+    pub fn new(askers: Vec<u32>, door: Vec<String>, fences: Fences) -> Self {
         Self {
             askers,
             door,
             limit: DOOR,
+            fences: Some(fences),
+            live: Mutex::default(),
+        }
+    }
+
+    /// A broker whose doors run unfenced, as the crate's tests have them.
+    #[cfg(test)]
+    fn bare(askers: Vec<u32>, door: Vec<String>) -> Self {
+        Self {
+            askers,
+            door,
+            limit: DOOR,
+            fences: None,
             live: Mutex::default(),
         }
     }
@@ -230,9 +299,60 @@ impl Broker {
         reply
     }
 
-    /// The door on `request`, killed if the asker goes first (anything that
+    /// The door on `request`, in its fence, emptied once the door is done
+    /// with however it ended, so nothing it started outlives it.
+    fn door(&self, request: &Request, read: BufReader<UnixStream>) -> Option<Reply> {
+        let (program, args) = self.door.split_first()?;
+        let fence = match self.fences.as_ref().map(Fences::make).transpose() {
+            Ok(f) => f,
+            Err(e) => {
+                return Some(Reply::failed(format!(
+                    "the owner's door's broker: its fence: {e}"
+                )));
+            }
+        };
+        let mut command = match (&self.fences, &fence) {
+            (Some(fences), Some(fence)) => {
+                let mut c = Command::new(&fences.exe);
+                c.arg("enter").arg(fence).arg("--").arg(program);
+                c
+            }
+            _ => Command::new(program),
+        };
+        command
+            .args(args)
+            .args([&request.repo, &request.pr.to_string(), &request.head])
+            // None of the broker's environment but where its user's gh
+            // login is: the door's command sets the rest.
+            .env_clear()
+            .envs(std::env::var_os("HOME").map(|h| ("HOME", h)));
+        let reply = self.run(request, command, read);
+        match fence.map(|f| burrow_process::fence::empty(&f).map_err(|e| (f, e))) {
+            Some(Err((f, e))) => {
+                eprintln!(
+                    "burrow-review-ask: {} #{}: its door's fence {} won't empty: {e}",
+                    request.repo,
+                    request.pr,
+                    f.display()
+                );
+                reply.map(|_| {
+                    Reply::failed(format!(
+                        "the owner's door's broker: what the door started may still run: {e}"
+                    ))
+                })
+            }
+            _ => reply,
+        }
+    }
+
+    /// `command`, the door, killed if the asker goes first (anything that
     /// ends its read: it sends nothing after its request). None then.
-    fn door(&self, request: &Request, mut read: BufReader<UnixStream>) -> Option<Reply> {
+    fn run(
+        &self,
+        request: &Request,
+        mut command: Command,
+        mut read: BufReader<UnixStream>,
+    ) -> Option<Reply> {
         let gone = Arc::new(AtomicBool::new(false));
         let watched = gone.clone();
         let watch = thread::spawn(move || {
@@ -246,15 +366,6 @@ impl Broker {
             }
             watched.store(true, Ordering::SeqCst);
         });
-        let (program, args) = self.door.split_first()?;
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .args([&request.repo, &request.pr.to_string(), &request.head])
-            // None of the broker's environment but where its user's gh
-            // login is: the door's command sets the rest.
-            .env_clear()
-            .envs(std::env::var_os("HOME").map(|h| ("HOME", h)));
         let ran = burrow_process::output_unless(
             &mut command,
             None,
@@ -308,8 +419,10 @@ pub fn main(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|n| uid(&passwd, n))
         .collect::<Result<_, _>>()?;
+    let exe = std::env::current_exe().map_err(|e| format!("which program this is: {e}"))?;
+    let fences = Fences::own(exe).map_err(|e| format!("the doors' fences: {e}"))?;
     let listener = bind(&cfg.socket).map_err(|e| format!("{}: {e}", cfg.socket.display()))?;
-    Arc::new(Broker::new(askers, cfg.door))
+    Arc::new(Broker::new(askers, cfg.door, fences))
         .serve(&listener)
         .map_err(|e| format!("{}: {e}", cfg.socket.display()))
 }

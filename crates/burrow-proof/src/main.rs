@@ -6,8 +6,9 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use burrow_process::fence::enter;
 use burrow_proof::end::{Ended, end};
-use burrow_proof::fence::{Cgroups, enter};
+use burrow_proof::fence::Cgroups;
 use burrow_proof::plugin::Config;
 use burrow_proof::run::run;
 use burrow_proof::start::start;

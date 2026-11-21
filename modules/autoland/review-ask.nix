@@ -46,8 +46,9 @@ let
   # broker's client, whose exit and what it prints are the door's. The
   # broker runs one door a head at a time, ends it within its 150s
   # (inside Conary's flow's 180s deadline for a door, flow/ask.rs), and
-  # ends it at once when its asker goes: the flow's kill of the client
-  # reaches the door that way, so a door the flow gave up on never posts.
+  # ends it at once when its asker goes, with all it started (its fence):
+  # the flow's kill of the client reaches the door that way, so a door the
+  # flow gave up on never posts.
   ask = pkgs.writeShellScript "burrow-review-ask-as-owner" ''
     exec ${bin} ask ${socket} "$@"
   '';
@@ -111,6 +112,10 @@ in
         ExecStart = "${bin} broker ${brokerConfig}";
         RuntimeDirectory = "burrow-review-ask";
         RuntimeDirectoryMode = "0755";
+        # Its cgroup is the broker's to divide: each door runs in a fence
+        # of its own (broker.rs), emptied once the door is done with, so
+        # the gh a door runs in a process group of its own goes with it.
+        Delegate = true;
         # A restart stops the doors it ran, and their askers see their
         # connections close.
         Restart = "on-failure";

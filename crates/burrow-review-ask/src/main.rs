@@ -1,10 +1,12 @@
-//! burrow-review-ask, in three parts (lib.rs, broker.rs):
+//! burrow-review-ask, in four parts (lib.rs, broker.rs):
 //!
 //! - `door REPO PR HEAD`: ask Codex's connector to review the head as the
 //!   owner, if every check holds (lib.rs). Its config is the file
 //!   BURROW_REVIEW_ASK_CONFIG names. The broker runs it.
 //! - `broker CONFIG`: the broker, which runs the door for the users it's
-//!   given to, and for no one else.
+//!   given to, and for no one else, each door in a fence of its own.
+//! - `enter FENCE -- DOOR ARGS...`: the door, as the broker starts it, once
+//!   this process is inside its fence (burrow_process::fence).
 //! - `ask SOCKET REPO PR HEAD`: ask through the broker, as the steward and
 //!   Conary's flow do.
 //!
@@ -26,6 +28,23 @@ fn main() {
                 serde_json::to_string(&out).expect("an outcome is JSON"),
             )
         }
+        Some((what, rest)) if what == "enter" => {
+            let out = match rest {
+                [fence, dashes, program, args @ ..] if dashes == "--" => Outcome::Failed {
+                    why: format!(
+                        "the door in its fence {fence}: {}",
+                        burrow_process::fence::enter(fence.as_ref(), program, args)
+                    ),
+                },
+                _ => Outcome::Failed {
+                    why: "usage: burrow-review-ask enter FENCE -- DOOR ARGS...".into(),
+                },
+            };
+            (
+                out.code(),
+                serde_json::to_string(&out).expect("an outcome is JSON"),
+            )
+        }
         Some((what, rest)) if what == "ask" => {
             let reply = broker::client(rest);
             (reply.code, reply.said)
@@ -39,7 +58,7 @@ fn main() {
         },
         _ => {
             let out = Outcome::Failed {
-                why: "usage: burrow-review-ask door|ask|broker ...".into(),
+                why: "usage: burrow-review-ask door|ask|broker|enter ...".into(),
             };
             (
                 out.code(),

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 burrow-github = { path = "../burrow-github" }
+burrow-process = { path = "../burrow-process" }
 burrow-producer = { path = "../burrow-producer" }
 # The plugin contract, the flow's recipes and settings are Conary's, pinned
 # with the kit's by Cargo.lock.

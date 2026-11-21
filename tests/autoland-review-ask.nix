@@ -12,9 +12,13 @@
 # - the controller reads nothing of burrow.user's gh login, and nothing of
 #   it comes back in an answer.
 #
+# - a door whose asker goes is stopped with all it started, the gh it has
+#   in a process group of its own too (its fence, a cgroup of the broker's),
+#   so it never posts, and the head may be asked again.
+#
 # gh is a stand-in that says who ran it and fails, so nothing is posted.
-# The crate's tests have the rest: a door stopped when its asker goes, one
-# past its limit, one door a head at a time.
+# The crate's tests have the rest: a door past its limit, one door a head
+# at a time.
 #
 #   nix build .#checks.x86_64-linux.autoland-review-ask -L
 { self, pkgs }:
@@ -24,7 +28,15 @@ let
   head = "0123456789abcdef0123456789abcdef01234567";
   # The owner's login, as gh keeps it: a marker no answer may carry.
   login = "gho_the-owners-own-login";
+  # With /tmp/gh-slow there, it says where it is and takes a while first,
+  # as a post would: the door has it in its own process group
+  # (burrow-github's bounded transport), apart from the door's.
   gh = pkgs.writeShellScriptBin "gh" ''
+    if test -e /tmp/gh-slow; then
+      echo $$ > /tmp/gh-pid.new && ${pkgs.coreutils}/bin/mv /tmp/gh-pid.new /tmp/gh-pid
+      ${pkgs.coreutils}/bin/sleep 20
+      ${pkgs.coreutils}/bin/touch /tmp/gh-posted
+    fi
     {
       echo "user $(${pkgs.coreutils}/bin/id -un)"
       echo "home $HOME"
@@ -133,6 +145,19 @@ pkgs.testers.runNixOSTest {
         said = json.loads(out.strip().splitlines()[-1])
         assert said == {"outcome": "failed", "why": f"the owner's door's broker: uid {uid} may not ask"}, said
         machine.fail("test -e /tmp/gh-ran")
+
+    with subtest("a door its asker gives up on is stopped, its gh and all"):
+        machine.succeed("rm -f /tmp/gh-ran /tmp/gh-pid /tmp/gh-posted && touch /tmp/gh-slow")
+        machine.succeed("systemd-run --unit=asker --uid=conary-flow -- ${ask} ${repo} 5 ${head}")
+        machine.wait_for_file("/tmp/gh-pid")
+        pid = machine.succeed("cat /tmp/gh-pid").strip()
+        machine.succeed("systemctl kill --signal=KILL asker.service")
+        # gh sleeps 20s before it posts: gone well before then, or it went on.
+        machine.wait_until_fails(f"test -e /proc/{pid}", timeout=5)
+        machine.fail("test -e /tmp/gh-posted")
+        machine.succeed("rm /tmp/gh-slow")
+        code, out = asks("conary-flow", "${repo}")
+        assert code == 1 and "already asking" not in out, (code, out)
 
     with subtest("the controller reads nothing of the owner's login"):
         machine.fail("runuser -u conary-flow -- cat /home/dev/.config/gh/hosts.yml")
