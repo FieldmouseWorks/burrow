@@ -115,6 +115,9 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             // A here-document's script is one, line after line.
             "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
             "bash <<'EOF'\ntrue &&\n  cd OTHER &&\n  git push origin pr\nEOF",
+            // Parentheses that open no function.
+            "files=(a b); cd OTHER && git push origin pr",
+            "[[ x =~ (a|b) ]]; cd OTHER && git push origin pr",
             // A place spelled out from the root reads it again.
             "cd \"$D\" && cd OTHER && git push origin pr",
             "cd \"$D\" && git -C OTHER push origin pr",
@@ -214,6 +217,10 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "f() { git push origin pr; }; cd OTHER; f",
             "f() (git push origin pr); cd OTHER; f",
             "function f { git push origin pr; }; cd OTHER; f",
+            "f() { git push origin pr; }; (cd OTHER && f)",
+            "f() { git push origin pr; }; echo $(cd OTHER && f)",
+            "f() { git push origin pr; }; eval 'cd OTHER'; f",
+            "for i in 1 2; do git push origin pr; eval 'cd OTHER'; done",
         ],
     );
     assert_each(cwd, &cmds, Some(UNREAD));

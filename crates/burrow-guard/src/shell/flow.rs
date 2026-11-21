@@ -2,7 +2,7 @@
 //! command to the one before it (`;`, `&&`, `||`, `|`, `&`), as the lexer
 //! reads them.
 
-use super::{Command, Lexer, TooDeep};
+use super::{Command, Lexer, TooDeep, assigned};
 
 /// Each command in `text`, as [`commands`](super::commands) reads them,
 /// with the shell each runs in and how it's joined to the ones around it.
@@ -13,6 +13,7 @@ pub fn script(text: &str) -> Result<Script, TooDeep> {
         runs: lexer.runs,
         parents: lexer.parents,
         joins: lexer.joins,
+        apart: lexer.apart,
     })
 }
 
@@ -28,6 +29,10 @@ pub struct Script {
     /// How each shell is joined to the command before it in its parent:
     /// as the command that holds a substitution is, or a subshell itself.
     pub joins: Vec<Joined>,
+    /// Whether each shell is a text of its own, read apart from the line
+    /// (a comment, a here-document or here-string), rather than part of
+    /// the line's script (a subshell, a substitution).
+    pub apart: Vec<bool>,
 }
 
 /// One command of a [`Script`].
@@ -41,7 +46,8 @@ pub struct Run {
     /// Neither piped nor put in the background, either of which runs it in
     /// a subshell of its own.
     pub alone: bool,
-    /// It ends at a `(`, as a function's name does (`f() …`).
+    /// It's one word, not an assignment, ending at a `(`: a function's
+    /// name (`f() …`).
     pub defines: bool,
 }
 
@@ -94,12 +100,13 @@ impl Lexer {
     }
 
     /// A new shell, started from the one open here, as the command read
-    /// here is joined to the one before it.
-    pub(super) fn child(&mut self) -> usize {
+    /// here is joined to the one before it; `apart`, [`Script::apart`].
+    pub(super) fn child(&mut self, apart: bool) -> usize {
         let flow = self.flow();
         let (parent, joined) = (flow.scope, joined(flow.pending));
         self.parents.push(parent);
         self.joins.push(joined);
+        self.apart.push(apart);
         self.parents.len() - 1
     }
 
@@ -116,16 +123,18 @@ impl Lexer {
             };
         } else {
             let before = flow.pending.replace(sep);
+            let defines =
+                sep == Sep::Opens && matches!(words.as_slice(), [name] if assigned(name).is_none());
             self.runs.push(Run {
                 words,
                 scope,
                 joined: joined(before),
                 alone: before != Some(Sep::Pipe) && !matches!(sep, Sep::Pipe | Sep::Background),
-                defines: sep == Sep::Opens,
+                defines,
             });
         }
         for script in scripts {
-            let scope = self.child();
+            let scope = self.child(true);
             self.runs.push(Run {
                 words: vec![script],
                 scope,
@@ -140,7 +149,7 @@ impl Lexer {
     /// A substitution's commands, after its `(`, to the `)` that ends it,
     /// in a shell of their own.
     pub(super) fn substitution(&mut self, depth: usize) -> Result<(), TooDeep> {
-        let scope = self.child();
+        let scope = self.child(false);
         let open = self.flows.len();
         self.flows.push(Flow {
             scope,

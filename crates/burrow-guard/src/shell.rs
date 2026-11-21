@@ -49,6 +49,16 @@ pub fn unknown(word: &str) -> bool {
     word.contains(['$', UNKNOWN])
 }
 
+/// The value of a `NAME=value` word.
+pub fn assigned(word: &str) -> Option<&str> {
+    let (name, value) = word.split_once('=')?;
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let is_name = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    is_name.then_some(value)
+}
+
 /// Each command in `text` as its words, a substitution's commands among
 /// them, ahead of the command that holds them.
 pub fn commands(text: &str) -> Result<Vec<Vec<String>>, TooDeep> {
@@ -68,6 +78,8 @@ struct Lexer {
     parents: Vec<usize>,
     /// [`Script::joins`].
     joins: Vec<Joined>,
+    /// [`Script::apart`].
+    apart: Vec<bool>,
     /// The shells open at `pos`, innermost last: the one the text there
     /// runs in, and those it's in.
     flows: Vec<Flow>,
@@ -396,6 +408,7 @@ impl Lexer {
             runs: Vec::new(),
             parents: vec![0],
             joins: vec![Joined::First],
+            apart: vec![false],
             flows: vec![Flow {
                 scope: 0,
                 pending: None,
@@ -450,7 +463,7 @@ impl Lexer {
                     self.end(cmd, Sep::Opens)?;
                     if grammar.open.len() > open {
                         // The subshell is a command, joined as its `(` is.
-                        let scope = self.child();
+                        let scope = self.child(false);
                         self.flows.push(Flow {
                             scope,
                             pending: None,
@@ -514,9 +527,11 @@ impl Lexer {
 
     /// `text` read as a script of its own, its commands joining these.
     /// It runs in a shell of its own, which may not be this one's at all.
-    fn read_apart(&mut self, text: &str, depth: usize) -> Result<(), TooDeep> {
+    /// `apart`: it's a text of its own ([`Script::apart`]), not a
+    /// backquoted substitution.
+    fn read_apart(&mut self, text: &str, depth: usize, apart: bool) -> Result<(), TooDeep> {
         let mut flow = Flow {
-            scope: self.child(),
+            scope: self.child(apart),
             pending: None,
         };
         self.read_in(text, depth, &mut flow)
@@ -528,11 +543,13 @@ impl Lexer {
         let mut inner = Lexer::new(text);
         inner.parents = std::mem::take(&mut self.parents);
         inner.joins = std::mem::take(&mut self.joins);
+        inner.apart = std::mem::take(&mut self.apart);
         inner.flows[0] = *flow;
         let read = inner.list(depth + 1, false);
         *flow = inner.flows[0];
         self.parents = inner.parents;
         self.joins = inner.joins;
+        self.apart = inner.apart;
         self.runs.append(&mut inner.runs);
         read
     }
@@ -543,7 +560,7 @@ impl Lexer {
         while let Some(c) = self.next_if(|c| c != '\n') {
             text.push(c);
         }
-        self.read_apart(&text, depth)
+        self.read_apart(&text, depth, true)
     }
 
     /// The bodies of the here-documents waiting on this newline, each line
@@ -558,7 +575,7 @@ impl Lexer {
     fn heredoc_bodies(&mut self, depth: usize, closes: bool) -> Result<(), TooDeep> {
         for doc in std::mem::take(&mut self.heredocs) {
             let mut flow = Flow {
-                scope: self.child(),
+                scope: self.child(true),
                 pending: None,
             };
             let mut script = String::new();
@@ -726,7 +743,7 @@ impl Lexer {
                 c => text.push(c),
             }
         }
-        self.read_apart(&text, depth)
+        self.read_apart(&text, depth, false)
     }
 
     /// The rest of a `$'…'` string, after its `'`. Its end is found first,

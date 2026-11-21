@@ -13,8 +13,9 @@
 //! to a place spelled out reads it again.
 //!
 //! A loop or a function runs its body at another time than it's read in,
-//! so a shell whose own commands hold one and any `cd` reads no place at
-//! all, and nor do its subshells. Text read apart (a comment, a
+//! so a shell whose own commands hold one, and whose commands or
+//! subshells' hold a `cd` or an `eval`, reads no place at all, and nor do
+//! its subshells. Text read apart (a comment, a
 //! here-document) is a shell of its own, so its prose moves nothing.
 //!
 //! What a sourced file, an alias or a function from outside the line does
@@ -22,8 +23,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::shell::{self, Joined, Run, Script};
-use crate::walk::assigned;
+use crate::shell::{self, Joined, Run, Script, assigned};
 
 /// Where a command runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +88,8 @@ pub struct Shells {
     shells: Vec<Option<Shell>>,
     parents: Vec<usize>,
     joins: Vec<Joined>,
-    /// Each shell's own commands hold a loop or a function, and a `cd`.
+    /// Each shell's own commands hold a loop or a function, and its own
+    /// or its subshells' a `cd` (or an `eval`).
     deferring: Vec<bool>,
     cdpath: bool,
 }
@@ -110,14 +111,23 @@ impl Shells {
     /// `script`'s shells, its own at `place`. `cdpath`: `CDPATH` may be
     /// set, which takes a relative `cd` anywhere.
     pub fn new(script: &Script, place: Place, cdpath: bool) -> Shells {
-        let (mut moves, mut defers) = (
-            vec![false; script.parents.len()],
-            vec![false; script.parents.len()],
-        );
+        let shells = script.parents.len();
+        let (mut moves, mut defers) = (vec![false; shells], vec![false; shells]);
         for run in &script.runs {
             let read = reading(&run.words, cdpath);
-            moves[run.scope] |= read.moves.is_some();
             defers[run.scope] |= read.defers || run.defines;
+            // A move in a subshell or a substitution runs a function its
+            // parents define where it went; `eval` may move anything.
+            if read.moves.is_some() || run.words.iter().any(|w| w == "eval") {
+                let mut at = run.scope;
+                while !moves[at] {
+                    moves[at] = true;
+                    if at == 0 || script.apart[at] {
+                        break;
+                    }
+                    at = script.parents[at];
+                }
+            }
         }
         let deferring: Vec<bool> = moves.iter().zip(&defers).map(|(m, d)| *m && *d).collect();
         let mut shells: Vec<Option<Shell>> = script.parents.iter().map(|_| None).collect();

@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::path::Path;
 
 use crate::place::{Place, Shells};
-use crate::shell::{self, Script};
+use crate::shell::{self, Script, assigned};
 
 /// Why a command wasn't read to its end.
 #[derive(Debug)]
@@ -250,16 +250,6 @@ impl<'a> Iterator for Words<'a, '_> {
             self.then = next.then;
         }
     }
-}
-
-/// The value of a `NAME=value` word.
-pub fn assigned(word: &str) -> Option<&str> {
-    let (name, value) = word.split_once('=')?;
-    let name = name.strip_suffix('+').unwrap_or(name);
-    let is_name = !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    is_name.then_some(value)
 }
 
 /// Whether `word` names a shell, which runs the script its `-c` gives it.
