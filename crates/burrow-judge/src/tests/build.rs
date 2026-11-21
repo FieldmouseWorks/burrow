@@ -210,8 +210,8 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
     let mirror = r.dir.path().join("state/git/acme/widget.git");
     let github = r.dir.path().join("github/acme/widget.git");
     // Every commit a repo has, and what each holds, sorted: commits made
-    // in the same second come out in its refs' order, which differs
-    // between the two.
+    // in the same second come out of `git log --all` in an order their
+    // history doesn't fix, and it can differ between the two.
     let commits = |repo: &Path| {
         let out = Command::new("git")
             .arg("--git-dir")
