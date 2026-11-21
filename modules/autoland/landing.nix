@@ -229,8 +229,9 @@ in
         conary-flow = {
           description = "landing: Conary's flow, for the repos burrow-landing gives conaryd";
           wantedBy = [ "multi-user.target" ];
-          after = [ "network-online.target" ];
+          after = [ "network-online.target" ] ++ autoland.flow.needs;
           wants = [ "network-online.target" ];
+          requires = autoland.flow.needs;
           unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events given ];
           environment = ledger.env // ledger.flow.env // {
             CONARY_SOCKET = socket;

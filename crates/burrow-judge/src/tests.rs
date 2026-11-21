@@ -37,6 +37,9 @@ const SECRET: [u8; 32] = [7; 32];
 const PRODUCER: &str = "machine-judge";
 const FLOW: &str = "flow-bot";
 const SEAL: &str = "abababababababababababababababababababababababababababababababab";
+/// Where the flow's configurations find the seal key: the controller's
+/// copy, which the producer never reads.
+const FLOW_KEY: &str = "/run/autoland-flow-keys/judge-seal";
 const AUTHOR: &str = "author-session";
 const REVIEWER: &str = "reviewer-session";
 
@@ -54,15 +57,17 @@ fn settings(dir: &Path) -> burrow_settings::Config {
 }
 
 /// The config, with the flow in `REPO` reading verdicts from `FLOW` under
-/// `seal`.
-fn config_with(dir: &Path, seal: &str) -> Config {
+/// the seal key `key` gives (`judge_key`, `judge_key_file` or both).
+fn config_with(dir: &Path, key: serde_json::Value) -> Config {
+    let mut flow = key;
+    flow["verdict_authors"] = json!([FLOW]);
     let flows = dir.join("flow");
     std::fs::create_dir_all(&flows).unwrap();
     std::fs::write(flows.join("acme/widget.json".replace('/', "_")), "unused").unwrap();
     std::fs::create_dir_all(flows.join("acme")).unwrap();
     std::fs::write(
         flows.join("acme/widget.json"),
-        json!({"settings": {"verdict_authors": [FLOW], "judge_key": seal}}).to_string(),
+        json!({"settings": flow}).to_string(),
     )
     .unwrap();
     Config {
@@ -72,6 +77,7 @@ fn config_with(dir: &Path, seal: &str) -> Config {
         credential: "judge-key".into(),
         seal: "judge-seal".into(),
         flow: flows,
+        flow_key: FLOW_KEY.into(),
         settings: settings(dir),
         role: "judge".into(),
         owner: "Sam".into(),
@@ -90,8 +96,9 @@ fn config_with(dir: &Path, seal: &str) -> Config {
     }
 }
 
+/// As the module renders it: the flow names the key's file.
 fn config(dir: &Path) -> Config {
-    config_with(dir, SEAL)
+    config_with(dir, json!({"judge_key_file": FLOW_KEY}))
 }
 
 fn seal() -> SealKey {
@@ -644,17 +651,26 @@ fn a_flow_that_wouldnt_count_the_judgment_is_refused_before_any_work() {
     let dir = tempfile::tempdir().unwrap();
     let w = world();
     let judges = Scripted::default();
-    let p = Producer::new(
-        config_with(dir.path(), &"cd".repeat(32)),
-        read(&w),
-        github(&w),
-        Box::new(judges.clone()),
-        Signer::for_tests(PRODUCER, SECRET),
-        seal(),
-    )
-    .unwrap();
-    let refused = ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap_err();
-    assert!(refused.contains("seal key"), "{refused}");
+    // A flow under another key, inline or by another file, under its key
+    // both ways (which Conary won't load), or under none.
+    for key in [
+        json!({"judge_key": "cd".repeat(32)}),
+        json!({"judge_key_file": "/run/elsewhere/judge-seal"}),
+        json!({"judge_key": SEAL, "judge_key_file": FLOW_KEY}),
+        json!({}),
+    ] {
+        let p = Producer::new(
+            config_with(dir.path(), key.clone()),
+            read(&w),
+            github(&w),
+            Box::new(judges.clone()),
+            Signer::for_tests(PRODUCER, SECRET),
+            seal(),
+        )
+        .unwrap();
+        let refused = ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap_err();
+        assert!(refused.contains("seal key"), "{key}: {refused}");
+    }
     // Nor an old contract's request, a resumed session, or no reason.
     let p = producer(dir.path(), &w, judges.clone());
     let mut old = judge_request(&w, vec![Trigger::Asked]);
@@ -670,6 +686,27 @@ fn a_flow_that_wouldnt_count_the_judgment_is_refused_before_any_work() {
     }
     assert!(judges.0.lock().unwrap().asked.is_empty());
     assert!(w.with(|p| p.runs.is_empty()));
+}
+
+#[test]
+fn a_flow_given_the_producers_own_key_inline_is_judged_for() {
+    // The file form, the module's, is every other test's config.
+    let dir = tempfile::tempdir().unwrap();
+    let w = world();
+    let judges = Scripted::answering(vec![answer("judge-1", Judgment::Pass)]);
+    let p = Producer::new(
+        config_with(dir.path(), json!({"judge_key": SEAL})),
+        read(&w),
+        github(&w),
+        Box::new(judges.clone()),
+        Signer::for_tests(PRODUCER, SECRET),
+        seal(),
+    )
+    .unwrap();
+    // Straight to the producer: the plugin's own config would rewrite the
+    // flow's to the file form.
+    ask(dir.path(), &p, &judge_request(&w, vec![Trigger::Asked])).unwrap();
+    assert_eq!(judges.0.lock().unwrap().asked.len(), 1);
 }
 
 #[test]

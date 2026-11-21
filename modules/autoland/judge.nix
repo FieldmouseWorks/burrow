@@ -106,7 +106,9 @@ in
       description = ''
         The flow's judge seal key (its `settings.judge_key`), as 64
         lowercase hex characters, readable by root: a secret, never in the
-        store. The producer alone gets it, as its systemd credential.
+        store. The producer and the flow's controller alone get it, each as
+        a systemd credential: the controller's through autoland-flow-keys,
+        whose copy the flow configurations name (`judge_key_file`).
       '';
     };
 
@@ -163,6 +165,7 @@ in
         credential = "judge-key";
         seal = "judge-seal";
         flow = autoland.flowConfigs;
+        flow_key = autoland.flow.judgeKey;
         settings = config.burrow.settings.effective;
         owner = config.burrow.owner;
         api = "https://api.github.com";

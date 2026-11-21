@@ -359,7 +359,10 @@ Each has an entry below, and each can be imported on its own.
   anything else refuses the flow's choice), and, where the repo has
   evidence, its producer's public key (`plugins.proof.publicKey`,
   `plugins.judge.publicKey`) in the producers file, trusted for the repo's
-  proofs or `conary/judgment` alone.
+  proofs or `conary/judgment` alone. The judge's seal key reaches the flow
+  by its file alone (`judge_key_file`): `autoland-flow-keys`'s copy of its
+  credential, which only the controller can read and which every unit that
+  runs the flow requires.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every
