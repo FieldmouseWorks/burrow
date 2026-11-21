@@ -258,8 +258,10 @@ impl Outbox {
                 let (held, body) = match self.read(name) {
                     Ok(it) => it,
                     Err(e) => {
-                        eprintln!("conaryd's outbox: {name} unreadable, dropped: {e}");
+                        // Dropped before it's said, so whoever reads the
+                        // line finds it gone.
                         self.drop_held(name);
+                        eprintln!("conaryd's outbox: {name} unreadable, dropped: {e}");
                         continue;
                     }
                 };
@@ -268,13 +270,14 @@ impl Outbox {
                         .get(name)
                         .or(down.as_ref())
                         .map_or("never sent", |r| r.why.as_str());
+                    // Dropped before it's said, as above.
+                    self.drop_held(name);
                     eprintln!(
                         "{}: delivery {} ({}) not taken by conaryd: {why}",
                         held.repo,
                         held.header("X-GitHub-Delivery"),
                         held.header("X-GitHub-Event"),
                     );
-                    self.drop_held(name);
                     continue;
                 }
                 match send(self.port, &held.headers, &body, self.timeout) {
