@@ -177,6 +177,7 @@ mod first;
 pub mod github;
 pub mod github_quota;
 pub mod guest;
+pub mod held;
 pub mod host_jobs;
 pub mod inbox;
 pub mod job;

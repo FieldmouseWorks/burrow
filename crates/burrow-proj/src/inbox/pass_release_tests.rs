@@ -3,6 +3,7 @@
 //! that only ever tries for that lock almost never gets it.
 use super::resumption::{Permit, Wait};
 use super::sorting_tests::Box;
+use crate::held::Held;
 use crate::inbox::record::files;
 use crate::job::Job;
 use std::fs::{self, File, OpenOptions};
@@ -88,9 +89,7 @@ fn a_pass_holding_the_lock_throughout_releases_a_parked_drained_turn() {
 
     // The next pass holds the lock from start to end, as passes back to back
     // do: it releases the parked turn before it lets go.
-    let lock = wake_lock(&fixture);
-    lock.lock().unwrap();
-    let pass = Permit::pass(lock);
+    let pass = Permit::pass(Held::lock(wake_lock(&fixture)).unwrap());
     super::release_parked(&fixture.cfg, pass);
     assert!(launched.exists(), "the pass must release the parked turn");
     assert!(!crate::policy::parked(&job));
@@ -108,9 +107,7 @@ fn a_reply_the_pass_hands_on_counts_capacity_under_its_lock() {
     let mut fixture = Box::new();
     let launched = drained_pair(&mut fixture);
     fs::remove_file(fixture.path("active")).unwrap();
-    let lock = wake_lock(&fixture);
-    lock.lock().unwrap();
-    let pass = Permit::pass(lock);
+    let pass = Permit::pass(Held::lock(wake_lock(&fixture)).unwrap());
     let job = Job::new(&fixture.cfg, "waiting");
     crate::turn::start_answer(&fixture.cfg, job.id, "the owner replied", false).unwrap();
     assert!(
