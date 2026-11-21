@@ -83,8 +83,8 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the config names the key's file and holds no key"):
         machine.succeed("jq -e '.settings.judge_key_file == \"${keyFile}\" and (.settings | has(\"judge_key\") | not)' ${config}")
-        # conaryd's is the same file: the configs' entry links to it.
-        machine.succeed("jq -e --arg c \"$(readlink -f ${config})\" '.flow_config == $c' ${nodes.machine.burrow.landing.eventsTemplate}")
+        # conaryd's is the same file: its repo's entry links to it.
+        machine.succeed("jq -e --arg c \"$(readlink -f ${config})\" '.flow_config[\"${repo}\"] == $c' ${nodes.machine.burrow.landing.eventsTemplate}")
         # And the judge's producer, holding the same sealFile as its own
         # credential, checks the flow names that file before it judges.
         machine.succeed("jq -e '.flow_key == \"${keyFile}\" and .seal == \"judge-seal\"' /etc/burrow/autoland-judge-plugin.json")

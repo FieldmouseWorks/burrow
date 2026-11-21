@@ -39,23 +39,21 @@ let
   secret = "/run/conary-flow/webhook";
   socket = "/run/conary-flow/conaryd.sock";
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-landing;
-  # conaryd's flow configuration is one file for every repo it's given, so
-  # the repos it may have are those whose rendered configurations are the
-  # same file (each is a store path of its content).
-  files = map autoland.flow.config cfg.conaryd;
-  flowConfig = builtins.head files;
-  # conaryd's events file, but for the repos burrow-landing gives it, held
-  # to Conary's own types as the machine's build loads it (`cn flow
+  # conaryd's events file for every repo it may have, each reading its own
+  # flow configuration (`flow_config`, keyed OWNER/NAME: its shadow's),
+  # held to Conary's own types as the machine's build loads it (`cn flow
   # settings --events-config`), as the flow configurations are.
+  # burrow-landing narrows `repos` and `flow_config` to the ones it gives.
+  flowConfigs = lib.genAttrs cfg.conaryd autoland.flow.config;
   template = pkgs.runCommand "conaryd-events.json" {
     events = builtins.toJSON {
       listen = "127.0.0.1:${toString cfg.port}";
       # The repos' hooks' secret: GitHub signs each delivery with it, and
       # burrow-events passes them on whole.
       secret_path = secret;
-      repos = [ ];
+      repos = cfg.conaryd;
       inherit data;
-      flow_config = flowConfig;
+      flow_config = flowConfigs;
       policy = ledger.env.CONARY_POLICY;
       token_command = autoland.flow.token;
       anchor_repo = ledger.anchorRepo;
@@ -96,9 +94,8 @@ in
         them to it: the setting does, and `settings landing OWNER/REPO
         steward` hands one back. Each must be shadowed first
         (burrow.autoland.shadow), so the flow has been checked against the
-        steward on it, and they must render one flow configuration, since
-        conaryd reads one for every repo it lands. Empty, the default, runs
-        no conaryd for landing.
+        steward on it; each lands on its own flow configuration, the one its
+        shadow reads. Empty, the default, runs no conaryd for landing.
       '';
     };
     record = mkOption {
@@ -113,7 +110,7 @@ in
       readOnly = true;
       internal = true;
       default = template;
-      description = "conaryd's events file as rendered, its repos empty: burrow-landing gives it the rest.";
+      description = "conaryd's events file as rendered, for every repo conaryd may have: burrow-landing narrows it to the ones it gives.";
     };
     port = mkOption {
       type = types.port;
@@ -207,8 +204,10 @@ in
         assertion = lib.all (r: lib.any (s: lib.toLower s == lib.toLower r) autoland.shadow) cfg.conaryd;
         message = "burrow.landing.conaryd: shadow each repo first (burrow.autoland.shadow), so the flow is checked against the steward on it before it can land it.";
       } {
-        assertion = lib.all (f: f == flowConfig) files;
-        message = "burrow.landing.conaryd: ${lib.concatStringsSep ", " cfg.conaryd} render different flow configurations, and conaryd reads one for every repo it lands.";
+        # Conary's train steps only on its evidence, which a repo's
+        # trainNegative renders.
+        assertion = !lib.any (f: f.trainWithoutEvidence) (lib.attrValues flowConfigs);
+        message = "burrow.landing.conaryd: ${lib.concatStringsSep ", " (lib.attrNames (lib.filterAttrs (_: f: f.trainWithoutEvidence) flowConfigs))} run a train with no trainNegative, so no evidence, and conaryd's train steps only on evidence.";
       } {
         # conaryd runs the owner's door's command (its flow config's
         # review_ask) as the flow's user, and the command starts the door in

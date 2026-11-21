@@ -266,6 +266,34 @@ in
       '';
     };
 
+    freshRunners = mkOption {
+      type = types.functionTo (types.nullOr types.str);
+      readOnly = true;
+      internal = true;
+      default = repo:
+        let
+          same = r: lib.toLower r == lib.toLower repo;
+          # A private repo dispatch discovers (burrow.dispatch.privateOwners)
+          # runs on runners it registers for that repo alone, with the same
+          # prefix: only its settings can say so as the machine is built.
+          declared = lib.any (k: same k && (autoland.repos.${k}.trainFresh or false))
+            (lib.attrNames (autoland.repos or { }));
+        in
+        if (fresh.enable or false) && fresh.fresh.enable
+          && (lib.any same fresh.fresh.repos || declared)
+        then fresh.fresh.prefix else null;
+      defaultText = lib.literalMD "burrow.dispatch.fresh's prefix for its repos and those whose trainFresh is true, null for the rest";
+      description = ''
+        OWNER/NAME's runners started fresh for one job, as the start of their
+        names, whose results its evidence counts beside GitHub-hosted ones
+        (its flow configuration's `evidence.fresh`): this machine's
+        (burrow.dispatch.fresh) for a repo listed in its `repos` or whose
+        burrow.autoland.repos setting `trainFresh` is true (a private repo
+        dispatch registers runners for), and null, GitHub-hosted only, for
+        every other.
+      '';
+    };
+
     owners = mkOption {
       type = types.listOf types.str;
       default = if autoland.enable or false then autoland.owners else [ ];
