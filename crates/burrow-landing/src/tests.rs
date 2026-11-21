@@ -63,6 +63,7 @@ impl Machine {
                 given: p("conaryd-given"),
             }),
             steward_kick: String::new(),
+            renovate_lock: Some(p("run.lock")),
         };
         Self { dir, cfg, settings }
     }
@@ -182,6 +183,40 @@ fn the_steward_lets_go_before_conaryd_is_given_the_repo() {
         [REPO],
         "the steward isn't kicked for a repo it gave away"
     );
+}
+
+#[test]
+fn a_run_of_renovate_under_way_keeps_the_steward_from_letting_go() {
+    let m = Machine::new();
+    let mut kicks = Kicks::default();
+    // A run of Renovate's, holding renovate-run's run lock as it does from
+    // before it reads the record until its Renovate exits, read the record
+    // while the steward held the repo: it may merge there.
+    let renovate = fs::File::create(m.dir.path().join("run.lock")).unwrap();
+    renovate.lock().unwrap();
+    m.set("conaryd");
+    m.run(&mut kicks);
+    m.release(1);
+    for _ in 0..2 {
+        let moved = m.run(&mut kicks);
+        assert!(moved.waiting.contains(REPO) && moved.moved.is_empty());
+        let h = m.holding();
+        assert_eq!((h.owner, h.to), (Owner::Steward, Some(Owner::Conaryd)));
+        assert!(
+            m.given().is_empty(),
+            "conaryd given it while Renovate may merge"
+        );
+    }
+
+    // Once it has ended, any later run reads the handover and merges nothing.
+    // Its end changes what a run reads, so one under way as it comes goes
+    // again (main.rs).
+    let before = inputs(&m.cfg).unwrap();
+    drop(renovate);
+    assert_ne!(inputs(&m.cfg).unwrap(), before);
+    let moved = m.run(&mut kicks);
+    assert_eq!(moved.moved.get(REPO), Some(&Owner::Conaryd));
+    assert_eq!(m.given(), [REPO]);
 }
 
 #[test]

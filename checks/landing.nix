@@ -75,6 +75,8 @@ let
     (if !(on.systemd.timers ? burrow-landing) || driver.serviceConfig.Restart != "on-failure" then "a failed or missed run of burrow-landing isn't run again" else null)
     (if !(flow.serviceConfig ? ExecStartPre) then "conaryd reads the hooks' secret untrimmed" else null)
     (if !(lib.elem on.burrow.settings.effective.overlay on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear the setting change" else null)
+    (if !(lib.elem on.burrow.updates.renovate.runLock on.systemd.paths.burrow-landing.pathConfig.PathChanged) then "burrow-landing doesn't hear a run of Renovate end" else null)
+    (if on.systemd.tmpfiles.settings.burrow.${on.burrow.updates.renovate.runLock}.f.mode != "0644" then "Renovate's run lock may be unreadable to burrow-landing, which runs as the flow's user" else null)
     (if on.burrow.events.landing.forward != on.burrow.landing.port then "deliveries don't go where conaryd listens" else null)
     (if !(lib.all (e: lib.elem e on.burrow.events.hookEvents) [ "check_run" "pull_request_review_thread" "push" ]) then "the hooks don't send what conaryd takes" else null)
     (if !(lib.any (lib.hasInfix "shadow each repo first") (failing (machine [{ burrow.landing.conaryd = [ "sam/homelab" ]; }]))) then "a repo conaryd may have that was never shadowed is taken" else null)
@@ -113,6 +115,8 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   jq -e 'has("review_ask") | not' ${on.burrow.autoland.flowConfigs}/sam/homelab.json >/dev/null \
     || fail "a flow config asks through a door the machine doesn't have"
   grep -q "${template}" ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} || fail "burrow-landing doesn't write the rendered events file"
+  jq -e '.renovateLock == "${on.burrow.updates.renovate.runLock}"' ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} >/dev/null \
+    || fail "burrow-landing hands a repo over while a run of Renovate that may merge there is under way"
   jq -e '.conaryd.given == "${given}"' ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} >/dev/null \
     || fail "burrow-landing doesn't keep the marker conaryd starts on, so it starts with no repo given it"
   jq '. + {bogus: 1}' ${template} > key.json

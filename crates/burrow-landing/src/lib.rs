@@ -12,7 +12,11 @@
 //!    handover's generation. conaryd lets go by being taken off its events
 //!    file: it passes no repo it isn't given.
 //! 2. Once the one letting go is quiet, the record gives the repo to the
-//!    other. The steward is quiet when its marker names this handover.
+//!    other. The steward is quiet when its marker names this handover and
+//!    no run of Renovate holds renovate-run's run lock: one that read the
+//!    record before the handover started may still merge as the steward
+//!    held it, and one that takes the lock later reads the record that
+//!    step 1 published (burrow-renovate's run.rs).
 //!    conaryd is when it has started again since the events file's last
 //!    publication, which no longer lists the repo, by that publication's
 //!    serial, never its contents (a pass reads its repos before it takes
@@ -60,6 +64,10 @@ pub struct Config {
     /// Where a kick of the steward's pass of a repo goes, `/OWNER/REPO`
     /// added: burrow-events' kick of the steward's handler.
     pub steward_kick: String,
+    /// renovate-run's run lock, which each run of Renovate holds from
+    /// before it reads the record until it has exited; none where Renovate
+    /// doesn't run.
+    pub renovate_lock: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -198,7 +206,7 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
     for (repo, h) in record.repos.clone() {
         let Some(to) = h.to else { continue };
         let quiet = match h.owner {
-            Owner::Steward => released.get(&repo) == Some(&h.generation),
+            Owner::Steward => released.get(&repo) == Some(&h.generation) && renovate_quiet(cfg)?,
             Owner::Conaryd => restarted(cfg)? && conaryd_quiet(&cfg.data, &repo, patience)?,
         };
         if !quiet {
@@ -232,6 +240,32 @@ pub fn run(cfg: &Config, wake: &mut dyn Wake, patience: &Patience) -> Result<Mov
 fn wake_steward(wake: &mut dyn Wake, repo: &str) {
     if let Err(e) = wake.steward(repo) {
         eprintln!("burrow-landing: {e}");
+    }
+}
+
+/// Whether no run of Renovate is under way: none holds renovate-run's run
+/// lock. Its runs take turns on that one lock, each reading the record once
+/// it has it, and the Renovate it runs holds it too until it exits; so with
+/// the lock free, any run that read the record before this handover's
+/// publication has ended, and any later one merges nothing in the repo.
+/// Not waited for, since a run may last hours: the lock file's last close
+/// (`burrow-landing.path`) starts the next run.
+fn renovate_quiet(cfg: &Config) -> Result<bool, String> {
+    let Some(path) = &cfg.renovate_lock else {
+        return Ok(true);
+    };
+    let lock = match std::fs::File::open(path) {
+        Ok(lock) => lock,
+        // No run has ever taken it; one that makes it now reads the record
+        // after it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    // Shared, and dropped at once: no run of Renovate waits on this one.
+    match lock.try_lock_shared() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -424,10 +458,12 @@ fn conaryd_quiet(data: &Path, repo: &str, patience: &Patience) -> Result<bool, S
 }
 
 /// Everything a run reads that something else writes, as it is now: two
-/// that are the same mean nothing changed in between.
+/// that are the same mean nothing changed in between. Renovate's run lock
+/// counts by whether it's free: its last close, which frees it, may come
+/// while a run is under way and start none of its own.
 pub fn inputs(cfg: &Config) -> Result<Vec<Option<Vec<u8>>>, String> {
     let settings: burrow_settings::Config = read_json(&cfg.settings)?;
-    [settings.overlay.as_path(), &cfg.steward_released]
+    let mut inputs = [settings.overlay.as_path(), &cfg.steward_released]
         .into_iter()
         .chain(cfg.conaryd.as_ref().map(|c| c.started.as_path()))
         .map(|p| match std::fs::read(p) {
@@ -435,7 +471,9 @@ pub fn inputs(cfg: &Config) -> Result<Vec<Option<Vec<u8>>>, String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", p.display())),
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    inputs.push(Some(vec![u8::from(renovate_quiet(cfg)?)]));
+    Ok(inputs)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {

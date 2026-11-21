@@ -66,6 +66,13 @@ let
     HOME=$TMPDIR ${ledger.package}/bin/cn flow settings --events-config "$eventsPath" >/dev/null
     cp "$eventsPath" "$out"
   '';
+  # renovate-run's run lock, where Renovate runs: a repo the steward
+  # lands is handed over only once no run of it holds that.
+  # Another module may declare some of burrow.updates' options without the
+  # updates module: Renovate runs only where both are enabled.
+  updates = config.burrow.updates or { };
+  renovateLock = if (updates.enable or false) && (updates.renovate.enable or false)
+    then updates.renovate.runLock else null;
   driver = pkgs.writeText "burrow-landing.json" (builtins.toJSON {
     settings = config.burrow.settings.file;
     stewardReleased = "${stateDir}/autoland/landing-released.json";
@@ -74,6 +81,7 @@ let
     # off at a deploy) is handed back once the workers it left have exited.
     conaryd = if on then { eventsTemplate = cfg.eventsTemplate; inherit events serial started given; } else null;
     stewardKick = "${config.burrow.events.kick}/autoland";
+    inherit renovateLock;
   });
 in
 {
@@ -187,7 +195,8 @@ in
           config.burrow.settings.effective.overlay
           "${stateDir}/autoland/landing-released.json"
           "/run/current-system"
-        ] ++ lib.optional on started;
+          # Its last close, as a run of Renovate's ends, frees it.
+        ] ++ lib.optional on started ++ lib.optional (renovateLock != null) renovateLock;
       };
     })
     (lib.mkIf on {
