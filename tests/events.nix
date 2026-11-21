@@ -52,10 +52,6 @@ pkgs.testers.runNixOSTest {
         wake = "/var/lib/probe/wake.json";
       };
     };
-    # The hourly catch-up fires on the wall clock, so a run that straddles
-    # the hour got a full pass of its own among the ones the test counts.
-    # The test starts the catch-up itself where it checks it.
-    systemd.timers.burrow-events-catch-up.enable = false;
     # A file of its own rather than a link into the store, so the test can
     # write a new secret into it.
     environment.etc."burrow-webhook" = { text = "hook-secret\n"; mode = "0600"; };
