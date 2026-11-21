@@ -53,6 +53,15 @@ run(clean(), 400)
 assert C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 run(clean(), 86400 + 10)
 assert C.WAKE == {}, C.WAKE
+# Or a day after it was last set aside, when that's later: nothing could
+# land it on hold, so its day begins once the hold is off, and the pass that
+# finds it off books the one a day on. On hold it books none.
+fresh_pr_state()
+WEEK = 7 * 86400
+run(clean(labels=["hold"]), WEEK)
+assert C.WAKE == {}, C.WAKE
+run(clean(), WEEK + 600)
+assert C.WAKE == {"sam/r": T + WEEK + 86400 + 1}, C.WAKE
 # A status or a stop of auto-merge GitHub didn't take is tried again a
 # minute later, two after a second failure in a row: until then the old
 # success and the auto-merge stand.
@@ -70,7 +79,7 @@ run(held, 600)
 assert C.WAKE["sam/r"] == T + 600 + 120 + 1, C.WAKE
 FAIL.remove("--disable-auto")
 run(held, 700)
-assert C.WAKE == {"sam/r": T + 86400 + 1} and C.load(key, {})["landed"] is None, (C.WAKE, C.load(key, {}))
+assert C.WAKE == {} and C.load(key, {})["landed"] is None, (C.WAKE, C.load(key, {}))
 FAIL.append("/statuses/")
 run(clean(labels=["hold"]), 800)
 assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE

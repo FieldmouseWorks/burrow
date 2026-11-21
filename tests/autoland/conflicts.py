@@ -161,6 +161,19 @@ for pr in (clean(), clean(comments=[said(swept("ok"))], **major)):
     run(conflicting(pr), 700)
     status, digest = run(conflicting(pr), 90000)
     assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
+# Not one whose hold has just come off, though, however long ago it was
+# opened: nothing could land it on hold, so its day began when the hold came
+# off (remi#1486: a week on hold, then listed as stuck within the hour, with
+# a job at work on its conflict). Still open a day on from there, it's listed.
+fresh_pr_state()
+WEEK = 7 * 86400
+run(clean(labels=["hold"]), WEEK)
+status, digest = run(conflicting(clean()), WEEK + 1800)
+assert len(JOBS) == 1 and "a Claude job has it" in status and digest == [], (JOBS, status, digest)
+status, digest = run(conflicting(clean()), WEEK + 86300)
+assert digest == [], digest
+status, digest = run(conflicting(clean()), WEEK + 90000)
+assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
 # One renovate-sweep has is its job's: a red one, or a major with no verdict
 # on this head, gets no job of ours beside it on the branch.
 red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]

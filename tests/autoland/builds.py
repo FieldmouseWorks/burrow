@@ -266,6 +266,15 @@ assert evals() == [] and JOBS == [], (evals(), JOBS)
 # a status run can't say how that goes.
 status, st = dry(5, 700 + P.EVAL_RETRY * 60)
 assert UNTOLD in status and st["strikes"] == {"eval": 1} and evals() == [], (status, st)
+# When the live passes last saw a PR set aside is theirs too, whatever its
+# head, since its day to land in begins there: a status run counts the day
+# from where they do, and from when it opened once they have none.
+kept = open(f"{tmp}/state/pr-sam_r-1.json").read()
+C.save("pr-sam_r-1.json", {**json.loads(kept), "head": "an-earlier-head", "aside": 12345})
+assert dry(1, 1000)[1]["aside"] == 12345
+with open(f"{tmp}/state/pr-sam_r-1.json", "w") as f:
+    f.write(kept)
+assert "aside" not in dry(1, 1100)[1]
 VALID[:] = [Z]
 
 # A build whose eval fails has nothing to build: no build and no slot, a

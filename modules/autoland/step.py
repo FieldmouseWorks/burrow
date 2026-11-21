@@ -62,16 +62,25 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
 
 
 class Pass(Context, Jobs, Actions):
+    def day_began(self):
+        """When the day a PR gets to land in began (open_a_day): when it was
+        opened, or the last pass that set it aside (aside.py: a draft, a
+        hold, a stack) if that came later, since nothing could land it
+        until then. A week on hold isn't a week stuck: one listed the
+        moment its hold came off took a Claude job to find it moving
+        (remi#1486)."""
+        return max(ts(self.pr["createdAt"]), self.st.get("aside", 0))
+
     def open_a_day(self, what, swept=False):
-        """Anything not merged a day after it was opened, reviewed clean or
-        not (a check that never reports keeps it pending), is listed, unless
-        it's listed already, watchdog or not. A Renovate update's own stuck
-        ones are renovate-sweep's (swept)."""
+        """Anything not merged a day after it was opened or last set aside
+        (day_began), reviewed clean or not (a check that never reports keeps
+        it pending), is listed, unless it's listed already, watchdog or not.
+        A Renovate update's own stuck ones are renovate-sweep's (swept)."""
         if C.paused(self.repo):
             return
         if (release := self.usage_grace()) and C.NOW < release + C.repo_cfg(self.repo)["stallAfter"] * MIN:
             return
-        if not swept and C.NOW - ts(self.pr["createdAt"]) > 86400 and not any(x[1] == self.line for x in self.digest):
+        if not swept and C.NOW - self.day_began() > 86400 and not any(x[1] == self.line for x in self.digest):
             self.digest.append(("Open over a day", self.line, what))
 
     def owner_decides(self):
@@ -102,9 +111,6 @@ class Pass(Context, Jobs, Actions):
             self.cleared("stop")
         else:
             self.strike("stop")
-        # Open a day, it's listed for the owner (below): a pass then says so.
-        self.after(ts(self.pr["createdAt"]), 24 * 60)  # ends: listed for the owner
-
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
 
         # What its fix jobs left, posted once it's so (or they're stopped).
@@ -113,9 +119,13 @@ class Pass(Context, Jobs, Actions):
             save(self.key, self.st)
             return
         if set_aside := aside(self.tag, self.pr, self.labels, self.held, self.below):
+            self.st["aside"] = C.NOW  # its day to land in begins once it's no longer (day_began)
             self.settle("pending", *set_aside[:2], stage=set_aside[2], wait=set_aside[3])
             save(self.key, self.st)
             return
+        # Open a day, it's listed for the owner (below): a pass then says so.
+        # Set aside, it books none: the pass that finds it back books its day.
+        self.after(self.day_began(), 24 * 60)  # ends: listed for the owner
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
         self.ci, self.ci_names, docs = self.ci_checks()
