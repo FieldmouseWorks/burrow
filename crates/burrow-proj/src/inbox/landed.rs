@@ -17,6 +17,7 @@
 //! owner's notice says that it doesn't count.
 use super::{List, Pass, key};
 use crate::inbox::record::files;
+use crate::planning::reference;
 use crate::record::TurnFile;
 use crate::{Fail, job::Job, read, swap};
 use serde_json::{Value, json};
@@ -128,25 +129,6 @@ fn awaited_targets(job: &Job) -> Vec<String> {
         })
         .filter(|t| seen.insert(t.to_lowercase()))
         .collect()
-}
-
-/// `OWNER/REPO#N`, as `proj await` and `proj plan done` take one.
-fn reference(s: &str) -> Option<(String, u64)> {
-    let (repo, n) = s.trim().split_once('#')?;
-    let (owner, name) = repo.split_once('/')?;
-    let part = |p: &str| {
-        !p.is_empty()
-            && p.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    };
-    (part(owner) && part(name))
-        .then(|| {
-            n.parse()
-                .ok()
-                .filter(|n| *n > 0)
-                .map(|n| (repo.to_owned(), n))
-        })
-        .flatten()
 }
 
 /// The successor a comment's text names ([`CONTINUED`]), `#N` being in `repo`.
@@ -667,11 +649,7 @@ mod parse_tests {
     use super::*;
 
     #[test]
-    fn references_and_pull_urls() {
-        assert_eq!(reference("sam/box#8"), Some(("sam/box".into(), 8)));
-        assert_eq!(reference("sam/box#0"), None);
-        assert_eq!(reference("sam#8"), None);
-        assert_eq!(reference("sam/b x#8"), None);
+    fn pull_urls() {
         assert_eq!(
             pull_url("https://github.com/sam/box/pull/10"),
             Some(("sam/box".into(), 10))

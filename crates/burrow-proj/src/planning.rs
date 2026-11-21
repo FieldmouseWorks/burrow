@@ -126,6 +126,13 @@ pub const INSTRUCTIONS: &str = "Plan the size of this task before implementation
 mod tests {
     use super::*;
     #[test]
+    fn references() {
+        assert_eq!(reference("sam/box#8"), Some(("sam/box".into(), 8)));
+        assert_eq!(reference("sam/box#0"), None);
+        assert_eq!(reference("sam#8"), None);
+        assert_eq!(reference("sam/b x#8"), None);
+    }
+    #[test]
     fn a_planning_hold_blocks_every_turn_start_before_any_question_or_prompt_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: crate::config::Config =
