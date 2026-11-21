@@ -21,7 +21,7 @@ mod brace;
 mod flow;
 
 use flow::{Flow, Sep};
-pub use flow::{Joined, Run, Script, script};
+pub use flow::{Joined, Opened, Run, Script, script};
 
 /// What a substitution's output is, in the word that holds it: unknown
 /// until it runs.
@@ -74,12 +74,10 @@ struct Lexer {
     pos: usize,
     /// Every command read, from every scope.
     runs: Vec<Run>,
-    /// [`Script::parents`].
-    parents: Vec<usize>,
-    /// [`Script::joins`].
-    joins: Vec<Joined>,
-    /// [`Script::apart`].
-    apart: Vec<bool>,
+    /// [`Script::shells`].
+    shells: Vec<Opened>,
+    /// The last list read ended with a subshell or a `case` still open.
+    torn: bool,
     /// The shells open at `pos`, innermost last: the one the text there
     /// runs in, and those it's in.
     flows: Vec<Flow>,
@@ -256,6 +254,8 @@ struct Command {
     target: bool,
     /// That target is a here-string's text.
     here_string: bool,
+    /// It has a redirect, which may fail before it runs.
+    redirected: bool,
     /// Here-strings' texts: a shell given one runs it.
     scripts: Vec<String>,
     /// Inside a `${…}`, where a glob or brace character is the
@@ -315,7 +315,9 @@ impl Command {
     }
 
     /// The command ends: its words, and its here-strings' texts.
-    fn end(&mut self) -> Result<(Vec<String>, Vec<String>), TooDeep> {
+    /// The command ends: its words, its here-strings' texts, and whether
+    /// it has a redirect.
+    fn end(&mut self) -> Result<(Vec<String>, Vec<String>, bool), TooDeep> {
         self.end_word()?;
         // A redirect with no target before the command ends takes nothing
         // from the next command.
@@ -324,6 +326,7 @@ impl Command {
         Ok((
             std::mem::take(&mut self.words),
             std::mem::take(&mut self.scripts),
+            std::mem::take(&mut self.redirected),
         ))
     }
 }
@@ -406,9 +409,13 @@ impl Lexer {
             chars: text.chars().collect(),
             pos: 0,
             runs: Vec::new(),
-            parents: vec![0],
-            joins: vec![Joined::First],
-            apart: vec![false],
+            shells: vec![Opened {
+                parent: 0,
+                joined: Joined::First,
+                apart: false,
+                torn: false,
+            }],
+            torn: false,
             flows: vec![Flow {
                 scope: 0,
                 pending: None,
@@ -521,6 +528,7 @@ impl Lexer {
             }
         }
         let read = self.end(cmd, Sep::Seq);
+        self.torn = self.flows.len() > own || !grammar.open.is_empty();
         self.flows.truncate(own);
         read
     }
@@ -541,15 +549,12 @@ impl Lexer {
     /// past it: a here-document's lines are one script.
     fn read_in(&mut self, text: &str, depth: usize, flow: &mut Flow) -> Result<(), TooDeep> {
         let mut inner = Lexer::new(text);
-        inner.parents = std::mem::take(&mut self.parents);
-        inner.joins = std::mem::take(&mut self.joins);
-        inner.apart = std::mem::take(&mut self.apart);
+        inner.shells = std::mem::take(&mut self.shells);
         inner.flows[0] = *flow;
         let read = inner.list(depth + 1, false);
         *flow = inner.flows[0];
-        self.parents = inner.parents;
-        self.joins = inner.joins;
-        self.apart = inner.apart;
+        self.shells = inner.shells;
+        self.shells[flow.scope].torn |= inner.torn;
         self.runs.append(&mut inner.runs);
         read
     }
@@ -763,6 +768,7 @@ impl Lexer {
             cmd.in_word = false;
         }
         cmd.end_word()?;
+        cmd.redirected = true;
         let mut operator = String::from(first);
         while let Some(c) = self.next_if(|c| matches!(c, '<' | '>' | '&' | '|')) {
             operator.push(c);

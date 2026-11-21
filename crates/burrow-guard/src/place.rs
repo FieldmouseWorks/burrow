@@ -29,7 +29,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::shell::{self, Joined, Run, Script, assigned};
+use crate::shell::{self, Joined, Opened, Run, Script, assigned};
 
 /// Where a command runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,15 +57,21 @@ impl Place {
     }
 
     /// `cd dir`, from here, as bash's logical `cd` goes: `..` takes off
-    /// the name before it, whatever links there are.
+    /// the name before it. Where that name is a link, physical mode (`set
+    /// -P`, which the guard doesn't follow) goes to the link's target's
+    /// parent instead, so the place is unread; elsewhere both go to the
+    /// same directory.
     fn cd(&self, dir: &str) -> Place {
         let mut path = PathBuf::new();
+        let mut linked = false;
         for part in self.path.join(dir).components() {
             match part {
                 Component::CurDir => {}
                 Component::ParentDir
                     if matches!(path.components().next_back(), Some(Component::Normal(_))) =>
                 {
+                    linked |=
+                        std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
                     path.pop();
                 }
                 Component::ParentDir if path.has_root() => {}
@@ -77,7 +83,7 @@ impl Place {
         }
         Place {
             path,
-            unread: self.unread && Path::new(dir).is_relative(),
+            unread: linked || (self.unread && Path::new(dir).is_relative()),
         }
     }
 
@@ -92,9 +98,7 @@ impl Place {
 /// The shells of a [`Script`] as it's walked, each at its place.
 pub struct Shells {
     shells: Vec<Option<Shell>>,
-    parents: Vec<usize>,
-    joins: Vec<Joined>,
-    apart: Vec<bool>,
+    opened: Vec<Opened>,
     /// Each shell's own commands hold a loop or a function, and its own
     /// or its subshells' a `cd` (or an `eval`).
     deferring: Vec<bool>,
@@ -118,7 +122,7 @@ impl Shells {
     /// `script`'s shells, its own at `place`. `cdpath`: `CDPATH` may be
     /// set, which takes a relative `cd` anywhere.
     pub fn new(script: &Script, place: Place, cdpath: bool) -> Shells {
-        let shells = script.parents.len();
+        let shells = script.shells.len();
         let (mut moves, mut defers) = (vec![false; shells], vec![false; shells]);
         for run in &script.runs {
             let read = reading(&run.words, cdpath);
@@ -129,15 +133,15 @@ impl Shells {
                 let mut at = run.scope;
                 while !moves[at] {
                     moves[at] = true;
-                    if at == 0 || script.apart[at] {
+                    if at == 0 || script.shells[at].apart {
                         break;
                     }
-                    at = script.parents[at];
+                    at = script.shells[at].parent;
                 }
             }
         }
         let deferring: Vec<bool> = moves.iter().zip(&defers).map(|(m, d)| *m && *d).collect();
-        let mut shells: Vec<Option<Shell>> = script.parents.iter().map(|_| None).collect();
+        let mut shells: Vec<Option<Shell>> = script.shells.iter().map(|_| None).collect();
         shells[0] = Some(Shell {
             place,
             open: 0,
@@ -146,9 +150,7 @@ impl Shells {
         });
         Shells {
             shells,
-            parents: script.parents.clone(),
-            joins: script.joins.clone(),
-            apart: script.apart.clone(),
+            opened: script.shells.clone(),
             deferring,
             cdpath,
         }
@@ -205,24 +207,22 @@ impl Shells {
         let mut at = scope;
         while self.shells[at].is_none() {
             unstarted.push(at);
-            at = self.parents[at];
+            at = self.opened[at].parent;
         }
         for &scope in unstarted.iter().rev() {
-            let joined = self.joins[scope];
-            let parent = self.shells[self.parents[scope]]
-                .as_mut()
-                .expect("started first");
+            let opened = self.opened[scope];
+            let parent = self.shells[opened.parent].as_mut().expect("started first");
             // A subshell, or the command holding a substitution, ends what
             // `&&` joined unless it's joined so itself. Text read apart
             // (a comment) is no command of its parent's.
-            if !self.apart[scope] && joined != Joined::And && std::mem::take(&mut parent.unsure) {
+            if !opened.apart && opened.joined != Joined::And && std::mem::take(&mut parent.unsure) {
                 parent.place = parent.place.unread();
             }
             let shell = Shell {
                 place: parent.place.clone(),
                 open: 0,
                 unsure: false,
-                nowhere: parent.nowhere || self.deferring[scope],
+                nowhere: parent.nowhere || self.deferring[scope] || opened.torn,
             };
             self.shells[scope] = Some(shell);
         }
@@ -231,10 +231,13 @@ impl Shells {
 }
 
 /// Whether `run` ends the shell it's in: a failure `||` joins it to goes
-/// no further. `return` outside a function only fails, and a command in
-/// a pipeline or the background exits only its own subshell.
+/// no further. `return` outside a function only fails, a command in a
+/// pipeline or the background exits only its own subshell, and one whose
+/// redirect fails doesn't run.
 fn exits(run: &Run) -> bool {
-    run.alone && run.words.first().is_some_and(|w| w == "exit")
+    run.alone
+        && !run.redirected
+        && matches!(run.words.as_slice(), [exit] | [exit, _] if exit == "exit")
 }
 
 /// What a command does to the place of the shell it runs in.
@@ -336,6 +339,23 @@ mod tests {
         assert!(unread.join("c").unread);
         assert!(!unread.join("/c").unread);
         assert!(at.join("$D").unread);
+    }
+
+    /// Logical and physical `cd ..` part only where `..` steps back out of
+    /// a link.
+    #[test]
+    fn a_cd_back_out_of_a_link_is_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real/sub");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let at = Place::at(dir.path());
+        assert!(at.cd("link/..").unread);
+        assert!(at.cd("link").cd("..").unread);
+        assert!(!at.cd("link").unread);
+        assert!(!at.cd("link/x/..").unread);
+        assert!(!at.cd("real/sub/..").unread);
+        assert_eq!(at.cd("real/sub/..").path, dir.path().join("real"));
     }
 
     #[test]

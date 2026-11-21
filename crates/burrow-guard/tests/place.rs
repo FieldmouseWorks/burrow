@@ -205,6 +205,12 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "cd OTHER || exit 1 & wait; git push origin pr",
             "cd OTHER || exit 1 && true & wait; git push origin pr",
             "cd OTHER || exit 1 | cat; git push origin pr",
+            // A redirect that fails keeps the `exit` from running.
+            "cd OTHER/missing/.. || exit 1 > OTHER/missing/log; git push origin pr",
+            "cd OTHER || exit 1 2>/dev/null; git push origin pr",
+            // A here-document's line that leaves a subshell open, which
+            // the next line's reading doesn't know it's in.
+            "bash <<'EOF'\n(cd OTHER || exit 1\ngit push origin pr\n)\nEOF",
             "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
             // It may not have run, or ran in a shell of its own.
             "true && cd OTHER; git push origin pr",
@@ -252,6 +258,30 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
         &at(other.path(), &["cd \"$D\" && git push -f origin pr"]),
         Some(UNLEASED),
     );
+}
+
+/// In physical mode (`set -P`) `..` out of a link goes to its target's
+/// parent, and in logical mode to the link's: the guard can't tell which
+/// mode a shell is in, so a place that depends on it is unread.
+#[test]
+fn a_cd_back_out_of_a_link_is_unread() {
+    let here = clone_on("pr");
+    let other = forcing();
+    std::fs::create_dir(other.path().join("sub")).unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("l");
+    std::os::unix::fs::symlink(other.path().join("sub"), &link).unwrap();
+    for cmd in [
+        format!("set -P; cd {}/.. && git push origin pr", link.display()),
+        format!("cd {} && cd .. && git push origin pr", link.display()),
+    ] {
+        assert_eq!(refusal(&cmd, here.path()), Some(UNREAD), "{cmd}");
+    }
+    let cmd = format!(
+        "cd {}/.. && git push origin pr",
+        other.path().join("sub").display()
+    );
+    assert_eq!(refusal(&cmd, here.path()), Some(CONFIGURED), "{cmd}");
 }
 
 /// A lease's object is held to the format of the repository the push runs

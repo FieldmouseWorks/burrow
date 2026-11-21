@@ -11,28 +11,36 @@ pub fn script(text: &str) -> Result<Script, TooDeep> {
     lexer.list(0, false)?;
     Ok(Script {
         runs: lexer.runs,
-        parents: lexer.parents,
-        joins: lexer.joins,
-        apart: lexer.apart,
+        shells: lexer.shells,
     })
 }
 
 /// A command line's commands, and the shells they run in.
 pub struct Script {
     pub runs: Vec<Run>,
-    /// The shell each shell (a [`Run::scope`]) starts from, a copy of it as
-    /// it is then: the line's own (0) is its own. A `( … )` subshell or a
-    /// substitution is one, and so is any text read apart from the line
-    /// (a comment, a here-document or here-string, a backquoted
-    /// substitution), which may be a script for another shell.
-    pub parents: Vec<usize>,
-    /// How each shell is joined to the command before it in its parent:
-    /// as the command that holds a substitution is, or a subshell itself.
-    pub joins: Vec<Joined>,
-    /// Whether each shell is a text of its own, read apart from the line
-    /// (a comment, a here-document or here-string), rather than part of
-    /// the line's script (a subshell, a substitution).
-    pub apart: Vec<bool>,
+    /// Each shell a [`Run::scope`] names: the line's own (0), and each
+    /// `( … )` subshell, substitution and text read apart from the line.
+    pub shells: Vec<Opened>,
+}
+
+/// A shell of a [`Script`], and where it starts.
+#[derive(Debug, Clone, Copy)]
+pub struct Opened {
+    /// The shell it starts from, a copy of it as it is then: the line's
+    /// own (0) is its own.
+    pub parent: usize,
+    /// How it's joined to the command before it in its parent: as the
+    /// command that holds a substitution is, or a subshell itself.
+    pub joined: Joined,
+    /// It's a text of its own, read apart from the line (a comment, a
+    /// here-document or here-string), which may be a script for another
+    /// shell, rather than part of the line's script (a subshell, a
+    /// substitution, a backquoted one).
+    pub apart: bool,
+    /// It's read line by line (a here-document), and a line left a
+    /// subshell or a `case` open, which the next line's reading doesn't
+    /// know it's in.
+    pub torn: bool,
 }
 
 /// One command of a [`Script`].
@@ -49,6 +57,8 @@ pub struct Run {
     /// It's one word, not an assignment, ending at a `(`: a function's
     /// name (`f() …`).
     pub defines: bool,
+    /// It has a redirect, which can fail and keep it from running.
+    pub redirected: bool,
 }
 
 /// What joins a command to the one before it in its shell: nothing (`;`,
@@ -104,16 +114,19 @@ impl Lexer {
     pub(super) fn child(&mut self, apart: bool) -> usize {
         let flow = self.flow();
         let (parent, joined) = (flow.scope, joined(flow.pending));
-        self.parents.push(parent);
-        self.joins.push(joined);
-        self.apart.push(apart);
-        self.parents.len() - 1
+        self.shells.push(Opened {
+            parent,
+            joined,
+            apart,
+            torn: false,
+        });
+        self.shells.len() - 1
     }
 
     /// `cmd` ends at `sep`, in the shell open here. A newline or a
     /// subshell's `(` after `&&`, `||` or `|` goes on with what they join.
     pub(super) fn end(&mut self, cmd: &mut Command, sep: Sep) -> Result<(), TooDeep> {
-        let (words, scripts) = cmd.end()?;
+        let (words, scripts, redirected) = cmd.end()?;
         let flow = self.flow();
         let scope = flow.scope;
         if words.is_empty() {
@@ -131,6 +144,7 @@ impl Lexer {
                 joined: joined(before),
                 alone: before != Some(Sep::Pipe) && !matches!(sep, Sep::Pipe | Sep::Background),
                 defines,
+                redirected,
             });
         }
         if sep == Sep::Background {
@@ -144,6 +158,7 @@ impl Lexer {
                 joined: Joined::First,
                 alone: true,
                 defines: false,
+                redirected: false,
             });
         }
         Ok(())
