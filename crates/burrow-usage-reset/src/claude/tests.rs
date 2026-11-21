@@ -295,6 +295,7 @@ fn only_a_config_showing_no_copy_counts_as_none() {
         copied_in(&json!({"cachedUsageUtilization": {"fetchedAtMs": 5000}})),
         Ok(Some(5.0))
     );
+    assert!(parsed(b"{\"cachedUsage").is_err());
     assert!(copied_in(&json!({"cachedUsageUtilization": {}})).is_err());
 }
 

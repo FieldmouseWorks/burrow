@@ -59,7 +59,8 @@ pub enum Reset {
 /// What the account can be asked: the meter, and to use its banked reset.
 pub trait Account {
     /// The meter as it stands now. A copy of it from earlier, however it
-    /// looks, is an error: a pass decides and books only on a fresh reading.
+    /// looks, is an error: a pass presses and settles only on a fresh
+    /// reading, and only a copy from [`Account::copy`] stands in for one.
     fn read(&mut self) -> Result<Reading, String>;
     /// The meter as another reader of the same account last fetched it
     /// from its endpoint, and when, if one is kept: a real reading, only an
@@ -150,13 +151,14 @@ pub fn pass(
     // Other readers of the account share its endpoint's rate limit, so it
     // often refuses, or isn't asked for a minute after one read it: what
     // the last of them read stands in then, when it can.
-    let read = account.read().map(|r| (now, r)).or_else(|e| {
+    let read = account.read().map(|r| (now, r, false)).or_else(|e| {
         account
             .copy()
             .filter(|(at, copy)| shows_room(&state, *at, copy, below, now))
+            .map(|(at, copy)| (at, copy, true))
             .ok_or(e)
     });
-    let (mut read_at, reading) = match read {
+    let (mut read_at, reading, copied) = match read {
         Ok(r) => r,
         Err(e) => {
             eprintln!("couldn't read the meter: {e}");
@@ -285,7 +287,9 @@ pub fn pass(
     }
 
     // The reading's own time, not the pass's, says how far the week can
-    // have gone since: a copy's is earlier.
+    // have gone since: a copy's is earlier. A copy stands in for a reading
+    // that failed, so a fresh one is tried no later than after any failure,
+    // for proj's meter too.
     let wake = if state.unsettled.is_some() || again {
         now + RETRY
     } else {
@@ -294,7 +298,12 @@ pub fn pass(
         } else {
             100.0 - below
         };
-        (read_at + next(&state, &reading, limit, read_at)).max(now + SOONEST)
+        let booked = (read_at + next(&state, &reading, limit, read_at)).max(now + SOONEST);
+        if copied {
+            booked.min(now + RETRY)
+        } else {
+            booked
+        }
     };
     state.last = Some((read_at, reading.used));
     Outcome {

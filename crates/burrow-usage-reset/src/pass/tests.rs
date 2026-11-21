@@ -572,10 +572,21 @@ fn a_refused_read_takes_another_sessions_newer_copy() {
         assert_eq!(o.state.last, Some((now - age, used)));
         state = o.state;
     }
-    // Booked from the copy's time, not the pass's.
-    let o = refused(state.clone(), Some((12_500.0, at(57.0))), 12_600.0);
-    let room = 98.0 - 57.0;
-    assert_eq!(o.wake, 12_500.0 + (room / ASSUMED_BURN / 2.0).min(LATEST));
+    // A fresh reading is tried again no later than after any failed one,
+    // and sooner if the copy's room runs out first: 1 point at the assumed
+    // burn is 10 minutes, so its next look is 5 minutes off the copy's
+    // time.
+    assert_eq!(
+        refused(state, Some((12_500.0, at(57.0))), 12_600.0).wake,
+        12_600.0 + RETRY
+    );
+    let o = refused(
+        read_at(10_000.0, 96.0),
+        Some((12_500.0, at(97.0))),
+        12_600.0,
+    );
+    assert_eq!(o.state.failed_reads, 0);
+    assert_eq!(o.wake, 12_500.0 + 300.0);
 }
 
 #[test]

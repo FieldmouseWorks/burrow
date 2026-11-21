@@ -273,12 +273,17 @@ fn config() -> Result<Option<Value>, String> {
         .ok_or("neither CLAUDE_CONFIG_DIR nor HOME is set")?;
     let file = PathBuf::from(dir).join(".claude.json");
     match std::fs::read(&file) {
-        Ok(config) => serde_json::from_slice(&config)
+        Ok(config) => parsed(&config)
             .map(Some)
             .map_err(|e| format!("{}: {e}", file.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", file.display())),
     }
+}
+
+/// Claude Code's config from its file's bytes.
+fn parsed(config: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(config).map_err(|e| e.to_string())
 }
 
 /// When Claude Code's persisted copy of the meter was fetched, in seconds
