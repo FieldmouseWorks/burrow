@@ -34,12 +34,12 @@ let
   # burrow-proof, what runs a proof that's a command (a repo's proofRuns).
   burrowProof = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof;
 
-  # The baseline and the house style it links to (the rules, the project
-  # template and lib), together, so the links resolve for the job that reads
-  # them.
+  # The baseline and what it links to, so the links resolve: the list is
+  # autoland/baseline-docs.json, which burrow-workflows' baseline_docs tests.
   baselineDocs = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../docs ../house ../templates ../lib ];
+    fileset = lib.fileset.unions
+      (map (path: ../. + "/${path}") (lib.importJSON ./autoland/baseline-docs.json));
   };
 
   # Who Renovate is (updates/renovate-identity.nix): the App it acts as, or

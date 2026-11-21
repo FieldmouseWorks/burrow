@@ -102,8 +102,10 @@
       # burrow-brief's that none of the steward's code holds its text, and
       # house-sync's read burrow's own house blocks, burrow-settings' the
       # settings reference it writes and its house guidance, and attestation's ask a
-      # token server of their own with curl. No test reads README.md,
-      # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
+      # token server of their own with curl, and baseline_docs's the docs the
+      # steward's config carries (modules/autoland/baseline-docs.json) and
+      # their links. No test reads README.md, AGENTS.md, CLAUDE.md or any
+      # other doc under docs/: they're the docs lane's (.github/workflows/flake.yml).
       # Their nix is the newest, as the hosted runners' install-nix is: the
       # build store's shadow (burrow-flake-check) asks an HTTP store about
       # paths nobody has, which only a newer nix fails on (burrow#1223).
@@ -119,8 +121,7 @@
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland"
             "house"
-            "docs/settings-reference.md"
-          ];
+          ] ++ builtins.fromJSON (builtins.readFile ./modules/autoland/baseline-docs.json);
           testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nixVersions.latest pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
       };

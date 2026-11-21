@@ -13,6 +13,7 @@
 #![cfg(test)]
 
 mod attestation;
+mod baseline_docs;
 mod builds;
 mod commit_signatures;
 mod degradations;

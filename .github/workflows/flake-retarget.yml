@@ -41,7 +41,10 @@ jobs:
       eval-apart: true
       legs: 4
       keep-builds: true
-      docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-paths: >-
+        README.md AGENTS.md CLAUDE.md docs/**
+        !docs/repo-baseline.md !docs/house-style.md !docs/settings.md
+        !docs/settings-reference.md !docs/front-door.md !docs/landing.md
       docs-checks: guidance
       negative: ${{ needs.train-route.outputs.train != 'true' }}
   # GitHub expression equality ignores case; git branch names do not.
@@ -81,6 +84,9 @@ jobs:
       eval-apart: true
       legs: 4
       keep-builds: true
-      docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-paths: >-
+        README.md AGENTS.md CLAUDE.md docs/**
+        !docs/repo-baseline.md !docs/house-style.md !docs/settings.md
+        !docs/settings-reference.md !docs/front-door.md !docs/landing.md
       docs-checks: guidance
       pr-gate: false

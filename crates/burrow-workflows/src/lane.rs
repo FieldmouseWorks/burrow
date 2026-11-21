@@ -282,7 +282,7 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
 }
 
 /// burrow's docs lane, a retargeted PR's too, builds the guidance check: a
-/// PR that changes only README.md, AGENTS.md or CLAUDE.md is still held to
+/// PR that changes only documentation is still held to
 /// what the guidance may say, and AGENTS.md to the house blocks.
 #[test]
 fn burrows_docs_lane_runs_the_guidance_check() {
@@ -340,7 +340,7 @@ fn the_train_lands_only_its_default_branchs_prs() {
 
 /// GitHub, with main holding a bit of everything, the docs included, and
 /// the PRs made off it.
-struct Repo {
+pub(crate) struct Repo {
     s: Scratch,
     origin: PathBuf,
     work: PathBuf,
@@ -351,7 +351,7 @@ struct Repo {
 
 /// What a PR changes.
 #[derive(Default)]
-struct Change<'a> {
+pub(crate) struct Change<'a> {
     files: &'a [&'a str],
     gone: &'a [&'a str],
     moved: &'a [(&'a str, &'a str)],
@@ -361,7 +361,7 @@ struct Change<'a> {
 const ALL: &str = "README.md AGENTS.md docs/** **/*.md";
 
 impl Repo {
-    fn new() -> Repo {
+    pub(crate) fn new() -> Repo {
         let s = Scratch::default();
         let (origin, work) = (s.join("origin.git"), s.join("work"));
         s.git(
@@ -519,12 +519,12 @@ impl Repo {
         (docs_lane, ran.said())
     }
 
-    fn docs(&mut self, docs: &str, c: &Change) -> bool {
+    pub(crate) fn docs(&mut self, docs: &str, c: &Change) -> bool {
         self.lane_of(docs, c, &[]).0
     }
 }
 
-fn files<'a>(files: &'a [&'a str]) -> Change<'a> {
+pub(crate) fn files<'a>(files: &'a [&'a str]) -> Change<'a> {
     Change {
         files,
         ..Change::default()
