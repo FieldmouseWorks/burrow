@@ -98,7 +98,6 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             "cd OTHER && git push origin pr",
             "cd OTHER || exit 1; git push origin pr",
             "cd OTHER || exit\ngit push origin pr",
-            "cd OTHER || return; git push origin pr",
             "git fetch && cd OTHER || exit 1; git push origin pr",
             "cd OTHER && git fetch || exit 1; git push origin pr",
             "cd -- OTHER && git push origin pr",
@@ -199,6 +198,13 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "cd OTHER && git fetch; git push origin pr",
             "cd OTHER || echo no; git push origin pr",
             "cd OTHER || (exit 1); git push origin pr",
+            // `return` outside a function only fails, and an `exit` in the
+            // background or a pipeline ends only its own subshell.
+            "cd OTHER || return; git push origin pr",
+            "cd OTHER/missing/.. || return; git push origin pr",
+            "cd OTHER || exit 1 & wait; git push origin pr",
+            "cd OTHER || exit 1 && true & wait; git push origin pr",
+            "cd OTHER || exit 1 | cat; git push origin pr",
             "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
             // It may not have run, or ran in a shell of its own.
             "true && cd OTHER; git push origin pr",
@@ -211,6 +217,8 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "{ cd OTHER; }; git push origin pr",
             "cd OTHER | cat; git push origin pr",
             "cd OTHER & git push origin pr",
+            "cd OTHER && true & git push origin pr",
+            "cd OTHER && (true) & git push origin pr",
             "case x in x) cd OTHER;; esac; git push origin pr",
             // Behind something that changes how it runs, or by a name that
             // may be cd.

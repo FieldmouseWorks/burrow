@@ -14,7 +14,8 @@
 //! A `cd` the guard follows may still fail (a directory missing, even one
 //! `..` steps back out of), and the shell goes on where it was. So it's
 //! where the `cd` went only for the commands `&&` joins after it, and for
-//! everything after it only where its failure exits (`cd DIR || exit 1`);
+//! everything after it only where its failure exits the shell (`cd DIR ||
+//! exit 1`, in the shell itself, not the background);
 //! past that, it may be either place, which is none read.
 //!
 //! A loop or a function runs its body at another time than it's read in,
@@ -161,7 +162,7 @@ impl Shells {
         let shell = self.shell(run.scope);
         if run.joined != Joined::And
             && std::mem::take(&mut shell.unsure)
-            && !(run.joined == Joined::Or && exits(&run.words))
+            && !(run.joined == Joined::Or && exits(run))
         {
             shell.place = shell.place.unread();
         }
@@ -229,10 +230,11 @@ impl Shells {
     }
 }
 
-/// Whether `words`, a command, ends the shell: a failure `||` joins it to
-/// goes no further.
-fn exits(words: &[String]) -> bool {
-    matches!(words.first().map(String::as_str), Some("exit" | "return"))
+/// Whether `run` ends the shell it's in: a failure `||` joins it to goes
+/// no further. `return` outside a function only fails, and a command in
+/// a pipeline or the background exits only its own subshell.
+fn exits(run: &Run) -> bool {
+    run.alone && run.words.first().is_some_and(|w| w == "exit")
 }
 
 /// What a command does to the place of the shell it runs in.

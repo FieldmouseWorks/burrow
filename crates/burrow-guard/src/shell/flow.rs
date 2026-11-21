@@ -43,8 +43,8 @@ pub struct Run {
     pub scope: usize,
     /// How it follows the command before it in its shell.
     pub joined: Joined,
-    /// Neither piped nor put in the background, either of which runs it in
-    /// a subshell of its own.
+    /// Neither piped nor put in the background (with the whole `&&`/`||`
+    /// list it's in), either of which runs it in a subshell of its own.
     pub alone: bool,
     /// It's one word, not an assignment, ending at a `(`: a function's
     /// name (`f() …`).
@@ -133,6 +133,9 @@ impl Lexer {
                 defines,
             });
         }
+        if sep == Sep::Background {
+            self.background(scope);
+        }
         for script in scripts {
             let scope = self.child(true);
             self.runs.push(Run {
@@ -144,6 +147,17 @@ impl Lexer {
             });
         }
         Ok(())
+    }
+
+    /// The `&&`/`||` list `&` ends, in `scope`'s shell, runs in the
+    /// background: every command of it, not only its last.
+    fn background(&mut self, scope: usize) {
+        for run in self.runs.iter_mut().rev().filter(|r| r.scope == scope) {
+            run.alone = false;
+            if run.joined == Joined::First {
+                break;
+            }
+        }
     }
 
     /// A substitution's commands, after its `(`, to the `)` that ends it,
