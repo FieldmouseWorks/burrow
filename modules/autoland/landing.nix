@@ -68,8 +68,11 @@ let
   '';
   # renovate-run's run lock, where Renovate runs: a repo the steward
   # lands is handed over only once no run of it holds that.
-  renovate = lib.attrByPath [ "burrow" "updates" "renovate" ] { enable = false; } config;
-  renovateLock = if renovate.enable then renovate.runLock else null;
+  # Another module may declare some of burrow.updates' options without the
+  # updates module: Renovate runs only where both are enabled.
+  updates = config.burrow.updates or { };
+  renovateLock = if (updates.enable or false) && (updates.renovate.enable or false)
+    then updates.renovate.runLock else null;
   driver = pkgs.writeText "burrow-landing.json" (builtins.toJSON {
     settings = config.burrow.settings.file;
     stewardReleased = "${stateDir}/autoland/landing-released.json";
