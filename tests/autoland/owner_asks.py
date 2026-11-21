@@ -169,6 +169,17 @@ STATES[pr_state()["conflictFixedJob"]] = "done"
 step(quiet, 121 * 60)
 assert heard["owner"] == [("sam/r", 5, head)], heard
 STATES.clear()
+# The same for findings answered without a push: no look again is asked
+# of a head its conflict's job replaces, nor listed for the owner.
+fresh()
+step({**answered, "mergeStateStatus": "DIRTY"}, 700)
+for at in (900, 960, said_at + 120 * 60):
+    status, digest = step({**answered, "mergeStateStatus": "UNKNOWN"}, at)
+    assert heard["owner"] == [] and digest == [], (at, heard, digest)
+STATES[pr_state()["conflictFixedJob"]] = "done"
+step({**answered, "mergeStateStatus": "UNKNOWN"}, said_at + 121 * 60)
+assert heard["owner"] == [("sam/r", 5, head)], heard
+STATES.clear()
 print("no ask of a head a conflict's job replaces: ok")
 
 # The steward runs the door's command (which starts it as a unit of the

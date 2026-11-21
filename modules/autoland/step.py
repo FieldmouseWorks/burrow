@@ -319,6 +319,8 @@ class Pass(Context, Jobs, Actions):
                         self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
                         if C.NOW - said[r][1] <= self.rc["settleDelay"] * MIN:
                             continue
+                        if replacing:
+                            continue  # its conflict's job pushes a new head, looked at instead
                         at, unasked = V.asked(self.repo, self.pr, said[r][1]), None
                         if at is None:
                             at, unasked, failed = V.ask(self.repo, self.pr)
