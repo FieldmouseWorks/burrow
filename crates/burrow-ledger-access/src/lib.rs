@@ -182,7 +182,7 @@ fn one(access: &Access, p: &Pinned) -> rustix::io::Result<()> {
 /// since `read` rewrote the ACL's mask, and so the mode's group bits, and
 /// a mode from before it would set back what that chmod took away. A chmod
 /// between that read and this one's is still overwritten; what this sets
-/// is never wider than both, so it only narrows.
+/// is never wider than the mode it read.
 fn unacl(p: &Pinned, read: Option<&Acl>, limit: u32) -> rustix::io::Result<()> {
     let path = p.proc();
     if read.is_some() {
