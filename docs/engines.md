@@ -74,7 +74,7 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 - **Today:** [`burrow-proj/src/usage.rs`](../crates/burrow-proj/src/usage.rs),
   [`slot/room.rs`](../crates/burrow-proj/src/slot/room.rs), and
   [`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs) model one global
-  Claude subscription hold (`.usage.json`) plus a special-case `api: bool`
+  Claude subscription hold (`proj.usageHold`, see the [settings reference](settings-reference.md)) plus a special-case `api: bool`
   split for `claude-api`.
   [`burrow-probe/src/answer/usage.rs`](../crates/burrow-probe/src/answer/usage.rs)
   parses Claude's stream records directly for token and cost totals.
