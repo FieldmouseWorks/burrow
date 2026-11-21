@@ -235,6 +235,7 @@ fn config(dir: &std::path::Path) -> Config {
         proj: vec!["proj".into()],
         jobs: dir.join("jobs"),
         role: "fix".into(),
+        stuck: None,
         app: None,
         timeout: "60m".into(),
         idle: "20m".into(),

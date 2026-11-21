@@ -63,6 +63,6 @@ impl Said {
     }
 }
 
-fn full_sha(s: &str) -> bool {
+pub(crate) fn full_sha(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }

@@ -6,11 +6,17 @@
 # runs as burrow.user, since proj's jobs are that user's, and holds no key;
 # only the flow's controller may ask it (its socket's directory and its peer
 # check). Off by default: Conary#314 turns the flow's plugins on.
+#
+# The same broker serves the stuck role's `job` (Conary's
+# docs/m6-properties.md, SJ) through a plugin of its own, which names
+# itself by the stuck role's engine: burrow.autoland.plugins.job, off by
+# default, and named for `job` in the flow's configuration only when on.
 # Part of burrow.autoland, which imports it.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.autoland.plugins.fix;
+  job = config.burrow.autoland.plugins.job;
   autoland = config.burrow.autoland;
   inherit (config.burrow) user stateDir;
   inherit (config.burrow.github) machineApp;
@@ -55,6 +61,8 @@ in
         proj = [ "${config.burrow.tools.proj}/bin/proj" ];
         jobs = config.burrow.proj.jobsDir;
         inherit (cfg) role;
+        # The stuck role, when the broker serves the job kind.
+        stuck = if job.enable then job.role else null;
         # The machine's own work, which acts on GitHub as the machinery's App.
         app = if machineApp == null then null else machineApp.name;
         timeout = "${toString autoland.jobTimeoutMinutes}m";
@@ -89,7 +97,47 @@ in
     };
   };
 
-  config = lib.mkIf (autoland.enable && cfg.enable) {
+  options.burrow.autoland.plugins.job = {
+    enable = lib.mkEnableOption ''
+      the stuck role's `job` plugin, which the fix broker serves: the flow
+      hands a PR it can't settle to the stuck role as a proj job. Off until
+      Conary's flow sends it (FP11); it needs burrow.ledger.controllerUser'';
+
+    role = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9-]+";
+      default = "stuck";
+      description = ''
+        The role a stuck-role job runs as, which picks its engine, model and
+        effort (`proj settings role`). The plugin offers what that role's
+        engine offers, as the fix plugin does the fixing role's.
+      '';
+    };
+
+    plugin = lib.mkOption {
+      type = lib.types.path;
+      readOnly = true;
+      default = pkgs.writeShellScript "burrow-fix-job-plugin" ''
+        exec ${lib.getExe package} job ${configFile}
+      '';
+      defaultText = lib.literalExpression "the plugin's executable";
+      description = "The executable the flow configuration's `plugins` names for the job kind.";
+    };
+
+    choice = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${job.role}";
+      defaultText = lib.literalMD "the command that prints the stuck role's choice";
+      description = ''
+        The command that prints what the flow configuration's `execution`
+        asks the job kind to run with: the stuck role's engine, model and
+        effort as the settings source declares them.
+      '';
+    };
+  };
+
+  config = lib.mkIf (autoland.enable && (cfg.enable || job.enable)) {
     assertions = [{
       assertion = config.burrow.ledger.enable && flow.controller != null;
       message = "burrow.autoland.plugins.fix: only the flow's controller may ask the broker, so it needs burrow.ledger with its controllerUser.";
@@ -98,7 +146,7 @@ in
     systemd.tmpfiles.rules = [ "d ${stateDir}/fix 0700 ${user} - -" ];
 
     systemd.services.burrow-fix = {
-      description = "Conary's fix broker: the flow's fixes, as proj jobs";
+      description = "Conary's fix broker: the flow's fixes and stuck-role jobs, as proj jobs";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];

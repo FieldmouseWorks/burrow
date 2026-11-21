@@ -3,7 +3,9 @@
 # listening in its own directory under the producers', which only the
 # flow's controller may enter, and a plugin wrapper the flow configuration
 # names. With no controller it's refused: the broker would trust
-# burrow.user, the user authoring jobs run as.
+# burrow.user, the user authoring jobs run as. The stuck role's job plugin
+# (burrow.autoland.plugins.job) runs the same broker, fix on or off, and
+# names the stuck role in its config only when on.
 { self, pkgs, nixpkgs, ... }:
 let
   lib = nixpkgs.lib;
@@ -15,6 +17,15 @@ let
   }];
   uncontrolled = machine [{ burrow.autoland.plugins.fix.enable = true; }];
   failed = map (a: a.message) (lib.filter (a: !a.assertion) uncontrolled.assertions);
+  # The job plugin alone, with the fix plugin off.
+  jobbed = machine [{
+    burrow.ledger.controllerUser = "conary-flow";
+    burrow.autoland.plugins.job.enable = true;
+  }];
+  jobUncontrolled = machine [{ burrow.autoland.plugins.job.enable = true; }];
+  jobFailed = map (a: a.message) (lib.filter (a: !a.assertion) jobUncontrolled.assertions);
+  jobBroker = jobbed.systemd.services.burrow-fix;
+  jobConfigFile = plain (lib.last (lib.splitString " " jobBroker.serviceConfig.ExecStart));
   broker = on.systemd.services.burrow-fix;
   plugin = on.burrow.autoland.plugins.fix.plugin;
   # The config the broker and the plugin read, and the file it's in, from
@@ -34,6 +45,14 @@ let
     config = read.socket == "/run/conary-producers/fix/broker.sock" && read.controller == "conary-flow"
       && read.role == "fix" && read.jobs == on.burrow.proj.jobsDir && lib.hasSuffix "/bin/proj" (lib.head read.proj)
       && read.settings == on.burrow.settings.effective && read.state == "${on.burrow.stateDir}/fix";
+    # The fix plugin alone serves no job kind.
+    noStuck = read.stuck == null;
+    jobHolds = lib.all (a: a.assertion) jobbed.assertions;
+    jobRefusedWithoutController = lib.any (lib.hasInfix "only the flow's controller may ask") jobFailed;
+    jobBroker = lib.hasSuffix "/bin/burrow-fix broker ${jobConfigFile}" (plain jobBroker.serviceConfig.ExecStart)
+      && jobBroker.serviceConfig.RuntimeDirectory == "conary-producers/fix";
+    jobPlugin = lib.hasInfix "/bin/burrow-fix job ${jobConfigFile}" (plain jobbed.burrow.autoland.plugins.job.plugin.text);
+    jobStuck = jobbed.burrow.autoland.plugins.fix.config.stuck == "stuck";
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
 in pkgs.runCommand "autoland-fix-check" { } ''

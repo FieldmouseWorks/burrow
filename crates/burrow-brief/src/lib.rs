@@ -86,6 +86,74 @@ pub fn land_or_owner(owner: &str) -> String {
     )
 }
 
+/// Why the flow hands a PR to the stuck role (Conary's FP11, burrow#945):
+/// a review loop that won't settle, or a stall the flow couldn't bring
+/// back. The word is how the flow names it in its request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stuck {
+    /// Its reviewers still had findings after the configured rounds.
+    RoundLimit,
+    /// Its fixes grew the diff past the configured share of what it was.
+    FixGrowth,
+    /// A finding a fix had answered was raised again, unchanged.
+    RaisedAgain,
+    /// A stage stalled, and the flow couldn't bring it back.
+    Stall,
+}
+
+impl Stuck {
+    pub const ALL: [Self; 4] = [
+        Self::RoundLimit,
+        Self::FixGrowth,
+        Self::RaisedAgain,
+        Self::Stall,
+    ];
+
+    /// Its word in the flow's request.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::RoundLimit => "round_limit",
+            Self::FixGrowth => "fix_growth",
+            Self::RaisedAgain => "raised_again",
+            Self::Stall => "stall",
+        }
+    }
+
+    /// The reason a word names, if it names one.
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.word() == word)
+    }
+
+    /// What it means, as the stuck role is told it.
+    pub fn told(self) -> &'static str {
+        match self {
+            Self::RoundLimit => {
+                "its reviewers still had findings after the review-round limit, so no reviewer is asked again and no other fix round runs"
+            }
+            Self::FixGrowth => {
+                "its fix rounds grew the diff past the share of the original change they may add, so no other fix round runs"
+            }
+            Self::RaisedAgain => {
+                "a reviewer raised again, unchanged, a finding a fix had already answered, so no other fix round runs"
+            }
+            Self::Stall => {
+                "one of its stages stalled, and the flow couldn't bring it back the ways GitHub allows: if the PR's own change is why, fix that, and if it isn't, push nothing and say what it is"
+            }
+        }
+    }
+}
+
+/// What the stuck role does with a PR the flow handed it: settle it in one
+/// push, or say why it can't, and put what it won't fix in one follow-up
+/// issue, never in another round.
+pub const STUCK: &str = concat!(
+    "You break the loop: you settle the PR in one push, or say why you can't. ",
+    "Read every review finding still open on it, and every answer a fix gave, as well as the diff. ",
+    "Fix the blockers among them in one push and leave the rest for one follow-up issue, which a later PR takes up. ",
+    "You don't judge it: its head gets one more review, the findings on that head go to a judge, ",
+    "and CI and every landing gate still hold.",
+);
+
 /// The fix job's and the judge's text, for `owner`, by name: what the
 /// CLI prints for the steward's tasks.
 pub fn texts(owner: &str) -> serde_json::Value {

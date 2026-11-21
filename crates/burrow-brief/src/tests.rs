@@ -65,6 +65,8 @@ fn policy() -> HashSet<String> {
     for (_, v) in super::texts(MARK).as_object().unwrap() {
         texts.push(v.as_str().unwrap().to_string());
     }
+    texts.push(STUCK.into());
+    texts.extend(Stuck::ALL.map(|s| s.told().to_string()));
     let mut windows = HashSet::new();
     for text in texts {
         for piece in text.split(MARK) {
@@ -192,4 +194,16 @@ fn a_copy_of_the_briefs_text_is_found() {
 fn a_description_is_quoted_line_by_line_and_none_says_so() {
     assert_eq!(super::quote("  one\n\ntwo  \n"), "> one\n>\n> two");
     assert_eq!(super::quote(" \n "), "(none)");
+}
+
+#[test]
+fn each_stuck_reason_has_its_own_word_and_text() {
+    for s in Stuck::ALL {
+        assert_eq!(Stuck::parse(s.word()), Some(s));
+        assert!(!s.told().is_empty());
+    }
+    let words: HashSet<_> = Stuck::ALL.map(Stuck::word).into();
+    let told: HashSet<_> = Stuck::ALL.map(Stuck::told).into();
+    assert_eq!((words.len(), told.len()), (4, 4));
+    assert_eq!(Stuck::parse("tired"), None);
 }
