@@ -253,6 +253,18 @@ fn conaryd(listener: TcpListener, delay: Duration) -> Arc<Mutex<Vec<String>>> {
     got
 }
 
+/// The hooks' secret in these tests: made as they run, as a real one is,
+/// never written in the source.
+fn secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("hook-{}-{nanos}", std::process::id())
+    })
+}
+
 /// A directory with a landing record giving sam/r to conaryd, the webhook
 /// secret, and the config forwarding to `port`.
 fn landing(dir: &Path, port: u16) -> (Value, PathBuf) {
@@ -270,7 +282,7 @@ fn landing(dir: &Path, port: u16) -> (Value, PathBuf) {
     r.write(&record).unwrap();
     let creds = dir.join("creds");
     fs::create_dir(&creds).unwrap();
-    fs::write(creds.join("webhook"), "hook-secret\n").unwrap();
+    fs::write(creds.join("webhook"), format!("{}\n", secret())).unwrap();
     let outbox = dir.join("outbox");
     let config = json!({"port": 0, "kickPort": 0, "handlers": {},
         "landing": {"record": record, "forward": port, "outbox": outbox}});
@@ -281,7 +293,7 @@ const BODY: &[u8] = br#"{"repository": {"full_name": "sam/r"}}"#;
 
 /// GitHub's delivery about sam/r, signed: its answer.
 fn deliver(hooks: u16) -> u16 {
-    let mut mac = Hmac::<Sha256>::new_from_slice(b"hook-secret").unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret().as_bytes()).unwrap();
     mac.update(BODY);
     let sig: String = mac
         .finalize()
