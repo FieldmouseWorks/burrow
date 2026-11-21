@@ -233,11 +233,17 @@ impl Shells {
 /// Whether `run` ends the shell it's in: a failure `||` joins it to goes
 /// no further. `return` outside a function only fails, a command in a
 /// pipeline or the background exits only its own subshell, and one whose
-/// redirect fails doesn't run.
+/// redirect fails doesn't run. Its one word, if any, must be a number bash
+/// takes (a sign, digits, within 64 bits): with any other, `exit` only
+/// fails and the shell goes on.
 fn exits(run: &Run) -> bool {
     run.alone
         && !run.redirected
-        && matches!(run.words.as_slice(), [exit] | [exit, _] if exit == "exit")
+        && match run.words.as_slice() {
+            [exit] => exit == "exit",
+            [exit, status] => exit == "exit" && status.parse::<i64>().is_ok(),
+            _ => false,
+        }
 }
 
 /// What a command does to the place of the shell it runs in.

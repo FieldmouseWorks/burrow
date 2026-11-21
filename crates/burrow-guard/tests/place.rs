@@ -98,6 +98,9 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             "cd OTHER && git push origin pr",
             "cd OTHER || exit 1; git push origin pr",
             "cd OTHER || exit\ngit push origin pr",
+            "cd OTHER || exit -1; git push origin pr",
+            "cd OTHER || exit +2; git push origin pr",
+            "cd OTHER || exit '08'; git push origin pr",
             "git fetch && cd OTHER || exit 1; git push origin pr",
             "cd OTHER && git fetch || exit 1; git push origin pr",
             "cd -- OTHER && git push origin pr",
@@ -205,6 +208,14 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "cd OTHER || exit 1 & wait; git push origin pr",
             "cd OTHER || exit 1 && true & wait; git push origin pr",
             "cd OTHER || exit 1 | cat; git push origin pr",
+            // An `exit` whose word isn't a number bash takes only fails.
+            "cd OTHER/missing/.. || exit foo; git push origin pr",
+            "cd OTHER/missing/.. || exit ''; git push origin pr",
+            "cd OTHER/missing/.. || exit \"$NOPE\"; git push origin pr",
+            "cd OTHER/missing/.. || exit --help; git push origin pr",
+            "cd OTHER/missing/.. || exit -x; git push origin pr",
+            "cd OTHER/missing/.. || exit 1x; git push origin pr",
+            "cd OTHER/missing/.. || exit 99999999999999999999; git push origin pr",
             // A redirect that fails keeps the `exit` from running.
             "cd OTHER/missing/.. || exit 1 > OTHER/missing/log; git push origin pr",
             "cd OTHER || exit 1 2>/dev/null; git push origin pr",
@@ -338,6 +349,15 @@ fn a_push_with_no_refspec_pushes_the_branch_where_the_cd_went() {
         question(&format!("(cd {}); git push -f", m.display()), f),
         None
     );
+    // An `exit` that only fails leaves the shell on main, so the push is
+    // refused as unread rather than read as `feature`'s.
+    for word in ["foo", "''", "\"$NOPE\""] {
+        let cmd = format!(
+            "cd {}/missing/.. || exit {word}; git push --force-with-lease --force-if-includes",
+            f.display()
+        );
+        assert_eq!(refusal(&cmd, m), Some(UNREAD), "{cmd}");
+    }
 }
 
 /// Subshells nest as deep as the line goes, and each starts from its
