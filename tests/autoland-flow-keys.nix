@@ -10,6 +10,12 @@
 # flow (the shadow's and conaryd's) require the keys' unit. With the judge
 # off there's no such unit (checks/autoland-flow-plugins.nix).
 #
+# The configs are the machine's live ones (burrow#1393): with the judging
+# role set to no model, as a build's choice would be, nothing is rendered;
+# setting one through the settings door renders them, by the path unit on
+# the role settings, with the judge's choice on that model, and a change to
+# it is rendered again with no deploy.
+#
 # The judge's producer and looks aren't started: only the flow's half is
 # tested here, and that the producer's config names the same key file
 # (tests/judge-look.nix and crates/burrow-judge, which checks the producer
@@ -78,13 +84,29 @@ pkgs.testers.runNixOSTest {
   testScript = { nodes, ... }: let
     config = "${nodes.machine.burrow.autoland.flowConfigs}/${repo}.json";
     keyFile = "/run/autoland-flow-keys/judge-seal";
+    role = nodes.machine.burrow.autoland.plugins.judge.role;
   in ''
     machine.wait_for_unit("multi-user.target")
 
+    with subtest("the configs are rendered on the judging role as it's set live"):
+        # At boot the judging role names no model, which its jobs would
+        # refuse: the render fails, and writes nothing.
+        machine.wait_until_succeeds("systemctl show -P Result autoland-flow-configs.service | grep -qv success", timeout=60)
+        machine.fail("test -e ${config}")
+        machine.succeed("runuser -u dev -- settings offer claude models stand-in-one stand-in-two")
+        machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-one high")
+        machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-one\", effort: \"high\"}' ${config}", timeout=60)
+        # Everyone reads it; only the flow's controller writes it.
+        machine.succeed("runuser -u dev -- test -r ${config}")
+        machine.fail("runuser -u dev -- test -w ${nodes.machine.burrow.autoland.flowConfigs}")
+        # A change to the role is read at the next render, with no deploy.
+        machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-two")
+        machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-two\", effort: null}' ${config}", timeout=60)
+
     with subtest("the config names the key's file and holds no key"):
         machine.succeed("jq -e '.settings.judge_key_file == \"${keyFile}\" and (.settings | has(\"judge_key\") | not)' ${config}")
-        # conaryd's is the same file: its repo's entry links to it.
-        machine.succeed("jq -e --arg c \"$(readlink -f ${config})\" '.flow_config[\"${repo}\"] == $c' ${nodes.machine.burrow.landing.eventsTemplate}")
+        # conaryd's is the same file: its repo's entry names it.
+        machine.succeed("jq -e '.flow_config[\"${repo}\"] == \"${config}\"' ${nodes.machine.burrow.landing.eventsTemplate}")
         # And the judge's producer, holding the same sealFile as its own
         # credential, checks the flow names that file before it judges.
         machine.succeed("jq -e '.flow_key == \"${keyFile}\" and .seal == \"judge-seal\"' /etc/burrow/autoland-judge-plugin.json")

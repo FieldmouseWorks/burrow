@@ -366,9 +366,13 @@ Each has an entry below, and each can be imported on its own.
   (`plugins.judge.sealFile`) and then `conary/judgment` signed with its own
   key (`plugins.judge.keyFile`); it needs `burrow.ledger.controllerUser`.
   Each enabled plugin is in a shadowed repo's flow config
-  (autoland/shadow.nix): its executable, its role's choice as the settings
-  source declares it (a build reads no live settings, so a role set live to
-  anything else refuses the flow's choice), and, where the repo has
+  (autoland/shadow.nix): its executable, its choice (the proof plugin's
+  its own, in the base the build renders; a role's as the role settings say
+  now, rendered on the machine into `burrow.stateDir`/flow-configs by
+  `autoland-flow-configs` at boot, each switch and each change to the role
+  settings, so `proj settings model` reaches conaryd's next pass with no
+  deploy, and a role its jobs would refuse fails the render, which keeps
+  the last good configs), and, where the repo has
   evidence, its producer's public key (`plugins.proof.publicKey`,
   `plugins.judge.publicKey`) in the producers file, trusted for the repo's
   proofs or `conary/judgment` alone. The judge's seal key reaches the flow

@@ -1,5 +1,8 @@
 # The flow config's plugins (autoland/shadow.nix): each enabled plugin's
-# executable in `plugins`, its role's choice in `execution`, and, where a
+# executable in `plugins`, its choice in `execution` (a plugin's own in the
+# base the build renders, a role's only as the machine renders it from the
+# live role settings, burrow#1393: a build's names no model, which every
+# job refuses), and, where a
 # repo has evidence, its producer in the producers file
 # `evidence.producers` names, with its unpadded base64url public key and
 # trusted for its own checks alone: the proofs' names, or the judge's
@@ -74,7 +77,9 @@ let
     burrow.autoland.plugins.fix.enable = true;
     burrow.autoland.plugins.job.enable = true;
   };
-  entries = m: m.burrow.autoland.flowConfigs.entries;
+  entries = m: m.burrow.autoland.flow.base.entries;
+  # The manifest the machine renders its live configs by.
+  manifest = m: lib.last (lib.splitString " " m.systemd.services.autoland-flow-configs.serviceConfig.ExecStart);
   # One repo's config, built alone.
   file = m: repo: "${(entries m)."${repo}.json"}";
   # A repo's producers, as rendered, before Conary's loader reads them.
@@ -118,6 +123,24 @@ let
     jobNamed = let p = (entries jobbed)."sam/homelab.json".plugins; in
       lib.attrNames p == [ "fix" "job" ] && p.job == "${jobbed.burrow.autoland.plugins.job.plugin}";
     jobUnnamed = !((entries on)."sam/homelab.json".plugins ? job);
+    # The live configs are where every reader reads them, and are rendered
+    # at boot, each switch and each change to the role settings.
+    liveRead = on.burrow.autoland.flowConfigs == "/var/lib/burrow/flow-configs"
+      && on.burrow.autoland.plugins.fix.config.flow == on.burrow.autoland.flowConfigs
+      && on.burrow.autoland.plugins.proof.config.flow == on.burrow.autoland.flowConfigs
+      && judged.burrow.autoland.plugins.judge.config.flow == judged.burrow.autoland.flowConfigs;
+    rendered = let r = on.systemd; in
+      r.paths.autoland-flow-configs.pathConfig.PathChanged == [ "/var/lib/burrow/settings/overlay.roles.json" "/run/current-system" ]
+      && r.services.autoland-flow-configs.serviceConfig.User == "conary-flow"
+      && lib.elem "autoland-flow-configs.service" r.services."autoland-shadow@".after
+      && lib.elem "autoland-flow-configs.service" r.services."autoland-shadow@".wants
+      && lib.elem "autoland-flow-configs.service" r.services.burrow-fix.after
+      && lib.elem "autoland-flow-configs.service" r.services.autoland-proof.after
+      && lib.elem "autoland-flow-configs.service" judged.systemd.services.autoland-judge.after;
+    # With no shadowed repo, nothing to render and no one to read it.
+    noRenderWithoutShadow = let bare = self.nixosConfigurations.example.config; in
+      bare.burrow.autoland.shadow == [ ] && !(bare.systemd.services ? autoland-flow-configs)
+      && !(bare.systemd.paths ? autoland-flow-configs) && bare.burrow.autoland.flow.render == [ ];
     judgedProducers = builtins.fromJSON (producers judged "sam/homelab").producers == [
       { name = "sam/judge"; key = keys.judge; checks = [ "conary/judgment" ]; }
       { name = "sam/proof"; key = keys.proof; checks = [ "gate" "vm" ]; }
@@ -145,34 +168,67 @@ in pkgs.runCommand "autoland-flow-plugins-check" { nativeBuildInputs = [ pkgs.jq
   jq -e --arg fix ${plugins.fix.plugin} --arg proof ${plugins.proof.plugin} \
     '.plugins == {fix: $fix, proof: $proof}' $homelab >/dev/null \
     || fail "plugins aren't the enabled plugins' executables: $(jq -c .plugins $homelab)"
-  ${plugins.fix.choice} > fix.json
   ${plugins.proof.choice} > proof.json
   jq -e '.engine == "burrow-proof" and .model == null and .effort == null' proof.json >/dev/null \
     || fail "the proof plugin's choice isn't its own engine's: $(cat proof.json)"
-  jq -e --slurpfile fix fix.json --slurpfile proof proof.json \
-    '.execution == {fix: $fix[0], proof: $proof[0]}' $homelab >/dev/null \
-    || fail "execution isn't each enabled plugin's role's choice: $(jq -c .execution $homelab), not $(cat fix.json) $(cat proof.json)"
+  # The base holds the proof plugin's own choice, and no role's: a build
+  # reads no live settings.
+  jq -e --slurpfile proof proof.json '.execution == {proof: $proof[0]}' $homelab >/dev/null \
+    || fail "the base's execution isn't the proof plugin's own choice alone: $(jq -c .execution $homelab)"
   jq -e '.execution | has("judge") | not' ${file on "sam/plain"} >/dev/null || fail "a plugin that's off has a choice"
+
+  # The machine's render, here on role settings of its own: the manifest's
+  # base and roles, its settings source and output moved into the sandbox.
+  manifest=${manifest on}
+  jq -e '.roles == {fix: "${plugins.fix.role}"} and .out == "/var/lib/burrow/flow-configs"' $manifest >/dev/null \
+    || fail "the render's roles aren't the role-run plugins': $(cat $manifest)"
+  mkdir -p settings
+  echo "{\"overlay\": \"$PWD/settings/overlay.json\"}" > settings.json
+  jq --arg s "$PWD/settings.json" --arg o "$PWD/live" '.settings = $s | .out = $o' $manifest > render.json
+  settings() { ${self.packages.${system}.burrow-settings}/bin/burrow-settings "$PWD/settings.json" "$@" >/dev/null; }
+  # The bug: with no model set live, the fixing role's choice names none,
+  # which every fix job refuses, so the render refuses it, writing nothing.
+  if ${flowFiles} render render.json 2>render.err; then
+    fail "a render with no live model for the fixing role succeeded: $(cat live/sam/homelab.json)"
+  fi
+  grep -q "names no model" render.err || fail "the render was refused for something else: $(cat render.err)"
+  [ ! -e live ] || [ -z "$(ls -A live)" ] || fail "a refused render wrote: $(ls -R live)"
+  settings offer claude models stand-in-one stand-in-two
+  settings model ${plugins.fix.role} claude stand-in-one high
+  ${flowFiles} render render.json || fail "the render refused a role set live"
+  jq -e --slurpfile proof proof.json \
+    '.execution == {fix: {engine: "claude", model: "stand-in-one", effort: "high"}, proof: $proof[0]}' live/sam/homelab.json >/dev/null \
+    || fail "the live execution isn't the role's as set: $(jq -c .execution live/sam/homelab.json)"
+  for f in live/sam/*.json; do
+    cmp <(jq -S 'del(.execution)' $f) <(jq -S 'del(.execution)' ${on.burrow.autoland.flow.base}/sam/$(basename $f)) \
+      || fail "the render changed $f beyond its execution"
+  done
+  ${flowFiles} flow live/sam/homelab.json || fail "Conary's flow::Config refuses the rendered config"
+  # A change to the role, rendered again: the next read is the new choice.
+  settings model ${plugins.fix.role} claude stand-in-two
+  ${flowFiles} render render.json || fail "the render refused a changed role"
+  jq -e '.execution.fix == {engine: "claude", model: "stand-in-two", effort: null}' live/sam/homelab.json >/dev/null \
+    || fail "a changed role isn't rendered: $(jq -c .execution live/sam/homelab.json)"
   producers=$(jq -r .evidence.producers $homelab)
   jq -e --arg key ${keys.proof} '. == [{name: "sam/proof", key: $key, checks: ["gate", "vm"]}]' "$producers" >/dev/null \
     || fail "the producers file isn't the proof producer's, trusted for homelab's proofs: $(cat "$producers")"
   ${flowFiles} producers "$producers" || fail "Conary's loader refuses the rendered producers file"
   ${flowFiles} flow $homelab ${file on "sam/plain"} ${file on "sam/bare"} || fail "Conary's flow::Config refuses a config with plugins"
-  [ -e ${on.burrow.autoland.flowConfigs}/sam/bare.json ] || fail "the machine's configs don't all build"
+  [ -e ${on.burrow.autoland.flow.base}/sam/bare.json ] || fail "the machine's configs don't all build"
 
-  # With the job plugin on: named for `job`, and asked to run as the stuck
+  # With the job plugin on: named for `job`, and rendered on the stuck
   # role's choice.
   jobbed=${file jobbed "sam/homelab"}
-  ${jobbed.burrow.autoland.plugins.job.choice} > job.json
-  jq -e --slurpfile job job.json '.execution.job == $job[0]' $jobbed >/dev/null \
-    || fail "execution.job isn't the stuck role's choice: $(jq -c .execution $jobbed), not $(cat job.json)"
+  jq -e '.roles == {fix: "${jobbed.burrow.autoland.plugins.fix.role}", job: "${jobbed.burrow.autoland.plugins.job.role}"}' ${manifest jobbed} >/dev/null \
+    || fail "the job kind isn't rendered on the stuck role: $(cat ${manifest jobbed})"
+  jq -e 'has("execution") | not' $jobbed >/dev/null || fail "a base holds a role's choice: $(jq -c .execution $jobbed)"
   # Until Conary's flow config takes `plugins.job` (FP11), its loader
   # refuses the file, so a machine with the job plugin on fails its build
   # rather than every pass once live.
   if ${flowFiles} flow $jobbed; then
     fail "Conary's flow::Config now takes plugins.job: check here that it loads instead (SJ, FP11)"
   fi
-  jq -c 'del(.plugins.job, .execution.job)' $jobbed > unjobbed.json
+  jq -c 'del(.plugins.job)' $jobbed > unjobbed.json
   ${flowFiles} flow unjobbed.json || fail "the flow config with the job plugin on is refused for more than its job key"
 
   # A producer trusted for no check fails the build that renders it.

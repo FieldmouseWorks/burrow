@@ -298,7 +298,7 @@ let
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
   shadow = import ./autoland/shadow.nix {
-    inherit lib pkgs cfg settings ledger steward credentials;
+    inherit lib pkgs cfg settings ledger steward credentials config;
     flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   };
 in
@@ -665,18 +665,16 @@ in
     };
 
     flowConfigs = mkOption {
-      type = types.path;
+      type = types.str;
       readOnly = true;
       internal = true;
-      default = shadow.configs;
-      defaultText = lib.literalMD "the shadow's configurations";
+      default = shadow.live;
+      defaultText = lib.literalMD "the shadow's live configurations";
       description = ''
-        Each shadowed repo's flow configuration, at OWNER/NAME.json
-        lowercased (autoland/shadow.nix), rendered from the steward's
-        settings and its enabled plugins (their executables, choices and
-        producers): the flow's only one, where its plugins read its settings
-        (a proof's recipe). One set by hand (CONARY_FLOW_CONFIG) is refused
-        (burrow.ledger).
+        Each shadowed repo's flow configuration, at OWNER/NAME.json lowercased,
+        as the machine renders it (autoland/shadow.nix): the flow's only
+        one, where its plugins read its settings. One set by hand
+        (CONARY_FLOW_CONFIG) is refused (burrow.ledger).
       '';
     };
 
@@ -687,15 +685,15 @@ in
       default = {
         inherit credentials;
         token = "${steward}/bin/autoland-steward token";
-        config = shadow.file;
-        inherit (shadow) needs judgeKey;
+        config = shadow.liveFile;
+        inherit (shadow) needs judgeKey render base;
       };
       description = ''
         What runs Conary's flow as the steward's App (autoland/landing.nix):
         the credentials its token reads, the token's command, each
-        shadowed repo's flow configuration by name, and the units a unit
-        running the flow requires (the one holding its seal keys, which its
-        configurations name), and the file they name for the judge's.
+        shadowed repo's flow configuration by name (live, and as built),
+        the units running the flow require, the judge's key file, and the
+        unit rendering the configs (autoland/shadow.nix).
       '';
     };
 
@@ -925,7 +923,9 @@ in
       # Conary's flow beside a shadowed repo's pass, once it's done.
       unitConfig.OnSuccess = lib.optionals (lib.hasSuffix "@" name) shadow.onSuccess;
     }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; }
-      // lib.optionalAttrs (shadow.keys != null) { ${shadow.keys.name} = shadow.keys.service; };
+      // lib.optionalAttrs (shadow.keys != null) { ${shadow.keys.name} = shadow.keys.service; }
+      // shadow.renderer.services;
+    systemd.paths = shadow.renderer.paths;
     # The steward's state, and its clones of the repos, which are its alone.
     # What the retired review service kept (its queue, answers, sessions and
     # snapshots) is removed.
@@ -938,7 +938,7 @@ in
       "${stateDir}/autoland/git" = dir "0700" account.group;
       "${stateDir}/autoland/review".R = { };
       "/var/cache/autoland".R = { };
-    };
+    } // shadow.renderer.tmpfiles;
 
     burrow.watchdog.sources.autoland = {
       file = "${settings.stateDir}/watch.json";

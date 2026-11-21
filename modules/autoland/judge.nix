@@ -39,7 +39,6 @@ let
   apps = config.burrow.github.apps;
   app = if cfg.app == null then null else apps.${cfg.app} or null;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-judge;
-  flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   producer = "autoland-judge";
   look = "autoland-judge-look";
   build = "autoland-judge-build";
@@ -207,18 +206,6 @@ in
       description = "The executable the flow configuration's `plugins` names for judgments.";
     };
 
-    choice = lib.mkOption {
-      type = lib.types.str;
-      readOnly = true;
-      internal = true;
-      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${cfg.role}";
-      defaultText = lib.literalMD "the command that prints the judging role's choice";
-      description = ''
-        The command that prints what the flow configuration's `execution`
-        asks judgments to run with: the judging role's
-        engine, model and effort as the settings source declares them.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -253,8 +240,10 @@ in
     systemd.services.${producer} = {
       description = "Conary's judge producer: the flow's judgments, sealed and signed";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      # After the flow's configs are rendered, which it reads at each
+      # request (autoland/shadow.nix).
+      after = [ "network-online.target" ] ++ autoland.flow.render;
+      wants = [ "network-online.target" ] ++ autoland.flow.render;
       environment = lib.optionalAttrs (app != null) app.env;
       # With no controller, the assertion above says why, rather than
       # flow.producer's throw.

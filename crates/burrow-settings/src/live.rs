@@ -140,7 +140,7 @@ pub(crate) fn write<D: Document>(
 
 /// BODY as the file at PATH, world-readable, by a synced atomic rename: a
 /// reader sees the old file or the new one, whole.
-pub(crate) fn publish(path: &Path, body: &[u8]) -> Result<(), String> {
+pub fn publish(path: &Path, body: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or("a settings file needs a parent directory")?;
