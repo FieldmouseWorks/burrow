@@ -7,11 +7,18 @@ struct Fake {
     reads: Vec<Result<Reading, String>>,
     resets: Vec<Reset>,
     asked: usize,
+    /// What another reader last fetched, and when, for each read that fails.
+    copies: Vec<Option<(f64, Reading)>>,
 }
 
 impl Account for Fake {
     fn read(&mut self) -> Result<Reading, String> {
         self.reads.remove(0)
+    }
+    fn copy(&mut self) -> Option<(f64, Reading)> {
+        (!self.copies.is_empty())
+            .then(|| self.copies.remove(0))
+            .flatten()
     }
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         self.asked += 1;
@@ -30,6 +37,7 @@ fn fake(reads: Vec<Result<Reading, String>>, resets: Vec<Reset>) -> Fake {
         reads,
         resets,
         asked: 0,
+        copies: vec![],
     }
 }
 
@@ -106,9 +114,7 @@ fn under_the_line_presses_once_and_says_so() {
     };
     assert_eq!(title, "Used the banked weekly Claude reset at 98% used");
     assert!(
-        body.contains("read 98% used")
-            && body.contains("reads 0% now")
-            && body.contains("0 left"),
+        body.contains("read 98% used") && body.contains("reads 0% now") && body.contains("0 left"),
         "{body}"
     );
     assert_eq!(o.state.week.as_deref(), Some("2026-11-06T05:00"));
@@ -530,4 +536,97 @@ fn a_fast_burn_brings_the_next_look_in() {
     };
     let mut a = fake(vec![Ok(at(88.0))], vec![]);
     assert_eq!(run(&mut a, state, 600.0).wake, 600.0 + 1500.0);
+}
+
+/// A pass at NOW whose own read fails as remi's did when the endpoint
+/// refused, with COPY what another session last fetched.
+fn refused(state: State, copy: Option<(f64, Reading)>, now: f64) -> Outcome {
+    let mut a = fake(
+        vec![Err("its usage endpoint not answering".to_owned())],
+        vec![],
+    );
+    a.copies = vec![copy];
+    run(&mut a, state, now)
+}
+
+/// The state after a good reading of USED at AT.
+fn read_at(at: f64, used: f64) -> State {
+    let mut a = fake(vec![Ok(self::at(used))], vec![]);
+    run(&mut a, State::default(), at).state
+}
+
+#[test]
+fn a_refused_read_takes_another_sessions_newer_copy() {
+    // remi#1516: three refusals in a row, while other sessions' copies,
+    // 461s, 72s and 63s old, showed the week at 56-57%. Not blind.
+    let mut state = read_at(10_000.0, 56.0);
+    for (now, age, used) in [
+        (11_800.0, 461.0, 56.0),
+        (12_100.0, 72.0, 56.0),
+        (12_400.0, 63.0, 57.0),
+    ] {
+        let o = refused(state, Some((now - age, at(used))), now);
+        assert!(keys(&o.notices).iter().all(|k| !k.starts_with("open")));
+        assert_eq!(o.state.failed_reads, 0);
+        // Its burn and next look count from when the copy was fetched.
+        assert_eq!(o.state.last, Some((now - age, used)));
+        state = o.state;
+    }
+    // Booked from the copy's time, not the pass's.
+    let o = refused(state.clone(), Some((12_500.0, at(57.0))), 12_600.0);
+    let room = 98.0 - 57.0;
+    assert_eq!(o.wake, 12_500.0 + (room / ASSUMED_BURN / 2.0).min(LATEST));
+}
+
+#[test]
+fn a_copy_never_presses_or_settles_a_reset() {
+    // Over the line: only a fresh reading may press.
+    let o = refused(
+        read_at(10_000.0, 97.0),
+        Some((10_200.0, at(99.0))),
+        10_300.0,
+    );
+    assert_eq!(o.state.failed_reads, 1);
+    assert!(!o.state.pressed);
+    // A press still unsettled waits for a fresh reading, however new the
+    // copy: one fetched just before the yes would say it didn't take.
+    let mut state = read_at(10_000.0, 97.0);
+    state.unsettled = Some(Unsettled {
+        used: 99.0,
+        at: "then".to_owned(),
+        week: WEEK.to_owned(),
+        ends: ENDS,
+        said: None,
+    });
+    state.pressed = true;
+    let o = refused(state, Some((10_200.0, at(3.0))), 10_300.0);
+    assert!(o.state.unsettled.is_some());
+    assert_eq!(o.state.failed_reads, 1);
+    assert!(o.notices.is_empty());
+}
+
+#[test]
+fn a_copy_counts_only_while_it_says_more_than_the_passes_know() {
+    // No older than the last reading, nor dated ahead of the clock.
+    let o = refused(read_at(10_000.0, 56.0), Some((9_900.0, at(56.0))), 10_300.0);
+    assert_eq!(o.state.failed_reads, 1);
+    let o = refused(
+        read_at(10_000.0, 56.0),
+        Some((10_400.0, at(56.0))),
+        10_300.0,
+    );
+    assert_eq!(o.state.failed_reads, 1);
+    // With nothing read yet, there's no telling how far the week has gone.
+    let o = refused(State::default(), Some((10_200.0, at(56.0))), 10_300.0);
+    assert_eq!(o.state.failed_reads, 1);
+    // Three points short of the line at the assumed burn: half an hour, so
+    // a copy 15 minutes old or more may be over it by now.
+    let state = read_at(5_000.0, 90.0);
+    let o = refused(state.clone(), Some((10_000.0, at(95.0))), 10_000.0 + 900.0);
+    assert_eq!(o.state.failed_reads, 1);
+    let o = refused(state, Some((10_000.0, at(95.0))), 10_000.0 + 899.0);
+    assert_eq!(o.state.failed_reads, 0);
+    // No copy at all: a failed read, as before.
+    let o = refused(read_at(10_000.0, 56.0), None, 10_300.0);
+    assert_eq!(o.state.failed_reads, 1);
 }

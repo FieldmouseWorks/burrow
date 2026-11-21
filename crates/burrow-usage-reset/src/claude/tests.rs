@@ -290,13 +290,43 @@ fn freshness_holds_across_the_asking() {
 
 #[test]
 fn only_a_config_showing_no_copy_counts_as_none() {
-    assert_eq!(copied_in(b"{}"), Ok(None));
+    assert_eq!(copied_in(&json!({})), Ok(None));
     assert_eq!(
-        copied_in(br#"{"cachedUsageUtilization":{"fetchedAtMs":5000}}"#),
+        copied_in(&json!({"cachedUsageUtilization": {"fetchedAtMs": 5000}})),
         Ok(Some(5.0))
     );
-    assert!(copied_in(b"{\"cachedUsage").is_err());
-    assert!(copied_in(br#"{"cachedUsageUtilization":{}}"#).is_err());
+    assert!(copied_in(&json!({"cachedUsageUtilization": {}})).is_err());
+}
+
+/// Claude Code's config as 2.1.330 keeps it, logged in to ACCOUNT, with a
+/// copy of its endpoint's answer for OWNER fetched at AT.
+fn config_with(account: &str, owner: &str, at: f64, used: f64) -> Value {
+    json!({
+        "oauthAccount": {"accountUuid": account},
+        "cachedUsageUtilization": {
+            "fetchedAtMs": at * 1000.0,
+            "accountUuid": owner,
+            "utilization": fetched(used)["rate_limits"].clone(),
+        }
+    })
+}
+
+#[test]
+fn the_copy_is_a_reading_from_when_it_was_fetched() {
+    let config = config_with("a", "a", NOW - 300.0, 57.0);
+    let (at, copy) = copy_in(&config).unwrap().unwrap();
+    assert_eq!(at, NOW - 300.0);
+    assert_eq!(Ok(copy), usage(&fetched(57.0), None, NOW));
+    // Another account's, as after a login as someone else, is none.
+    assert_eq!(copy_in(&config_with("a", "b", NOW, 57.0)), Ok(None));
+    let mut logged_out = config_with("a", "a", NOW, 57.0);
+    logged_out.as_object_mut().unwrap().remove("oauthAccount");
+    assert_eq!(copy_in(&logged_out), Ok(None));
+    assert_eq!(copy_in(&json!({})), Ok(None));
+    // One it can't make sense of is an error, not a reading.
+    let mut broken = config_with("a", "a", NOW, 57.0);
+    broken["cachedUsageUtilization"]["utilization"]["seven_day"] = Value::Null;
+    assert!(copy_in(&broken).is_err());
 }
 
 #[test]
@@ -318,6 +348,9 @@ impl Account for Answers {
     fn read(&mut self) -> Result<Reading, String> {
         let (answer, copied) = self.answers.remove(0);
         usage(&answer, copied, NOW)
+    }
+    fn copy(&mut self) -> Option<(f64, Reading)> {
+        None
     }
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         self.pressed += 1;

@@ -61,6 +61,10 @@ pub trait Account {
     /// The meter as it stands now. A copy of it from earlier, however it
     /// looks, is an error: a pass decides and books only on a fresh reading.
     fn read(&mut self) -> Result<Reading, String>;
+    /// The meter as another reader of the same account last fetched it
+    /// from its endpoint, and when, if one is kept: a real reading, only an
+    /// older one. Nothing when there's none, or it can't be told to be that.
+    fn copy(&mut self) -> Option<(f64, Reading)>;
     /// Ask for the banked reset, calling KEEP once just before its yes is
     /// first pressed. If KEEP fails, nothing is pressed.
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset;
@@ -143,7 +147,16 @@ pub fn pass(
     stamp: &str,
 ) -> Outcome {
     let mut notices = Vec::new();
-    let reading = match account.read() {
+    // Other readers of the account share its endpoint's rate limit, so it
+    // often refuses, or isn't asked for a minute after one read it: what
+    // the last of them read stands in then, when it can.
+    let read = account.read().map(|r| (now, r)).or_else(|e| {
+        account
+            .copy()
+            .filter(|(at, copy)| shows_room(&state, *at, copy, below, now))
+            .ok_or(e)
+    });
+    let (mut read_at, reading) = match read {
         Ok(r) => r,
         Err(e) => {
             eprintln!("couldn't read the meter: {e}");
@@ -224,6 +237,7 @@ pub fn pass(
                     Ok(r) => {
                         settle(&mut state, &mut notices, &then, &r);
                         reading = r;
+                        read_at = now;
                     }
                     Err(e) => {
                         // Spent, and settled by the next pass that can read
@@ -270,27 +284,41 @@ pub fn pass(
         notices.push(Notice::Close(FAILED, "The week has room again.".to_owned()));
     }
 
-    let wake = now
-        + if state.unsettled.is_some() || again {
-            RETRY
+    // The reading's own time, not the pass's, says how far the week can
+    // have gone since: a copy's is earlier.
+    let wake = if state.unsettled.is_some() || again {
+        now + RETRY
+    } else {
+        let limit = if state.at_limit_only {
+            100.0
         } else {
-            next(
-                &state,
-                &reading,
-                if state.at_limit_only {
-                    100.0
-                } else {
-                    100.0 - below
-                },
-                now,
-            )
+            100.0 - below
         };
-    state.last = Some((now, reading.used));
+        (read_at + next(&state, &reading, limit, read_at)).max(now + SOONEST)
+    };
+    state.last = Some((read_at, reading.used));
     Outcome {
         state,
         notices,
         wake,
     }
+}
+
+/// Whether a copy of the meter fetched at AT can stand for a reading at NOW:
+/// only when all it can say is that the week still has room. It's never
+/// what a reset is pressed or settled on: one over the line, or a press
+/// still unsettled, waits for a fresh reading. It has to be newer than the
+/// last reading the passes made (so newer than any press, whose pass
+/// reads after it), and young enough that, at the burn the passes assume, the
+/// week can't have reached the line since it was fetched: the pass that
+/// read it then would have looked again no sooner than now.
+fn shows_room(state: &State, at: f64, copy: &Reading, below: f64, now: f64) -> bool {
+    let limit = 100.0 - below;
+    state.unsettled.is_none()
+        && copy.used < limit
+        && at <= now
+        && state.last.is_some_and(|(last, _)| at > last)
+        && now < at + next(state, copy, limit, at)
 }
 
 /// The meter is in a later week than the one that was to end at ENDS: it

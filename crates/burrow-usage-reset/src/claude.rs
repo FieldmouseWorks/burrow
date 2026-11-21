@@ -47,6 +47,15 @@ impl Account for ClaudeCode {
         read_usage(&self.claude, &self.dir)
     }
 
+    fn copy(&mut self) -> Option<(f64, Reading)> {
+        config()
+            .and_then(|config| config.map_or(Ok(None), |c| copy_in(&c)))
+            .unwrap_or_else(|e| {
+                eprintln!("couldn't read Claude Code's cached meter: {e}");
+                None
+            })
+    }
+
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         let tmux = Tmux {
             bin: self.tmux.clone(),
@@ -257,25 +266,31 @@ impl ClaudeCode {
 /// to answer from it without asking its endpoint at all, in seconds.
 const SNAPSHOT: f64 = 60.0;
 
-/// When Claude Code's persisted copy of the meter was fetched, in seconds
-/// since the epoch: its global config's `cachedUsageUtilization`, for this
-/// user.
-fn copied_at() -> Result<Option<f64>, String> {
+/// Claude Code's global config for this user, if it has one.
+fn config() -> Result<Option<Value>, String> {
     let dir = env::var_os("CLAUDE_CONFIG_DIR")
         .or_else(|| env::var_os("HOME"))
         .ok_or("neither CLAUDE_CONFIG_DIR nor HOME is set")?;
     let file = PathBuf::from(dir).join(".claude.json");
     match std::fs::read(&file) {
-        Ok(config) => copied_in(&config).map_err(|e| format!("{}: {e}", file.display())),
+        Ok(config) => serde_json::from_slice(&config)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", file.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", file.display())),
     }
 }
 
+/// When Claude Code's persisted copy of the meter was fetched, in seconds
+/// since the epoch: its global config's `cachedUsageUtilization`, for this
+/// user.
+fn copied_at() -> Result<Option<f64>, String> {
+    config()?.map_or(Ok(None), |config| copied_in(&config))
+}
+
 /// The copy's time in Claude Code's config. None only if the config shows it
 /// has no copy: one it can't make sense of may still be what answers.
-fn copied_in(config: &[u8]) -> Result<Option<f64>, String> {
-    let config: Value = serde_json::from_slice(config).map_err(|e| e.to_string())?;
+fn copied_in(config: &Value) -> Result<Option<f64>, String> {
     match config.get("cachedUsageUtilization") {
         None | Some(Value::Null) => Ok(None),
         Some(copy) => copy["fetchedAtMs"]
@@ -285,6 +300,22 @@ fn copied_in(config: &[u8]) -> Result<Option<f64>, String> {
     }
 }
 
+/// The copy of the meter in Claude Code's config, and when it was fetched:
+/// Claude Code keeps its usage endpoint's answer there, as it came, only
+/// when one comes (Claude Code 2.1.330), so it's a real reading from then.
+/// Only one for the account it's logged in to now counts, as Claude Code
+/// itself has it.
+fn copy_in(config: &Value) -> Result<Option<(f64, Reading)>, String> {
+    let Some(at) = copied_in(config)? else {
+        return Ok(None);
+    };
+    let copy = &config["cachedUsageUtilization"];
+    let account = &config["oauthAccount"]["accountUuid"];
+    if !account.is_string() || copy["accountUuid"] != *account {
+        return Ok(None);
+    }
+    reading(&copy["utilization"]).map(|r| Some((at, r)))
+}
 /// The meter from one `get_usage` (ASK), only if it can be shown to be fresh.
 /// The copy is looked at first, then the clock, then it's asked: Claude Code
 /// picks its answer after all of them, so a copy already past SNAPSHOT by this
@@ -336,16 +367,8 @@ pub fn usage(answer: &Value, copied: Option<f64>, now: f64) -> Result<Reading, S
             answer["subscription_type"]
         ));
     }
-    let week = &answer["rate_limits"]["seven_day"];
-    let used = week["utilization"]
-        .as_f64()
-        .ok_or("get_usage has no weekly utilization")?;
-    let resets = week["resets_at"]
-        .as_str()
-        .ok_or("get_usage has no weekly resets_at")?;
-    let ends = resets
-        .parse::<jiff::Timestamp>()
-        .map_err(|e| format!("get_usage's weekly resets_at {resets}: {e}"))?;
+    let reading = reading(&answer["rate_limits"])?;
+    let used = reading.used;
     let age = copied.map(|at| now - at);
     if !answer["rate_limits"]["limits"].is_array() {
         return Err(match age {
@@ -362,13 +385,29 @@ pub fn usage(answer: &Value, copied: Option<f64>, now: f64) -> Result<Reading, S
             "get_usage answered {used}% from a snapshot {age:.0}s old, its usage endpoint not asked"
         ));
     }
+    Ok(reading)
+}
+
+/// The weekly meter in the usage endpoint's LIMITS, as `get_usage`'s
+/// `rate_limits` and Claude Code's copy both have them.
+fn reading(limits: &Value) -> Result<Reading, String> {
+    let week = &limits["seven_day"];
+    let used = week["utilization"]
+        .as_f64()
+        .ok_or("get_usage has no weekly utilization")?;
+    let resets = week["resets_at"]
+        .as_str()
+        .ok_or("get_usage has no weekly resets_at")?;
+    let ends = resets
+        .parse::<jiff::Timestamp>()
+        .map_err(|e| format!("get_usage's weekly resets_at {resets}: {e}"))?;
     // To the minute: the same week's end may come back with a different
     // fraction of a second.
     Ok(Reading {
         used,
         week: resets.chars().take(16).collect(),
         ends: ends.as_second() as f64,
-        session: session(&answer["rate_limits"]["five_hour"])?,
+        session: session(&limits["five_hour"])?,
     })
 }
 

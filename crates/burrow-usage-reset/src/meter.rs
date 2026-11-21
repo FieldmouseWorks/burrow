@@ -205,6 +205,12 @@ impl<A: Account> Account for Meter<A> {
         }
         Ok(reading)
     }
+    /// A copy isn't kept: nothing says when it was asked for, so it can't
+    /// show proj a refusal over, and it would take the place of a reading
+    /// that can.
+    fn copy(&mut self) -> Option<(f64, Reading)> {
+        self.account.copy()
+    }
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         self.account.reset(keep)
     }
@@ -320,6 +326,9 @@ mod tests {
                     ends: 20000.0,
                     session: None,
                 })
+            }
+            fn copy(&mut self) -> Option<(f64, Reading)> {
+                None
             }
             fn reset(&mut self, _: &mut dyn FnMut() -> Result<(), String>) -> Reset {
                 unreachable!()
