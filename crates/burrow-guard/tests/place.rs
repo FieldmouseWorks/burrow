@@ -112,6 +112,9 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             "(cd OTHER && git push origin pr)",
             "sh -c 'cd OTHER && git push origin pr'",
             "sh -c 'cd \"$1\" && git push origin pr' _ OTHER",
+            // A here-document's script is one, line after line.
+            "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
+            "bash <<'EOF'\ntrue &&\n  cd OTHER &&\n  git push origin pr\nEOF",
             // A place spelled out from the root reads it again.
             "cd \"$D\" && cd OTHER && git push origin pr",
             "cd \"$D\" && git -C OTHER push origin pr",
@@ -134,6 +137,12 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             "git commit -m 'cd OTHER' && git push origin pr",
             "echo cd OTHER; git push origin pr",
             "env cd OTHER; git push origin pr",
+            // Prose read as a script moves nothing, and holds no loop or
+            // function for a cd to spoil.
+            "# cd OTHER (the worktree)\ngit push origin pr",
+            "cd OTHER # (the worktree)\ncd .. && git push origin pr",
+            "git push origin pr && gh pr create --body \"$(cat <<'EOF'\n**Summary** of it (short)\n* cd OTHER\nfor a while (until done)\nEOF\n)\"",
+            "git commit -F - <<'EOF'\nplace: cd OTHER first (see #1)\n\n`cd` it { now }\nEOF\ngit push origin pr",
         ],
     );
     cmds.push(format!("cd {h} && git push origin pr"));
@@ -193,6 +202,10 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             "command cd OTHER && git push origin pr",
             "eval cd OTHER && git push origin pr",
             "eval 'cd OTHER' && git push origin pr",
+            "eval cd OTHER \\; git push origin pr",
+            "eval 'cd OTHER;' git push origin pr",
+            "x='cd OTHER'; eval \"$x\"; git push origin pr",
+            "bash <<'EOF'\ntrue && cd OTHER\ngit push origin pr\nEOF",
             "$c OTHER && git push origin pr",
             "${c} OTHER && git push origin pr",
             // A body read before the cd that runs after it.
@@ -266,4 +279,18 @@ fn a_push_with_no_refspec_pushes_the_branch_where_the_cd_went() {
         question(&format!("(cd {}); git push -f", m.display()), f),
         None
     );
+}
+
+/// Subshells nest as deep as the line goes, and each starts from its
+/// parent's place: a line of them is read to its end, not the guard's.
+#[test]
+fn subshells_nested_deep_are_read_through() {
+    let here = clone_on("pr");
+    let deep = 300_000;
+    let cmd = format!(
+        "{}git push origin +pr{}",
+        "(".repeat(deep),
+        ")".repeat(deep)
+    );
+    assert_eq!(refusal(&cmd, here.path()), Some(UNLEASED));
 }

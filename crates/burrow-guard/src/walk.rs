@@ -74,18 +74,29 @@ const NESTED: usize = 16;
 /// unchecked, isn't read to its end.
 pub fn walk(cmd: &str, cwd: &Path, visit: &mut Visit<'_>) -> Result<(), Unread> {
     let budget = Budget(Cell::new(WORDS));
-    let cdpath =
-        cmd.contains("CDPATH") || std::env::var_os("CDPATH").is_some_and(|p| !p.is_empty());
+    let line = Line {
+        cdpath: cmd.contains("CDPATH") || std::env::var_os("CDPATH").is_some_and(|p| !p.is_empty()),
+        evals: cmd.contains("eval"),
+    };
     read(
         shell::script(cmd)?,
         Place::at(cwd),
         0,
         None,
         &budget,
-        cdpath,
+        line,
         visit,
     )?;
     Ok(())
+}
+
+/// What the whole command line says about every reading of it.
+#[derive(Clone, Copy)]
+struct Line {
+    /// `CDPATH` may be set (place.rs).
+    cdpath: bool,
+    /// It may `eval` an assignment's value.
+    evals: bool,
 }
 
 /// What [`walk`] calls for each word: the word, the words after it, where
@@ -101,16 +112,16 @@ fn read(
     depth: usize,
     trailing: Option<&Rest<'_>>,
     budget: &Budget,
-    cdpath: bool,
+    line: Line,
     visit: &mut Visit<'_>,
 ) -> Result<Place, Unread> {
     if depth > NESTED {
         return Err(Unread::Deep);
     }
-    let mut shells = Shells::new(&script, place, cdpath);
+    let mut shells = Shells::new(&script, place, line.cdpath);
     let last = script.runs.len().saturating_sub(1);
     for (n, run) in script.runs.into_iter().enumerate() {
-        let here = shells.enter(&run);
+        let mut here = shells.enter(&run);
         let words = with_parameter_texts(run.words)?;
         let evals = words.iter().any(|w| w == "eval");
         let trailing = if n == last { trailing } else { None };
@@ -129,19 +140,22 @@ fn read(
                 if !script_read && shell.is_some_and(|at| at + 1 < i) && is_c(&words[i - 1]) {
                     script_read = true;
                     let inner = given_params(inner, word, rest, budget)?;
-                    read(inner, here.clone(), depth + 1, None, budget, cdpath, visit)?;
+                    read(inner, here.clone(), depth + 1, None, budget, line, visit)?;
                 } else if read(
                     inner,
                     here.clone(),
                     depth + 1,
                     Some(&rest),
                     budget,
-                    cdpath,
+                    line,
                     visit,
                 )? != here
-                    && evals
+                    && (evals || (line.evals && assigned(word).is_some()))
                 {
+                    // `eval` runs it here, and an assignment's value may
+                    // be run here later by one (`eval "$x"`).
                     shells.moved(run.scope);
+                    here = here.unread();
                 }
             }
             visit(

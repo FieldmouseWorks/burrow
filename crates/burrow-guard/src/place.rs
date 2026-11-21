@@ -13,7 +13,9 @@
 //! to a place spelled out reads it again.
 //!
 //! A loop or a function runs its body at another time than it's read in,
-//! so a line that holds one and any `cd` reads no place at all.
+//! so a shell whose own commands hold one and any `cd` reads no place at
+//! all, and nor do its subshells. Text read apart (a comment, a
+//! here-document) is a shell of its own, so its prose moves nothing.
 //!
 //! What a sourced file, an alias or a function from outside the line does
 //! isn't seen, any more than a push in it is.
@@ -73,7 +75,7 @@ impl Place {
         }
     }
 
-    fn unread(&self) -> Place {
+    pub fn unread(&self) -> Place {
         Place {
             path: self.path.clone(),
             unread: true,
@@ -86,8 +88,8 @@ pub struct Shells {
     shells: Vec<Option<Shell>>,
     parents: Vec<usize>,
     joins: Vec<Joined>,
-    /// The line holds a loop or a function, and a `cd`.
-    nowhere: bool,
+    /// Each shell's own commands hold a loop or a function, and a `cd`.
+    deferring: Vec<bool>,
     cdpath: bool,
 }
 
@@ -99,43 +101,51 @@ struct Shell {
     /// A `cd` behind `&&` moved it: once the commands that `&&` joins end
     /// (or `||` takes over), it may be either place.
     joined_cd: bool,
+    /// Its commands, or its parent's, may run where they weren't read: no
+    /// place in it is read.
+    nowhere: bool,
 }
 
 impl Shells {
     /// `script`'s shells, its own at `place`. `cdpath`: `CDPATH` may be
     /// set, which takes a relative `cd` anywhere.
     pub fn new(script: &Script, place: Place, cdpath: bool) -> Shells {
-        let reads: Vec<Reading> = script
-            .runs
-            .iter()
-            .map(|r| reading(&r.words, cdpath))
-            .collect();
-        let nowhere = reads.iter().any(|r| r.moves.is_some())
-            && (reads.iter().any(|r| r.defers) || script.runs.iter().any(|r| r.defines));
+        let (mut moves, mut defers) = (
+            vec![false; script.parents.len()],
+            vec![false; script.parents.len()],
+        );
+        for run in &script.runs {
+            let read = reading(&run.words, cdpath);
+            moves[run.scope] |= read.moves.is_some();
+            defers[run.scope] |= read.defers || run.defines;
+        }
+        let deferring: Vec<bool> = moves.iter().zip(&defers).map(|(m, d)| *m && *d).collect();
         let mut shells: Vec<Option<Shell>> = script.parents.iter().map(|_| None).collect();
         shells[0] = Some(Shell {
             place,
             open: 0,
             joined_cd: false,
+            nowhere: deferring[0],
         });
         Shells {
             shells,
             parents: script.parents.clone(),
             joins: script.joins.clone(),
-            nowhere,
+            deferring,
             cdpath,
         }
     }
 
-    /// Where `run` runs; its shell moves on past it.
+    /// Where `run` runs; its shell moves on past it. A command that moves
+    /// it where the guard can't follow runs nowhere read (`eval cd "$D" \;
+    /// git push` pushes from there).
     pub fn enter(&mut self, run: &Run) -> Place {
         let read = reading(&run.words, self.cdpath);
-        let nowhere = self.nowhere;
         let shell = self.shell(run.scope);
         if run.joined != Joined::And && std::mem::take(&mut shell.joined_cd) {
             shell.place = shell.place.unread();
         }
-        let here = if nowhere {
+        let mut here = if shell.nowhere {
             shell.place.unread()
         } else {
             shell.place.clone()
@@ -147,13 +157,16 @@ impl Shells {
                 shell.place = shell.place.cd(&dir);
                 shell.joined_cd = run.joined == Joined::And;
             }
-            Some(_) => shell.place = shell.place.unread(),
+            Some(_) => {
+                shell.place = shell.place.unread();
+                here = here.unread();
+            }
         }
         here
     }
 
-    /// A reading `eval` runs in `scope`'s shell moved it, somewhere the
-    /// guard didn't follow.
+    /// A reading run in `scope`'s shell (by `eval`) moved it, somewhere
+    /// the guard didn't follow.
     pub fn moved(&mut self, scope: usize) {
         let shell = self.shell(scope);
         shell.place = shell.place.unread();
@@ -164,24 +177,34 @@ impl Shells {
         self.shell(0).place.clone()
     }
 
-    /// `scope`'s shell, started from its parent's as it is now.
+    /// `scope`'s shell, started from its parent's as it is now, and each
+    /// of its parents not started yet before it, outermost first.
     fn shell(&mut self, scope: usize) -> &mut Shell {
-        if self.shells[scope].is_none() {
+        let mut unstarted = Vec::new();
+        let mut at = scope;
+        while self.shells[at].is_none() {
+            unstarted.push(at);
+            at = self.parents[at];
+        }
+        for &scope in unstarted.iter().rev() {
             let joined = self.joins[scope];
-            let parent = self.shell(self.parents[scope]);
+            let parent = self.shells[self.parents[scope]]
+                .as_mut()
+                .expect("started first");
             // A subshell, or the command holding a substitution, ends what
             // `&&` joined unless it's joined so itself.
             if joined != Joined::And && std::mem::take(&mut parent.joined_cd) {
                 parent.place = parent.place.unread();
             }
-            let place = parent.place.clone();
-            self.shells[scope] = Some(Shell {
-                place,
+            let shell = Shell {
+                place: parent.place.clone(),
                 open: 0,
                 joined_cd: false,
-            });
+                nowhere: parent.nowhere || self.deferring[scope],
+            };
+            self.shells[scope] = Some(shell);
         }
-        self.shells[scope].as_mut().expect("just started")
+        self.shells[scope].as_mut().expect("started")
     }
 }
 

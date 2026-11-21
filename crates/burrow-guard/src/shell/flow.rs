@@ -80,6 +80,7 @@ fn joined(before: Option<Sep>) -> Joined {
 
 /// A shell being read in: the one its commands run in, and what ended the
 /// last of them, if nothing's begun since.
+#[derive(Clone, Copy)]
 pub(super) struct Flow {
     pub(super) scope: usize,
     pub(super) pending: Option<Sep>,

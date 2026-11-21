@@ -515,12 +515,22 @@ impl Lexer {
     /// `text` read as a script of its own, its commands joining these.
     /// It runs in a shell of its own, which may not be this one's at all.
     fn read_apart(&mut self, text: &str, depth: usize) -> Result<(), TooDeep> {
-        let scope = self.child();
+        let mut flow = Flow {
+            scope: self.child(),
+            pending: None,
+        };
+        self.read_in(text, depth, &mut flow)
+    }
+
+    /// `text` read as more of the script `flow` is reading, which goes on
+    /// past it: a here-document's lines are one script.
+    fn read_in(&mut self, text: &str, depth: usize, flow: &mut Flow) -> Result<(), TooDeep> {
         let mut inner = Lexer::new(text);
         inner.parents = std::mem::take(&mut self.parents);
         inner.joins = std::mem::take(&mut self.joins);
-        inner.flows[0].scope = scope;
+        inner.flows[0] = *flow;
         let read = inner.list(depth + 1, false);
+        *flow = inner.flows[0];
         self.parents = inner.parents;
         self.joins = inner.joins;
         self.runs.append(&mut inner.runs);
@@ -537,7 +547,8 @@ impl Lexer {
     }
 
     /// The bodies of the here-documents waiting on this newline, each line
-    /// read on its own: a quote in one doesn't reach the next. In a
+    /// read on its own: a quote in one doesn't reach the next, but each
+    /// document's lines are one script, in one shell of its own. In a
     /// substitution (`closes`), the end word with the substitution's `)`
     /// straight after it ends the body too, as it does in bash. Where the
     /// end word was unquoted, a line that ends in a backslash goes on into
@@ -546,6 +557,10 @@ impl Lexer {
     /// read as one.
     fn heredoc_bodies(&mut self, depth: usize, closes: bool) -> Result<(), TooDeep> {
         for doc in std::mem::take(&mut self.heredocs) {
+            let mut flow = Flow {
+                scope: self.child(),
+                pending: None,
+            };
             let mut script = String::new();
             while self.peek().is_some() {
                 // The line, and where each of its characters is.
@@ -586,9 +601,9 @@ impl Lexer {
                     script.pop();
                     continue;
                 }
-                self.read_apart(&std::mem::take(&mut script), depth)?;
+                self.read_in(&std::mem::take(&mut script), depth, &mut flow)?;
             }
-            self.read_apart(&script, depth)?;
+            self.read_in(&script, depth, &mut flow)?;
         }
         Ok(())
     }
