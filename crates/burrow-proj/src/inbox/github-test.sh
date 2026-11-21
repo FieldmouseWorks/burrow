@@ -45,6 +45,9 @@ fi
 echo "$request" >>"$TEST/log"
 [ ! -x "$TEST/hook" ] || "$TEST/hook" "$request"
 if [ -f "$TEST/fail" ] && printf '%s' "$request" | grep -qF -f "$TEST/fail"; then exit 1; fi
+if [ -f "$TEST/gone" ] && printf '%s' "$request" | grep -qF -f "$TEST/gone"; then
+  printf 'HTTP/2.0 404 Not Found\n\n{"message":"Not Found"}'; exit 1
+fi
 if [ "$method" != GET ]; then
   case "$path" in */comments) printf '%s' "$body" | jq -r .body >>"$TEST/posted" ;; esac
   # Closing an issue answers it as closed, as GitHub does.

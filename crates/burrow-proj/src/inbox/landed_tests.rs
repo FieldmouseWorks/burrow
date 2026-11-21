@@ -55,6 +55,7 @@ fn child_job(target: &str, end: &str, state: &str, labels: &[&str]) -> (Box, Pat
         tasks: (0..2)
             .map(|i| Task {
                 issue: None,
+                carries: None,
                 title: format!("task {i}"),
                 body: "one PR".into(),
                 check: "regression".into(),
@@ -398,6 +399,107 @@ fn an_awaited_pr_that_never_merged_lands_nothing() {
     assert!(!b.log().contains("state=closed"), "{}", b.log());
     assert!(d.exists());
     assert_eq!(kept(&b), None);
+}
+
+/// #6's list says its child #7 was split to carry `target`.
+fn carries(b: &Box, target: &str) {
+    let mut list = stored_at(b, "6");
+    list.tasks[0].carries = Some(target.into());
+    assert!(b.pass().save_list("sam/box", "6", &list));
+}
+
+/// #7 as GitHub has it now.
+fn now(b: &Box) -> Value {
+    serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap()
+}
+
+/// FieldmouseWorks/Conary#450: a child split to carry a PR that said
+/// `Refs` merged before its job looked, so the job awaited nothing, and it
+/// was closed by hand with no job record left. The PR it carries lands it,
+/// with no host step.
+#[test]
+fn a_child_carrying_a_merged_pr_lands_with_it_closed_by_hand() {
+    for repo in ["sam/box", "sam/machine"] {
+        let (b, d, parent) = child_job("", "done", "closed", &[]);
+        fs::remove_dir_all(&d).unwrap();
+        carries(&b, &format!("{repo}#449"));
+        let url = pr(&b, repo, 449, true);
+        assert_eq!(
+            b.pass().landed_child("sam/box", 7, Some(&now(&b))),
+            Some(Some(url.clone())),
+            "{repo}"
+        );
+        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(moved_on(&b), "{repo}");
+        assert_eq!(
+            stored_at(&b, "6").children[0].merged_pr.as_deref(),
+            Some(url.as_str())
+        );
+    }
+}
+
+/// The carried PR hadn't merged when the child closed: the list waits,
+/// looks again later, and moves on once it does. One that never merges
+/// lands nothing.
+#[test]
+fn a_carried_pr_that_merges_after_the_close_lands_it_then() {
+    let (b, d, parent) = child_job("", "done", "closed", &[]);
+    fs::remove_dir_all(&d).unwrap();
+    carries(&b, "sam/machine#449");
+    pr(&b, "sam/machine", 449, false);
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(p.wake.contains_key("sam/box"), "a later look is booked");
+    let url = pr(&b, "sam/machine", 449, true);
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(moved_on(&b));
+    assert_eq!(
+        stored_at(&b, "6").children[0].merged_pr.as_deref(),
+        Some(url.as_str())
+    );
+}
+
+/// A carried PR GitHub says isn't there, a mistyped one say, hasn't
+/// merged: the list waits on the child and says so, never a silent miss.
+#[test]
+fn a_carried_pr_that_isnt_there_leaves_the_list_waiting_and_saying_so() {
+    let (b, d, parent) = child_job("", "done", "closed", &[]);
+    fs::remove_dir_all(&d).unwrap();
+    carries(&b, "sam/machine#4490");
+    fs::write(b.path("gone"), "api repos/sam/machine/issues/4490\n").unwrap();
+    assert_eq!(
+        b.pass().landed_child("sam/box", 7, Some(&now(&b))),
+        Some(None)
+    );
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(!p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+    assert!(stored_at(&b, "6").children[0].waits);
+}
+
+/// The child's job found its carried PR already merged and said `proj
+/// done` with nothing awaited: the child closes with its job.
+#[test]
+fn a_job_that_awaited_nothing_closes_a_child_whose_carried_pr_merged() {
+    for merged in [true, false] {
+        let (b, d, _) = child_job("", "done", "open", &["claude"]);
+        carries(&b, "sam/machine#449");
+        pr(&b, "sam/machine", 449, merged);
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let closing = b.pass().child_can_close("sam/box", "7", Some(&job));
+        assert_eq!(closing.closes(), merged, "{closing:?}");
+        jobs(&b, true);
+        assert_eq!(
+            b.log()
+                .contains("-X PATCH repos/sam/box/issues/7 -f state=closed"),
+            merged,
+            "{}",
+            b.log()
+        );
+        assert_eq!(d.exists(), !merged);
+    }
 }
 
 #[test]
