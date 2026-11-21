@@ -1,40 +1,25 @@
 //! Who a repo's landing events go to (Conary#313): the steward, through the
 //! handlers marked `landing`, or conaryd, which gets each delivery as GitHub
-//! sent it. The landing record (burrow_settings::landing) says which, and is
+//! sent it, through its outbox (crate::outbox). The landing record (burrow_settings::landing) says which, and is
 //! read again for every delivery, kick and pass, since burrow-landing moves
 //! a repo from one to the other while this service runs.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use burrow_settings::landing::{Owner, Record};
 use serde::Deserialize;
 
-use crate::http::Request;
-
-/// How long conaryd has to take a forwarded delivery: it answers once it's
-/// queued, before any pass, so a few seconds is long.
-const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The headers conaryd reads: its signature check is over the same body
-/// with the same secret, so the delivery goes on as GitHub signed it.
-const FORWARDED: [&str; 4] = [
-    "X-GitHub-Event",
-    "X-GitHub-Delivery",
-    "X-Hub-Signature-256",
-    "Content-Type",
-];
-
-/// The config's `landing`: the record, and conaryd's webhook port on this
-/// machine (none: nothing goes to conaryd).
+/// The config's `landing`: the record, conaryd's webhook port on this
+/// machine (none: nothing goes to conaryd), and the directory its
+/// deliveries are held in until it takes them (crate::outbox).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Landing {
     pub record: PathBuf,
     #[serde(default)]
     pub forward: Option<u16>,
+    #[serde(default)]
+    pub outbox: Option<PathBuf>,
 }
 
 /// Whether the steward's handlers take `repo` now: while the record says
@@ -59,51 +44,6 @@ impl Landing {
     }
 }
 
-/// POST the delivery to conaryd on `port`, its body and the headers it
-/// reads as they came. Ok once conaryd answered 2xx.
-pub fn forward(port: u16, req: &Request) -> Result<(), String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = TcpStream::connect_timeout(&addr, FORWARD_TIMEOUT).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(FORWARD_TIMEOUT))
-        .and_then(|()| s.set_write_timeout(Some(FORWARD_TIMEOUT)))
-        .map_err(|e| e.to_string())?;
-    let mut head = format!(
-        "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        req.body.len()
-    );
-    for name in FORWARDED {
-        if let Some(v) = req.header(name) {
-            head.push_str(&format!("{name}: {v}\r\n"));
-        }
-    }
-    head.push_str("\r\n");
-    s.write_all(head.as_bytes())
-        .and_then(|()| s.write_all(&req.body))
-        .and_then(|()| s.flush())
-        .map_err(|e| e.to_string())?;
-    // The status line is all that's wanted; a body, if any, is left.
-    let mut got = Vec::new();
-    let mut buf = [0u8; 256];
-    while !got.windows(2).any(|w| w == b"\r\n") && got.len() < 4096 {
-        match s.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-    let line = String::from_utf8_lossy(&got);
-    let code: u16 = line
-        .split(' ')
-        .nth(1)
-        .and_then(|c| c.trim().parse().ok())
-        .ok_or("no answer")?;
-    if (200..300).contains(&code) {
-        Ok(())
-    } else {
-        Err(format!("answered {code}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -111,9 +51,10 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use burrow_settings::landing::{Holding, Owner, Record};
     use serde_json::json;
@@ -123,6 +64,7 @@ mod tests {
     use crate::http::listen;
     use crate::http::tests::{post, sign};
     use crate::line::{Line, Pass};
+    use crate::outbox::Outbox;
     use crate::passes::{Units, Yields, serve};
     use crate::routes::{Handlers, Lines, delivery, kick};
 
@@ -147,16 +89,21 @@ mod tests {
         r.write(record).unwrap();
     }
 
-    /// conaryd, stood in for: answers `code` and keeps each request whole.
-    fn conaryd(code: u16) -> (u16, Arc<Mutex<Vec<String>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    /// conaryd, stood in for on `listener`: answers each request in turn
+    /// with the next of `answers` (the last one ever after), after
+    /// `delay`, and keeps each request whole.
+    fn conaryd_on(
+        listener: TcpListener,
+        delay: Duration,
+        answers: &[u16],
+    ) -> Arc<Mutex<Vec<String>>> {
         let got = Arc::new(Mutex::new(Vec::new()));
         let kept = got.clone();
+        let mut answers = answers.to_vec();
         thread::spawn(move || {
             for s in listener.incoming() {
                 let mut s = s.unwrap();
-                s.set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                s.set_read_timeout(Some(Duration::from_millis(300)))
                     .unwrap();
                 let mut req = Vec::new();
                 let mut buf = [0u8; 4096];
@@ -180,10 +127,44 @@ mod tests {
                 kept.lock()
                     .unwrap()
                     .push(String::from_utf8_lossy(&req).into());
+                thread::sleep(delay);
+                let code = if answers.len() > 1 {
+                    answers.remove(0)
+                } else {
+                    answers[0]
+                };
                 let _ = write!(s, "HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n");
             }
         });
-        (port, got)
+        got
+    }
+
+    /// conaryd, stood in for: answers `code` at once.
+    fn conaryd(code: u16) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (port, conaryd_on(listener, Duration::ZERO, &[code]))
+    }
+
+    /// A port nothing listens on, yet.
+    fn closed() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Whether `ok` comes true within ten seconds.
+    fn soon(ok: impl Fn() -> bool) -> bool {
+        let end = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < end {
+            if ok() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        ok()
     }
 
     struct Ports {
@@ -191,16 +172,32 @@ mod tests {
         handlers: Handlers,
         hooks: u16,
         kicks: u16,
+        /// conaryd's outbox, and what sends it on.
+        outbox: PathBuf,
+        forwarder: Option<Arc<Outbox>>,
+    }
+
+    impl Ports {
+        /// The deliveries held for conaryd.
+        fn held(&self) -> usize {
+            fs::read_dir(&self.outbox).map_or(0, Iterator::count)
+        }
     }
 
     /// The steward's handler (`landing`) and the inbox's beside it, their
     /// config as modules/events.nix writes it, with this record and
-    /// forward port.
+    /// forward port, and the outbox's forwarder running.
     fn setup(record: &Path, forward: Option<u16>) -> Ports {
+        setup_with(record, forward, |_| {})
+    }
+
+    /// The same, the outbox tuned first.
+    fn setup_with(record: &Path, forward: Option<u16>, tune: impl FnOnce(&mut Outbox)) -> Ports {
+        let outbox = record.with_file_name("outbox");
         let cfg: Config = serde_json::from_value(json!({
             "port": null,
             "kickPort": 0,
-            "landing": {"record": record, "forward": forward},
+            "landing": {"record": record, "forward": forward, "outbox": outbox},
             "handlers": {
                 "autoland": {"events": ["pull_request", "push"], "unit": "autoland", "landing": true},
                 "inbox": {"events": ["pull_request"], "unit": "proj-inbox"},
@@ -208,7 +205,18 @@ mod tests {
         }))
         .unwrap();
         let cfg = cfg.wire();
-        let landing = cfg.landing.clone();
+        let held = cfg
+            .landing
+            .as_ref()
+            .and_then(|l| Outbox::open(l).unwrap())
+            .map(|mut o| {
+                tune(&mut o);
+                Arc::new(o)
+            });
+        let forwarder = held.clone();
+        if let Some(o) = held.clone() {
+            thread::spawn(move || o.forward());
+        }
         let handlers: Handlers = Arc::new(cfg.handlers);
         let lines: Lines = Arc::new(
             handlers
@@ -219,7 +227,7 @@ mod tests {
         let (hs, ls) = (handlers.clone(), lines.clone());
         let (hooks, _) = listen(
             0,
-            Arc::new(move |req| delivery(&hs, &ls, landing.as_ref(), crate::test_secret(), req)),
+            Arc::new(move |req| delivery(&hs, &ls, held.as_deref(), crate::test_secret(), req)),
         )
         .unwrap();
         let (hs, ls) = (handlers.clone(), lines.clone());
@@ -229,6 +237,8 @@ mod tests {
             handlers,
             hooks,
             kicks,
+            outbox,
+            forwarder,
         }
     }
 
@@ -351,10 +361,13 @@ mod tests {
         assert_eq!(run(&p), vec!["autoland@sam-r.service".to_string()]);
         hold(&record, "sam/r", Owner::Conaryd, Some(Owner::Steward));
         assert_eq!(deliver(p.hooks), 202);
+        // Nothing held, so nothing sent later either.
+        assert_eq!(p.held(), 0);
         assert!(got.lock().unwrap().is_empty());
 
         hold(&record, "sam/r", Owner::Conaryd, None);
         assert_eq!(deliver(p.hooks), 202);
+        assert!(soon(|| p.held() == 0 && !got.lock().unwrap().is_empty()));
         let got = got.lock().unwrap().clone();
         assert_eq!(got.len(), 1);
         let (head, body) = got[0].split_once("\r\n\r\n").unwrap();
@@ -370,25 +383,121 @@ mod tests {
         assert!(head.starts_with("POST / HTTP/1.1\r\n"));
     }
 
-    // (d) A delivery conaryd refuses, or that finds no conaryd, answers
-    // GitHub 502.
+    // (d) A conaryd slower to answer than GitHub waits for us gets the
+    // delivery once, and GitHub hears 202 without waiting for it.
     #[test]
-    fn a_forward_not_taken_is_502() {
+    fn a_slow_conaryd_gets_it_once() {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("owners.json");
         hold(&record, "sam/r", Owner::Conaryd, None);
-        let (port, got) = conaryd(500);
-        assert_eq!(deliver(setup(&record, Some(port)).hooks), 502);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let got = conaryd_on(listener, Duration::from_secs(6), &[202]);
+        let p = setup(&record, Some(port));
+        let started = Instant::now();
+        assert_eq!(deliver(p.hooks), 202);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(soon(|| p.held() == 0));
+        assert!(started.elapsed() >= Duration::from_secs(6));
         assert_eq!(got.lock().unwrap().len(), 1);
-        let closed = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        assert_eq!(deliver(setup(&record, Some(closed)).hooks), 502);
     }
 
-    // (e) A record that can't be read lets the steward's handler through
+    // (e) A delivery conaryd refuses, or that finds no conaryd, is 202 and
+    // held, and sent again until conaryd takes it: once it listens, and
+    // once more after it refused.
+    #[test]
+    fn a_delivery_not_taken_is_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let port = closed();
+        let p = setup(&record, Some(port));
+        assert_eq!(deliver(p.hooks), 202);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(p.held(), 1);
+        let got = conaryd_on(
+            TcpListener::bind(("127.0.0.1", port)).unwrap(),
+            Duration::ZERO,
+            &[500, 202],
+        );
+        assert!(soon(|| p.held() == 0));
+        assert_eq!(got.lock().unwrap().len(), 2);
+        let got = got.lock().unwrap().clone();
+        assert_eq!(got[0], got[1]);
+    }
+
+    // (f) One that conaryd hasn't taken by the time it would forget the
+    // delivery's id is given up, rather than sent again as a new one.
+    #[test]
+    fn a_delivery_too_old_is_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let p = setup_with(&record, Some(closed()), |o| o.give_up = 0.5);
+        assert_eq!(deliver(p.hooks), 202);
+        assert_eq!(p.held(), 1);
+        assert!(soon(|| p.held() == 0));
+    }
+
+    // (g) The forwarder rests between tries: after conaryd refused a
+    // connection and then answered other than 2xx, and once what it held
+    // is given up while conaryd is away.
+    #[test]
+    fn the_forwarder_waits_between_tries() {
+        let rounds = |p: &Ports| {
+            p.forwarder
+                .as_ref()
+                .unwrap()
+                .rounds
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let port = closed();
+        let p = setup(&record, Some(port));
+        assert_eq!(deliver(p.hooks), 202);
+        thread::sleep(Duration::from_millis(300));
+        let got = conaryd_on(
+            TcpListener::bind(("127.0.0.1", port)).unwrap(),
+            Duration::ZERO,
+            &[500],
+        );
+        assert!(soon(|| !got.lock().unwrap().is_empty()));
+        let before = rounds(&p);
+        thread::sleep(Duration::from_millis(1500));
+        assert!(rounds(&p) - before < 10, "{} rounds", rounds(&p) - before);
+
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let p = setup_with(&record, Some(closed()), |o| o.give_up = 0.5);
+        assert_eq!(deliver(p.hooks), 202);
+        assert!(soon(|| p.held() == 0));
+        let before = rounds(&p);
+        thread::sleep(Duration::from_millis(1000));
+        assert!(rounds(&p) - before < 3, "{} rounds", rounds(&p) - before);
+    }
+
+    // (h) A delivery for conaryd that can't be held is answered 502, so
+    // GitHub's log shows it; one about a repo conaryd doesn't land is
+    // still taken.
+    #[test]
+    fn a_delivery_not_held_is_502() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("owners.json");
+        hold(&record, "sam/r", Owner::Conaryd, None);
+        let (port, got) = conaryd(202);
+        let p = setup(&record, Some(port));
+        fs::remove_dir(&p.outbox).unwrap();
+        fs::write(&p.outbox, b"").unwrap();
+        assert_eq!(deliver(p.hooks), 502);
+        hold(&record, "sam/r", Owner::Steward, None);
+        assert_eq!(deliver(p.hooks), 202);
+        assert!(got.lock().unwrap().is_empty());
+    }
+
+    // (i) A record that can't be read lets the steward's handler through
     // (the steward refuses itself) and sends conaryd nothing.
     #[test]
     fn an_unreadable_record_forwards_nothing() {
@@ -400,15 +509,39 @@ mod tests {
         assert_eq!(deliver(p.hooks), 202);
         assert_eq!(due(&p.lines, "autoland"), just("sam/r"));
         assert_eq!(post(p.kicks, "/kick/autoland/sam/r", b"", &[]), 202);
+        assert_eq!(p.held(), 0);
         assert!(got.lock().unwrap().is_empty());
         assert_eq!(
             Landing {
                 record,
-                forward: Some(port)
+                forward: Some(port),
+                outbox: None,
             }
             .forward_to("sam/r"),
             None
         );
+    }
+
+    // Forwarding with nowhere to hold what's forwarded is no config.
+    #[test]
+    fn forward_needs_an_outbox() {
+        let landing = |outbox| Landing {
+            record: "/nonexistent".into(),
+            forward: Some(1),
+            outbox,
+        };
+        assert!(Outbox::open(&landing(None)).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Outbox::open(&landing(Some(dir.path().join("o"))))
+                .unwrap()
+                .is_some()
+        );
+        let none = Landing {
+            forward: None,
+            ..landing(None)
+        };
+        assert!(Outbox::open(&none).unwrap().is_none());
     }
 
     // With no landing in the config, nothing changes: the steward's

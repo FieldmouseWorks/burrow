@@ -17,12 +17,18 @@ let
 
   # Deliveries come in only where GitHub can reach the machine.
   hooked = cfg.host != null;
+  forwarding = cfg.landing.record != null && cfg.landing.forward != null;
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
     # Who lands each repo (Conary#313): the record burrow-landing keeps,
     # read again at every delivery, kick and pass.
-    landing = if cfg.landing.record == null then null else { inherit (cfg.landing) record forward; };
+    # Where deliveries wait for conaryd to take them (crates/burrow-events'
+    # outbox.rs), under the state that survives a reboot.
+    landing = if cfg.landing.record == null then null else {
+      inherit (cfg.landing) record forward;
+      outbox = if forwarding then cfg.landing.outbox else null;
+    };
     handlers = lib.mapAttrs (name: h: {
       inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap yieldTo landing;
       issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
@@ -41,6 +47,8 @@ let
   '') (lib.attrNames cfg.handlers);
 in
 {
+  imports = [ (import ./common.nix inputs) ];
+
   options.burrow.events = {
     enable = mkOption {
       type = types.bool;
@@ -278,8 +286,22 @@ in
         description = ''
           conaryd's webhook port on 127.0.0.1: each signed delivery about a
           repo the record gives conaryd (and no handover under way) goes on
-          to it as GitHub sent it, body and signature, and one it doesn't
-          take is answered 502, so GitHub's log shows it. Null: none goes.
+          to it as GitHub sent it, body and signature. It's held in
+          `outbox` before GitHub is answered (502 only if it couldn't be),
+          and sent from there until conaryd takes it, across conaryd's
+          restarts and burrow-events' own. Null: none goes.
+        '';
+      };
+      outbox = mkOption {
+        type = types.str;
+        readOnly = true;
+        default = "${config.burrow.stateDir}/events-outbox";
+        defaultText = lib.literalExpression ''"''${config.burrow.stateDir}/events-outbox"'';
+        description = ''
+          Where deliveries for conaryd wait until it takes them: one file
+          each, sent oldest first, and one it hasn't taken in nearly a day
+          (its memory of delivery ids) given up with a `not taken by
+          conaryd` line in burrow-events' log.
         '';
       };
       events = mkOption {
@@ -343,6 +365,12 @@ in
     };
     users.groups.burrow-events = { };
 
+    systemd.tmpfiles.settings.burrow.${cfg.landing.outbox}.d = lib.mkIf forwarding {
+      mode = "0700";
+      user = "burrow-events";
+      group = "burrow-events";
+    };
+
     systemd.services.burrow-events = {
       description = "burrow-events: a pass on each GitHub event, kick or wake-up";
       after = [ "network.target" ];
@@ -359,6 +387,7 @@ in
         RuntimeDirectory = lib.mkIf (told != { }) "burrow-events";
         RuntimeDirectoryMode = lib.mkIf (told != { }) "0755";
         ProtectSystem = "strict";
+        ReadWritePaths = lib.mkIf forwarding [ cfg.landing.outbox ];
         ProtectHome = true;
         PrivateTmp = true;
         NoNewPrivileges = true;

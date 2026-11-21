@@ -49,6 +49,7 @@ pub mod http;
 pub mod kick;
 pub mod landing;
 pub mod line;
+pub mod outbox;
 pub mod passes;
 pub mod routes;
 

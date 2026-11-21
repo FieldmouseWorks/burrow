@@ -109,6 +109,11 @@ let
       "issue_comment" "check_suite" "check_run" "workflow_run" "status" "workflow_job" "push" ];
       missing = lib.filter (e: !(lib.elem e on.burrow.events.landing.events && lib.elem e on.burrow.events.hookEvents)) takes;
     in if missing != [ ] then "the hooks don't send what conaryd takes: ${toString missing}" else null)
+    (if !(lib.hasPrefix "${on.burrow.stateDir}/" on.burrow.events.landing.outbox)
+        || on.systemd.tmpfiles.settings.burrow.${on.burrow.events.landing.outbox}.d.user != "burrow-events"
+        || !(lib.elem on.burrow.events.landing.outbox on.systemd.services.burrow-events.serviceConfig.ReadWritePaths)
+      then "deliveries for conaryd aren't held where burrow-events can write and a reboot keeps" else null)
+    (if plain.systemd.services.burrow-events.serviceConfig ? ReadWritePaths then "a machine forwarding nothing gives burrow-events somewhere to write" else null)
     (if !(lib.any (lib.hasInfix "shadow each repo first") (failing (machine [{ burrow.landing.conaryd = [ "sam/homelab" ]; }]))) then "a repo conaryd may have that was never shadowed is taken" else null)
     (if failing pair != [ ] then "two repos with different flow configs can't both be given to conaryd: ${toString (failing pair)}" else null)
     (if !(lib.any (lib.hasInfix "a train with no trainNegative") (failing (bare [{

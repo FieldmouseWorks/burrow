@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::handler::Handler;
 use crate::http::{Request, signed};
-use crate::landing::{Landing, forward};
 use crate::line::{DEBOUNCE, Line, Pass};
+use crate::outbox::Outbox;
 use burrow_github::repo_name;
 
 use crate::now;
@@ -19,12 +19,14 @@ pub type Lines = Arc<BTreeMap<String, Line>>;
 /// The webhook's deliveries, nginx passes them on: each goes to the handlers
 /// that take it (`Handler::takes`). A commit status goes to none whose own
 /// passes posted it (`ownStatuses`), which is no news to them. One about a
-/// repo conaryd lands goes on to conaryd too (`landing`); one it didn't take
-/// is answered 502, so GitHub's log shows it and it can be sent again.
+/// repo conaryd lands (the landing record, read now) goes on to conaryd
+/// too: held in its outbox before GitHub hears 202, and sent from there
+/// until conaryd takes it. One that couldn't be held is answered 502, so
+/// GitHub's log shows it and it can be sent again.
 pub fn delivery(
     handlers: &Handlers,
     lines: &Lines,
-    landing: Option<&Landing>,
+    outbox: Option<&Outbox>,
     secret: &str,
     req: &Request,
 ) -> u16 {
@@ -56,11 +58,11 @@ pub fn delivery(
             }
         }
     }
-    if let Some(port) = landing.and_then(|l| l.forward_to(repo))
-        && let Err(e) = forward(port, req)
+    if let Some(outbox) = outbox
+        && let Err(e) = outbox.hold(repo, req)
     {
         let id = req.header("X-GitHub-Delivery").unwrap_or("?");
-        eprintln!("{repo}: delivery {id} ({event}) not taken by conaryd: {e}");
+        eprintln!("{repo}: delivery {id} ({event}) not held for conaryd: {e}");
         return 502;
     }
     202

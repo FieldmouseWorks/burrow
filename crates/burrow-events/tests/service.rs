@@ -3,14 +3,17 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::path::Path;
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use burrow_settings::landing::{Holding, Owner, Record};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
+use sha2::Sha256;
 
 struct Service {
     child: Child,
@@ -67,6 +70,20 @@ impl Service {
             .unwrap()
             .parse()
             .unwrap()
+    }
+
+    /// Whether no line of its log for `wait` has `word` in it.
+    fn never_says(&self, word: &str, wait: Duration) -> bool {
+        let end = Instant::now() + wait;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(word) => return false,
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        true
     }
 
     fn running(&mut self) -> bool {
@@ -204,4 +221,182 @@ fn bad_config() {
     );
     assert!(svc.said("burrow-events: ").contains("events.json"));
     assert!(!svc.child.wait().unwrap().success());
+}
+
+/// conaryd, stood in for on `listener`: answers each request 202 after
+/// `delay`, and keeps its body.
+fn conaryd(listener: TcpListener, delay: Duration) -> Arc<Mutex<Vec<String>>> {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let kept = got.clone();
+    thread::spawn(move || {
+        for s in listener.incoming() {
+            let mut s = s.unwrap();
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some(n) = line.strip_prefix("Content-Length: ") {
+                    len = n.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            kept.lock().unwrap().push(String::from_utf8(body).unwrap());
+            thread::sleep(delay);
+            let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+    got
+}
+
+/// The hooks' secret in these tests: made as they run, as a real one is,
+/// never written in the source.
+fn secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("hook-{}-{nanos}", std::process::id())
+    })
+}
+
+/// A directory with a landing record giving sam/r to conaryd, the webhook
+/// secret, and the config forwarding to `port`.
+fn landing(dir: &Path, port: u16) -> (Value, PathBuf) {
+    let record = dir.join("owners.json");
+    let mut r = Record::default();
+    r.repos.insert(
+        "sam/r".into(),
+        Holding {
+            owner: Owner::Conaryd,
+            to: None,
+            generation: 1,
+            since: 0,
+        },
+    );
+    r.write(&record).unwrap();
+    let creds = dir.join("creds");
+    fs::create_dir(&creds).unwrap();
+    fs::write(creds.join("webhook"), format!("{}\n", secret())).unwrap();
+    let outbox = dir.join("outbox");
+    let config = json!({"port": 0, "kickPort": 0, "handlers": {},
+        "landing": {"record": record, "forward": port, "outbox": outbox}});
+    (config, creds)
+}
+
+const BODY: &[u8] = br#"{"repository": {"full_name": "sam/r"}}"#;
+
+/// GitHub's delivery about sam/r, signed: its answer.
+fn deliver(hooks: u16) -> u16 {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret().as_bytes()).unwrap();
+    mac.update(BODY);
+    let sig: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    post(
+        hooks,
+        "/burrow/hook",
+        BODY,
+        &[
+            ("X-GitHub-Event", "push"),
+            ("X-GitHub-Delivery", "d-1"),
+            ("X-Hub-Signature-256", &format!("sha256={sig}")),
+        ],
+    )
+}
+
+/// Whether `ok` comes true within fifteen seconds.
+fn soon(ok: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < end {
+        if ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    ok()
+}
+
+fn held(dir: &Path) -> usize {
+    fs::read_dir(dir.join("outbox")).map_or(0, Iterator::count)
+}
+
+// A conaryd slower to answer than GitHub waits gets the delivery once,
+// GitHub hears 202, and nothing says it wasn't taken.
+#[test]
+fn a_slow_conaryd_takes_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let got = conaryd(listener, Duration::from_secs(6));
+    let (config, creds) = landing(dir.path(), port);
+    let svc = Service::start(dir.path(), config, &creds);
+    let hooks = svc.port("deliveries on 127.0.0.1:");
+    assert_eq!(deliver(hooks), 202);
+    assert!(soon(|| held(dir.path()) == 0));
+    assert!(svc.never_says("not taken", Duration::from_secs(2)));
+    assert_eq!(*got.lock().unwrap(), vec![String::from_utf8_lossy(BODY)]);
+}
+
+// A delivery while conaryd isn't listening is 202 and held, across a
+// restart of burrow-events too, and reaches conaryd once it listens.
+#[test]
+fn a_delivery_waits_for_conaryd_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let (config, creds) = landing(dir.path(), port);
+    let svc = Service::start(dir.path(), config.clone(), &creds);
+    let hooks = svc.port("deliveries on 127.0.0.1:");
+    assert_eq!(deliver(hooks), 202);
+    svc.said("conaryd on 127.0.0.1:");
+    drop(svc);
+    assert_eq!(held(dir.path()), 1);
+
+    let got = conaryd(
+        TcpListener::bind(("127.0.0.1", port)).unwrap(),
+        Duration::ZERO,
+    );
+    let svc = Service::start(dir.path(), config, &creds);
+    svc.said("deliveries on 127.0.0.1:");
+    assert!(soon(|| held(dir.path()) == 0));
+    assert!(svc.never_says("not taken", Duration::from_millis(500)));
+    assert_eq!(*got.lock().unwrap(), vec![String::from_utf8_lossy(BODY)]);
+}
+
+// One held since before conaryd would still know its id is given up, said
+// once, and never sent.
+#[test]
+fn a_delivery_held_too_long_is_given_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let got = conaryd(listener, Duration::ZERO);
+    let (config, creds) = landing(dir.path(), port);
+    let outbox = dir.path().join("outbox");
+    fs::create_dir(&outbox).unwrap();
+    let head = json!({"repo": "sam/r", "received": 1.0,
+        "headers": [["X-GitHub-Event", "push"], ["X-GitHub-Delivery", "d-old"]]});
+    fs::write(
+        outbox.join("00000000000001000000-00000000"),
+        [head.to_string().as_bytes(), b"\n", BODY].concat(),
+    )
+    .unwrap();
+    let svc = Service::start(dir.path(), config, &creds);
+    let line = svc.said("sam/r: delivery d-old (push) not taken by conaryd");
+    assert!(line.ends_with("never sent"), "{line}");
+    assert_eq!(held(dir.path()), 0);
+    assert!(svc.never_says("not taken", Duration::from_millis(500)));
+    assert!(got.lock().unwrap().is_empty());
 }
