@@ -161,7 +161,7 @@ fn only_this_machines_login_holds_the_machine() {
     assert!(holds_machine(LOGGED_OUT, false));
     assert!(holds_machine(LIMIT, true));
     assert!(holds_machine(LIMIT, false));
-    assert!(login::SANDBOX.contains("claudeTokenFile"));
+    assert!(login::SANDBOX.contains("engines.claude.credentialFile"));
     assert!(!login::SANDBOX.contains("/login"));
 }
 

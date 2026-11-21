@@ -105,6 +105,18 @@ in
     environment.systemPackages = [ cfg.package ];
     burrow.tools.claude-guard = guard.claude;
 
+    # Claude's sandboxes (agents.nix): the same build and effort as here, its
+    # token as CLAUDE_CODE_OAUTH_TOKEN, and Anthropic's hosts on its proxy
+    # alone. The machine sets credentialFile; `proj run --vm` runs Claude.
+    burrow.agents.engines.claude = {
+      packages = [ cfg.package ];
+      guestModules = [ (import ./claude/guest.nix { inherit (cfg) effort; }) ];
+      credentialEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+      hosts = [ "api.anthropic.com" "*.anthropic.com" "claude.ai" "*.claude.ai" "*.claude.com" ];
+      proxyPort = 3128;
+    };
+    burrow.agents.defaultEngine = lib.mkDefault "claude";
+
     # Copies, not links into the store (claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {
       mode = "0444";

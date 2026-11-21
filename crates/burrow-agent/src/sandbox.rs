@@ -4,20 +4,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{Agent, Config, DAY, mtime, read};
+use crate::{Agent, Config, DAY, Engine, mtime, read};
 
 /// What a sandbox's directory holds, by name: written by `agent new` and
 /// kept up by the rest.
 pub const PROJECT: &str = "project";
 pub const CID: &str = "cid";
 pub const NET: &str = "net";
+pub const ENGINE: &str = "engine";
 pub const TTL_DAYS: &str = "ttl-days";
 pub const LAST_USED: &str = "last-used";
 pub const REMOVED: &str = "removed";
 pub const SHARES: &str = "shares";
 pub const MOUNTS: &str = "mounts";
 pub const QEMU_ARGS: &str = "qemu-args";
-pub const TOKEN: &str = "claude-token";
+pub const CREDENTIAL: &str = "credential";
 
 pub struct Sandbox {
     pub id: String,
@@ -72,6 +73,20 @@ impl Sandbox {
         Ok(read(&self.file(NET))? == "open")
     }
 
+    /// The engine it was made for, which it boots, logs in and reaches the
+    /// network as. One made before sandboxes had engines has none, and
+    /// won't start again: it'd be a guess which login and hosts it gets.
+    pub fn engine<'c>(&self, cfg: &'c Config) -> Result<&'c Engine, String> {
+        let at = self.file(ENGINE);
+        if !at.exists() {
+            return Err(format!(
+                "{} was made before sandboxes had engines, so it won't start: `agent fetch` its work and `agent rm` it",
+                self.id
+            ));
+        }
+        cfg.engine(&read(&at)?)
+    }
+
     pub fn removed(&self) -> bool {
         self.file(REMOVED).exists()
     }
@@ -112,33 +127,40 @@ impl Sandbox {
     }
 
     /// Writes its QEMU arguments, which the runner reads at every start, with
-    /// Claude's login copied fresh, so a token the host has since dropped
-    /// doesn't linger.
+    /// its engine's login copied fresh, so one the host has since dropped
+    /// doesn't linger, and no other engine's.
     pub fn write_args(&self, agent: &Agent) -> Result<(), String> {
         let cfg = agent.cfg;
-        let token = self.file(TOKEN);
-        match fs::remove_file(&token) {
+        let engine = self.engine(cfg)?;
+        let credential = self.file(CREDENTIAL);
+        match fs::remove_file(&credential) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!("{}: {e}", token.display()));
+                return Err(format!("{}: {e}", credential.display()));
             }
             _ => {}
         }
-        if let Some(from) = &cfg.token_file
+        if let Some(from) = &engine.credential_file
             && fs::metadata(from).is_ok_and(|m| m.len() > 0)
         {
-            let (from, to) = (from.to_string_lossy(), token.to_string_lossy());
+            let (from, to) = (from.to_string_lossy(), credential.to_string_lossy());
             agent.run(
                 "install",
                 &["-m", "0400", "-o", "microvm", "-g", "kvm", &from, &to],
             )?;
         }
-        let has_token = fs::metadata(&token).is_ok_and(|m| m.len() > 0);
+        let has_credential = fs::metadata(&credential).is_ok_and(|m| m.len() > 0);
         let forward = if self.open()? {
             &cfg.forward_open
         } else {
-            &cfg.forward_filtered
+            &engine.forward
         };
-        let args = qemu_args(&self.id, self.cid()?, forward, has_token, &self.tags()?);
+        let args = qemu_args(
+            &self.id,
+            self.cid()?,
+            forward,
+            has_credential,
+            &self.tags()?,
+        );
         let at = self.file(QEMU_ARGS);
         fs::write(&at, args).map_err(|e| format!("{}: {e}", at.display()))
     }
@@ -146,12 +168,12 @@ impl Sandbox {
 
 /// The per-VM QEMU arguments: the network, the vsock address, the shares and
 /// the credentials, on one line.
-pub fn qemu_args(id: &str, cid: u32, forward: &Path, token: bool, tags: &[String]) -> String {
+pub fn qemu_args(id: &str, cid: u32, forward: &Path, credential: bool, tags: &[String]) -> String {
     let mut a = String::new();
     a += "-fw_cfg name=opt/io.systemd.credentials/agent.mounts,file=mounts ";
     a += &format!("-fw_cfg name=opt/io.systemd.credentials/agent.id,string={id} ");
-    if token {
-        a += "-fw_cfg name=opt/io.systemd.credentials/agent.claude-token,file=claude-token ";
+    if credential {
+        a += "-fw_cfg name=opt/io.systemd.credentials/agent.credential,file=credential ";
     }
     a += &format!("-device vhost-vsock-pci,guest-cid={cid} ");
     // restrict=on: no route out and no way to the host, except the one
@@ -255,18 +277,23 @@ mod tests {
     }
 
     #[test]
-    fn its_args_are_written_fresh_without_a_token_the_host_dropped() {
+    fn its_args_are_written_fresh_without_a_credential_the_host_dropped() {
         let d = tempfile::tempdir().unwrap();
         let cfg = config(d.path());
         let dir = made(&cfg, "web-1");
         fs::write(dir.join(CID), "1001\n").unwrap();
         fs::write(dir.join(NET), "open\n").unwrap();
         fs::write(dir.join(SHARES), "share0\t/a\t/b\nshare1\t/c\t/d\n").unwrap();
-        fs::write(dir.join(TOKEN), "old\n").unwrap();
+        fs::write(dir.join(CREDENTIAL), "old\n").unwrap();
         let agent = Agent::new(&cfg, Path::new("/nonexistent.json")).unwrap();
         let sb = Sandbox::find(&cfg, "web-1").unwrap();
+        // Made before engines: it won't guess one, and leaves what it has.
+        let err = sb.write_args(&agent).unwrap_err();
+        assert!(err.contains("made before sandboxes had engines"), "{err}");
+        assert!(dir.join(CREDENTIAL).exists());
+        fs::write(dir.join(ENGINE), "claude\n").unwrap();
         sb.write_args(&agent).unwrap();
-        assert!(!dir.join(TOKEN).exists());
+        assert!(!dir.join(CREDENTIAL).exists());
         let args = fs::read_to_string(dir.join(QEMU_ARGS)).unwrap();
         assert_eq!(
             args,
@@ -278,10 +305,20 @@ mod tests {
                 &["share0".into(), "share1".into()]
             )
         );
+        // Filtered, through its own engine's allowlist, never another's.
         fs::write(dir.join(NET), "filtered\n").unwrap();
         sb.write_args(&agent).unwrap();
         let args = fs::read_to_string(dir.join(QEMU_ARGS)).unwrap();
-        assert!(args.contains(&format!("-cmd:{} ", cfg.forward_filtered.display())));
+        assert!(args.contains(&format!(
+            "-cmd:{} ",
+            cfg.engines["claude"].forward.display()
+        )));
+        fs::write(dir.join(ENGINE), "other\n").unwrap();
+        sb.write_args(&agent).unwrap();
+        let args = fs::read_to_string(dir.join(QEMU_ARGS)).unwrap();
+        assert!(args.contains(&format!("-cmd:{} ", cfg.engines["other"].forward.display())));
+        fs::write(dir.join(ENGINE), "gone\n").unwrap();
+        assert!(sb.write_args(&agent).is_err());
     }
 
     #[test]
@@ -305,10 +342,10 @@ mod tests {
              -chardev socket,id=agentfs1,path=share1.sock \
              -device vhost-user-fs-pci,chardev=agentfs1,tag=share1 \n"
         );
-        let with_token = qemu_args("a-1", 0x01020304, Path::new("/f"), true, &[]);
-        assert!(with_token.contains(
-            "string=a-1 -fw_cfg name=opt/io.systemd.credentials/agent.claude-token,file=claude-token -device"
+        let with_credential = qemu_args("a-1", 0x01020304, Path::new("/f"), true, &[]);
+        assert!(with_credential.contains(
+            "string=a-1 -fw_cfg name=opt/io.systemd.credentials/agent.credential,file=credential -device"
         ));
-        assert!(with_token.contains("mac=02:00:01:02:03:04 \n"));
+        assert!(with_credential.contains("mac=02:00:01:02:03:04 \n"));
     }
 }

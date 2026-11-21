@@ -2,7 +2,7 @@
 //! dataset (burrow.agents.dataDataset, mounted at `data`).
 //!
 //! ```text
-//! agent new PROJECT [--with DATA/PATH]... [--open]
+//! agent new PROJECT [--with DATA/PATH]... [--open] [--engine NAME]
 //!                             a fresh sandbox for PROJECT; prints its id
 //! agent claude ID [ARGS...]   Claude inside it, in the project, no prompts
 //! agent sh ID [COMMAND...]    a shell inside it (or run one command); starts
@@ -19,10 +19,13 @@
 //!
 //! The VM sees the project (a clone, so nothing it does touches the real
 //! one), its own home, and any --with paths under `data` (also from the
-//! clone). Inside, Claude runs with permissions bypassed and the user has
-//! sudo: the VM is the boundary. It reaches the network only through the
-//! egress proxy, which allows the package registries, GitHub and Anthropic
-//! (burrow.agents.allowlist); --open lifts the allowlist for that VM. It
+//! clone). It's started for one engine (burrow.agents.engines; --engine, or
+//! the default): it boots that engine's image, gets that engine's login and
+//! no other's, and inside, the engine runs with nothing to ask and the user
+//! has sudo: the VM is the boundary. It reaches the network only through its
+//! engine's egress proxy, which allows the package registries, GitHub and
+//! that engine's own hosts (burrow.agents.allowlist and the engine's hosts);
+//! --open lifts the allowlist for that VM. It
 //! holds no GitHub token: its work comes back with `agent fetch`, and you
 //! push from the host.
 //!
@@ -36,6 +39,7 @@ pub mod sandbox;
 pub mod save;
 pub mod ssh;
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
@@ -53,11 +57,12 @@ pub const DAY: u64 = 86_400;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {
-    /// The guest's microvm runner, linked into each sandbox as `current`.
-    pub runner: PathBuf,
-    /// What QEMU runs for each connection to the proxy address: one for the
-    /// allowlist, one for `--open`.
-    pub forward_filtered: PathBuf,
+    /// What a sandbox can be started for, by name.
+    pub engines: BTreeMap<String, Engine>,
+    /// The engine `agent new` takes when it's given none.
+    pub default_engine: Option<String>,
+    /// What QEMU runs for each connection to the proxy address with
+    /// `--open`; an engine's allowlist has its own.
     pub forward_open: PathBuf,
     /// Where burrow.agents.dataset is mounted: a directory per sandbox.
     pub root: PathBuf,
@@ -72,8 +77,6 @@ pub struct Config {
     pub uid: u32,
     pub group: String,
     pub home: PathBuf,
-    /// Claude's login for the sandboxes, when the machine gives them one.
-    pub token_file: Option<PathBuf>,
     pub sudo: PathBuf,
     /// Where the programs it runs by name are: zfs, git, ssh, ssh-keygen,
     /// socat, systemctl, runuser, install and chown. Ahead of the PATH it
@@ -81,7 +84,36 @@ pub struct Config {
     pub path: String,
 }
 
+/// One engine's part of the sandboxes (burrow.agents.engines.NAME).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Engine {
+    /// Its guest's microvm runner, linked into each of its sandboxes as
+    /// `current`.
+    pub runner: PathBuf,
+    /// What QEMU runs for each connection to the proxy address: the forward
+    /// to its own allowlist's proxy.
+    pub forward: PathBuf,
+    /// Its login for the sandboxes, when the machine gives them one.
+    pub credential_file: Option<PathBuf>,
+}
+
 impl Config {
+    /// The engine called `name`.
+    pub fn engine(&self, name: &str) -> Result<&Engine, String> {
+        self.engines.get(name).ok_or_else(|| {
+            let known: Vec<&str> = self.engines.keys().map(String::as_str).collect();
+            format!(
+                "no such engine: {name} (burrow.agents.engines has {})",
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            )
+        })
+    }
+
     pub fn read(path: &Path) -> Result<Config, String> {
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))

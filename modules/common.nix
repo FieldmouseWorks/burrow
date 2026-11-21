@@ -1,12 +1,15 @@
 # Options every burrow module reads: who the agents run as, where the projects
 # are, where this machine's own flake is checked out, the Claude Code build and
-# the machine CLAUDE.md and MCP servers (mcp.nix) the modules give it.
+# the machine CLAUDE.md and MCP servers (mcp.nix) the modules give it, and the
+# sandboxes' engines (agents/engines.nix).
 # Every module imports it; the key keeps it in only once.
 inputs:
 {
   key = "burrow/common";
   imports = [
     ./mcp.nix
+    # So the module that owns an engine can declare its sandbox entry alone.
+    ./agents/engines.nix
     ({ config, lib, pkgs, ... }:
       let
         inherit (lib) mkOption types;
