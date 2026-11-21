@@ -91,6 +91,13 @@ class Context:
                     self.st[k] = live[k]
                 else:
                     self.st.pop(k, None)
+            # When it was last set aside (step.py's day_began) is the PR's,
+            # not its head's, and the live passes': a status run that saw
+            # none of its hold would list it as open a day.
+            if "aside" in live:
+                self.st["aside"] = live["aside"]
+            else:
+                self.st.pop("aside", None)
         self.labels = {x["name"] for x in self.pr["labels"]["nodes"]}
         self.merging = MERGE_STEPS.get(self.pr.get("mergeStateStatus"), "refused")
         self.age = C.NOW - self.st["seen"]  # how long its head has been still
