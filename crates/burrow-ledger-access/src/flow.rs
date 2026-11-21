@@ -158,7 +158,11 @@ pub fn carry(data: &Path, other: &Path, owner: Owner) -> Result<Carried, Refused
             }
             (Found::State, _) => {
                 copy(&op, &on, &dp, &dn, owner, &from)?;
-                remove(&op, &on).map_err(failed(&from))?;
+                // Its removal flushed too: an old copy back after a crash
+                // would be a second history, and refused.
+                remove(&op, &on)
+                    .and_then(|()| durable(&op))
+                    .map_err(failed(&from))?;
                 return Ok(Carried::Moved);
             }
             (Found::Other, Found::Absent | Found::Empty) => {

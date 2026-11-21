@@ -265,6 +265,19 @@ fn every_directory_and_file_carried_is_on_disk_before_the_old_goes() {
 }
 
 #[test]
+fn the_old_copy_is_gone_from_disk_once_carried() {
+    // Where it was kept is flushed once it's removed, so a crash can't
+    // bring it back beside the carried copy as a second history.
+    let (_root, data, other, _outside) = places();
+    write_state(&other);
+    let parent = other.parent().unwrap().to_path_buf();
+    SYNCED.with(|s| s.borrow_mut().clear());
+    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Moved);
+    assert!(!other.exists());
+    assert_eq!(unsynced(&parent), Vec::<PathBuf>::new());
+}
+
+#[test]
 fn every_directory_and_file_handed_in_place_is_on_disk() {
     let (_root, data, other, _outside) = places();
     write_state(&data);
