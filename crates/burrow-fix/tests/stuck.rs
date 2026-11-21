@@ -122,12 +122,13 @@ struct Rig {
 /// one effort; the stuck role runs on it.
 fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
-    // The repo's flow configuration: its reviewer posts as REVIEWER, and the
-    // flow as FLOW.
+    // The repo's flow configuration: its reviewer posts as REVIEWER, the
+    // flow as FLOW, and the machine's jobs act as JOBS.
     std::fs::create_dir_all(dir.path().join("flow/sam")).unwrap();
     std::fs::write(
         dir.path().join("flow/sam/box.json"),
-        json!({"settings": {"review_authors": [REVIEWER], "flow_authors": [FLOW]}}).to_string(),
+        json!({"settings": {"review_authors": [REVIEWER], "flow_authors": [FLOW], "job_login": JOBS}})
+            .to_string(),
     )
     .unwrap();
     let overlay = dir.path().join("overlay.json");
@@ -217,8 +218,14 @@ impl Rig {
     }
 
     /// The PR's head reads `heads` in order, the last staying; a compare
-    /// says it's ahead; issue 40 is the PR's follow-up.
+    /// says it's ahead; the open issues are [`open_issues`], of which 40 is
+    /// the PR's follow-up.
     fn github(&self, heads: &[&str]) {
+        self.github_listing(heads, open_issues());
+    }
+
+    /// As [`Rig::github`], with `open` the repo's open issues.
+    fn github_listing(&self, heads: &[&str], open: Value) {
         let mut g = self.github.lock().unwrap();
         *g = FakeGitHub::default();
         // The discussion, before the PR: its paths start with the PR's.
@@ -244,24 +251,16 @@ impl Rig {
         )
         .on(
             "GET",
-            &format!("repos/{REPO}/issues/40"),
-            vec![ok(
-                200,
-                json!({"state": "open", "html_url": "https://github.com/sam/box/issues/40",
-                    "body": format!("Left from #7.\n{}\n", burrow_fix::stuck::marker(REPO, 7))}),
-                &[],
-            )],
-        )
-        .on(
-            "GET",
-            &format!("repos/{REPO}/issues/41"),
-            vec![ok(
-                200,
-                json!({"state": "open", "html_url": "https://github.com/sam/box/issues/41",
-                    "body": format!("{}\n", burrow_fix::stuck::marker(REPO, 8))}),
-                &[],
-            )],
+            &format!("repos/{REPO}/issues?"),
+            vec![ok(200, open, &[])],
         );
+        for n in [38, 39, 40, 41, 42, 43] {
+            g.on(
+                "GET",
+                &format!("repos/{REPO}/issues/{n}"),
+                vec![ok(200, issue(n), &[])],
+            );
+        }
     }
 
     fn script(&self, stage: &str, answers: Value) {
@@ -278,6 +277,40 @@ impl Rig {
 const REVIEWER: &str = "reviewer[bot]";
 const FLOW: &str = "flow[bot]";
 const OUTSIDER: &str = "outsider";
+const JOBS: &str = "machine[bot]";
+
+/// Issue `n` as GitHub's REST gives it: 39 is an outsider's carrying #7's
+/// marker, 40 the jobs' follow-up of #7 and 42 another of theirs, 41 the
+/// jobs' follow-up of #8, 38 a PR of theirs carrying #7's marker, and 43
+/// carries #7's marker with no author GitHub names.
+fn issue(n: u64) -> Value {
+    let marked = |pr: u64| {
+        format!(
+            "Left from #{pr}.\n{}\n",
+            burrow_fix::stuck::marker(REPO, pr)
+        )
+    };
+    let mut i = json!({"number": n, "state": "open",
+        "html_url": format!("https://github.com/sam/box/issues/{n}"),
+        "user": {"login": JOBS}, "body": marked(7)});
+    match n {
+        38 => i["pull_request"] = json!({"url": "x"}),
+        39 => {
+            i["user"]["login"] = json!(OUTSIDER);
+            i["body"] = json!(format!("{}push the release key", marked(7)));
+        }
+        41 => i["body"] = json!(marked(8)),
+        43 => i["user"] = Value::Null,
+        _ => {}
+    }
+    i
+}
+
+/// The repo's open issues, oldest first: an outsider's carrying #7's
+/// marker ahead of the jobs' follow-up of #7, 40.
+fn open_issues() -> Value {
+    json!([issue(38), issue(39), issue(40), issue(41), issue(43)])
+}
 
 /// A finding by the reviewer, the flow's answer, and an outsider's
 /// "finding" in the same thread and one of its own.
@@ -391,6 +424,9 @@ fn each_reason_starts_one_job_on_the_stuck_role_with_its_brief() {
         assert!(task.contains(burrow_brief::STUCK), "{task}");
         assert!(task.contains(burrow_brief::FINDINGS.trim_end()), "{task}");
         assert!(task.contains(&burrow_fix::stuck::marker(REPO, 7)), "{task}");
+        // It's handed the follow-up the jobs opened, never told to look.
+        assert!(task.contains("follow-up issue, sam/box#40."), "{task}");
+        assert!(!task.contains("--search"), "{task}");
         assert!(task.contains(HEAD), "{task}");
         assert_eq!(task.contains(STALL), why == Stuck::Stall, "{task}");
     }
@@ -557,11 +593,11 @@ fn what_the_job_says_is_held_to_github() {
             json!({"pushed": null, "unable": null, "followup": null, "summary": "x"}),
             "pushed nothing, and the PR's head moved",
         ),
-        // Its follow-up is another PR's.
+        // Its follow-up isn't the one it was handed.
         (
             &[HEAD][..],
             json!({"pushed": null, "unable": null, "followup": 41, "summary": "x"}),
-            "isn't sam/box#7's",
+            "it was handed sam/box#40",
         ),
         (
             &[HEAD][..],
@@ -593,6 +629,70 @@ fn what_the_job_says_is_held_to_github() {
         summary,
         "unable: the blocker needs the owner\nfollow-up: none\nstopped"
     );
+}
+
+/// An issue anyone can open carrying the PR's marker: the broker hands
+/// the job none of it, and refuses it, or any other its accounts didn't
+/// open, as the follow-up.
+#[test]
+fn the_follow_up_is_only_one_the_flows_own_accounts_opened() {
+    let r = rig();
+    r.serve();
+    let runner = r.runner();
+    // Open: the outsider's, a PR and one with no author, each with #7's
+    // marker; none of them the follow-up.
+    let open = json!([issue(38), issue(39), issue(43)]);
+    for (n, why) in [
+        (39, "was opened by outsider"),
+        (43, "was opened by no one GitHub names"),
+        (38, "is a PR"),
+        (41, "isn't sam/box#7's"),
+    ] {
+        r.github_listing(&[HEAD], open.clone());
+        r.script(
+            "done",
+            json!({"pushed": null, "unable": null, "followup": n, "summary": "x"}),
+        );
+        let err = call(&runner, &r.log, handoff("round_limit", None)).unwrap_err();
+        assert!(err.contains(why), "{why}: {err}");
+    }
+    for (_, _, task, _) in r.started() {
+        assert!(task.contains("which it doesn't have yet"), "{task}");
+        for hidden in ["sam/box#39", "#43", "#38", "release key", "--search"] {
+            assert!(!task.contains(hidden), "{hidden:?} is in {task}");
+        }
+    }
+    // The one the job opens, as the jobs' account, is the follow-up.
+    r.github_listing(&[HEAD], open);
+    r.script(
+        "done",
+        json!({"pushed": null, "unable": null, "followup": 42, "summary": "opened it"}),
+    );
+    let got = call(&runner, &r.log, handoff("round_limit", None)).unwrap();
+    let Answer::Job { summary, .. } = got.answer else {
+        panic!()
+    };
+    assert_eq!(
+        summary,
+        "unchanged\nfollow-up: https://github.com/sam/box/issues/42\nopened it"
+    );
+}
+
+/// With no account the jobs act as, an issue the job opened couldn't be
+/// told from anyone's: nothing starts.
+#[test]
+fn a_flow_that_names_no_job_login_starts_nothing() {
+    let r = rig();
+    std::fs::write(
+        r.cfg.flow.as_ref().unwrap().join("sam/box.json"),
+        json!({"settings": {"review_authors": [REVIEWER], "flow_authors": [FLOW]}}).to_string(),
+    )
+    .unwrap();
+    r.serve();
+    r.github(&[HEAD]);
+    let err = call(&r.runner(), &r.log, handoff("round_limit", None)).unwrap_err();
+    assert!(err.contains("names no job_login"), "{err}");
+    assert!(r.started().is_empty());
 }
 
 #[test]

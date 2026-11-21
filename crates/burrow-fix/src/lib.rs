@@ -58,7 +58,8 @@ pub struct Config {
     pub stuck: Option<String>,
     /// The flow's configurations, one a repo (`OWNER/NAME.json`,
     /// lowercased), whose authors a stuck-role job is shown the discussion
-    /// of: needed when the broker serves the job kind.
+    /// of, and whose jobs' and flow's accounts alone may have opened a PR's
+    /// follow-up issue: needed when the broker serves the job kind.
     #[serde(default)]
     pub flow: Option<PathBuf>,
     /// The App the job acts on GitHub as, if the machine has one.

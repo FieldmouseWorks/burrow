@@ -3,29 +3,64 @@
 //! them from alone (its `review_authors` and `flow_authors`), read by the
 //! broker before the job starts. Anyone else's comment, review or thread
 //! is left out, and the job is told not to look for more: a job acts on
-//! text from its configured authors alone.
+//! text from its configured authors alone. The PR's follow-up issue is held
+//! to the same: the one the broker hands the job is by the account the
+//! machine's jobs act as, or by the flow's own ([`Accounts::followup`]).
 use burrow_github::{Api, pages};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The accounts the flow in `repo` reads findings and their answers from,
-/// from its configuration in `flow` (`OWNER/NAME.json`, lowercased, as the
-/// machine renders them): none, and nothing of the discussion is shown.
-pub fn authors(flow: &Path, repo: &str) -> Result<BTreeSet<String>, String> {
+/// The accounts a stuck-role job in a repo takes text from, from the
+/// repo's flow configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Accounts {
+    /// Whose findings and answers it's shown: the flow's `review_authors`
+    /// and `flow_authors`.
+    pub discussion: BTreeSet<String>,
+    /// Who may have opened the PR's follow-up issue: the account the
+    /// machine's jobs act as on GitHub (the flow's `job_login`), which a
+    /// stuck-role job opens it as, and the flow's own (`flow_authors`).
+    pub followup: BTreeSet<String>,
+}
+
+impl Accounts {
+    /// Whether `login` may have opened a PR's follow-up issue. GitHub's
+    /// logins are one account whatever their case.
+    pub fn opened(&self, login: &str) -> bool {
+        self.followup.iter().any(|a| a.eq_ignore_ascii_case(login))
+    }
+}
+
+/// The accounts of the flow in `repo`, from its configuration in `flow`
+/// (`OWNER/NAME.json`, lowercased, as the machine renders them), or why a
+/// stuck-role job there would have none to take text from.
+pub fn accounts(flow: &Path, repo: &str) -> Result<Accounts, String> {
     let path = flow.join(format!("{}.json", repo.to_lowercase()));
     let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let cfg: conary_github::flow::Config =
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut authors = cfg.settings.review_authors;
-    authors.extend(cfg.settings.flow_authors);
-    if authors.is_empty() {
+    let settings = cfg.settings;
+    let mut discussion = settings.review_authors;
+    discussion.extend(settings.flow_authors.iter().cloned());
+    if discussion.is_empty() {
         return Err(format!(
             "the flow in {repo} reads findings from no account, so a stuck-role job would have none to read"
         ));
     }
-    Ok(authors)
+    let job = settings.job_login.filter(|l| !l.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "the flow in {repo} names no job_login, the account a stuck-role job opens the PR's follow-up issue as, \
+             so the one it opened couldn't be told from anyone's"
+        )
+    })?;
+    let mut followup = settings.flow_authors;
+    followup.insert(job);
+    Ok(Accounts {
+        discussion,
+        followup,
+    })
 }
 
 /// PR `pr`'s review threads and review bodies by `authors`, each comment

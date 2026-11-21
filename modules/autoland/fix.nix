@@ -68,7 +68,9 @@ in
         # The stuck role, when the broker serves the job kind.
         stuck = if job.enable then job.role else null;
         # The flow's configurations, whose review and flow authors are the
-        # only ones a stuck-role job is shown the discussion of.
+        # only ones a stuck-role job is shown the discussion of, and whose
+        # job_login and flow authors the only ones a follow-up issue it's
+        # handed may have been opened by.
         flow = if job.enable then autoland.flowConfigs else null;
         # The machine's own work, which acts on GitHub as the machinery's App.
         app = if machineApp == null then null else machineApp.name;
@@ -148,6 +150,9 @@ in
     assertions = [{
       assertion = config.burrow.ledger.enable && flow.controller != null;
       message = "burrow.autoland.plugins.fix: only the flow's controller may ask the broker, so it needs burrow.ledger with its controllerUser.";
+    } {
+      assertion = job.enable -> machineApp != null;
+      message = "burrow.autoland.plugins.job: a stuck-role job opens a PR's follow-up issue as the machinery's App, and the broker takes no issue anyone else opened for one, so it needs burrow.github.machineApp.";
     }];
 
     systemd.tmpfiles.rules = [ "d ${stateDir}/fix 0700 ${user} - -" ];
