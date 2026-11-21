@@ -41,7 +41,8 @@ let
     socketDir = broker.serviceConfig.RuntimeDirectory == "conary-producers/fix"
       && broker.serviceConfig.SupplementaryGroups == [ "conary-flow" ];
     broker = lib.hasSuffix "/bin/burrow-fix broker ${configFile}" (plain broker.serviceConfig.ExecStart);
-    plugin = lib.hasInfix "/bin/burrow-fix plugin ${configFile}" (plain plugin.text);
+    plugin = lib.hasInfix "/bin/burrow-fix plugin /etc/burrow/autoland-fix-plugin.json" (plain plugin.text)
+      && plain "${on.environment.etc."burrow/autoland-fix-plugin.json".source}" == configFile;
     config = read.socket == "/run/conary-producers/fix/broker.sock" && read.controller == "conary-flow"
       && read.role == "fix" && read.jobs == on.burrow.proj.jobsDir && lib.hasSuffix "/bin/proj" (lib.head read.proj)
       && read.settings == on.burrow.settings.effective && read.state == "${on.burrow.stateDir}/fix";
@@ -51,8 +52,11 @@ let
     jobRefusedWithoutController = lib.any (lib.hasInfix "only the flow's controller may ask") jobFailed;
     jobBroker = lib.hasSuffix "/bin/burrow-fix broker ${jobConfigFile}" (plain jobBroker.serviceConfig.ExecStart)
       && jobBroker.serviceConfig.RuntimeDirectory == "conary-producers/fix";
-    jobPlugin = lib.hasInfix "/bin/burrow-fix job ${jobConfigFile}" (plain jobbed.burrow.autoland.plugins.job.plugin.text);
+    jobPlugin = lib.hasInfix "/bin/burrow-fix job /etc/burrow/autoland-fix-plugin.json" (plain jobbed.burrow.autoland.plugins.job.plugin.text)
+      && plain "${jobbed.environment.etc."burrow/autoland-fix-plugin.json".source}" == jobConfigFile;
     jobStuck = jobbed.burrow.autoland.plugins.fix.config.stuck == "stuck";
+    jobFlow = jobbed.burrow.autoland.plugins.fix.config.flow == jobbed.burrow.autoland.flowConfigs
+      && read.flow == null;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
 in pkgs.runCommand "autoland-fix-check" { } ''

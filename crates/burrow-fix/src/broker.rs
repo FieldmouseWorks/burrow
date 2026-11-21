@@ -25,7 +25,7 @@
 //! moved.
 use crate::answers::Said;
 use crate::stuck::{self, Ask, Outcome};
-use crate::{Config, brief};
+use crate::{Config, brief, discussion};
 use burrow_github::{Api, call};
 use burrow_producer::jobs::{self, Jobs};
 use burrow_producer::serve::Work;
@@ -369,12 +369,19 @@ impl Broker {
             choice,
         )?;
         let pr = ask.pr;
+        let flow = self
+            .cfg
+            .flow
+            .as_deref()
+            .ok_or("the broker has no flow configurations to read a repo's authors from")?;
+        let authors = discussion::authors(flow, repo)?;
         let held = self.hold(
             stuck_key(repo, pr),
             &format!("a stuck-role job on {repo}#{pr}"),
         )?;
         let (head, branch) = self.pr(repo, pr)?;
-        let task = brief::stuck(repo, pr, &head, &branch, &ask, &self.cfg.jobs);
+        let shown = discussion::read(&mut *(self.github)(), repo, pr, &authors)?;
+        let task = brief::stuck(repo, pr, &head, &branch, &ask, &shown, &self.cfg.jobs);
         let kept = self.kept(&held.job);
         fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
         let id = match starter.start(repo, &held.job, &task) {

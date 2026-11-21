@@ -20,6 +20,8 @@
 //! - [`stuck`]: the stuck role's handoff, the `job` kind's request and
 //!   answer (SJ): the same broker starts it as a proj job on the stuck
 //!   role, one live a PR, through its own plugin ([`job_plugin`]).
+//! - [`discussion`]: what of a PR's discussion a stuck-role job is shown,
+//!   its configured authors' alone.
 use conary_core::plugin::{
     Answer, Capabilities, FindingAnswer, FixResult, Identity, Kind, Next, Problem, Sandbox, Task,
 };
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 pub mod answers;
 pub mod brief;
 pub mod broker;
+pub mod discussion;
 pub mod stuck;
 
 /// What the module tells the plugin and the broker, one file for both.
@@ -53,6 +56,11 @@ pub struct Config {
     /// the `job` kind; null when it doesn't.
     #[serde(default)]
     pub stuck: Option<String>,
+    /// The flow's configurations, one a repo (`OWNER/NAME.json`,
+    /// lowercased), whose authors a stuck-role job is shown the discussion
+    /// of: needed when the broker serves the job kind.
+    #[serde(default)]
+    pub flow: Option<PathBuf>,
     /// The App the job acts on GitHub as, if the machine has one.
     pub app: Option<String>,
     /// How long a fix job's turn may run, and go quiet, as proj takes them.

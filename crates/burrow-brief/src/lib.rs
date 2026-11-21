@@ -148,7 +148,7 @@ impl Stuck {
 /// issue, never in another round.
 pub const STUCK: &str = concat!(
     "You break the loop: you settle the PR in one push, or say why you can't. ",
-    "Read every review finding still open on it, and every answer a fix gave, as well as the diff. ",
+    "Read every review finding you're given, and every answer a fix gave, as well as the diff. ",
     "Fix the blockers among them in one push and leave the rest for one follow-up issue, which a later PR takes up. ",
     "You don't judge it: its head gets one more review, the findings on that head go to a judge, ",
     "and CI and every landing gate still hold.",

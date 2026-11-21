@@ -21,6 +21,7 @@ fn each_reasons_brief_is_its_golden() {
             "1111111111111111111111111111111111111111",
             "topic",
             &ask,
+            "Review thread on src/lib.rs:3:\nreviewer[bot] wrote:\n> it panics on empty input",
             Path::new("/var/lib/proj/jobs"),
         );
         let golden = dir.join(format!("stuck-{}.txt", why.word()));

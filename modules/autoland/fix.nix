@@ -27,6 +27,10 @@ let
   socket = if flow.producers == null then null else "${flow.producers}/fix/broker.sock";
 
   configFile = pkgs.writeText "burrow-fix.json" (builtins.toJSON cfg.config);
+  # Where the plugins read it: the machine's copy, not the store path,
+  # since with the job kind on it names the flow's configs, which name the
+  # plugins, as the judge's does.
+  etcConfig = "burrow/autoland-fix-plugin.json";
 in
 {
   options.burrow.autoland.plugins.fix = {
@@ -63,6 +67,9 @@ in
         inherit (cfg) role;
         # The stuck role, when the broker serves the job kind.
         stuck = if job.enable then job.role else null;
+        # The flow's configurations, whose review and flow authors are the
+        # only ones a stuck-role job is shown the discussion of.
+        flow = if job.enable then autoland.flowConfigs else null;
         # The machine's own work, which acts on GitHub as the machinery's App.
         app = if machineApp == null then null else machineApp.name;
         timeout = "${toString autoland.jobTimeoutMinutes}m";
@@ -77,7 +84,7 @@ in
       type = lib.types.path;
       readOnly = true;
       default = pkgs.writeShellScript "burrow-fix-plugin" ''
-        exec ${lib.getExe package} plugin ${configFile}
+        exec ${lib.getExe package} plugin /etc/${etcConfig}
       '';
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for fixes.";
@@ -117,7 +124,7 @@ in
       type = lib.types.path;
       readOnly = true;
       default = pkgs.writeShellScript "burrow-fix-job-plugin" ''
-        exec ${lib.getExe package} job ${configFile}
+        exec ${lib.getExe package} job /etc/${etcConfig}
       '';
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for the job kind.";
@@ -144,6 +151,7 @@ in
     }];
 
     systemd.tmpfiles.rules = [ "d ${stateDir}/fix 0700 ${user} - -" ];
+    environment.etc.${etcConfig}.source = configFile;
 
     systemd.services.burrow-fix = {
       description = "Conary's fix broker: the flow's fixes and stuck-role jobs, as proj jobs";
