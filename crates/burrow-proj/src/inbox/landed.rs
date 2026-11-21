@@ -11,7 +11,9 @@
 //!
 //! A child closed as continued elsewhere (an author's comment on it with a
 //! line `Continued as OWNER/REPO#N`) hands its place to that issue: the list
-//! waits on it, saying so, and is done when a merged PR closes it.
+//! waits on it, saying so, and is done when a merged PR closes it. One
+//! naming the parent or a child of its own list hands nothing on, and the
+//! owner's notice says that it doesn't count.
 use super::{List, Pass, key};
 use crate::inbox::record::files;
 use crate::record::TurnFile;
@@ -52,9 +54,25 @@ pub(super) enum Successor {
     Landed(String),
     /// The successor, `OWNER/REPO#N`, is open.
     Open(String),
+    /// What's named, `OWNER/REPO#N`, is the parent or a child of the same
+    /// list: never a successor, and the notice says so.
+    OnList(String),
     /// GitHub couldn't be asked.
     Unknown,
 }
+
+/// What a list's notice to the owner says holds it ([`Pass::reconcile_notice`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum Stall {
+    /// Its next child, closed with nothing landed; `named`, the issue on
+    /// the same list its newest `Continued as` names, if that's why.
+    Child { child: u64, named: Option<String> },
+    /// Its parent changed after its split ([`super::place`]).
+    Paused,
+}
+
+/// What [`NOTICE`] keeps while the notice is about the parent's pause.
+const PAUSED: &str = "paused";
 
 /// Whether an issue may close with its finished job ([`Pass::child_can_close`]).
 #[derive(Debug, PartialEq)]
@@ -203,15 +221,17 @@ impl Pass<'_> {
     /// Where closed child `issue` (as REST gives it) went on: the successor
     /// its newest author's comment naming one names, in one of this
     /// machine's projects and off its own list (`list`, the parent and its
-    /// children, as `OWNER/REPO#N`). Done as a child is ([`Pass::landed_child`]);
+    /// children, as `OWNER/REPO#N`; one of those named is [`Successor::OnList`]).
+    /// Done as a child is ([`Pass::landed_child`]);
     /// one closed without that passes on to the successor it names in turn.
     /// Comments count as [`Pass::written`] verifies them: every writer and
     /// editor an author. While one is open the repo is looked at again in a
     /// while, since a merge elsewhere sends no event here.
     pub(super) fn successor(&mut self, repo: &str, issue: &Value, list: &[String]) -> Successor {
         let mut from = (repo.to_owned(), issue.clone());
-        let mut seen: std::collections::BTreeSet<String> =
+        let list: std::collections::BTreeSet<String> =
             list.iter().map(|r| r.to_lowercase()).collect();
+        let mut seen = std::collections::BTreeSet::new();
         for _ in 0..HOPS {
             let Some(written) = self.written(&from.0, &from.1) else {
                 return Successor::Unknown;
@@ -236,7 +256,11 @@ impl Pass<'_> {
             else {
                 return Successor::None;
             };
-            if !seen.insert(format!("{at}#{m}").to_lowercase()) {
+            let named = format!("{at}#{m}");
+            if list.contains(&named.to_lowercase()) {
+                return Successor::OnList(named);
+            }
+            if !seen.insert(named.to_lowercase()) {
                 return Successor::None;
             }
             let got = crate::github::reported(burrow_github::call_allowing(
@@ -466,16 +490,30 @@ impl Pass<'_> {
         }
     }
 
-    /// The child a notice that the list waits may still be open about.
-    pub(super) fn notice_owed(&self, repo: &str, parent: &str) -> Option<u64> {
-        read(&self.plan_dir(repo, parent).join(NOTICE)).and_then(|n| n.parse().ok())
+    /// What a notice that the list waits may still be open about: the
+    /// child's number, or [`PAUSED`].
+    fn notice_owed(&self, repo: &str, parent: &str) -> Option<String> {
+        read(&self.plan_dir(repo, parent).join(NOTICE))
+    }
+
+    /// Whether a notice may still be open about something other than
+    /// `child`, the list's next child, closed with nothing landed.
+    pub(super) fn notice_moved_on(&self, repo: &str, parent: &str, child: u64) -> bool {
+        self.notice_owed(repo, parent)
+            .is_some_and(|on| on != child.to_string())
+    }
+
+    /// Whether a notice may still be open about the parent's pause.
+    pub(super) fn notice_paused(&self, repo: &str, parent: &str) -> bool {
+        self.notice_owed(repo, parent).as_deref() == Some(PAUSED)
     }
 
     /// Tell the owner, through the notifier, while the list waits on a
-    /// child closed with no landed PR, and clear that once it doesn't. Both
-    /// are retried every pass until they hold: `ensure` is safe to repeat,
-    /// and a close counts only once `pending` says the notice is gone.
-    pub(super) fn reconcile_notice(&mut self, repo: &str, parent: &str, waiting_on: Option<u64>) {
+    /// child closed with no landed PR or on its parent's pause, and clear
+    /// that once it doesn't. Both are retried every pass until they hold:
+    /// `ensure` is safe to repeat (and updates the notice's text), and a
+    /// close counts only once `pending` says the notice is gone.
+    pub(super) fn reconcile_notice(&mut self, repo: &str, parent: &str, waiting_on: Option<Stall>) {
         let Some(notify) = &self.cfg.notify else {
             return;
         };
@@ -483,20 +521,32 @@ impl Pass<'_> {
         let id = format!("proj-plan-{}-{parent}", key(repo));
         let run = |args: &[&str]| Command::new(notify).args(args).status().ok();
         match waiting_on {
-            Some(child) => {
+            Some(stall) => {
+                let (on, title, body) = match stall {
+                    Stall::Child { child, named } => (
+                        child.to_string(),
+                        format!("{repo}#{parent}'s task list waits on #{child}"),
+                        format!(
+                            "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start.{} If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; if it went on elsewhere, an author comments `Continued as OWNER/REPO#N` on #{child}, naming an issue or PR that is neither {repo}#{parent} nor another child of its list; otherwise reopen it.",
+                            named.map_or_else(String::new, |named| format!(
+                                " Its newest `Continued as` names {named}, which is on this task list itself, so it hands nothing on."
+                            )),
+                        ),
+                    ),
+                    Stall::Paused => (
+                        PAUSED.to_owned(),
+                        format!("{repo}#{parent}'s task list is paused"),
+                        format!(
+                            "{repo}#{parent} changed after its split (its title, its body or an author's comment on it), so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. A `Continued as` or `proj plan done` on a child is read once it goes on."
+                        ),
+                    ),
+                };
                 // Kept before it's asked for, so a crash still owes a close.
-                if swap(&owed, &format!("{child}\n")).is_err() {
+                if swap(&owed, &format!("{on}\n")).is_err() {
                     eprintln!("proj-inbox: couldn't keep {}", owed.display());
                     return;
                 }
-                let said = run(&[
-                    "ensure",
-                    &id,
-                    &format!("{repo}#{parent}'s task list waits on #{child}"),
-                    &format!(
-                        "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start. If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{child}; otherwise reopen it."
-                    ),
-                ]);
+                let said = run(&["ensure", &id, &title, &body]);
                 if !said.is_some_and(|s| s.success()) {
                     eprintln!("proj-inbox: couldn't tell the owner {repo}#{parent} waits");
                     self.retry(repo);

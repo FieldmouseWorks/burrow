@@ -471,6 +471,12 @@ impl Look<'_, '_> {
         }
         if let Some(super::plans::Place::Parent(step)) = place {
             let r = match step {
+                Some(_) if p.paused(repo, n) => Record::new(
+                    &name,
+                    Stage::Planned,
+                    "its list goes on once it's replanned from its new text, or its text goes back",
+                )
+                .waiting(Wait::Stuck("it changed after its split".into())),
                 Some(step) => Record::new(
                     &name,
                     Stage::Planned,

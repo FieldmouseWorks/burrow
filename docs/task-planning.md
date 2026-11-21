@@ -69,8 +69,10 @@ its place to that issue: an author comments on the closed child with a
 line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
 newest comment with such a line counts, and only as `written` verifies it,
 every writer and editor an author. The successor must be an issue in one
-of the machine's projects, and not the parent or a child on the same list.
-The list then waits on it, its checklist saying "continued as" it, with no
+of the machine's projects, and not the parent or a child on the same list:
+one naming those hands nothing on, and the owner's notice says so. The
+newest comment is read again every pass, so one written on a child already
+closed and waiting counts at the next. The list then waits on it, its checklist saying "continued as" it, with no
 notice and nothing to record by hand, looking again hourly. The child is
 done when the successor is, by the same rules as a child, or when the
 successor is a PR, once it merges. A successor
@@ -82,9 +84,13 @@ Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes
 `inbox.authors`. Comments and edit histories always require configured
 authors, including on generated children. Outside-text labels retain their
-existing protection. An edited parent pauses child
-admission and posts a notice; the task list and completed work remain on
-disk for replanning rather than silently executing the old scope.
+existing protection. An edited parent (its title, its body or an author's
+comment on it) pauses its list: no child is read or admitted, the pause is
+said once on the parent, `proj why` names it as what holds the list and its
+children, and the owner's notice says it while it lasts. The task list and
+completed work remain on disk for replanning rather than silently executing
+the old scope; the list goes on once the parent is replanned from its new
+text or its text goes back, and a later change pauses it again.
 
 Each child creation has a durable receipt marker. A lost creation response
 is reconciled against all issues, including closed ones, before any further
