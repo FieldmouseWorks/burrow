@@ -11,6 +11,7 @@ use burrow_producer::units::{Ended, Units};
 use burrow_proof::fence::Fence;
 use conary_core::plugin::Trigger;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -209,7 +210,9 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
     let looks = r.dir.path().join("state/looks");
     let mirror = r.dir.path().join("state/git/acme/widget.git");
     let github = r.dir.path().join("github/acme/widget.git");
-    // Every commit a repo has, and what each holds.
+    // Every commit a repo has, and what each holds, as a set: `git log
+    // --all` orders commits made in the same second by ref, which the
+    // mirror and GitHub needn't share.
     let commits = |repo: &Path| {
         let out = Command::new("git")
             .arg("--git-dir")
@@ -217,7 +220,11 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
             .args(["log", "--all", "--format=%H %T %s"])
             .output()
             .unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
     };
     // It rewrites and commits what it has, and every look's checkout it
     // can find.
@@ -238,7 +245,12 @@ fn a_build_reaches_its_own_copy_of_the_head_and_never_the_looks() {
     assert_eq!(laid.len(), 1);
     assert_eq!(laid[0].1, "fn new() {}\n");
     assert_eq!(commits(&mirror), commits(&github));
-    assert!(!commits(&mirror).contains("forged"));
+    let mirrored = commits(&mirror);
+    assert!(!mirrored.is_empty());
+    assert!(
+        !mirrored.iter().any(|c| c.contains("forged")),
+        "{mirrored:?}"
+    );
 }
 
 #[test]
