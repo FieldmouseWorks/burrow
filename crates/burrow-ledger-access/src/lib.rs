@@ -44,11 +44,22 @@ pub struct Access {
     pub controller: Option<u32>,
 }
 
+pub mod flow;
+
 /// The uid `/etc/passwd`'s text `passwd` gives `name`.
 pub fn uid_of(passwd: &str, name: &str) -> Option<u32> {
+    ids_of(passwd, name).map(|(uid, _)| uid)
+}
+
+/// The uid and primary gid `/etc/passwd`'s text `passwd` gives `name`.
+pub fn ids_of(passwd: &str, name: &str) -> Option<(u32, u32)> {
     passwd.lines().find_map(|line| {
         let mut f = line.split(':');
-        (f.next() == Some(name)).then(|| f.nth(1)?.parse().ok())?
+        if f.next() != Some(name) {
+            return None;
+        }
+        let uid = f.nth(1)?.parse().ok()?;
+        Some((uid, f.next()?.parse().ok()?))
     })
 }
 

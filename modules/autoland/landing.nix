@@ -33,7 +33,7 @@ let
   # the publication that put it there: conaryd runs only then
   # (crates/burrow-landing).
   given = "${dir}/conaryd-given";
-  data = ledger.flow.env.CONARY_DATA or "${ledger.dir}/data";
+  inherit (ledger.flow) data;
   # The repos' hooks' secret as burrow-events and the hooks have it,
   # trimmed: conaryd reads a secret file's bytes as they are.
   secret = "/run/conary-flow/webhook";
@@ -147,7 +147,11 @@ in
         # And once as the machine starts, carrying on a handover a
         # shutdown cut short.
         wantedBy = [ "multi-user.target" ];
-        after = [ "burrow-events.service" ];
+        # On the flow's state, carried to its user. A switch that carries
+        # it does stop a running one: as the user the flow had, on state
+        # that's moving.
+        after = [ "burrow-events.service" ] ++ ledger.flow.needs;
+        requires = ledger.flow.needs;
         # A switch leaves a running one be: the path unit's next start is
         # the new one, and it goes on from the record.
         restartIfChanged = false;

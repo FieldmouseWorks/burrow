@@ -52,6 +52,21 @@ let
   # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
   # private to the controller.
   flowData = "${config.burrow.stateDir}/flow";
+  # Where the flow keeps it, as whoever runs the flow now (flow.data): in
+  # the ledger's `data` with no controller, as before it had one, and in
+  # flowData with one. A switch that turns the controller on, changes it
+  # or turns it off carries the state over (burrow-flow-data, below):
+  # without that, every PR would start over on the flow's next pass, its
+  # reviews asked again, its stall clocks and fix rounds reset and a pause
+  # lifted. crates/burrow-ledger-access's `flow` says how.
+  legacyData = "${cfg.dir}/data";
+  data = if controller == null then legacyData else flowData;
+  carry = lib.escapeShellArgs [
+    "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-ledger-access}/bin/burrow-flow-data"
+    data
+    (if controller == null then user else controller)
+    (if controller == null then flowData else legacyData)
+  ];
   # Units other than the flow's that run as the controller, and users in
   # its group: the controller must be neither's.
   others = lib.attrNames (lib.filterAttrs (_: s:
@@ -424,7 +439,10 @@ in
         plugins they run, run as it, and only it may ask a producer for
         work, both by the producers' socket directory (${producers}, which
         only its group may enter) and by each producer's peer check. Its
-        state (`CONARY_DATA`) is its own, in ${flowData}. It reads the
+        state (`CONARY_DATA`) is its own, in ${flowData}, carried there
+        from the ledger's `data` at the switch that turns it on, and back
+        or to the next controller at the one that turns it off or changes
+        it (`flow.data`). It reads the
         ledger as everyone does, and writes and signs it as burrow.user's
         writers do (a flow with a train or evidence signs its ops), through
         POSIX ACLs on `dir` that name it: that directory's file system must
@@ -445,6 +463,12 @@ in
         # with no controller, since a producer would trust burrow.user.
         producers = if controller == null then null else producers;
         env = lib.optionalAttrs (controller != null) { CONARY_DATA = flowData; };
+        # Where the flow's state is (`CONARY_DATA`, or conaryd's `data`),
+        # the flow's user's alone.
+        inherit data;
+        # What every unit that runs the flow, on its state, requires and
+        # comes after: the state carried to the flow's user, or refused.
+        needs = [ "burrow-flow-data.service" ];
         # A producer unit's serviceConfig for its socket's directory,
         # ${producers}/NAME: the producer is let through the directory only
         # the controller's group may enter, to listen in its own.
@@ -457,9 +481,10 @@ in
         };
       };
       description = ''
-        Who runs the flow, the environment it adds, where producers listen,
-        and a producer unit's serviceConfig for its socket's directory: for
-        the units that run `cn flow` and the producers.
+        Who runs the flow, the environment it adds, where its state is and
+        the units that carry it there, where producers listen, and a
+        producer unit's serviceConfig for its socket's directory: for the
+        units that run `cn flow` and the producers.
       '';
     };
 
@@ -674,7 +699,6 @@ in
       };
       ${passDir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
     } // lib.optionalAttrs (controller != null) {
-      ${flowData}.d = { mode = "0700"; user = controller; group = controller; };
       # Entered, not listed, by the controller's group alone; each producer
       # is let in to make its own directory there (flow.producer).
       ${producers}.d = { mode = "0710"; user = "root"; group = controller; };
@@ -779,6 +803,23 @@ in
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = access;
+        };
+      };
+      # As root, before every unit that runs the flow (flow.needs), on
+      # each boot and at a switch that changes who runs it. Refused, it
+      # fails, and so does every unit that would have started on no state;
+      # one of the flow's processes still running as the user it had (a
+      # worker outlives conaryd) is refused until it has exited.
+      burrow-flow-data = {
+        description = "ledger: carry the flow's state to whoever runs the flow";
+        wantedBy = [ "multi-user.target" ];
+        # After the ledger's access, which takes a controller's default
+        # entries off the ledger, so nothing made in it names one.
+        after = [ "systemd-tmpfiles-setup.service" "burrow-ledger-access.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = carry;
         };
       };
       burrow-ledger-access-key = lib.mkIf (controller != null) {
