@@ -17,6 +17,9 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   conaryd, the one setting that switches it and how a handover goes.
 - [docs/proj-design.md](docs/proj-design.md): proj's design (one record per
   job and issue, waits that say what ends them, one pass) and its stages.
+- [docs/engines.md](docs/engines.md): modular engine and outside-service
+  boundaries, what still couples burrow to Claude Code, and how swappable
+  LLMs fit the active redesigns.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
   schema (crates/burrow-settings) and `proj settings show`.
 - [docs/settings-reference.md](docs/settings-reference.md): every option's

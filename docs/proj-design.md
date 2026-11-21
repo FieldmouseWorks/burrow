@@ -329,8 +329,10 @@ it went. The two keep their jobs:
   it, as they do a turn.
 - When the steward is deleted, so are `lifecycle`, the `--owned` jobs made
   for it and their tests. The engines then become Conary job plugins
-  ([#668](https://github.com/FieldmouseWorks/burrow/issues/668)), and what
-  is left of proj is the records, the pass, the meters and the inbox.
+  ([#668](https://github.com/FieldmouseWorks/burrow/issues/668); see
+  [docs/engines.md](engines.md) for the remaining engine and outside-service
+  boundaries), and what is left of proj is the records, the pass, the meters
+  and the inbox.
 - The `claude-api` engine goes with them, and its plugin keeps what
   [`engine/api.rs`](../crates/burrow-proj/src/engine/api.rs) holds today.
   Credentials: its key, from `burrow.proj.claudeApi.keyFile`, reaches only
