@@ -55,6 +55,10 @@ pub fn prompt(input: &str, source: &std::path::Path) -> String {
 pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<u64>,
+    /// The PR this child carries to landing, `OWNER/REPO#N`: the child is
+    /// done once it merges, however the child is closed (docs/task-planning.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carries: Option<String>,
     pub title: String,
     pub body: String,
     pub check: String,
@@ -89,15 +93,45 @@ pub fn parse(text: &str) -> Result<Vec<Task>, String> {
         {
             return Err("existing child issue numbers must be positive and unique".into());
         }
+        if t.carries.as_deref().is_some_and(|c| reference(c).is_none()) {
+            return Err(format!("task {}'s carries must be OWNER/REPO#N", i + 1));
+        }
     }
     Ok(tasks)
 }
 
-pub const INSTRUCTIONS: &str = "Plan the size of this task before implementation. Read the verified task and repository, including existing issues and open PRs, but no earlier sessions' transcripts. Change nothing. Answer `ready` if this is one self-contained PR that a fresh session can finish and check. A known GitHub dependency can be awaited in that fresh session; it is not on its own a reason for `later`. For a lane, epic, tracker or bigger task, answer `split` on the first line, followed by a JSON array of 2 to 16 objects with title, body and check. Reuse existing authorized child issues rather than duplicate their work: optionally include issue (its positive number in this repository), copying its title and body verbatim for size approval. Each child must be self-contained, one PR, with concrete verification, the original authorization boundaries and necessary task context. Put children in dependency order. Do not expand the original authority. Never preserve a lane as a child or ask one session to carry a workstream. If there are more than 16 tasks, make bounded planning children for the remaining groups. Do not include Markdown fences. Use `owner` only for an actual decision reserved to the owner, and `later` only for a missing prerequisite you cannot resolve.";
+/// `OWNER/REPO#N`, as `proj await`, `proj plan done` and a task's
+/// `carries` take one.
+pub(crate) fn reference(s: &str) -> Option<(String, u64)> {
+    let (repo, n) = s.trim().split_once('#')?;
+    let (owner, name) = repo.split_once('/')?;
+    let part = |p: &str| {
+        !p.is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    (part(owner) && part(name))
+        .then(|| {
+            n.parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(|n| (repo.to_owned(), n))
+        })
+        .flatten()
+}
+
+pub const INSTRUCTIONS: &str = "Plan the size of this task before implementation. Read the verified task and repository, including existing issues and open PRs, but no earlier sessions' transcripts. Change nothing. Answer `ready` if this is one self-contained PR that a fresh session can finish and check. A known GitHub dependency can be awaited in that fresh session; it is not on its own a reason for `later`. For a lane, epic, tracker or bigger task, answer `split` on the first line, followed by a JSON array of 2 to 16 objects with title, body and check. Reuse existing authorized child issues rather than duplicate their work: optionally include issue (its positive number in this repository), copying its title and body verbatim for size approval. A child whose task is to carry an open PR to landing includes carries (that PR, as OWNER/REPO#N): it is done once that PR merges. Each child must be self-contained, one PR, with concrete verification, the original authorization boundaries and necessary task context. Put children in dependency order. Do not expand the original authority. Never preserve a lane as a child or ask one session to carry a workstream. If there are more than 16 tasks, make bounded planning children for the remaining groups. Do not include Markdown fences. Use `owner` only for an actual decision reserved to the owner, and `later` only for a missing prerequisite you cannot resolve.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn references() {
+        assert_eq!(reference("sam/box#8"), Some(("sam/box".into(), 8)));
+        assert_eq!(reference("sam/box#0"), None);
+        assert_eq!(reference("sam#8"), None);
+        assert_eq!(reference("sam/b x#8"), None);
+    }
     #[test]
     fn a_planning_hold_blocks_every_turn_start_before_any_question_or_prompt_changes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -122,6 +156,7 @@ mod tests {
     fn only_whole_bounded_self_contained_plans_are_accepted() {
         let one = Task {
             issue: None,
+            carries: None,
             title: "first".into(),
             body: "bounded task".into(),
             check: "regression test".into(),
@@ -145,10 +180,10 @@ mod tests {
                 },
             ],
             vec![
-                one,
+                one.clone(),
                 Task {
                     check: String::new(),
-                    ..two
+                    ..two.clone()
                 },
             ],
         ] {
@@ -157,6 +192,30 @@ mod tests {
         assert!(
             parse("[{\"title\":\"x\",\"body\":\"y\",\"check\":\"z\",\"shell\":\"bad\"}]").is_err()
         );
+        let carrying = Task {
+            carries: Some("sam/box#9".into()),
+            ..two.clone()
+        };
+        let plan = serde_json::to_string(&vec![one.clone(), carrying.clone()]).unwrap();
+        assert_eq!(parse(&plan).unwrap(), vec![one.clone(), carrying]);
+        for bad in [
+            "#9",
+            "sam/box",
+            "sam/box#0",
+            "https://github.com/sam/box/pull/9",
+        ] {
+            let plan = vec![
+                one.clone(),
+                Task {
+                    carries: Some(bad.into()),
+                    ..two.clone()
+                },
+            ];
+            assert!(
+                parse(&serde_json::to_string(&plan).unwrap()).is_err(),
+                "{bad}"
+            );
+        }
     }
     #[test]
     fn a_growing_parent_never_grows_the_planning_prompt_without_bound() {

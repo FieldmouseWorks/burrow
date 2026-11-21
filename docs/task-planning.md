@@ -18,7 +18,9 @@ preview and instructions to inspect the complete source in bounded portions.
 A `ready` verdict approves the exact verified input for implementation.
 An engine label alone cannot bypass planning. A `split` verdict is a JSON
 array of 2–16 tasks, each with `title`, `body` and `check`; an optional
-`issue` number reuses an existing authorized issue in the same repository.
+`issue` number reuses an existing authorized issue in the same repository,
+and an optional `carries`, `OWNER/REPO#N`, names the open PR a child is
+split to carry to landing.
 Titles and task bodies have fixed bounds, and a whole plan is validated
 before any child is created. Exact generated or verbatim reused children
 retain that size approval, rather than running another planner. Changed
@@ -39,7 +41,11 @@ without a parent job.
 A child is done when a merged PR is tied to it, whatever the PR's body
 said. Tied means a merged PR from any repository that closes it by a
 closing reference, a merged PR the child's own job awaited (`proj await`)
-before it ended with its own `proj done`, or one an author recorded. The
+before it ended with its own `proj done`, the PR its task `carries`, or
+one an author recorded. The carried PR is read from the parent's list,
+and counts once it merges however the child closed (by its job or by
+hand, its job's record gone or not), a pass looking again hourly while a
+closed child's hasn't. The
 job's awaits are kept in the child's plan folder (`.plans/OWNER_REPO-N/
 awaited`) only once the child is closed on an accepted completion (the
 checks that close an issue with its finished job, a `done` that isn't a
