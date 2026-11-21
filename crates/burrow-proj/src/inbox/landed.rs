@@ -220,8 +220,8 @@ impl Pass<'_> {
     /// done as [`Pass::landed_child`] says, or by its successor, counts; an
     /// open one is its list's own to move on, so it's not done, and so is
     /// one whose list is already being read above (a successor naming an
-    /// ancestor). What counts is ticked and kept only once N is `closed`:
-    /// an open N's list is [`Pass::sequence`]'s to write.
+    /// ancestor). What counts is ticked, kept and rendered only once N is
+    /// `closed`: an open N's list is [`Pass::sequence`]'s to write.
     fn split_landed(
         &mut self,
         repo: &str,
@@ -237,14 +237,17 @@ impl Pass<'_> {
         walking.push(at);
         let (done, ticked) = self.split_walk(repo, n, &mut list, walking);
         walking.pop();
-        if closed && ticked {
+        if closed {
             let parent = n.to_string();
-            if !self.save_list(repo, &parent, &list) {
+            if ticked && !self.save_list(repo, &parent, &list) {
                 self.retry(repo);
                 return None;
             }
+            // Nothing else renders a closed list: one that didn't go
+            // through holds the answer until it does, as sequence's own.
             if !self.render_list(repo, &parent, &mut list) {
                 self.miss(repo);
+                return None;
             }
         }
         done

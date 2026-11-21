@@ -139,3 +139,27 @@ fn a_sub_child_continued_as_its_grandparent_ends_the_walk() {
     assert!(!advanced(&b));
     assert!(stored_at(&b, "8").children[0].merged_pr.is_none());
 }
+
+/// The closed split child's ticks are kept but its checklist's update
+/// fails: nothing else renders a closed list, so #7 holds until a pass
+/// gets it through, then moves on.
+#[test]
+fn a_closed_split_childs_checklist_that_didnt_render_holds_until_it_does() {
+    let (b, parent, _) = parent_fixture();
+    split(&b, &[(11, None)]);
+    let pr = "https://github.com/sam/box/pull/519";
+    issue_now(&b, 8, "closed", Some(pr));
+    issue_now(&b, 11, "closed", Some(pr));
+    fs::write(b.path("fail"), "issues/comments/101\n").unwrap();
+    sequence(&b, &parent);
+    assert!(!advanced(&b));
+    let own = stored_at(&b, "8");
+    assert!(own.children[0].merged_pr.is_some(), "the tick is kept");
+    assert_ne!(own.rendered, own.checklist("sam/box", "8"));
+
+    fs::remove_file(b.path("fail")).unwrap();
+    sequence(&b, &parent);
+    assert!(advanced(&b));
+    let own = stored_at(&b, "8");
+    assert_eq!(own.rendered, own.checklist("sam/box", "8"));
+}
