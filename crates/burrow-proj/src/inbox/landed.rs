@@ -223,10 +223,24 @@ impl Pass<'_> {
     /// list is sequenced only while N is open, and a PR may close N with its
     /// last child (FieldmouseWorks/Conary#416). Like that pass, it reads none
     /// while N's own job is live or once N changed after its split. The
-    /// ticks it finds are kept
-    /// on the list and its checklist, and an open child it ticks is closed.
-    /// None when one couldn't be asked about.
+    /// ticks it finds are kept on the list and its checklist, and an open
+    /// child it ticks is closed. None when one couldn't be asked about, or
+    /// a done list's checklist couldn't be written.
     fn split_done(&mut self, repo: &str, n: u64, mut list: List) -> Option<bool> {
+        let done = self.walk_split(repo, n, &mut list)?;
+        // Its checklist says so before the list counts as done, retried on
+        // each look until it does: no pass of its own renders a closed one.
+        if (done || list.rendered != list.checklist(repo, &n.to_string()))
+            && !self.render_list(repo, &n.to_string(), &mut list)
+        {
+            self.miss(repo);
+            return if done { None } else { Some(false) };
+        }
+        Some(done)
+    }
+
+    /// [`Pass::split_done`]'s walk: ticks what it finds, and keeps them.
+    fn walk_split(&mut self, repo: &str, n: u64, list: &mut List) -> Option<bool> {
         if list.next().is_none() {
             return Some(true);
         }
@@ -279,12 +293,8 @@ impl Pass<'_> {
             }
         };
         self.splits.pop();
-        if ticked {
-            if !self.save_list(repo, &n.to_string(), &list) {
-                self.retry(repo);
-            } else if !self.render_list(repo, &n.to_string(), &mut list) {
-                self.miss(repo);
-            }
+        if ticked && !self.save_list(repo, &n.to_string(), list) {
+            self.retry(repo);
         }
         done
     }

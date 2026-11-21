@@ -180,3 +180,22 @@ fn a_split_child_changed_after_its_split_holds_the_grandparent() {
     assert!(!moved_on(&b));
     assert_eq!(list_of(&b, "8").children[1].merged_pr, None);
 }
+
+/// A done split list's checklist that couldn't be written leaves the
+/// grandparent unticked, so a later look writes it before moving on.
+#[test]
+fn a_done_split_lists_checklist_is_written_before_it_counts() {
+    let (b, parent) = split("closed");
+    closes(&b, 11);
+    fs::write(b.path("fail"), "repos/sam/box/issues/comments/101\n").unwrap();
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(p.unreached.contains(&"sam/box".to_owned()), "{}", b.log());
+    assert_eq!(list_of(&b, "8").children[1].merged_pr.as_deref(), Some(PR));
+    assert_eq!(list_of(&b, "7").children[0].merged_pr, None);
+    fs::remove_file(b.path("fail")).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(moved_on(&b));
+    assert!(list_of(&b, "8").rendered.contains("[x] #11"));
+}
