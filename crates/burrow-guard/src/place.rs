@@ -7,10 +7,15 @@
 //! `git -C "$DIR"` is (push/lease.rs). That's a `cd` or `pushd` to an
 //! expansion, `-`, `~`, home or through `CDPATH`, with options, run behind
 //! a keyword, an assignment, `eval`, `builtin` or `command`, inside `if`,
-//! `case` or a group, piped or in the background, or after `&&` or `||`
-//! once the commands it joins end; a `popd`; a command whose name is an
-//! expansion that may be `cd`; and a reading `eval` runs that moves. A cd
-//! to a place spelled out reads it again.
+//! `case` or a group, piped or in the background, or after `||`; a `popd`;
+//! a command whose name is an expansion that may be `cd`; and a reading
+//! `eval` runs that moves. A cd to a place spelled out reads it again.
+//!
+//! A `cd` the guard follows may still fail (a directory missing, even one
+//! `..` steps back out of), and the shell goes on where it was. So it's
+//! where the `cd` went only for the commands `&&` joins after it, and for
+//! everything after it only where its failure exits (`cd DIR || exit 1`);
+//! past that, it may be either place, which is none read.
 //!
 //! A loop or a function runs its body at another time than it's read in,
 //! so a shell whose own commands hold one, and whose commands or
@@ -88,6 +93,7 @@ pub struct Shells {
     shells: Vec<Option<Shell>>,
     parents: Vec<usize>,
     joins: Vec<Joined>,
+    apart: Vec<bool>,
     /// Each shell's own commands hold a loop or a function, and its own
     /// or its subshells' a `cd` (or an `eval`).
     deferring: Vec<bool>,
@@ -99,9 +105,9 @@ struct Shell {
     /// Keywords open (`if`, `case`, `{`, a loop): a `cd` inside runs only
     /// if they say so.
     open: usize,
-    /// A `cd` behind `&&` moved it: once the commands that `&&` joins end
-    /// (or `||` takes over), it may be either place.
-    joined_cd: bool,
+    /// A `cd` that may have failed moved it: past the commands `&&` joins
+    /// to it, it may be either place, unless a failure exits.
+    unsure: bool,
     /// Its commands, or its parent's, may run where they weren't read: no
     /// place in it is read.
     nowhere: bool,
@@ -134,13 +140,14 @@ impl Shells {
         shells[0] = Some(Shell {
             place,
             open: 0,
-            joined_cd: false,
+            unsure: false,
             nowhere: deferring[0],
         });
         Shells {
             shells,
             parents: script.parents.clone(),
             joins: script.joins.clone(),
+            apart: script.apart.clone(),
             deferring,
             cdpath,
         }
@@ -152,7 +159,10 @@ impl Shells {
     pub fn enter(&mut self, run: &Run) -> Place {
         let read = reading(&run.words, self.cdpath);
         let shell = self.shell(run.scope);
-        if run.joined != Joined::And && std::mem::take(&mut shell.joined_cd) {
+        if run.joined != Joined::And
+            && std::mem::take(&mut shell.unsure)
+            && !(run.joined == Joined::Or && exits(&run.words))
+        {
             shell.place = shell.place.unread();
         }
         let mut here = if shell.nowhere {
@@ -165,7 +175,7 @@ impl Shells {
             None => {}
             Some(Move::To(dir)) if shell.open == 0 && run.alone && run.joined != Joined::Or => {
                 shell.place = shell.place.cd(&dir);
-                shell.joined_cd = run.joined == Joined::And;
+                shell.unsure = true;
             }
             Some(_) => {
                 shell.place = shell.place.unread();
@@ -202,20 +212,27 @@ impl Shells {
                 .as_mut()
                 .expect("started first");
             // A subshell, or the command holding a substitution, ends what
-            // `&&` joined unless it's joined so itself.
-            if joined != Joined::And && std::mem::take(&mut parent.joined_cd) {
+            // `&&` joined unless it's joined so itself. Text read apart
+            // (a comment) is no command of its parent's.
+            if !self.apart[scope] && joined != Joined::And && std::mem::take(&mut parent.unsure) {
                 parent.place = parent.place.unread();
             }
             let shell = Shell {
                 place: parent.place.clone(),
                 open: 0,
-                joined_cd: false,
+                unsure: false,
                 nowhere: parent.nowhere || self.deferring[scope],
             };
             self.shells[scope] = Some(shell);
         }
         self.shells[scope].as_mut().expect("started")
     }
+}
+
+/// Whether `words`, a command, ends the shell: a failure `||` joins it to
+/// goes no further.
+fn exits(words: &[String]) -> bool {
+    matches!(words.first().map(String::as_str), Some("exit" | "return"))
 }
 
 /// What a command does to the place of the shell it runs in.

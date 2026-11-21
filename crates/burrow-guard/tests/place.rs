@@ -96,8 +96,11 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             // As `-C` is.
             "git -C OTHER push origin pr",
             "cd OTHER && git push origin pr",
-            "cd OTHER; git push origin pr",
-            "cd OTHER\ngit push origin pr",
+            "cd OTHER || exit 1; git push origin pr",
+            "cd OTHER || exit\ngit push origin pr",
+            "cd OTHER || return; git push origin pr",
+            "git fetch && cd OTHER || exit 1; git push origin pr",
+            "cd OTHER && git fetch || exit 1; git push origin pr",
             "cd -- OTHER && git push origin pr",
             "cd 'OTHER' && git push origin pr",
             "pushd OTHER && git push origin pr",
@@ -113,7 +116,7 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             "sh -c 'cd OTHER && git push origin pr'",
             "sh -c 'cd \"$1\" && git push origin pr' _ OTHER",
             // A here-document's script is one, line after line.
-            "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
+            "bash <<'EOF'\ncd OTHER || exit 1\ngit push origin pr\nEOF",
             "bash <<'EOF'\ntrue &&\n  cd OTHER &&\n  git push origin pr\nEOF",
             // Parentheses that open no function.
             "files=(a b); cd OTHER && git push origin pr",
@@ -125,7 +128,9 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
         ],
     );
     cmds.push(format!("cd {parent} && cd {name} && git push origin pr"));
-    cmds.push(format!("cd {parent}; cd ./{name}/ && git push origin pr"));
+    cmds.push(format!(
+        "cd {parent} || exit; cd ./{name}/ && git push origin pr"
+    ));
     assert_each(cwd, &cmds, Some(CONFIGURED));
 
     // A cd away from it, or one that ends with its shell, leaves it.
@@ -143,7 +148,7 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
             // Prose read as a script moves nothing, and holds no loop or
             // function for a cd to spoil.
             "# cd OTHER (the worktree)\ngit push origin pr",
-            "cd OTHER # (the worktree)\ncd .. && git push origin pr",
+            "cd OTHER || exit # (the worktree)\ncd .. && git push origin pr",
             "git push origin pr && gh pr create --body \"$(cat <<'EOF'\n**Summary** of it (short)\n* cd OTHER\nfor a while (until done)\nEOF\n)\"",
             "git commit -F - <<'EOF'\nplace: cd OTHER first (see #1)\n\n`cd` it { now }\nEOF\ngit push origin pr",
         ],
@@ -154,7 +159,7 @@ fn a_push_after_a_cd_is_read_where_the_cd_went() {
         o,
         &[
             format!("cd {h} && git push origin pr"),
-            format!("pushd {h}; git push origin pr"),
+            format!("pushd {h} && git push origin pr"),
         ],
         None,
     );
@@ -186,6 +191,15 @@ fn a_cd_the_guard_cant_follow_leaves_the_place_unread() {
             // A relative cd from an unread place stays unread.
             "cd \"$D\" && cd sub && git push origin pr",
             "cd \"$D\" && git -C sub push origin pr",
+            // It may have failed, and the shell gone on where it was: a
+            // directory missing, even one `..` steps back out of.
+            "cd OTHER; git push origin pr",
+            "cd OTHER\ngit push origin pr",
+            "cd OTHER/missing/..; git push origin pr",
+            "cd OTHER && git fetch; git push origin pr",
+            "cd OTHER || echo no; git push origin pr",
+            "cd OTHER || (exit 1); git push origin pr",
+            "bash <<'EOF'\ncd OTHER\ngit push origin pr\nEOF",
             // It may not have run, or ran in a shell of its own.
             "true && cd OTHER; git push origin pr",
             "true && cd OTHER || git push origin pr",
@@ -273,7 +287,7 @@ fn a_push_with_no_refspec_pushes_the_branch_where_the_cd_went() {
     );
     for cmd in [
         format!("cd {} && git push -f", m.display()),
-        format!("cd {}; git push --force-with-lease", m.display()),
+        format!("cd {} || exit 1; git push --force-with-lease", m.display()),
         format!("(cd {} && git push -f)", m.display()),
     ] {
         assert_eq!(question(&cmd, f), asks, "{cmd}");
