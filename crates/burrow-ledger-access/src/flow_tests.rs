@@ -223,19 +223,38 @@ fn with_no_state_anywhere_an_empty_directory_waits() {
 }
 
 #[test]
-fn state_not_its_owners_alone_is_handed_in_place() {
-    // A controller changed: the state is where it's kept, but not the new
-    // owner's alone (here, a directory others may enter).
+fn state_already_its_owners_is_kept_and_only_narrowed() {
+    // The ledger's `data` as the flow kept it before this ran: its owner's,
+    // but a directory others may enter. Nothing is copied, so a worker
+    // still holding its lock holds nothing up.
     let (_root, data, other, _outside) = places();
     write_state(&data);
     burrow_test::permissions(&data, 0o755);
     let before = inode(&data.join("flow/sam/plain/5.json"));
-    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Handed);
+    let held = std::fs::File::open(data.join("flow/sam/plain/lock")).unwrap();
+    held.try_lock().unwrap();
+    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Kept);
     assert!(holds_state(&data));
     assert_eq!(mode(&data), 0o700);
-    assert_ne!(inode(&data.join("flow/sam/plain/5.json")), before);
-    assert!(!data.parent().unwrap().join(".burrow-flow-carry").exists());
+    assert_eq!(inode(&data.join("flow/sam/plain/5.json")), before);
+}
+
+#[test]
+fn a_removal_cut_short_leaves_no_second_history() {
+    // What a carry put aside and couldn't finish removing.
+    let (_root, data, other, _outside) = places();
+    write_state(&data);
+    burrow_test::permissions(&data, 0o700);
+    let aside = other.parent().unwrap().join(".burrow-flow-carry");
+    write_state(&aside);
     assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Kept);
+    // And the next carry clears it before it puts its own aside.
+    std::fs::remove_dir_all(&data).unwrap();
+    write_state(&other);
+    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Moved);
+    assert!(!aside.exists());
+    assert!(!other.exists());
+    assert!(holds_state(&data));
 }
 
 #[test]
@@ -279,11 +298,18 @@ fn the_old_copy_is_gone_from_disk_once_carried() {
 
 #[test]
 fn every_directory_and_file_handed_in_place_is_on_disk() {
-    let (_root, data, other, _outside) = places();
+    // A controller changed: [`carry`] copies in place what another user
+    // owns, which a test can't make as its own user, so the copy it runs
+    // is run here directly.
+    let (_root, data, _other, _outside) = places();
     write_state(&data);
-    // Not its owner's alone: a mode the flow never gives it.
-    burrow_test::permissions(&data, 0o755);
+    let before = inode(&data.join("flow/sam/plain/5.json"));
+    let (dp, dn) = place(&data).unwrap().unwrap();
     SYNCED.with(|s| s.borrow_mut().clear());
-    assert_eq!(carry(&data, &other, me()).unwrap(), Carried::Handed);
+    copy(&dp, &dn, &dp, &dn, me(), "data").unwrap();
+    assert!(holds_state(&data));
+    assert_eq!(mode(&data), 0o700);
+    assert_ne!(inode(&data.join("flow/sam/plain/5.json")), before);
+    assert!(!data.parent().unwrap().join(".burrow-flow-carry").exists());
     assert_eq!(unsynced(&data), Vec::<PathBuf>::new());
 }

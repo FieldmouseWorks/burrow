@@ -468,6 +468,8 @@ in
         inherit data;
         # What every unit that runs the flow, on its state, requires and
         # comes after: the state carried to the flow's user, or refused.
+        # One that keeps running (conaryd) is wanted by them too, so it
+        # starts with a carry that a worker held off and goes through.
         needs = [ "burrow-flow-data.service" ];
         # A producer unit's serviceConfig for its socket's directory,
         # ${producers}/NAME: the producer is let through the directory only
@@ -806,16 +808,25 @@ in
         };
       };
       # As root, before every unit that runs the flow (flow.needs), on
-      # each boot and at a switch that changes who runs it. Refused, it
-      # fails, and so does every unit that would have started on no state;
-      # one of the flow's processes still running as the user it had (a
-      # worker outlives conaryd) is refused until it has exited.
+      # each boot and at a switch that changes its unit. Refused, it
+      # fails, and so does every unit that would have started on no state.
+      # One of the flow's processes still running as the user it had (a
+      # worker outlives conaryd) holds it off (75) until that has exited:
+      # the next start of a unit that requires it (burrow-landing's, every
+      # five minutes at most) tries again, and starts conaryd with it. Not
+      # Restart=: its tries would each start conaryd, whose start starts
+      # it again at once. As the units that run the flow require it, a switch that changes
+      # it (who runs the flow, or its package or PATH) stops a running one
+      # too, which starts again on its next event.
       burrow-flow-data = {
         description = "ledger: carry the flow's state to whoever runs the flow";
         wantedBy = [ "multi-user.target" ];
         # After the ledger's access, which takes a controller's default
         # entries off the ledger, so nothing made in it names one.
         after = [ "systemd-tmpfiles-setup.service" "burrow-ledger-access.service" ];
+        # Each unit that requires it starts it again, as a switch starts
+        # them together: the start limit would refuse the next try.
+        startLimitIntervalSec = 0;
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;

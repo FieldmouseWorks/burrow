@@ -147,9 +147,9 @@ in
         # And once as the machine starts, carrying on a handover a
         # shutdown cut short.
         wantedBy = [ "multi-user.target" ];
-        # On the flow's state, carried to its user. A switch that carries
-        # it does stop a running one: as the user the flow had, on state
-        # that's moving.
+        # On the flow's state, carried to its user. A switch that changes
+        # the carry's unit stops a running one (burrow.ledger's
+        # burrow-flow-data says when), which goes on from the record.
         after = [ "burrow-events.service" ] ++ ledger.flow.needs;
         requires = ledger.flow.needs;
         # A switch leaves a running one be: the path unit's next start is
@@ -244,7 +244,9 @@ in
         # repo without them, it fails, and says so.
         conary-flow = {
           description = "landing: Conary's flow, for the repos burrow-landing gives conaryd";
-          wantedBy = [ "multi-user.target" ];
+          # And with the carry of the flow's state, after one a worker held
+          # off (burrow.ledger.flow.needs).
+          wantedBy = [ "multi-user.target" ] ++ ledger.flow.needs;
           after = [ "network-online.target" ] ++ autoland.flow.needs;
           wants = [ "network-online.target" ];
           requires = autoland.flow.needs;

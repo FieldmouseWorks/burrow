@@ -4,9 +4,11 @@
 # PR's record and a pause; the controller turned on (burrow.ledger
 # .controllerUser) still sees both, and so does the next one when it's
 # changed, and burrow.user again when it's turned off, the user it had
-# keeping none of it. A worker still running as the user it had holds the
-# carry off until it exits, two histories are refused, not merged, and a
-# link the old user leaves in the state leads it nowhere; each time, the
+# keeping none of it. State the flow already kept as its user is kept as
+# it is, a worker running or not. A worker still running as the user it
+# had holds a carry off until it exits, and the flow starts again with
+# the next start that carries it; two histories are refused, not merged, and
+# a link the old user leaves in the state leads it nowhere. Each time, the
 # flow doesn't start on no state.
 #
 # cn here is a stand-in that keeps `flow pause` and reads `flow status`
@@ -103,6 +105,19 @@ pkgs.testers.runNixOSTest {
       on.configuration.burrow.ledger.controllerUser = "conary-flow";
       moved.configuration.burrow.ledger.controllerUser = "conary-flow2";
     };
+    # The flow that keeps running, wired as conaryd is
+    # (modules/autoland/landing.nix): as its user, after its state is
+    # carried, and started again once a carry held off goes through.
+    systemd.services.flow = {
+      wantedBy = [ "multi-user.target" ] ++ ledger.flow.needs or [ ];
+      requires = ledger.flow.needs or [ ];
+      after = ledger.flow.needs or [ ];
+      environment = ledger.env // ledger.flow.env;
+      serviceConfig = {
+        User = ledger.flow.user;
+        ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+      };
+    };
     # `cn flow status` as the flow runs: as its user, on its state, as
     # conaryd is given it (modules/autoland/landing.nix).
     systemd.services.flow-status = {
@@ -184,24 +199,39 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"test -e {flow}")
         unreadable(old, second)
 
-    with subtest("a worker still running as the user it had holds the carry off"):
+    with subtest("state the flow kept before the carry is kept, a worker running or not"):
+        # As the ledger's `data` is on a machine this comes to: the flow's
+        # user's, but a directory others may enter.
+        machine.succeed(f"chmod 755 {old}")
+        inode = machine.succeed(f"stat -c %i {old}/{repo}/5.json")
         machine.succeed(f"runuser -u dev -- touch {old}/{repo}/5-1.running")
         machine.succeed(f"systemd-run --unit=worker -p User=dev flock {old}/{repo}/5-1.running ${pkgs.coreutils}/bin/sleep infinity")
-        machine.wait_until_succeeds(f"! flock -n {old}/{repo}/5-1.running true")
-        machine.fail(to("on"))
-        machine.succeed("systemctl is-failed burrow-flow-data.service")
+        machine.wait_for_unit("worker.service")
+        machine.succeed(f"! flock -n {old}/{repo}/5-1.running true")
+        machine.succeed("systemctl restart burrow-flow-data.service")
+        machine.wait_for_unit("flow.service")
+        assert machine.succeed(f"stat -c %i {old}/{repo}/5.json") == inode
+        shows_both(old, "dev")
+
+    with subtest("a worker still running as the user it had holds the carry off"):
+        # Whatever the switch says of a unit that tries again.
+        machine.execute(to("on"))
+        machine.fail("systemctl is-active burrow-flow-data.service")
         # The flow doesn't start on no state.
-        machine.fail("systemctl start flow-status.service")
+        machine.fail("systemctl is-active flow.service")
         machine.fail(f"test -e {flow}")
         machine.succeed(f"test -e {old}/{repo}/5.json")
         machine.succeed("systemctl stop worker.service")
-        # Its next start carries it.
+        # The next start of a unit of the flow's carries it (burrow-landing's
+        # timer, on a machine that lands), and the flow starts with it.
         shows_both(flow, "conary-flow")
+        machine.wait_for_unit("flow.service")
 
     with subtest("two histories are refused, not merged"):
         machine.succeed(f"runuser -u dev -- sh -c 'mkdir -p {old}/{repo} && echo {{}} >{old}/{repo}/7.json'")
         machine.fail(to("moved"))
         machine.succeed("systemctl is-failed burrow-flow-data.service")
+        machine.fail("systemctl is-active flow.service")
         machine.fail("systemctl start flow-status.service")
         machine.succeed(f"test -e {old}/{repo}/7.json")
         machine.fail(f"test -e {old}/{repo}/5.json")
@@ -209,6 +239,7 @@ pkgs.testers.runNixOSTest {
         # The one the flow shouldn't carry on from moved aside.
         machine.succeed(f"rm -r {old}")
         shows_both(flow, "conary-flow2")
+        machine.wait_for_unit("flow.service")
 
     with subtest("a link the user it had leaves leads it nowhere"):
         machine.succeed("echo root >/var/lib/root-secret && chmod 600 /var/lib/root-secret")

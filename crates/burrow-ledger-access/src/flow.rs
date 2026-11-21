@@ -11,8 +11,10 @@
 //! at a switch that changes who runs the flow. The state is in one place
 //! or the other: where it's kept now (`data`), or where it was kept
 //! (`other`). Found in `other`, it's copied into `data` and `other` is
-//! removed; found in `data` with files someone else owns (a controller
-//! changed), it's copied in place. Found in both, it's refused: two
+//! put aside and removed; found in `data` with files someone else owns (a
+//! controller changed), it's copied in place; found in `data` all its
+//! owner's, only the directory is narrowed to 0700. Found in both, it's
+//! refused: two
 //! histories aren't merged. An empty directory (what tmpfiles or a unit
 //! made) holds no state.
 //!
@@ -158,10 +160,18 @@ pub fn carry(data: &Path, other: &Path, owner: Owner) -> Result<Carried, Refused
             }
             (Found::State, _) => {
                 copy(&op, &on, &dp, &dn, owner, &from)?;
-                // Its removal flushed too: an old copy back after a crash
-                // would be a second history, and refused.
-                remove(&op, &on)
+                // Out of the way at once, and that flushed, so neither a
+                // crash nor a removal cut short leaves a second history:
+                // what's left is a copy's to clear.
+                let aside = match remove(&op, STAGING) {
+                    Ok(()) | Err(Errno::NOENT) => {
+                        fs::renameat_with(&op, &on, &op, STAGING, RenameFlags::NOREPLACE)
+                    }
+                    Err(e) => Err(e),
+                };
+                aside
                     .and_then(|()| durable(&op))
+                    .and_then(|()| remove(&op, STAGING))
                     .map_err(failed(&from))?;
                 return Ok(Carried::Moved);
             }
@@ -191,19 +201,25 @@ pub fn carry(data: &Path, other: &Path, owner: Owner) -> Result<Carried, Refused
 }
 
 /// Whether the directory `name` in `parent`, and all it holds, is
-/// `owner`'s, the directory 0700 with no ACL.
+/// `owner`'s, made 0700, its group's and with no ACL if it isn't.
 fn owned(parent: &OwnedFd, name: &CStr, owner: Owner) -> Result<bool, Errno> {
     let dir = fs::openat(parent, name, dir_flags(), Mode::empty())?;
-    let st = fs::fstat(&dir)?;
-    if st.st_mode & 0o7777 != 0o700 || acl(&dir)? {
+    if !all_owned(&dir, owner.uid)? {
         return Ok(false);
     }
-    all_owned(&dir, owner)
+    // All of it the owner's already (the ledger's `data` as the flow kept
+    // it before this ran, 0755): only the directory is narrowed, which
+    // leaves what it holds reachable by its owner alone.
+    let st = fs::fstat(&dir)?;
+    if st.st_mode & 0o7777 != 0o700 || st.st_gid != owner.gid || acl(&dir)? {
+        own(&dir, owner, 0o700)?;
+    }
+    Ok(true)
 }
 
-fn all_owned(dir: &OwnedFd, owner: Owner) -> Result<bool, Errno> {
-    let st = fs::fstat(dir)?;
-    if st.st_uid != owner.uid || st.st_gid != owner.gid {
+/// Whether `dir` and all it holds is `uid`'s.
+fn all_owned(dir: &OwnedFd, uid: u32) -> Result<bool, Errno> {
+    if fs::fstat(dir)?.st_uid != uid {
         return Ok(false);
     }
     for entry in fs::Dir::read_from(dir)? {
@@ -219,12 +235,12 @@ fn all_owned(dir: &OwnedFd, owner: Owner) -> Result<bool, Errno> {
             Err(e) => return Err(e),
         };
         let st = fs::fstat(&p)?;
-        if st.st_uid != owner.uid || st.st_gid != owner.gid {
+        if st.st_uid != uid {
             return Ok(false);
         }
         if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
             let d = fs::openat(&p, c".", dir_flags(), Mode::empty())?;
-            if !all_owned(&d, owner)? {
+            if !all_owned(&d, uid)? {
                 return Ok(false);
             }
         }
@@ -376,7 +392,7 @@ fn tree(src: &OwnedFd, dst: &OwnedFd, owner: Owner, at: &Path) -> Result<(), Ref
                     Err(Errno::WOULDBLOCK) => {
                         return Err(Refused::Busy(format!(
                             "{shown}: locked, so a process of the flow's still runs as the user it had: \
-                             start this again once it has exited"
+                             start burrow-flow-data.service (or a unit of the flow's) again once it has exited"
                         )));
                     }
                     Err(e) => return Err(fail(e)),
