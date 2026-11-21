@@ -480,7 +480,10 @@ Each has an entry below, and each can be imported on its own.
   round, unless it's R2), and which repos go live when they land. With
   `controllerUser`, Conary's flow (its passes, workers and plugins) runs as a
   user of its own that no authoring job, sandbox or proj run shares, on state
-  only it reads,
+  only it reads, carried to it from burrow.user's at the switch that turns it
+  on (and on, or back, at one that changes it or turns it off: a fresh copy,
+  refused while one of the flow's processes still runs as the user it had,
+  or when both places hold state),
   and only it may reach a producer's socket under `/run/conary-producers`.
   It signs the ledger as burrow.user does, through ACLs on `dir` naming it,
   so its file system must support POSIX ACLs.

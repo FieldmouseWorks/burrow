@@ -40,11 +40,12 @@ let
   # itself: a unit's credentials are mounted in its own namespace, which no
   # other unit sees. Every unit that runs the flow (the shadow's and
   # conaryd's) requires it, as its config names the key's file there. None
-  # with the judge off: no unit.
+  # with the judge off: no unit. They require the flow's state too,
+  # carried to the flow's user (burrow.ledger.flow.needs).
   keysUnit = "autoland-flow-keys";
   seals = lib.optionalAttrs (enabled ? judge) { judge-seal = enabled.judge.sealFile; };
   keyFile = name: "/run/${keysUnit}/${name}";
-  needs = lib.optional (seals != { }) "${keysUnit}.service";
+  needs = ledger.flow.needs ++ lib.optional (seals != { }) "${keysUnit}.service";
   # The judge's: what the configs name, and what its producer checks they
   # name, holding as it does the same sealFile as its own credential.
   judgeKey = keyFile "judge-seal";
