@@ -240,12 +240,14 @@ pkgs.testers.runNixOSTest {
         s = build_shown("b0")
         log = producer("cat ${state}/runs/b0/log")
         assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "0"), (s, log)
-        uid = int(log.split("uid ")[1].split()[0])
+        # What it printed, not the worker's note of its command.
+        printed = [l for l in log.splitlines() if not l.startswith("burrow-proof:")]
+        uid = int(next(l for l in printed if l.startswith("uid "))[4:])
         assert uid not in (0, int(machine.succeed("id -u autoland-judge")), int(machine.succeed("id -u dev"))), log
-        assert "wrote its own copy" in log, log
+        assert "wrote its own copy" in printed, log
         # Every way past its folder, at once, so a run with a guard removed
         # names all it let through.
-        reached = [l for l in log.splitlines() if l.startswith(("WROTE", "SEES", "REACHED"))]
+        reached = [l for l in printed if l.startswith(("WROTE", "SEES", "REACHED"))]
         assert reached == [], (reached, log)
         assert producer("cat ${state}/looks/g1/head/f") == "code\n"
 
