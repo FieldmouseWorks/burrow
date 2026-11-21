@@ -294,7 +294,7 @@ let
   renovateWake = "${cfg.renovate.dir}/wake.json";
   renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
     name = "renovate-run";
-    runLock = "${cfg.renovate.dir}/run.lock";
+    runLock = cfg.renovate.runLock;
     runs = "${cfg.renovate.dir}/runs";
     # The renovate handler's: what GitHub's rate limit holds off is booked
     # again there for when it lifts.
@@ -609,6 +609,13 @@ in
         type = lib.types.str;
         default = "/var/cache/renovate";
         description = "Renovate's clones and caches.";
+      };
+      runLock = lib.mkOption {
+        type = lib.types.str;
+        readOnly = true;
+        default = "${cfg.renovate.dir}/run.lock";
+        defaultText = lib.literalExpression ''"''${config.burrow.updates.renovate.dir}/run.lock"'';
+        description = "The lock each run of Renovate holds, from before it reads who lands each repo until it has exited (crates/burrow-renovate): burrow-landing hands a repo the steward lands over only while none holds it.";
       };
       settings = lib.mkOption {
         type = lib.types.attrs;
@@ -927,6 +934,8 @@ in
 
       systemd.tmpfiles.settings.burrow = {
         ${rcfg.dir}.d = { mode = "0755"; inherit user; group = account.group; };
+        # Readable by burrow-landing, which runs as the flow's user.
+        ${rcfg.runLock}.f = { mode = "0644"; inherit user; group = account.group; };
         "${stateDir}/renovate-sweep".d = { mode = "0755"; inherit user; group = account.group; };
       };
     })

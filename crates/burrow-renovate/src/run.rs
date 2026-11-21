@@ -31,7 +31,9 @@
 //! Renovate's patched merges (patches/renovate-no-merge.patch) all ask, so
 //! it opens and updates PRs and merges none. A full run as the user leaves
 //! those repos out and gives each a run of its own. A record that can't be
-//! read lets no run merge, and fails the pass.
+//! read lets no run merge, and fails the pass. burrow-landing hands a repo
+//! the steward lands over only while no run holds the lock, so a run reads
+//! the record only once it holds it, and never merges past it.
 //!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 

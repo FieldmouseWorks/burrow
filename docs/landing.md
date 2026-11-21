@@ -69,7 +69,15 @@ at the same time:
    - conaryd lets go by being taken off its events file. It passes no repo
      it isn't given.
 2. **The new owner takes the repo** once the one letting go is quiet:
-   - The steward is quiet when its marker names this generation.
+   - The steward is quiet when its marker names this generation and no run
+     of Renovate holds renovate-run's run lock. A run takes that lock before
+     it reads the record, and the Renovate it starts holds it until it
+     exits, so a run that read the record while the steward still held the
+     repo, and may merge there, is over once the lock is free. A later run
+     reads the handover and merges nothing. burrow-landing doesn't wait on
+     the lock, since a run can last hours: the lock file's last close starts
+     it again (`burrow-landing.path`). A queue of Renovate runs holds the
+     handover until it drains.
    - conaryd is quiet once three things hold. It has started again since
      the events file was last published without the repo, which a
      publication serial shows; matching contents isn't enough, because a
