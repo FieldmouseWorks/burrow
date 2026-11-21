@@ -10,6 +10,7 @@ use std::{env, fs};
 
 use burrow_events::handler::Config;
 use burrow_events::line::{DEBOUNCE, Line, Pass};
+use burrow_events::outbox::Outbox;
 use burrow_events::passes::{Systemctl, Yields, check_yields, refresh, serve};
 use burrow_events::routes::{Handlers, Lines, delivery, kick};
 use burrow_events::{http, now, supervise};
@@ -39,7 +40,12 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
     let cfg = cfg.wire();
     check_yields(&cfg.handlers).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
-    let landing = cfg.landing;
+    let outbox = match &cfg.landing {
+        Some(l) => Outbox::open(l)
+            .map_err(|e| format!("{}: {e}", path.to_string_lossy()))?
+            .map(Arc::new),
+        None => None,
+    };
     let handlers: Handlers = Arc::new(cfg.handlers);
     let lines: Lines = Arc::new(
         handlers
@@ -60,14 +66,22 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
             .map_err(|e| format!("{}: {e}", file.display()))?
             .trim()
             .to_owned();
-        let (h, l) = (handlers.clone(), lines.clone());
+        let (h, l, o) = (handlers.clone(), lines.clone(), outbox.clone());
         let (port, t) = http::listen(
             port,
-            Arc::new(move |req| delivery(&h, &l, landing.as_ref(), &secret, req)),
+            Arc::new(move |req| delivery(&h, &l, o.as_deref(), &secret, req)),
         )
         .map_err(|e| format!("deliveries: {e}"))?;
         eprintln!("deliveries on 127.0.0.1:{port}");
         threads.push(("deliveries".to_owned(), t));
+    }
+    // What's held for conaryd, sent on until it takes it: what an earlier
+    // run held too.
+    if let Some(o) = outbox {
+        let t = thread::Builder::new()
+            .spawn(move || o.forward())
+            .map_err(|e| format!("conaryd's outbox: {e}"))?;
+        threads.push(("conaryd's outbox".to_owned(), t));
     }
     let (h, l) = (handlers.clone(), lines.clone());
     let (port, t) = http::listen(cfg.kick_port, Arc::new(move |req| kick(&h, &l, req)))
