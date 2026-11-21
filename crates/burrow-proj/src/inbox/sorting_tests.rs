@@ -163,6 +163,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.j
             scope: None,
             drain_at: None,
             skipped: Vec::new(),
+            splits: Vec::new(),
         }
     }
 

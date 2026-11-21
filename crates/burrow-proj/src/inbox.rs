@@ -107,6 +107,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         },
         drain_at: None,
         skipped: Vec::new(),
+        splits: Vec::new(),
     };
     // `drain`: the drain's own pass, from the saved ready lists alone.
     let result = if only == "drain" {
@@ -198,6 +199,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        splits: Vec::new(),
     };
     let repo = p.plan_done(child, pr, caller)?;
     drop(permit);
@@ -341,6 +343,9 @@ struct Pass<'a> {
     /// open issue to a later pass (scope.rs): it says nothing of whether
     /// that listing reaches GitHub again.
     skipped: Vec<String>,
+    /// Children split again whose own lists this pass is deciding
+    /// (landed.rs), as `owner/repo#n`: one met again is a cycle, not done.
+    splits: Vec<String>,
 }
 
 impl Pass<'_> {

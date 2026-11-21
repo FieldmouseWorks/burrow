@@ -922,6 +922,7 @@ pub(super) fn observer<'a>(cfg: &'a Config, inbox: &'a crate::config::Inbox) -> 
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        splits: Vec::new(),
     }
 }
 

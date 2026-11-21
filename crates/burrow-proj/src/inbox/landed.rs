@@ -16,6 +16,7 @@
 //! naming the parent or a child of its own list hands nothing on, and the
 //! owner's notice says that it doesn't count.
 use super::{List, Pass, key};
+use crate::github::api;
 use crate::inbox::record::files;
 use crate::planning::reference;
 use crate::record::TurnFile;
@@ -75,6 +76,19 @@ pub(super) enum Stall {
 
 /// What [`NOTICE`] keeps while the notice is about the parent's pause.
 const PAUSED: &str = "paused";
+
+/// What a list's child is now ([`Pass::child_now`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum Now {
+    /// Done, by this merged PR.
+    Landed(String),
+    /// Open, with no landing recorded: its own work goes on.
+    Open,
+    /// Closed with none, continued as this sibling on its list if named.
+    Closed(Option<String>),
+    /// Closed as continued in this issue, `OWNER/REPO#N`, still open.
+    Continues(String),
+}
 
 /// Whether an issue may close with its finished job ([`Pass::child_can_close`]).
 #[derive(Debug, PartialEq)]
@@ -176,8 +190,7 @@ impl Pass<'_> {
             && !list.children.is_empty()
         {
             return Some(
-                list.next()
-                    .is_none()
+                self.split_done(repo, n, list)?
                     .then(|| format!("https://github.com/{repo}/issues/{n}")),
             );
         }
@@ -201,6 +214,82 @@ impl Pass<'_> {
             Some(Some(pr)) => Some(Some(pr)),
             Some(None) if !unsure => Some(None),
             _ => None,
+        }
+    }
+
+    /// Whether split child N's own `list` is done, read from its children
+    /// as GitHub has them now, each by the rule its own pass reads it by
+    /// ([`Pass::child_now`]), not only from the ticks a pass of it kept: its
+    /// list is sequenced only while N is open, and a PR may close N with its
+    /// last child (FieldmouseWorks/Conary#416). The ticks it finds are kept
+    /// on the list. None when one couldn't be asked about.
+    fn split_done(&mut self, repo: &str, n: u64, mut list: List) -> Option<bool> {
+        let at = format!("{repo}#{n}").to_lowercase();
+        if self.splits.contains(&at) {
+            return Some(false);
+        }
+        self.splits.push(at);
+        let refs = list.refs(repo, &n.to_string());
+        let mut ticked = false;
+        let done = loop {
+            let Some(index) = list.next() else {
+                break Some(true);
+            };
+            let Some(child) = list.children[index].number else {
+                break Some(false);
+            };
+            let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{child}")) else {
+                break None;
+            };
+            if !self.eligible(repo, &issue) {
+                break Some(false);
+            }
+            match self.child_now(repo, child, &issue, &refs) {
+                Some(Now::Landed(pr)) => {
+                    let at = &mut list.children[index];
+                    at.merged_pr = Some(pr);
+                    at.waits = false;
+                    at.continued = None;
+                    ticked = true;
+                }
+                Some(_) => break Some(false),
+                None => break None,
+            }
+        };
+        self.splits.pop();
+        if ticked && !self.save_list(repo, &n.to_string(), &list) {
+            self.retry(repo);
+        }
+        done
+    }
+
+    /// What child `child` of a list is now, `issue` being it as GitHub has
+    /// it and `refs` its list ([`List::refs`]): the one rule every list's
+    /// child is read by. An open one is done only by a landing an author
+    /// recorded; a closed one by a merged PR tied to it, or its successor's.
+    /// None when it couldn't be told.
+    pub(super) fn child_now(
+        &mut self,
+        repo: &str,
+        child: u64,
+        issue: &Value,
+        refs: &[String],
+    ) -> Option<Now> {
+        if issue["state"] != "closed" {
+            return Some(
+                self.recorded_landing(repo, child)
+                    .map_or(Now::Open, Now::Landed),
+            );
+        }
+        if let Some(pr) = self.landed_child(repo, child, Some(issue))? {
+            return Some(Now::Landed(pr));
+        }
+        match self.successor(repo, issue, refs) {
+            Successor::Landed(pr) => Some(Now::Landed(pr)),
+            Successor::None => Some(Now::Closed(None)),
+            Successor::OnList(sibling) => Some(Now::Closed(Some(sibling))),
+            Successor::Open(to) => Some(Now::Continues(to)),
+            Successor::Unknown => None,
         }
     }
 

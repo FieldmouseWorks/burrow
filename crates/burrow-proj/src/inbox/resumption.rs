@@ -128,6 +128,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        splits: Vec::new(),
     };
     let mine = |d: &Path| files::job(d).as_deref() == Some(job.id);
     let drained = dirs(&inbox.state, "");
