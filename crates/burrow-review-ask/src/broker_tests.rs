@@ -19,9 +19,14 @@ fn door(dir: &Path, body: &str) -> Vec<String> {
 
 /// A broker for `askers` on `door`, serving at the socket it returns.
 fn broker(dir: &Path, askers: Vec<u32>, door: Vec<String>) -> (Arc<Broker>, PathBuf) {
+    serving(dir, Broker::bare(askers, door))
+}
+
+/// `broker`, serving at the socket it returns.
+fn serving(dir: &Path, broker: Broker) -> (Arc<Broker>, PathBuf) {
     let socket = dir.join("door.sock");
     let listener = bind(&socket).unwrap();
-    let broker = Arc::new(Broker::bare(askers, door));
+    let broker = Arc::new(broker);
     let serving = broker.clone();
     thread::spawn(move || serving.serve(&listener));
     (broker, socket)
@@ -168,6 +173,93 @@ fn a_door_past_its_limit_is_stopped_and_fails() {
     assert!(reply.said.contains("time limit"), "{}", reply.said);
     thread::sleep(Duration::from_secs(4));
     assert!(!posted.exists());
+}
+
+/// The one line the broker answers `stream` with, read within `within`.
+fn answer_within(stream: &UnixStream, within: Duration) -> Reply {
+    stream.set_read_timeout(Some(within)).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(line.trim_end()).unwrap()
+}
+
+#[test]
+fn anyone_else_is_refused_before_anything_is_read_from_them() {
+    // A peer that may not ask and sends nothing is answered at once: it's
+    // never waited on, and holds no thread of the broker's.
+    let dir = TempDir::new().unwrap();
+    let (_, socket) = broker(
+        dir.path(),
+        vec![me().wrapping_add(1)],
+        door(dir.path(), "exit 0"),
+    );
+    let held: Vec<UnixStream> = (0..64)
+        .map(|_| UnixStream::connect(&socket).unwrap())
+        .collect();
+    for stream in &held {
+        let reply = answer_within(stream, Duration::from_secs(2));
+        assert!(reply.said.contains("may not ask"), "{}", reply.said);
+    }
+}
+
+#[test]
+fn a_request_trickled_in_is_cut_off_at_its_deadline() {
+    let dir = TempDir::new().unwrap();
+    let mut b = Broker::bare(vec![me()], door(dir.path(), "exit 0"));
+    b.request = Duration::from_secs(1);
+    let (_, socket) = serving(dir.path(), b);
+    let stream = UnixStream::connect(&socket).unwrap();
+    let at = Instant::now();
+    let trickle = {
+        let stream = stream.try_clone().unwrap();
+        thread::spawn(move || {
+            for _ in 0..20 {
+                if (&stream).write_all(b"{").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    let reply = answer_within(&stream, Duration::from_secs(10));
+    assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
+    assert_eq!(reply.code, 1, "{reply:?}");
+    assert!(reply.said.contains("didn't come in time"), "{}", reply.said);
+    drop(stream);
+    trickle.join().unwrap();
+}
+
+#[test]
+fn past_the_most_asks_in_hand_another_is_refused_at_once() {
+    let dir = TempDir::new().unwrap();
+    let mut b = Broker::bare(vec![me()], door(dir.path(), "exit 0"));
+    b.most = 2;
+    b.request = Duration::from_secs(30);
+    let (_, socket) = serving(dir.path(), b);
+    // Two asks in hand, their requests not yet sent.
+    let first = UnixStream::connect(&socket).unwrap();
+    let second = UnixStream::connect(&socket).unwrap();
+    let third = UnixStream::connect(&socket).unwrap();
+    let reply = answer_within(&third, Duration::from_secs(2));
+    assert!(
+        reply.said.contains("2 asks are in hand already"),
+        "{}",
+        reply.said
+    );
+    // One let go, and the next is taken.
+    drop(first);
+    let mut taken = None;
+    for _ in 0..50 {
+        let reply = ask(&socket, &request(5), WAIT);
+        if !reply.said.contains("in hand already") {
+            taken = Some(reply);
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let taken = taken.expect("an ask let go is never freed");
+    assert_eq!(taken.code, 0, "{taken:?}");
+    drop(second);
 }
 
 #[test]

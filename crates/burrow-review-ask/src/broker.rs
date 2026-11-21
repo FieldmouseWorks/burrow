@@ -30,7 +30,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +43,10 @@ pub const DOOR: Duration = Duration::from_secs(150);
 pub const WAIT: Duration = Duration::from_secs(170);
 /// The most of a request, or of what the door prints, that's read.
 const MOST: u64 = 64 << 10;
+/// How long an asker has to send its whole request, however it trickles in.
+const REQUEST: Duration = Duration::from_secs(10);
+/// The most asks in hand at once, past which another is refused at once.
+const ASKS: usize = 16;
 
 /// What the machine's flake gives the broker (review-ask.nix).
 #[derive(Debug, Deserialize)]
@@ -95,6 +99,12 @@ pub struct Broker {
     fences: Option<Fences>,
     /// The heads whose doors are running, by [`key`].
     live: Mutex<HashSet<String>>,
+    /// How long an asker has to send its request ([`REQUEST`]).
+    pub request: Duration,
+    /// The most asks in hand at once ([`ASKS`]).
+    pub most: usize,
+    /// The asks in hand.
+    asks: Arc<AtomicUsize>,
 }
 
 /// The doors' fences, `door-N` under the broker's own cgroup, each entered
@@ -189,6 +199,9 @@ impl Broker {
             limit: DOOR,
             fences: Some(fences),
             live: Mutex::default(),
+            request: REQUEST,
+            most: ASKS,
+            asks: Arc::default(),
         }
     }
 
@@ -201,18 +214,42 @@ impl Broker {
             limit: DOOR,
             fences: None,
             live: Mutex::default(),
+            request: REQUEST,
+            most: ASKS,
+            asks: Arc::default(),
         }
     }
 
     /// Serve every connection, each on its own thread, until accepting
-    /// fails for good.
+    /// fails for good. A peer that may not ask is answered here, before
+    /// anything is read from it, and never gets a thread; past
+    /// [`Broker::most`] asks in hand, so is one that may.
     pub fn serve(self: Arc<Self>, listener: &UnixListener) -> io::Result<()> {
         use rustix::io::Errno;
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    if let Some(refusal) = self.refusal(&stream) {
+                        say(&stream, &refusal);
+                        continue;
+                    }
+                    let Some(held) = Held::take(&self.asks, self.most) else {
+                        say(
+                            &stream,
+                            &Reply::failed(format!(
+                                "the owner's door's broker: {} asks are in hand already",
+                                self.most
+                            )),
+                        );
+                        continue;
+                    };
                     let me = self.clone();
-                    thread::spawn(move || me.connection(stream));
+                    // Short of threads: the connection closes, unanswered,
+                    // and its ask isn't held.
+                    let _ = thread::Builder::new().spawn(move || {
+                        let _held = held;
+                        me.connection(stream);
+                    });
                 }
                 // Short of descriptors or memory, or a peer gone before it
                 // was accepted: wait a moment.
@@ -234,49 +271,37 @@ impl Broker {
         }
     }
 
+    /// Why the peer may not ask, if it may not.
+    fn refusal(&self, stream: &UnixStream) -> Option<Reply> {
+        match rustix::net::sockopt::socket_peercred(stream) {
+            Ok(cred) if self.askers.contains(&cred.uid.as_raw()) => None,
+            Ok(cred) => Some(Reply::failed(format!(
+                "the owner's door's broker: uid {} may not ask",
+                cred.uid.as_raw()
+            ))),
+            Err(e) => Some(Reply::failed(format!(
+                "the owner's door's broker: its peer can't be told: {e}"
+            ))),
+        }
+    }
+
     /// One asker's connection, to its end.
     pub fn connection(&self, stream: UnixStream) {
-        let reply = match self.answer(&stream) {
-            Some(reply) => reply,
-            // The asker went away: nothing to say.
-            None => return,
-        };
-        let mut line = serde_json::to_vec(&reply).unwrap_or_default();
-        line.push(b'\n');
-        let _ = (&stream).write_all(&line);
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+        if let Some(reply) = self.answer(&stream) {
+            say(&stream, &reply);
+        }
     }
 
     fn answer(&self, stream: &UnixStream) -> Option<Reply> {
-        // The request is read before the peer is checked, so that one
-        // refused reads why rather than a broken pipe; the client sends it
-        // as soon as it connects.
-        let mut read = BufReader::new(stream.try_clone().ok()?);
-        let mut line = String::new();
-        let got = stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .and_then(|()| (&mut read).take(MOST).read_line(&mut line))
-            .and_then(|_| stream.set_read_timeout(None));
-        match rustix::net::sockopt::socket_peercred(stream) {
-            Ok(cred) if self.askers.contains(&cred.uid.as_raw()) => {}
-            Ok(cred) => {
-                return Some(Reply::failed(format!(
-                    "the owner's door's broker: uid {} may not ask",
-                    cred.uid.as_raw()
-                )));
-            }
-            Err(e) => {
-                return Some(Reply::failed(format!(
-                    "the owner's door's broker: its peer can't be told: {e}"
-                )));
-            }
-        }
-        if let Err(e) = got {
-            return Some(Reply::failed(format!("the owner's door's broker: {e}")));
-        }
+        let line = match request_line(stream, Instant::now() + self.request) {
+            Ok(line) => line,
+            Err(e) => return Some(Reply::failed(format!("the owner's door's broker: {e}"))),
+        };
+        // The asker went away before it asked: nothing to say.
         if line.is_empty() {
             return None;
         }
+        let read = BufReader::new(stream.try_clone().ok()?);
         let request: Request = match serde_json::from_str(line.trim_end()) {
             Ok(r) => r,
             Err(e) => {
@@ -427,6 +452,91 @@ pub fn main(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", cfg.socket.display()))
 }
 
+/// An ask in hand, counted while it's held.
+struct Held(Arc<AtomicUsize>);
+
+impl Held {
+    /// One more ask in hand, unless `most` are already.
+    fn take(asks: &Arc<AtomicUsize>, most: usize) -> Option<Self> {
+        asks.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            (n < most).then_some(n + 1)
+        })
+        .ok()
+        .map(|_| Self(asks.clone()))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Send `reply` as one line and end the connection. On a connection just
+/// accepted its few bytes fit the socket's buffer; the write's timeout
+/// bounds it anyway.
+fn say(stream: &UnixStream, reply: &Reply) {
+    let mut line = serde_json::to_vec(reply).unwrap_or_default();
+    line.push(b'\n');
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = (&*stream).write_all(&line);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// The request's one line, without its newline, read by `until` however it
+/// trickles in, and at most [`MOST`] bytes: empty if the asker went before
+/// it sent a byte.
+fn request_line(stream: &UnixStream, until: Instant) -> io::Result<String> {
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the request didn't come in time",
+            ));
+        }
+        stream.set_read_timeout(Some(left))?;
+        let n = match (&*stream).read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            return if got.is_empty() {
+                Ok(String::new())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the request was cut off",
+                ))
+            };
+        }
+        got.extend_from_slice(&buf[..n]);
+        if let Some(end) = got.iter().position(|b| *b == b'\n') {
+            got.truncate(end);
+            stream.set_read_timeout(None)?;
+            return String::from_utf8(got)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+        if got.len() as u64 > MOST {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the request is too long",
+            ));
+        }
+    }
+}
+
 /// Ask through the broker at `socket`: its reply, or the client's own
 /// failure as one.
 pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Reply {
@@ -434,7 +544,9 @@ pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Reply {
         let stream = UnixStream::connect(socket)?;
         let mut line = serde_json::to_vec(request)?;
         line.push(b'\n');
-        (&stream).write_all(&line)?;
+        // A broker that refused this asker may have answered and closed
+        // before the request went: its answer is read all the same.
+        let wrote = (&stream).write_all(&line);
         // Nothing more is sent, and the write side stays open: its end is
         // this asker gone.
         stream.set_read_timeout(Some(wait))?;
@@ -443,7 +555,9 @@ pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Reply {
             .take(MOST * 2)
             .read_line(&mut reply)?;
         if reply.is_empty() {
-            return Err(io::Error::other("it closed the connection with no answer"));
+            return Err(wrote
+                .err()
+                .unwrap_or_else(|| io::Error::other("it closed the connection with no answer")));
         }
         Ok(serde_json::from_str(reply.trim_end())?)
     })();
