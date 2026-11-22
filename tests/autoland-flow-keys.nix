@@ -79,6 +79,8 @@ pkgs.testers.runNixOSTest {
       systemd.services.autoland-judge.wantedBy = lib.mkForce [ ];
       users.users.dev.isNormalUser = true;
       environment.systemPackages = [ pkgs.jq ];
+      # No GitHub here: a pass would fail, and a switch with it.
+      burrow.events.enable = lib.mkForce false;
       # Another base, to switch to: one setting of the steward's changed.
       specialisation.rebased.configuration.burrow.autoland.labels.hold = "parked";
     };
