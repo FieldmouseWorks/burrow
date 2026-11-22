@@ -309,7 +309,8 @@ Each has an entry below, and each can be imported on its own.
   passes' own wake-ups (a settle delay, a review that hasn't come) kick them
   locally, and so does a switch that changes a handler's
   units. systemd holds the socket deliveries come in on, so one sent while
-  burrow-events restarts waits for it. The one timer is an hourly catch-up,
+  burrow-events restarts waits for it, and one it had taken is answered
+  before it stops. The one timer is an hourly catch-up,
   for deliveries GitHub never resends and repos too new to have a hook.
 - **`autoland`** (`burrow.autoland`): The PR steward for every repo you own:
   Codex reviews each ready PR through its GitHub connector (on the owner's

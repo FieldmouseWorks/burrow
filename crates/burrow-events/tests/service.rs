@@ -294,6 +294,8 @@ fn a_stalled_client_holds_a_stop_up_only_so_long() {
     let _stalled = half_sent(svc.port("deliveries on 127.0.0.1:"));
     svc.stop();
     assert!(svc.running(), "it went with a delivery unanswered");
+    // Ten seconds, which is as long as `said` waits.
+    thread::sleep(Duration::from_secs(5));
     svc.said("burrow-events: stopping with a delivery unanswered");
     assert!(svc.child.wait().unwrap().success());
 }
@@ -308,7 +310,11 @@ fn an_idle_stop_is_at_once() {
         let mut svc = Service::start(dir.path(), config, &creds);
         svc.said("kicks on");
         svc.stop();
-        assert!(!svc.running(), "still up");
+        // Short of what a stop waits for a delivery.
+        let end = Instant::now() + Duration::from_secs(5);
+        while svc.running() {
+            assert!(Instant::now() < end, "still up");
+        }
         assert!(svc.child.wait().unwrap().success());
     }
 }

@@ -401,6 +401,10 @@ in
         ExecStart = "${package}/bin/burrow-events";
         Restart = "always";
         RestartSec = 5;
+        # A stop tells only the service, which answers what it took before it
+        # exits (crates/burrow-events' taken.rs): a systemctl of its own
+        # killed meanwhile would read as that pass failed.
+        KillMode = "mixed";
         # Each told handler's DIR/INSTANCE, which its pass (another user)
         # reads.
         RuntimeDirectory = lib.mkIf (told != { }) "burrow-events";

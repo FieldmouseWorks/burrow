@@ -2,8 +2,9 @@
 //! config, and the webhook's secret is the `webhook` credential.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::{env, fs};
@@ -13,7 +14,10 @@ use burrow_events::line::{DEBOUNCE, Line, Pass};
 use burrow_events::outbox::Outbox;
 use burrow_events::passes::{Systemctl, Yields, check_yields, refresh, serve};
 use burrow_events::routes::{Handlers, Lines, delivery, kick};
+use burrow_events::taken::{DRAIN, Taken};
 use burrow_events::{http, now, supervise};
+use signal_hook::consts::SIGTERM;
+use signal_hook::iterator::Signals;
 
 fn main() -> ExitCode {
     match run() {
@@ -29,6 +33,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// On SIGTERM, answer the deliveries `taken` and exit.
+fn exit_on_stop(taken: Taken) -> io::Result<()> {
+    let mut signals = Signals::new([SIGTERM])?;
+    thread::Builder::new().spawn(move || {
+        if signals.forever().next().is_some() {
+            if !taken.stop(DRAIN) {
+                eprintln!("burrow-events: stopping with a delivery unanswered");
+            }
+            process::exit(0);
+        }
+    })?;
+    Ok(())
 }
 
 /// Start the listeners and the handlers' lines: the threads the service
@@ -57,6 +75,8 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
         line.event(Pass::Full, now() - DEBOUNCE); // catching up
     }
     let mut threads = Vec::new();
+    let taken = Taken::default();
+    exit_on_stop(taken.clone()).map_err(|e| format!("SIGTERM: {e}"))?;
 
     // GitHub's deliveries, where the machine takes them (a host and a secret).
     if cfg.deliveries {
@@ -72,6 +92,7 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
                 http::serve(
                     listener,
                     Arc::new(move |req| delivery(&h, &l, o.as_deref(), &secret, req)),
+                    taken,
                 )
             })
             .map_err(|e| format!("deliveries: {e}"))?;

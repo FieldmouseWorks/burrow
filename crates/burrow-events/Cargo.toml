@@ -10,9 +10,11 @@ publish.workspace = true
 burrow-github = { path = "../burrow-github" }
 burrow-settings = { path = "../burrow-settings" }
 hmac = "0.13.0"
+rustix = { version = "1.1.6", features = ["event"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+signal-hook = { version = "0.4.0", default-features = false, features = ["iterator"] }
 
 [dev-dependencies]
 burrow-test = { path = "../burrow-test" }
