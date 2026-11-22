@@ -1,6 +1,6 @@
 //! The workspace has one way to install executable fixtures. Follow test
 //! modules from Cargo's entry points, including helpers with arbitrary names.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,10 +31,41 @@ pub(crate) fn test_attrs(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// Whether only `cargo test` compiles what has these attributes. Narrower
+/// than `test_attrs`: what `any(test, feature = "fake")` holds is also built
+/// for whoever turns the feature on.
+fn only_test(attrs: &[syn::Attribute]) -> bool {
+    fn cfg(meta: &syn::Meta) -> bool {
+        let every = meta.path().is_ident("all");
+        match meta {
+            syn::Meta::Path(p) => p.is_ident("test"),
+            syn::Meta::List(l) if every || l.path.is_ident("any") => l
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|args| {
+                    if every {
+                        args.iter().any(cfg)
+                    } else {
+                        !args.is_empty() && args.iter().all(cfg)
+                    }
+                }),
+            _ => false,
+        }
+    }
+    attrs
+        .iter()
+        .any(|a| a.path().is_ident("cfg") && a.parse_args::<syn::Meta>().is_ok_and(|m| cfg(&m)))
+}
+
 struct Guard {
     file: PathBuf,
     modules: PathBuf,
     testing: bool,
+    /// Whether only `cargo test` compiles what's being visited.
+    only_test: bool,
+    /// Each file read, and whether that held every time it was.
+    read: BTreeMap<PathBuf, bool>,
     findings: BTreeSet<String>,
     /// Each file's stand-ins: what its `executable` calls named.
     installed: BTreeSet<(PathBuf, Name)>,
@@ -55,6 +86,8 @@ impl Guard {
             file,
             modules: PathBuf::new(),
             testing,
+            only_test: false,
+            read: BTreeMap::new(),
             findings: BTreeSet::new(),
             installed: BTreeSet::new(),
             written: BTreeSet::new(),
@@ -97,10 +130,23 @@ impl Guard {
         }
     }
 
+    fn note(&mut self, file: &Path, attrs: &[syn::Attribute]) {
+        self.only_test |= only_test(attrs);
+        // One file, however a #[path] spells it.
+        let file = fs::canonicalize(file).unwrap();
+        *self.read.entry(file).or_insert(true) &= self.only_test;
+    }
+
     fn file(&mut self, file: &Path, testing: bool) {
         let text = fs::read_to_string(file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
         let ast = syn::parse_file(&text).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-        let old = (self.file.clone(), self.modules.clone(), self.testing);
+        let old = (
+            self.file.clone(),
+            self.modules.clone(),
+            self.testing,
+            self.only_test,
+        );
+        self.note(file, &ast.attrs);
         self.file = file.into();
         self.modules = file.parent().unwrap().into();
         if !matches!(
@@ -111,14 +157,15 @@ impl Guard {
         }
         self.testing = testing || test_attrs(&ast.attrs);
         self.visit_file(&ast);
-        (self.file, self.modules, self.testing) = old;
+        (self.file, self.modules, self.testing, self.only_test) = old;
     }
 }
 
 impl<'ast> Visit<'ast> for Guard {
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        let old = (self.modules.clone(), self.testing);
+        let old = (self.modules.clone(), self.testing, self.only_test);
         self.testing |= test_attrs(&m.attrs);
+        self.only_test |= only_test(&m.attrs);
         if let Some((_, items)) = &m.content {
             self.modules.push(m.ident.to_string());
             self.uses.enter(Kind::Module, items.iter());
@@ -152,7 +199,7 @@ impl<'ast> Visit<'ast> for Guard {
             });
             self.file(&file, self.testing);
         }
-        (self.modules, self.testing) = old;
+        (self.modules, self.testing, self.only_test) = old;
     }
 
     fn visit_file(&mut self, f: &'ast syn::File) {
@@ -579,6 +626,20 @@ impl<'ast> Visit<'ast> for Shell {
 }
 
 fn check(root: &Path) -> BTreeSet<String> {
+    walk(root).finish()
+}
+
+/// The files under `root`'s members that only `cargo test` compiles, each by
+/// its canonical path.
+pub(crate) fn test_only(root: &Path) -> BTreeSet<PathBuf> {
+    walk(root)
+        .read
+        .into_iter()
+        .filter_map(|(file, only)| only.then_some(file))
+        .collect()
+}
+
+fn walk(root: &Path) -> Guard {
     let mut guard = Guard::new(PathBuf::new(), false);
     for entry in fs::read_dir(root).unwrap() {
         let dir = entry.unwrap().path();
@@ -588,6 +649,7 @@ fn check(root: &Path) -> BTreeSet<String> {
         for name in ["src/lib.rs", "src/main.rs"] {
             let file = dir.join(name);
             if file.exists() {
+                guard.only_test = false;
                 guard.file(&file, false);
             }
         }
@@ -598,6 +660,7 @@ fn check(root: &Path) -> BTreeSet<String> {
             }
             for e in fs::read_dir(path).unwrap() {
                 let file = e.unwrap().path();
+                guard.only_test = testing;
                 if file.extension().is_some_and(|e| e == "rs") {
                     // Cargo entry points resolve sibling modules from their directory.
                     let text = fs::read_to_string(&file).unwrap();
@@ -605,6 +668,7 @@ fn check(root: &Path) -> BTreeSet<String> {
                     guard.file = file.clone();
                     guard.modules = file.parent().unwrap().into();
                     guard.testing = testing || test_attrs(&ast.attrs);
+                    guard.note(&file, &ast.attrs);
                     guard.visit_file(&ast);
                 } else if file.is_dir() && file.join("main.rs").exists() {
                     guard.file(&file.join("main.rs"), testing);
@@ -612,7 +676,7 @@ fn check(root: &Path) -> BTreeSet<String> {
             }
         }
     }
-    guard.finish()
+    guard
 }
 
 #[cfg(test)]

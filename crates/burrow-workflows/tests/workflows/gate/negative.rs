@@ -24,8 +24,8 @@ use crate::harness::{read, repo_file, script, step, steps, text, workflow, write
 /// The flake's inputs, in the store apart the failing evaluation tries
 /// again in.
 mod inputs;
-/// Which of burrow's own files it has to take as tests: a tests-only
-/// crate's, all of them.
+/// Which of burrow's own files it has to take as tests: each one only
+/// `cargo test` compiles.
 mod layout;
 /// Which new tests count as having passed on the old code: those a check
 /// that passed runs.
