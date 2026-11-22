@@ -126,7 +126,7 @@ let
     # The live configs are where every reader reads them, and are rendered
     # at boot, each switch and each change to the role settings.
     liveRead = on.burrow.autoland.flowConfigs == "/var/lib/burrow/flow-configs"
-      && on.burrow.autoland.plugins.fix.config.flow == on.burrow.autoland.flowConfigs
+      && jobbed.burrow.autoland.plugins.fix.config.flow == jobbed.burrow.autoland.flowConfigs
       && on.burrow.autoland.plugins.proof.config.flow == on.burrow.autoland.flowConfigs
       && judged.burrow.autoland.plugins.judge.config.flow == judged.burrow.autoland.flowConfigs;
     rendered = let r = on.systemd; in
