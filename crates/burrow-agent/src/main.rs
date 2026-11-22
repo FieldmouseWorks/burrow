@@ -177,6 +177,11 @@ fn run(agent: &Agent, w: &[String]) -> Result<(), Stop> {
             }
         }
         "_hold" => hold()?,
+        "_jobs" => {
+            let socket = id("_jobs SOCKET")?;
+            let (from, mut to) = (std::io::stdin().lock(), std::io::stdout().lock());
+            plugin::jobs::pass(Path::new(&socket), from, &mut to)?;
+        }
         "start" => {
             agent.as_root(w)?;
             let sb = Sandbox::find(cfg, &id("start ID")?)?;

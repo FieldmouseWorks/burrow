@@ -92,8 +92,10 @@ pub(crate) fn save(agent: &Agent, call: &Path, sandbox: &Sandbox) -> Result<Stri
 }
 
 /// After a call, once nothing of it runs: saves its clone's work if the
-/// call didn't get to, then deletes it. One it can't save stays, as a
-/// sandbox `agent ls` shows.
+/// call didn't get to, then deletes it. One it can't save is kept on
+/// purpose, as a sandbox `agent ls` shows, and that's no failure of the
+/// unit's: the plugin decides what its repository holds, and a failed unit
+/// is a job for the machine (burrow-units).
 pub fn end(agent: &Agent, call: &Path) -> Result<(), String> {
     let made = call.join(MADE);
     if !made.exists() {
@@ -101,7 +103,34 @@ pub fn end(agent: &Agent, call: &Path) -> Result<(), String> {
     }
     let sandbox = Sandbox::find(agent.cfg, &crate::read(&made)?)?;
     if !call.join(SAVED).exists() {
-        eprintln!("{}: {}", sandbox.id, save(agent, call, &sandbox)?);
+        match save(agent, call, &sandbox) {
+            Ok(saved) => eprintln!("{}: {saved}", sandbox.id),
+            Err(kept) => {
+                eprintln!("{}: {kept}", sandbox.id);
+                return Ok(());
+            }
+        }
     }
     sandbox.destroy(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clone_that_cant_be_saved_is_kept_without_failing_the_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::new::tests::config(dir.path());
+        let sandbox = cfg.root.join("web-1");
+        fs::create_dir_all(&sandbox).unwrap();
+        fs::write(sandbox.join(sandbox::PROJECT), "web\n").unwrap();
+        let call = dir.path().join("call");
+        fs::create_dir(&call).unwrap();
+        fs::write(call.join(MADE), "web-1\n").unwrap();
+        // No clone and no such account: nothing can be saved here.
+        let agent = Agent::new(&cfg, Path::new("/nonexistent.json")).unwrap();
+        assert_eq!(end(&agent, &call), Ok(()));
+        assert!(sandbox.is_dir() && !call.join(SAVED).exists());
+    }
 }

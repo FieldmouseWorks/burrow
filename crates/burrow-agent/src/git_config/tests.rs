@@ -44,6 +44,15 @@ fn no_login_survives_in_a_kept_value() {
     ] {
         assert_eq!(keep(key, value).as_deref(), Some(kept), "{key} {value}");
     }
+    // Either mark could be the password's own.
+    for url in [
+        "https://user:sec#ret@example.com/o/r",
+        "https://user:sec?ret@example.com/o/r",
+        "https://example.com/o/r?by=a@b&token=secret",
+        "https://user:se#cr/et@example.com/o/r",
+    ] {
+        assert_eq!(keep("remote.origin.url", url), None, "{url}");
+    }
     for key in [
         "http.https://example.com/.extraheader",
         "http.extraheader",
@@ -56,6 +65,7 @@ fn no_login_survives_in_a_kept_value() {
         "remote.origin.pushurl",
         "user.name",
         "remote.https://secret@example.com/o/r.fetch",
+        "branch.x.description",
     ] {
         assert_eq!(keep(key, "secret"), None, "{key}");
     }
@@ -69,6 +79,9 @@ fn every_config_of_the_repository_is_rewritten() {
         "config",
         "config.worktree",
         "modules/vendor/x/config",
+        // Submodules named as git's own directories are.
+        "modules/logs/config",
+        "modules/vendor/objects/config",
         "worktrees/w/config.worktree",
     ];
     for config in configs {
@@ -82,6 +95,7 @@ fn every_config_of_the_repository_is_rewritten() {
         .unwrap();
     }
     // A branch by that name is no config.
+    fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
     fs::create_dir_all(git.join("refs/heads")).unwrap();
     fs::write(git.join("refs/heads/config"), "0000\n").unwrap();
     let mut cfg = crate::new::tests::config(dir.path());

@@ -17,10 +17,16 @@ use crate::{Agent, Engine, Plugin};
 static MAKING: Mutex<()> = Mutex::new(());
 
 /// One call: `engine`'s, with `call` its directory. What went wrong is the
-/// caller's to hear, so the service itself only fails when it can't tell.
+/// caller's to hear, so it never fails the service's unit.
 pub fn serve(agent: &Agent, engine: &str, call: &Path) -> Result<(), String> {
-    let header: Option<Header> = receive(&mut io::stdin().lock())?;
-    let Some(header) = header else { return Ok(()) };
+    let header: Header = match receive(&mut io::stdin().lock()) {
+        Ok(Some(header)) => header,
+        Ok(None) => return Ok(()),
+        Err(why) => {
+            let _ = send(&mut io::stdout().lock(), &Frame::Failed(why));
+            return Ok(());
+        }
+    };
     std::thread::spawn(|| {
         let mut rest = [0; 512];
         loop {

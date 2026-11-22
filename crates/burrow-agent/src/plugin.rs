@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod guest;
+pub mod jobs;
 pub mod render;
 pub mod serve;
 pub mod vm;

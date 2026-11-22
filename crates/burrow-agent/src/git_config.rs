@@ -37,16 +37,18 @@ pub fn sanitize(agent: &Agent, git: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// git's directories under `dir` that aren't objects, refs or logs, where
-/// a branch can be called `config`.
+/// git's configs under `dir`. A git directory's own objects, refs and logs
+/// are left, where a branch can be called `config`. A submodule can be
+/// called any of those.
 fn find(dir: &Path, into: &mut Vec<PathBuf>) -> Result<(), String> {
     let io = |e: std::io::Error| format!("{}: {e}", dir.display());
+    let git_dir = dir.join("HEAD").is_file();
     for entry in fs::read_dir(dir).map_err(io)? {
         let entry = entry.map_err(io)?;
         let (name, kind) = (entry.file_name(), entry.file_type().map_err(io)?);
         let is = |names: &[&str]| names.iter().any(|n| name == *n);
         if kind.is_dir() {
-            if !is(&["objects", "refs", "logs"]) {
+            if !(git_dir && is(&["objects", "refs", "logs"])) {
                 find(&entry.path(), into)?;
             }
         } else if is(&["config", "config.worktree"]) {
@@ -102,16 +104,17 @@ fn keep(key: &str, value: &str) -> Option<String> {
         )
         | ("remote", "fetch") => Some(value.to_owned()),
         // Either can be a URL in a name's place.
-        ("branch", "remote") | ("remote" | "submodule", "url") => Some(without_login(value)),
+        ("branch", "remote") | ("remote" | "submodule", "url") => without_login(value),
         _ => None,
     }
 }
 
-/// `url` with no user, password or query.
-fn without_login(url: &str) -> String {
+/// `url` with no user, password or query, or None where which part is
+/// which can't be told.
+fn without_login(url: &str) -> Option<String> {
     let Some((scheme, rest)) = url.split_once("://") else {
         // scp's user@host:path: the user goes too, in case it's a token.
-        return match url.split_once(':') {
+        return Some(match url.split_once(':') {
             Some((host, path)) if !host.contains('/') => {
                 let host = host.rsplit('@').next().unwrap_or(host);
                 match path.rsplit_once('@') {
@@ -120,11 +123,17 @@ fn without_login(url: &str) -> String {
                 }
             }
             _ => url.to_owned(),
-        };
+        });
     };
+    // An `@` past a `?` or `#`: either could be the password's.
+    if let (Some(mark), Some(at)) = (rest.find(['?', '#']), rest.rfind('@'))
+        && mark < at
+    {
+        return None;
+    }
     let rest = rest.split(['?', '#']).next().unwrap_or("");
     let host = rest.rsplit('@').next().unwrap_or(rest);
-    format!("{scheme}://{host}")
+    Some(format!("{scheme}://{host}"))
 }
 
 #[cfg(test)]

@@ -64,8 +64,8 @@ Never granted, whatever a plugin declares or the owner lists: a GitHub token
 or the App's installation authority (`github`, and `environment`, the login
 environment that carries them), a write to the settings store, and plugin
 installation. What a job is authorized to do that needs those reaches it only
-through host-mediated services: proj's jobs socket, the probe, heavy slots
-and the MCP servers below.
+through host-mediated services: proj's jobs socket (to read), the probe,
+heavy slots and the MCP servers below.
 
 `mcp` by itself reaches no server. A plugin granted it reaches those of
 `burrow.mcpServers` that its engine's
@@ -113,7 +113,7 @@ What each grant is in the VM:
 | --- | --- |
 | `workspace` | A clone of the project the `workdir` is in, at the same path. The work comes back as `agent fetch` brings it, to `refs/agents/ID/`, and the clone is deleted; one that can't be saved is kept for `agent ls`. |
 | `git-metadata` | That clone's `.git`, its configs cut to what names branches and remotes, without logins. Ungranted, it's covered from outside the VM. |
-| `job-state` | proj's jobs socket, at `PROJ_HOST_JOBS_SOCKET`. Never the job's directory. |
+| `job-state` | proj's jobs socket at `PROJ_HOST_JOBS_SOCKET`, for `status`, `state`, `lifecycle`, `log` and `list` alone: a plugin that could `reply` into a host job would have that job's authority. Never the job's directory. |
 | `probe` | proj's probe socket, at `PROJ_PROBE_SOCKET`. |
 | `units-clear` | The unit watch's socket, at `UNITS_CLEAR_SOCKET`. |
 | `heavy` | `heavy -- COMMAND`: the host takes a slot and holds it while the command runs. |

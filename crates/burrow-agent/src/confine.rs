@@ -23,7 +23,8 @@ fn confined(agent: &Agent, mut command: Command, bind: impl FnOnce(&mut Command)
         .args(["--ro-bind-try", "/bin", "/bin"])
         .args(["--ro-bind-try", "/etc/passwd", "/etc/passwd"])
         .args(["--ro-bind-try", "/etc/localtime", "/etc/localtime"])
-        .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+        .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
+        .args(["--setenv", "TMPDIR", "/tmp"]);
     bind(&mut command);
     command
         .args(["--chdir", "/", "--"])
@@ -65,6 +66,11 @@ pub fn save(agent: &Agent, sb: &Sandbox) -> Result<i32, String> {
         c.arg("--ro-bind").arg(&clone).arg(&clone);
         if plain_dir(&repo) {
             c.arg("--bind").arg(&repo).arg(&repo);
+            // It brings refs and objects, never what the host's git runs.
+            for part in ["config", "hooks"] {
+                let at = repo.join(part);
+                c.arg("--ro-bind-try").arg(&at).arg(&at);
+            }
         }
     });
     let status = command

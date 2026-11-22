@@ -100,6 +100,12 @@ fn every_grant_has_its_own_form() {
             .map(|name| format!("/run/agent/{name}.sock"))
     );
     assert_eq!(a.closures.len(), 3);
+    // proj's jobs socket is never passed through whole.
+    assert!(
+        matches!(a.services[0].does, Does::Jobs(_)),
+        "{:?}",
+        a.services[0]
+    );
     // The approved server, and not the one that acts as the owner.
     let servers: serde_json::Value = serde_json::from_str(&a.env["PROJ_MCP_SERVERS"]).unwrap();
     assert_eq!(

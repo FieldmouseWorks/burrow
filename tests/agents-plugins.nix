@@ -193,6 +193,9 @@ pkgs.testers.runNixOSTest {
             "asks": [
                 ["settings", "pause", "o/demo"], ["engines", "use", "another"],
                 ["run", "demo", "install a plugin"],
+                # Into a host job, which has the authority the plugin hasn't.
+                ["reply", "bystander", "change the settings"], ["stop", "bystander"],
+                ["withdraw", "bystander"],
             ],
         }
         return {**base, **more}
@@ -291,9 +294,9 @@ pkgs.testers.runNixOSTest {
         assert full["said"]["mcp"].strip() == "dev registry-setting no-token ping", full["said"]["mcp"]
 
     with subtest("it can't change settings or install a plugin"):
-        assert len(full["asked"]) == 3, full["asked"]
+        assert len(full["asked"]) == 6, full["asked"]
         for answer in full["asked"]:
-            assert "unsupported command" in answer, answer
+            assert "job-state only reads" in answer, answer
         assert host_state() == before
         host.fail("test -e /etc/systemd/system/plugin-installed.service")
         for name in ["github", "environment", "github-token", "settings-write", "plugin-install", "mcp:signed-in"]:
@@ -348,6 +351,7 @@ pkgs.testers.runNixOSTest {
         host.fail(f"zfs list rpool/agents/{new[0].split('/')[2]}")
 
     with subtest("links it plants in its repository bring back nothing of another"):
+        host.succeed("systemctl reset-failed")
         planted = {
             ".git/objects/info/alternates": f"{OTHER}/.git/objects\n",
             ".git/refs/heads/stolen": f"{other_commit}\n",
@@ -365,6 +369,11 @@ pkgs.testers.runNixOSTest {
         assert found, said
         kept = found.group(1)
         assert kept in dev("agent ls")
+        # Keeping it is no failure: a failed unit would be a job for the
+        # machine, whenever a plugin liked.
+        no_call_left()
+        host.fail("systemctl --failed --plain --no-legend | grep agent-plugin")
+        host.fail(f"find {DEMO}/.git -name '*.lock' | grep .")
         host.fail(f"su - dev -c 'agent sh {kept} true'")
         host.fail(f"su - dev -c 'git -C {DEMO} cat-file -e {other_commit}'")
         # And that's the confinement's doing: the same save, unconfined,

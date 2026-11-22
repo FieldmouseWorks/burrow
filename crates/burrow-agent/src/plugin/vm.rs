@@ -358,7 +358,7 @@ fn host_service(agent: &Agent, does: &Does, listener: UnixListener) -> Result<()
     let cfg = agent.cfg;
     let (user, group, home) = (cfg.user.clone(), cfg.group.clone(), cfg.home.clone());
     let (path, does) = (agent.path.clone(), does.clone());
-    let hold = [agent.exe.clone(), agent.config.clone()];
+    let agent_itself = [agent.exe.clone(), agent.config.clone()];
     let open = Arc::new(AtomicUsize::new(0));
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -378,8 +378,17 @@ fn host_service(agent: &Agent, does: &Does, listener: UnixListener) -> Result<()
                         .args(["socat", "-t", "300", "FD:0"])
                         .arg(format!("UNIX-CONNECT:{}", name.to_string_lossy()));
                 }
+                Does::Jobs(to) => {
+                    let (Some(dir), Some(name)) = (to.parent(), to.file_name()) else {
+                        return;
+                    };
+                    c.current_dir(dir)
+                        .args(&agent_itself)
+                        .arg("_jobs")
+                        .arg(name);
+                }
                 Does::Heavy(heavy) => {
-                    c.arg(heavy).arg("--").args(&hold).arg("_hold");
+                    c.arg(heavy).arg("--").args(&agent_itself).arg("_hold");
                 }
                 Does::Server { command, args, env } => {
                     c.current_dir("/").arg(command).args(args).envs(env);

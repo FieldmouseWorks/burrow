@@ -32,6 +32,8 @@ pub(crate) enum Does {
     /// Passes it to this socket, connecting as the user, whom the socket's
     /// owner checks.
     Relay(PathBuf),
+    /// Passes it to proj's jobs socket if it only reads (jobs.rs).
+    Jobs(PathBuf),
     /// Holds a heavy slot for as long as it's open.
     Heavy(PathBuf),
     /// Runs this MCP server on it, as the user, with the registry's
@@ -133,11 +135,11 @@ impl Attach {
                 self.git_metadata = true;
             }
             // Never the job's directory: what's written there is proj's word
-            // on the job. Its part that a job uses is proj's jobs socket.
+            // on the job. And proj's jobs socket only to read (jobs.rs).
             Capability::JobState => {
                 let to = job_socket(&host.job_sockets, header.jobs.as_deref(), "host-jobs-")
                     .ok_or("the caller has no jobs socket of proj's")?;
-                let at = self.service("host-jobs", Does::Relay(to));
+                let at = self.service("host-jobs", Does::Jobs(to));
                 self.env.insert("PROJ_HOST_JOBS_SOCKET".to_owned(), at);
             }
             Capability::Probe => {

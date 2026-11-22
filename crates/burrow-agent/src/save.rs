@@ -115,7 +115,14 @@ pub fn save(agent: &Agent, sb: &Sandbox) -> Result<Saved, String> {
     out(plain()
         .arg("-C")
         .arg(&repo)
-        .args(["fetch", "-q", "--no-write-fetch-head"])
+        // No maintenance after it: that detaches, and dies half done, its
+        // locks left in the project's repository, with the confinement.
+        .args([
+            "fetch",
+            "-q",
+            "--no-write-fetch-head",
+            "--no-auto-maintenance",
+        ])
         .arg(t)
         .arg(format!("+refs/heads/*:refs/agents/{}/heads/*", sb.id))
         .arg(format!("+refs/worktree:refs/agents/{}/worktree", sb.id)))?;
