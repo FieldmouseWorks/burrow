@@ -1,0 +1,174 @@
+{
+  "conary": "note v1",
+  "change": "5e25w984vdy9n74hq17dka0njt",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 1412,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/1412",
+  "summary": "deps: lock file maintenance (nix)",
+  "task": null,
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "62d61992ddce7d5705dcd748b478c6ccf336a9fc7048f4301e47d95ee432c5f1",
+    "before": "8d0754e6db2e276ac2917656f00ca52745e904d2",
+    "after": "892b5ed2dae73ab3478da0df26e12ec964c6d294",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1795341121086
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "codeql / analyze (javascript-typescript)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333181/job/137143393029"
+    },
+    {
+      "kind": "ci",
+      "check": "train / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143330118"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143330108"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143330104"
+    },
+    {
+      "kind": "ci",
+      "check": "train / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143330023"
+    },
+    {
+      "kind": "ci",
+      "check": "train / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143329998"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485/job/137143307111"
+    },
+    {
+      "kind": "ci",
+      "check": "train-route",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143307055"
+    },
+    {
+      "kind": "ci",
+      "check": "codeql / pick",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333181/job/137143305906"
+    },
+    {
+      "kind": "ci",
+      "check": "renovate/stability-days",
+      "result": "pass",
+      "source": "https://docs.renovatebot.com/key-concepts/minimum-release-age/"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/branch (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "house/mention (#1412)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333485"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143367593"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143367558"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143367537"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137150238374"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/45001333385/job/137143367545"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/1412"
+    }
+  ]
+}
