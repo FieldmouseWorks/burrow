@@ -6,7 +6,7 @@
 # would stop counting the push's. It keeps flake.yml's name (the shared
 # workflow's concurrency group takes the two as one workflow, as autoland does by
 # these files' names), and its
-# call matches flake.yml's (crates/burrow-workflows/src/lane.rs).
+# call matches flake.yml's (crates/burrow-workflows/tests/workflows/lane.rs).
 name: flake
 on:
   pull_request:

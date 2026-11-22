@@ -54,7 +54,7 @@ runs now pay Nix setup as well. This is a cold provisioning cost, not just
 the one-second compilation figure; CI logs expose both costs explicitly.
 No runner executable is reused between invocations.
 
-The behavioral tests live in `burrow-workflows/src/gate`: they run the workflow's
+The behavioral tests live in `burrow-workflows/tests/workflows/gate`: they run the workflow's
 own steps with real git and Nix evaluation, including the private-store retry,
 base failures, fetches, signals, VM slots, memory limits and test coverage.
 

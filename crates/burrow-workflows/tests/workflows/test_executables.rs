@@ -24,7 +24,7 @@ fn test_cfg(meta: &syn::Meta) -> bool {
     }
 }
 
-fn test_attrs(attrs: &[syn::Attribute]) -> bool {
+pub(crate) fn test_attrs(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("test")
             || (a.path().is_ident("cfg") && a.parse_args::<syn::Meta>().is_ok_and(|m| test_cfg(&m)))
