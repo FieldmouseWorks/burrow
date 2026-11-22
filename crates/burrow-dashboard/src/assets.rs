@@ -141,8 +141,8 @@ pub mod tests {
     use super::*;
 
     /// This crate's shell.
-    pub fn shell() -> &'static Path {
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"))
+    pub fn shell() -> std::path::PathBuf {
+        burrow_test::manifest_dir!().join("assets")
     }
 
     /// A fonts directory with every font in it (stand-ins).
@@ -170,16 +170,16 @@ pub mod tests {
     #[test]
     fn every_font_has_to_be_there() {
         let dir = fonts();
-        assert!(Assets::load(shell(), dir.path()).is_ok());
+        assert!(Assets::load(&shell(), dir.path()).is_ok());
         fs::remove_file(dir.path().join(FONTS[0])).unwrap();
-        let err = Assets::load(shell(), dir.path()).err().unwrap();
+        let err = Assets::load(&shell(), dir.path()).err().unwrap();
         assert!(err.contains(FONTS[0]), "{err}");
     }
 
     #[test]
     fn the_worker_caches_the_shell_and_the_offline_page_only() {
         let dir = fonts();
-        let a = Assets::load(shell(), dir.path()).unwrap();
+        let a = Assets::load(&shell(), dir.path()).unwrap();
         let sw = a.service_worker();
         assert!(sw.contains(&format!("{:?}", a.version)));
         assert!(!sw.contains("@VERSION@") && !sw.contains("@SHELL@"));
@@ -192,9 +192,9 @@ pub mod tests {
     #[test]
     fn the_version_follows_the_files() {
         let dir = fonts();
-        let a = Assets::load(shell(), dir.path()).unwrap();
+        let a = Assets::load(&shell(), dir.path()).unwrap();
         fs::write(dir.path().join(FONTS[1]), b"changed").unwrap();
-        let b = Assets::load(shell(), dir.path()).unwrap();
+        let b = Assets::load(&shell(), dir.path()).unwrap();
         assert_ne!(a.version, b.version);
         assert_eq!(a.get("app.css").unwrap().1, "text/css; charset=utf-8");
         assert!(a.get("../etc/passwd").is_none());
@@ -203,7 +203,7 @@ pub mod tests {
     #[test]
     fn the_manifest_installs() {
         let dir = fonts();
-        let a = Assets::load(shell(), dir.path()).unwrap();
+        let a = Assets::load(&shell(), dir.path()).unwrap();
         let m: serde_json::Value = serde_json::from_str(&a.manifest("box")).unwrap();
         assert_eq!(m["display"], "standalone");
         assert_eq!(m["start_url"], "/");

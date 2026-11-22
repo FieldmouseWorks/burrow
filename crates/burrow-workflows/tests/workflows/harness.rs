@@ -11,9 +11,7 @@ use yaml_serde::Value;
 
 /// A file of the repo, by its path from the repo's root.
 pub fn repo_file(path: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(path)
+    burrow_test::manifest_dir!().join("../..").join(path)
 }
 
 pub fn read(path: &Path) -> String {

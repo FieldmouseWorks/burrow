@@ -4,7 +4,6 @@
 //! isn't claimed.
 
 use std::fs;
-use std::path::Path;
 
 use burrow_dashboard::assets::{Assets, FONTS};
 use burrow_dashboard::pages::{Frame, live::live};
@@ -29,7 +28,7 @@ fn page(snap: &Snapshot) -> String {
     for name in FONTS {
         fs::write(fonts.path().join(name), name.as_bytes()).unwrap();
     }
-    let shell = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let shell = burrow_test::manifest_dir!().join("assets");
     let assets = Assets::load(&shell, fonts.path()).unwrap();
     let f = Frame {
         title: "box",

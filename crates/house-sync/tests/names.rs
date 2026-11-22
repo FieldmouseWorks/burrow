@@ -4,7 +4,6 @@
 //! PR red. The blocks say "job" and "review bot", whichever tool runs them.
 
 use std::fs;
-use std::path::Path;
 
 const NAMES: &[&str] = &[
     "gpt",
@@ -56,7 +55,7 @@ fn the_match_finds_a_name_and_leaves_longer_words() {
 
 #[test]
 fn no_house_block_names_a_vendor_or_a_model() {
-    let house = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../house");
+    let house = burrow_test::manifest_dir!().join("../../house");
     let mut read = 0;
     for entry in fs::read_dir(&house).unwrap() {
         let path = entry.unwrap().path();

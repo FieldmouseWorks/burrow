@@ -9,5 +9,8 @@ publish.workspace = true
 [dependencies]
 serde_json.workspace = true
 
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+
 [lints]
 workspace = true

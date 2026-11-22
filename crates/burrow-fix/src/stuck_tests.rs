@@ -20,7 +20,7 @@ fn the_brief_with_no_follow_up_yet_is_its_golden() {
 }
 
 fn golden(why: Stuck, followup: Option<u64>, name: &str) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let dir = burrow_test::manifest_dir!().join("tests/golden");
     let ask = Ask {
         pr: 7,
         why,

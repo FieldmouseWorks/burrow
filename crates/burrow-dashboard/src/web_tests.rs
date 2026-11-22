@@ -35,7 +35,7 @@ fn rig() -> Rig {
         origin: ORIGIN.into(),
         port: 0,
         state: state.path().into(),
-        shell: crate::assets::tests::shell().into(),
+        shell: crate::assets::tests::shell(),
         fonts: fonts.path().into(),
         owner: Owner {
             id: 583231,

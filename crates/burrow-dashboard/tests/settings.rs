@@ -1,5 +1,4 @@
 //! Exercise the public settings page so the negative runs these tests on base code too.
-use std::path::Path;
 
 use burrow_dashboard::assets::{Assets, FONTS};
 use burrow_dashboard::pages::{self, Frame};
@@ -12,11 +11,7 @@ fn settings_body(document: &Value, schema: &Value) -> Result<Markup, String> {
     for name in FONTS {
         std::fs::write(fonts.path().join(name), name.as_bytes()).unwrap();
     }
-    let assets = Assets::load(
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets")),
-        fonts.path(),
-    )
-    .unwrap();
+    let assets = Assets::load(&burrow_test::manifest_dir!().join("assets"), fonts.path()).unwrap();
     let frame = Frame {
         title: "Settings fixture",
         host: "dashboard.example.ts.net",
