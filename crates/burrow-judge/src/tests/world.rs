@@ -242,6 +242,9 @@ impl conary_github::Source for World {
     fn files(&self, _: &str, _: &str, _: &str) -> Result<conary_core::policy::Paths, ApiError> {
         unreachable!()
     }
+    fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {
+        unreachable!()
+    }
 }
 
 impl Branches for World {
@@ -288,9 +291,6 @@ impl flow::Read for World {
         })
     }
     fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, String>, ApiError> {
-        unreachable!()
-    }
-    fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {
         unreachable!()
     }
 }
