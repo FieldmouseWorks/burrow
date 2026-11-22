@@ -4,8 +4,9 @@
 # secret starts the repo's pass as its own unit (polkit lets the service
 # start those and nothing else), that one signed otherwise doesn't, that a
 # kick on the local port does, that a wake-up a pass booked comes on time,
-# that a new secret is the one checked once it's written, and that a switch
-# leaves the handler's units be.
+# that a new secret is the one checked once it's written, that a switch
+# leaves the handler's units be, and that no delivery is refused while the
+# service restarts for a switch, crashes or is stopped.
 #
 #   nix build .#checks.x86_64-linux.events-service -L
 { self, pkgs }:
@@ -74,6 +75,18 @@ pkgs.testers.runNixOSTest {
       };
     };
     environment.systemPackages = [ pkgs.curl pkgs.openssl ];
+    system.switch.enable = true;
+    # A switch that changes the service, as each bump of burrow does.
+    specialisation.changed.configuration.systemd.services.burrow-events.environment.CHANGED = "1";
+    # A generation whose service binds the deliveries' port itself, with no
+    # socket: what a switch to this one starts from, and what its revert
+    # goes back to.
+    specialisation.unheld.configuration = {
+      burrow.events.host = pkgs.lib.mkForce null;
+      burrow.events.secretFile = pkgs.lib.mkForce null;
+      systemd.services.burrow-events.serviceConfig.ExecStart = pkgs.lib.mkForce
+        "${pkgs.python3}/bin/python3 -m http.server 8787 --bind 127.0.0.1 --directory /etc";
+    };
   };
 
   testScript = ''
@@ -93,6 +106,14 @@ pkgs.testers.runNixOSTest {
                                f"-H 'X-GitHub-Event: {event}' --data-binary @/tmp/body http://127.0.0.1:8787/burrow/hook").strip()
 
     machine.wait_for_unit("burrow-events.service")
+    base = machine.succeed("readlink -f /run/current-system").strip()
+
+    def switch(to):
+        machine.succeed(f"{base}{to}/bin/switch-to-configuration test >&2")
+
+    def main_pid():
+        return machine.succeed("systemctl show -p MainPID --value burrow-events.service").strip()
+
     with subtest("a switch leaves a handler's running pass be"):
         for unit in ["probe", "probe@"]:
             machine.succeed(f"grep -qx X-RestartIfChanged=false /etc/systemd/system/{unit}.service")
@@ -124,6 +145,44 @@ pkgs.testers.runNixOSTest {
         machine.fail("su -s /bin/sh burrow-events -c 'systemctl start other.service'")
         machine.succeed("su -s /bin/sh burrow-events -c 'systemctl start probe@sam-x.service'")
         machine.succeed("grep -x sam/x /var/lib/probe/passes")
+
+    # Before the new secret below: a switch writes the first one back.
+    with subtest("a switch that restarts it refuses no delivery"):
+        body = json.dumps({"repository": {"full_name": "sam/s"}})
+        sig = "sha256=" + hmac.new(b"hook-secret", body.encode(), hashlib.sha256).hexdigest()
+        machine.succeed(f"printf %s '{body}' >/tmp/sent-body")
+        for to in ["/specialisation/changed", ""]:
+            was = main_pid()
+            machine.succeed("rm -f /tmp/codes /tmp/sender-done; touch /tmp/sending")
+            machine.succeed(
+                "( while [ -e /tmp/sending ]; do "
+                "curl -s -m 30 -o /dev/null -w '%{http_code}\\n' "
+                f"-H 'X-Hub-Signature-256: {sig}' -H 'X-GitHub-Event: issues' "
+                "--data-binary @/tmp/sent-body http://127.0.0.1:8787/burrow/hook >>/tmp/codes || true; "
+                "sleep 0.02; done; touch /tmp/sender-done ) >/dev/null 2>&1 &")
+            machine.wait_until_succeeds("test -s /tmp/codes", timeout=30)
+            switch(to)
+            assert main_pid() != was, "the switch didn't restart burrow-events"
+            time.sleep(2)
+            machine.succeed("rm /tmp/sending")
+            machine.wait_until_succeeds("test -e /tmp/sender-done", timeout=60)
+            codes = machine.succeed("cat /tmp/codes").split()
+            assert set(codes) == {"202"}, f"a switch lost deliveries: { {c: codes.count(c) for c in set(codes)} }"
+
+    with subtest("one that comes while it's crashed or stopped waits for it"):
+        body = json.dumps({"repository": {"full_name": "sam/d"}})
+        for down in ["systemctl kill -s KILL", "systemctl stop"]:
+            was = main_pid()
+            machine.succeed(f"{down} burrow-events.service")
+            machine.wait_until_succeeds(f"[ $(systemctl show -p MainPID --value burrow-events.service) != {was} ]", timeout=30)
+            assert deliver(body, "hook-secret", "issues") == "202", down
+
+    with subtest("a switch goes back to a service that binds the port itself, and on again"):
+        switch("/specialisation/unheld")
+        machine.wait_until_succeeds("curl -fsS -o /dev/null http://127.0.0.1:8787/os-release", timeout=30)
+        switch("")
+        machine.wait_for_unit("burrow-events.service")
+        assert deliver(body, "hook-secret", "issues") == "202"
 
     with subtest("a new secret restarts it once a running full pass is done, and is the one checked"):
         # A full pass that read the old secret is still going.
