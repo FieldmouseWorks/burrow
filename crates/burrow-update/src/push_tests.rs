@@ -1,6 +1,6 @@
 //! The push, on real git: what went live reaches main even when main moved
 //! while the run went on, with the stand-ins for runuser and nix
-//! (testing.rs).
+//! (testing_tests.rs).
 
 use super::*;
 use crate::testing::Machine;

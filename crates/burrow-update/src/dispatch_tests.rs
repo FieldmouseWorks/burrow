@@ -1,4 +1,4 @@
-//! The fix jobs, with the stand-ins for runuser and proj (testing.rs): pipeline
+//! The fix jobs, with the stand-ins for runuser and proj (testing_tests.rs): pipeline
 //! work, one job for a problem and its inputs while it's at work, and none
 //! again while a run handed it on recently.
 

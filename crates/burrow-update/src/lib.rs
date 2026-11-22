@@ -41,6 +41,7 @@ mod train;
 mod vm_tests;
 
 #[cfg(test)]
+#[path = "testing_tests.rs"]
 mod testing;
 
 pub use config::{Config, Train};

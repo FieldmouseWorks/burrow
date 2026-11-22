@@ -1,5 +1,5 @@
 //! What the machine runs against what HEAD builds, on its own: real git,
-//! and the stand-in for nix (testing.rs), whose system is made of flake.lock
+//! and the stand-in for nix (testing_tests.rs), whose system is made of flake.lock
 //! and system.nix and is stamped with the commit it's built from.
 
 use std::path::Path;

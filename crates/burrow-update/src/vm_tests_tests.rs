@@ -1,4 +1,4 @@
-//! What vulnix says a system has, through its stand-in (testing.rs). The
+//! What vulnix says a system has, through its stand-in (testing_tests.rs). The
 //! VM tests themselves are a run's, in run_tests.rs.
 
 use std::fs;

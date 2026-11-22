@@ -22,7 +22,8 @@ fn code(dir: &Path, out: &mut String) {
             if name != "tests" {
                 code(&p, out);
             }
-        } else if name.ends_with(".rs") && !matches!(name.as_str(), "tests.rs" | "testing.rs") {
+        } else if name.ends_with(".rs") && !matches!(name.as_str(), "tests.rs" | "testing_tests.rs")
+        {
             let text = fs::read_to_string(&p).unwrap();
             out.push_str(text.split("#[cfg(test)]").next().unwrap());
         }

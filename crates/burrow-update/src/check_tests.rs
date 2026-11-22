@@ -1,6 +1,6 @@
 //! The VM tests take a heavy slot on a machine that has them, and say how
 //! the test went either way, with the stand-ins for runuser, nix and heavy
-//! (testing.rs).
+//! (testing_tests.rs).
 
 use std::fs;
 

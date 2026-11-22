@@ -32,6 +32,7 @@ pub mod mirror;
 pub mod pass;
 pub mod settle;
 #[cfg(test)]
+#[path = "testing_tests.rs"]
 mod testing;
 pub mod token;
 pub mod verdict;

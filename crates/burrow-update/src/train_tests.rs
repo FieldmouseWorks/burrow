@@ -1,5 +1,5 @@
 //! HOST-update's PR on its own: real git, with a bare repo for GitHub's copy
-//! and a stand-in for runuser (testing.rs), and a GitHub that answers from a
+//! and a stand-in for runuser (testing_tests.rs), and a GitHub that answers from a
 //! script.
 
 use std::fs;

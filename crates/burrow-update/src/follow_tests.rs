@@ -1,4 +1,4 @@
-//! What a run's look at main finds, on a machine of stand-ins (testing.rs).
+//! What a run's look at main finds, on a machine of stand-ins (testing_tests.rs).
 
 use std::fs;
 
