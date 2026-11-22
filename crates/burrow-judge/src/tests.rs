@@ -6,6 +6,7 @@ use super::*;
 use world::{Pr, World, github, read, world};
 
 mod build;
+mod discussion;
 mod look;
 mod ran;
 mod world;

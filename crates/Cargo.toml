@@ -73,8 +73,8 @@ publish = false
 base64 = "0.23.1"
 # Conary's own types: one rev for every crate, so a bump moves them all, a
 # crate a branch adds meanwhile too.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "996dad39f8652d8cbf4a2276cc3c459de870705c" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "996dad39f8652d8cbf4a2276cc3c459de870705c" }
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "cdde15ec2e4d4a03017e00b25e617d2d33a014fa" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "cdde15ec2e4d4a03017e00b25e617d2d33a014fa" }
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
