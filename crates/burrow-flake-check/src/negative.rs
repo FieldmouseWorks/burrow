@@ -2,6 +2,9 @@
 use super::*;
 #[path = "classify.rs"]
 mod classify;
+#[path = "removal.rs"]
+mod removal;
+use removal::{Change, Names};
 // Go's and Rust's sibling files (`foo_test.go`, `foo_tests.rs`) use the
 // suffix pattern globally; other suffix-named tests count when they live
 // under one of the test-directory patterns.
@@ -48,6 +51,17 @@ struct Negative {
     /// The PR's head, where a check that timed out on the negative tree has
     /// to pass.
     head: String,
+    /// The merge base, whose code the new tests run on.
+    fork: String,
+    /// The fork's commit time, which every commit made here takes.
+    when: String,
+    /// What the negative tree applies to the fork's.
+    changes: Vec<Change>,
+    /// The checks that aren't built here (build-skip).
+    skip: String,
+    /// The controls built (removal.rs), and whether each passed: checks and
+    /// trees can share one.
+    controls: std::sync::Mutex<std::collections::BTreeMap<String, bool>>,
     /// The lock files whose inputs are in the store apart already, so a
     /// host out of reach costs its timeout once a run, not once a check.
     apart: std::sync::Mutex<Vec<String>>,
@@ -104,18 +118,21 @@ impl Negative {
         c.args([&format!("{}#.", s(tree)), "--apply", &apply]);
         c
     }
-    fn failed_there(&self, first: &Output, trees: &Path, name: Option<&str>) -> Result<()> {
+    fn failed_there(
+        &self,
+        first: &Output,
+        tree: &Path,
+        base: &Path,
+        name: Option<&str>,
+    ) -> Result<()> {
         classify::own(exit_code(first.status), &first.stderr, true)?;
-        self.inputs_apart(&trees.join("negative"))?;
-        let again = output(self.eval(&trees.join("negative"), name, true))?;
+        self.inputs_apart(tree)?;
+        let again = output(self.eval(tree, name, true))?;
         if again.status.success() {
             return Err(err("it evaluated on a second try, so it can't tell"));
         }
         classify::own(exit_code(again.status), &again.stderr, false)?;
-        if !output(self.eval(&trees.join("base"), name, true))?
-            .status
-            .success()
-        {
+        if !output(self.eval(base, name, true))?.status.success() {
             return Err(err("the base no longer evaluates either, so it can't tell"));
         }
         Ok(())
@@ -251,22 +268,23 @@ impl Negative {
             Alone::Failed(log)
         })
     }
-    /// Whether a check that failed on its own failed on the new tests: its
-    /// own builder failed with a test's exit code, or it timed out and the
-    /// same check passes on the head; and the same check on the base
-    /// passes. Anything else can't tell.
-    fn caught(&self, t: &Target, log: &[u8], work: &Path) -> Result<bool> {
-        if !not_a_fetch(&t.drv) {
+    /// Whether a check that failed on its own failed on the new tests:
+    /// itself, and not for a file the tree took away (`removal.rs`).
+    /// Anything else can't tell.
+    fn caught(&self, t: &Target, log: &[u8]) -> Result<bool> {
+        let Some(timed_out) = failed_itself(&t.drv, log) else {
             return Ok(false);
+        };
+        if self.removal_breaks(Some(t))? {
+            return self.fails_restored(t, log);
         }
-        let timed_out = classify::timed_out(&t.drv, log);
-        if !timed_out && !classify::builder_failed(&t.drv, log) {
-            println!(
-                "nix doesn't say {}'s own builder failed with a test's exit code, or that it timed out, so it can't tell",
-                t.drv
-            );
-            return Ok(false);
-        }
+        self.tests_own(t, timed_out)
+    }
+    /// Whether a check that failed itself is the new tests catching the
+    /// base: the same check on the base passes, and, where it timed out, on
+    /// the head.
+    fn tests_own(&self, t: &Target, timed_out: bool) -> Result<bool> {
+        let work = &self.work.0;
         if !t.base.is_empty() && !matches!(self.alone(&t.base, &work.join("roots"))?, Alone::Passed)
         {
             println!(
@@ -321,6 +339,22 @@ impl Negative {
         Ok(true)
     }
 }
+/// How a check that failed did so itself: whether it timed out, or else
+/// its own builder failed with a test's exit code. None is neither, or a
+/// fetch, so it can't tell.
+fn failed_itself(drv: &str, log: &[u8]) -> Option<bool> {
+    if !not_a_fetch(drv) {
+        return None;
+    }
+    let timed_out = classify::timed_out(drv, log);
+    if !timed_out && !classify::builder_failed(drv, log) {
+        println!(
+            "nix doesn't say {drv}'s own builder failed with a test's exit code, or that it timed out, so it can't tell"
+        );
+        return None;
+    }
+    Some(timed_out)
+}
 /// Whether a check is known not to be a fetch, whose failure, or timing
 /// out, can be the network's.
 fn not_a_fetch(drv: &str) -> bool {
@@ -336,7 +370,7 @@ fn not_a_fetch(drv: &str) -> bool {
         }
     }
 }
-fn negative_commit(tree: &str, fork: &str, head: &str, when: &str, one: bool) -> Result<String> {
+fn negative_commit(tree: &str, fork: &str, head: &str, when: &str, but: &str) -> Result<String> {
     let mut c = git(&[
         "-c",
         "user.name=flake-check",
@@ -349,10 +383,7 @@ fn negative_commit(tree: &str, fork: &str, head: &str, when: &str, one: bool) ->
         "-p",
         fork,
         "-m",
-        &format!(
-            "the tests of {head} on {fork}'s code{}",
-            if one { ", but one" } else { "" }
-        ),
+        &format!("the tests of {head} on {fork}'s code{but}"),
     ]);
     c.env("GIT_AUTHOR_DATE", format!("@{when} +0000"))
         .env("GIT_COMMITTER_DATE", format!("@{when} +0000"));
@@ -384,6 +415,7 @@ fn value(o: &Output) -> String {
         String::new()
     }
 }
+#[derive(Clone)]
 struct Target {
     i: usize,
     name: String,
@@ -400,12 +432,17 @@ pub fn negative() -> Result<bool> {
         skipped: vec![],
         unrun: vec![],
         head: var("HEAD_SHA"),
+        fork: String::new(),
+        when: String::new(),
+        changes: vec![],
+        skip: var("SKIP"),
+        controls: Default::default(),
         apart: Default::default(),
     };
     let work = n.work.0.clone();
     let base = var("BASE");
     let head = n.head.clone();
-    let skip = var("SKIP");
+    let skip = n.skip.clone();
     let tip = string(git(&[
         "rev-parse",
         "--verify",
@@ -440,8 +477,6 @@ pub fn negative() -> Result<bool> {
     if var("PATHS_ONLY") == "true" {
         return Ok(true);
     }
-    let index = work.join("index");
-    checked(index_git(&index, &["read-tree", &fork]))?;
     let mut c = git(&[
         "diff",
         "--raw",
@@ -454,34 +489,11 @@ pub fn negative() -> Result<bool> {
     ]);
     c.args(SPECS);
     let raw = nul(&checked(c)?)?;
-    for pair in raw.chunks(2) {
-        if pair.len() != 2 {
-            return Err(err("incomplete raw diff"));
-        }
-        let meta: Vec<_> = pair[0].split_whitespace().collect();
-        if meta.len() != 5 {
-            return Err(err("bad raw diff"));
-        }
-        if meta[4] == "D" {
-            checked(index_git(
-                &index,
-                &["update-index", "--force-remove", "--", &pair[1]],
-            ))?;
-        } else {
-            checked(index_git(
-                &index,
-                &[
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    &format!("{},{},{}", meta[1], meta[3], pair[1]),
-                ],
-            ))?;
-        }
-    }
-    let tree = string(index_git(&index, &["write-tree"]))?;
-    let when = string(git(&["show", "-s", "--format=%ct", &fork]))?;
-    let commit = negative_commit(&tree, &fork, &head, &when, false)?;
+    n.changes = raw.chunks(2).map(Change::read).collect::<Result<_>>()?;
+    let tree = removal::tree_with(&work.join("index"), &fork, &n.changes)?;
+    n.when = string(git(&["show", "-s", "--format=%ct", &fork]))?;
+    n.fork = fork.clone();
+    let commit = negative_commit(&tree, &fork, &head, &n.when, "")?;
     println!("the negative tree: {tree} ({commit})");
     checkout(&fork, &work.join("base"))?;
     checkout(&commit, &work.join("negative"))?;
@@ -493,16 +505,28 @@ pub fn negative() -> Result<bool> {
             "the base's checks don't evaluate, so there's nothing to compare with",
         ));
     }
-    let nn = output(n.eval(&work.join("negative"), None, false))?;
-    if !nn.status.success() {
+    let negative_dir = work.join("negative");
+    let base_dir = work.join("base");
+    let nn = output(n.eval(&negative_dir, None, false))?;
+    let mut new_names = nn.stdout.clone();
+    let names_broken = !nn.status.success();
+    if names_broken {
         classify::errors(&nn.stderr);
-        n.failed_there(&nn, &work, None)?;
-        println!("the checks don't evaluate with the new tests on the old code: they fail there");
-        return n.found("fail", Some(&tree));
+        n.failed_there(&nn, &negative_dir, &base_dir, None)?;
+        match n.names_failed()? {
+            Names::Unsure => return Ok(false),
+            Names::Restored(names) => new_names = names,
+            Names::Caught => {
+                println!(
+                    "the checks don't evaluate with the new tests on the old code: they fail there"
+                );
+                return n.found("fail", Some(&tree));
+            }
+        }
     }
     let base_names = lines(&jq(&bn.stdout, ".[]")?);
     let mut names = base_names.clone();
-    names.extend(lines(&jq(&nn.stdout, ".[]")?));
+    names.extend(lines(&jq(&new_names, ".[]")?));
     names.sort();
     names.dedup();
     fs::create_dir(work.join("roots"))?;
@@ -517,6 +541,8 @@ pub fn negative() -> Result<bool> {
     });
     let mut targets = Vec::new();
     let mut caught = false;
+    // Without the names nothing passed there, so only a catch counts.
+    let mut unsure = names_broken;
     for (i, name) in names.iter().enumerate() {
         let b = evals[i * 2].as_ref().map_err(|e| err(e.to_string()))?;
         let neg = evals[i * 2 + 1].as_ref().map_err(|e| err(e.to_string()))?;
@@ -533,9 +559,26 @@ pub fn negative() -> Result<bool> {
         if nv.is_empty() {
             println!("check {name} doesn't evaluate with the new tests on the old code:");
             classify::errors(&neg.stderr);
-            n.failed_there(neg, &work, Some(&q))?;
+            // Broken names say it of every check, and were tried again.
+            if !names_broken {
+                n.failed_there(neg, &negative_dir, &base_dir, Some(&q))?;
+            }
             n.checks.push(name.clone());
-            caught = true;
+            let t = Target {
+                i,
+                name: name.clone(),
+                q,
+                drv: nv,
+                base: bv,
+            };
+            if caught
+                || (!names_broken && !n.removal_breaks(Some(&t))?)
+                || n.fails_restored(&t, &[])?
+            {
+                caught = true;
+            } else {
+                unsure = true;
+            }
         } else if nv == bv {
         } else if skip.split(' ').any(|s| s == name) {
             println!("check {name} reads the new tests, but isn't built here (build-skip)");
@@ -560,13 +603,13 @@ pub fn negative() -> Result<bool> {
         );
     }
     let built = memory::parallel(&targets, side, |t| n.alone(&t.drv, &roots));
-    let mut unsure = false;
     for (t, b) in targets.iter().zip(built) {
         match b.map_err(|e| err(e.to_string()))? {
             Alone::Passed => println!("{} built: it passes", t.drv),
             Alone::Unsure => unsure = true,
             Alone::Failed(log) => {
-                if n.caught(t, &log, &work)? {
+                // One catch is the result, and each costs more builds.
+                if caught || n.caught(t, &log)? {
                     caught = true;
                 } else {
                     unsure = true;
@@ -581,6 +624,7 @@ pub fn negative() -> Result<bool> {
         println!("the new tests fail on the old code, as they should");
         return n.found("fail", Some(&tree));
     }
+    let when = n.when.clone();
     coverage(&mut n, &targets, &added, (&fork, &head, &tree, &when), side)?;
     if !n.unrun.is_empty() || !n.skipped.is_empty() {
         if !n.unrun.is_empty() {
@@ -700,7 +744,7 @@ fn coverage(
                 ))?;
             }
             let one = string(index_git(&index, &["write-tree"]))?;
-            let one = negative_commit(&one, fork, head, when, true)?;
+            let one = negative_commit(&one, fork, head, when, ", but one")?;
             let dir = work.join(format!("one/{j}"));
             fs::create_dir(&dir)?;
             checkout(&one, &dir.join("negative"))?;
@@ -725,7 +769,13 @@ fn coverage(
                         targets[*k].name, added[j]
                     );
                     classify::errors(&o.stderr);
-                    n.failed_there(o, &work.join(format!("one/{j}")), Some(&targets[*k].q))?;
+                    let dir = work.join(format!("one/{j}"));
+                    n.failed_there(
+                        o,
+                        &dir.join("negative"),
+                        &dir.join("base"),
+                        Some(&targets[*k].q),
+                    )?;
                     covered.push(added[j].clone());
                     break;
                 }
