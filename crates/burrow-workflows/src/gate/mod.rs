@@ -30,6 +30,7 @@ use crate::harness::{
 
 mod checkout;
 mod derivations;
+mod errors;
 mod legs;
 mod negative;
 mod outputs;

@@ -629,7 +629,8 @@ jobs:
       # With legs, a leg's log goes to the gate job, which attests the legs
       # together: as an artifact named for the leg, with the log's digest, the
       # commit it checked and the digest of the plan it took its share of
-      # (none if it stopped before it read one) as the leg's own output,
+      # (none if it stopped before it read one) and, last, how its gate
+      # failed if it said (src/verdict.rs), as the leg's own output,
       # which GitHub keeps and nothing else in the run can write.
       - id: leg
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs > 1 }}
@@ -642,8 +643,10 @@ jobs:
           commit=$(git rev-parse 'HEAD^{commit}')
           plan=none
           if [ -f "$RUNNER_TEMP/plan.json" ]; then plan=$(sha256sum "$RUNNER_TEMP/plan.json" | cut -d' ' -f1); fi
+          said=
+          if [ -f "$RUNNER_TEMP/gate-result" ]; then read -r said < "$RUNNER_TEMP/gate-result" || true; fi
           echo "leg $LEG's log: $name, sha256 $sha, of commit $commit and plan $plan"
-          { echo "name=$name"; echo "leg-$LEG=$name $sha $commit $plan"; } >> "$GITHUB_OUTPUT"
+          { echo "name=$name"; echo "leg-$LEG=$name $sha $commit $plan${said:+ $said}"; } >> "$GITHUB_OUTPUT"
       - if: ${{ !cancelled() && steps.leg.outputs.name }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -658,7 +661,10 @@ jobs:
       # this statement's, and it expires minutes after the job asks for it. A
       # run with no OIDC token (a fork's PR, Dependabot's) can't sign, so it
       # gets none and its result doesn't count as evidence. With legs, the
-      # gate job attests them, with this same script.
+      # gate job attests them, with this same script. A gate that didn't
+      # pass is a fail only where it said a check failed; else it broke,
+      # which is an error, and why goes in the predicate and the log
+      # (crates/burrow-flake-check/README.md, "A gate that breaks").
       - id: subject
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
@@ -672,7 +678,19 @@ jobs:
             echo "no OIDC token in this run, so no attestation"
             exit 0
           fi
-          case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
+          result=pass why=
+          if [ "$OUTCOME" != success ]; then
+            said=
+            if [ -f "$RUNNER_TEMP/gate-result" ]; then read -r said < "$RUNNER_TEMP/gate-result" || true; fi
+            case $said in
+              fail) result=fail ;;
+              "error "?*) result=error why=${said#error } ;;
+              *) result=error why="the gate ended without saying a check failed (the job's log has the last it said)" ;;
+            esac
+            if [ "$result" = error ]; then
+              printf '\nflake-check: error: %s\n' "$why" >> "$RUNNER_TEMP/flake.log" || echo "no room to log why: $why"
+            fi
+          fi
           # Artifact names are shared by every job in a run, and a caller may
           # run this job more than once (a matrix, a re-run), so each job's
           # log and attestation get names of their own.
@@ -697,10 +715,11 @@ jobs:
           # gate-reuse: the gate this was (the identity step's), last.
           gate=null
           if [ -s "$RUNNER_TEMP/gate.json" ]; then gate=$(cat "$RUNNER_TEMP/gate.json"); fi
-          jq -n --arg result "$result" --argjson revision "$revision" \
+          jq -n --arg result "$result" --arg why "$why" --argjson revision "$revision" \
             --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg skip "$SKIP" \
             --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$log" --argjson gate "$gate" \
             '{$result, $revision, $tree, skipped: ($skip | split(" ") | map(select(. != ""))), log: {$sha256, $artifact}}
+             + (if $why == "" then {} else {error: $why} end)
              + if $gate == null then {} else {$gate} end' \
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
@@ -961,40 +980,47 @@ jobs:
           # artifact, the log's digest and the commit it checked, which has
           # to be the commit here, and the plan it took its share of, which
           # has to be every other leg's, or some outputs could be no leg's.
-          # A leg with no output ended before its gate did.
+          # A leg with no output ended before its gate did. It's a fail
+          # only where such a leg said a check failed: anything else that
+          # fails this is an error, the first said being why.
           commit=$(git rev-parse 'HEAD^{commit}')
           log=$RUNNER_TEMP/flake.log
           : > "$log"
-          failed=0
+          rm -f "$RUNNER_TEMP/gate-result"
+          failed=0 why='' check_failed=
+          broke() { echo "$1"; failed=1; why=${why:-$1}; }
           plan=
           for ((k = 1; k <= LEGS; k++)); do
-            read -r name sha checked split < <(jq -r --arg k "leg-$k" '.[$k] // ""' <<< "$OUTPUTS")
+            read -r name sha checked split said < <(jq -r --arg k "leg-$k" '.[$k] // ""' <<< "$OUTPUTS")
             if [ -z "$name" ]; then
-              echo "leg $k of $LEGS left no log: it ended before its gate did"
-              failed=1
+              broke "leg $k of $LEGS left no log: it ended before its gate did"
             elif [[ ! $name =~ ^flake-log-leg-$k-[0-9a-f-]+$ ]] || [ ! -f "$RUNNER_TEMP/legs/$name/flake.log" ] \
                 || [ "$(sha256sum < "$RUNNER_TEMP/legs/$name/flake.log" | cut -d' ' -f1)" != "$sha" ]; then
-              echo "leg $k of $LEGS: its log here isn't the one it wrote, $name with sha256 $sha"
-              failed=1
+              broke "leg $k of $LEGS: its log here isn't the one it wrote, $name with sha256 $sha"
             elif [ "$checked" != "$commit" ]; then
-              echo "leg $k of $LEGS checked $checked, not $commit"
-              failed=1
+              broke "leg $k of $LEGS checked $checked, not $commit"
             else
               echo "leg $k of $LEGS: $name, sha256 $sha"
               { echo "leg $k of $LEGS:"; cat "$RUNNER_TEMP/legs/$name/flake.log"; } >> "$log"
+              case $said in
+                fail) check_failed=1 ;;
+                "error "?*) broke "leg $k of $LEGS: ${said#error }" ;;
+              esac
               if [ "$split" = none ] || [ -z "$split" ]; then
-                echo "leg $k of $LEGS stopped before it read the plan"
-                failed=1
+                broke "leg $k of $LEGS stopped before it read the plan"
               elif [ -z "$plan" ]; then
                 plan=$split first=$k
               elif [ "$split" != "$plan" ]; then
-                echo "leg $k of $LEGS took its share of another plan than leg $first: sha256 $split, not $plan"
-                failed=1
+                broke "leg $k of $LEGS took its share of another plan than leg $first: sha256 $split, not $plan"
               fi
             fi
           done
           echo "the legs: $RESULT"
-          [ "$failed" = 0 ] && [ "$RESULT" = success ]
+          if [ "$failed" = 0 ] && [ "$RESULT" = success ]; then exit 0; fi
+          said="error ${why:-the legs ended in $RESULT, and none said a check failed}"
+          if [ -n "$check_failed" ]; then said=fail; fi
+          echo "$said" > "$RUNNER_TEMP/gate-result"
+          exit 1
       - id: subject
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash

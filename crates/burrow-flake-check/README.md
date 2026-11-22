@@ -151,6 +151,34 @@ tests catching the base when the same check passes on the base and on the
 PR's head: a test that a wait ends waits forever on the code with that
 bug. Anything else about a timeout can't tell (#1212).
 
+## A gate that breaks
+
+A gate that didn't pass is signed `fail` only when it said that a check, or
+the flake, failed. Anything else is `error`, with the reason as the
+predicate's `error` (`src/verdict.rs`, #1400): a log or file it couldn't
+write, a command killed or unable to run, a tool of its own failing (git,
+tar, jq, mktemp, a GC root), a runner that died or never started. It's that
+way round because a gate on a full disk can't be counted on to write that
+it broke.
+
+- `fail`: a check's build or evaluation failed, the flake doesn't evaluate,
+  or the gate refuses the flake or how it was called (the same on a retry).
+- The gate leaves `fail`, or `error` and why on one line, in
+  `$RUNNER_TEMP/gate-result`. None, or one cut short, is `error`.
+- An error's reason is also an annotation on the job, for when nothing on
+  the disk could keep it, and is added to the log that's uploaded.
+- With legs, the gate job is `fail` if a leg it can hold to its log and
+  commit said so, and `error` otherwise.
+- What broke is remembered where the gate goes on (the other builds, the
+  whole-flake fallback): if it then fails that's `error`, and if it passes
+  it's a pass.
+- A failure inside Nix or heavy that exits as a failed build does (a builder
+  or the daemon out of disk, while the gate could still write) is still
+  `fail`: their log says which, and the gate doesn't read their words for it.
+
+The negative has no `error`: one whose log couldn't be written leaves
+nothing to attest, as when it can't tell.
+
 ## Reusing an attested pass
 
 With the workflow's `gate-reuse` input on (it's off by default, and no

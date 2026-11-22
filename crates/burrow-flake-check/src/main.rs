@@ -11,6 +11,7 @@ mod plan;
 mod reuse;
 mod snapshot;
 mod source;
+mod verdict;
 
 use std::{
     env, fs,
@@ -18,6 +19,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
+use verdict::{failed, judged};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 fn err(s: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     s.into().into()
@@ -62,11 +64,15 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 fn output(mut c: Command) -> Result<Output> {
     Ok(c.output()?)
 }
+fn program(c: &Command) -> String {
+    c.get_program().to_string_lossy().into_owned()
+}
 fn checked(c: Command) -> Result<Vec<u8>> {
+    let program = program(&c);
     let o = output(c)?;
     if !o.status.success() {
         io::stderr().write_all(&o.stderr)?;
-        return Err(err(format!("command failed: {}", o.status)));
+        return Err(err(format!("{program}: command failed: {}", o.status)));
     }
     Ok(o.stdout)
 }
@@ -82,8 +88,17 @@ fn text_output(bytes: Vec<u8>) -> Result<String> {
 fn string(c: Command) -> Result<String> {
     text_output(checked(c)?)
 }
+/// Whether it passed. One stopped before it could say didn't, and is how
+/// the gate broke (verdict.rs), with whatever else there is to run still run.
 fn run(mut c: Command) -> Result<bool> {
-    Ok(c.status()?.success())
+    let status = c.status()?;
+    Ok(verdict::passed(&program(&c), status).unwrap_or_else(|e| {
+        verdict::broke(&*e);
+        false
+    }))
+}
+fn save(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    fs::write(path, bytes).map_err(|e| err(format!("couldn't write {}: {e}", path.display())))
 }
 /// A command whose stderr goes where its stdout does: one pipe, in the
 /// order it said them.
@@ -92,23 +107,49 @@ fn merged(p: &str, args: &[&str]) -> Command {
     c.args(args);
     c
 }
-/// Run it, copying each line it says to this stdout and to `also` as it
-/// comes, so a long build is watched as it goes and its log kept whole; its
-/// exit code.
-fn tee(mut c: Command, also: &mut dyn Write) -> Result<i32> {
+/// How a command [`tee`] ran ended: its exit code and the last it said.
+struct Ended {
+    code: i32,
+    last: String,
+}
+/// Run it, copying each line it says to `out` and to `log` as it comes, so a
+/// long build is watched as it goes and its log kept whole. One that can't
+/// be written doesn't stop the other, or the command, which is always read
+/// to its end and waited for; then that's the error.
+fn tee(mut c: Command, log: &mut dyn Write, out: &mut dyn Write) -> Result<Ended> {
     use std::io::BufRead;
     let mut child = c.stdout(Stdio::piped()).spawn()?;
     let mut pipe = io::BufReader::new(child.stdout.take().ok_or_else(|| err("no pipe"))?);
-    let mut line = Vec::new();
-    loop {
+    let (mut line, mut last) = (Vec::new(), Vec::new());
+    let (mut unlogged, mut unshown) = (None, None);
+    let read = loop {
         line.clear();
-        if pipe.read_until(b'\n', &mut line)? == 0 {
-            break;
+        match pipe.read_until(b'\n', &mut line) {
+            Ok(0) => break Ok(()),
+            Ok(_) => {}
+            Err(e) => break Err(e),
         }
-        also.write_all(&line)?;
-        io::stdout().write_all(&line)?;
+        if unlogged.is_none() {
+            unlogged = log.write_all(&line).err();
+        }
+        if unshown.is_none() {
+            unshown = out.write_all(&line).err();
+        }
+        last.clone_from(&line);
+    };
+    drop(pipe);
+    let status = child.wait()?;
+    read?;
+    if let Some(e) = unlogged {
+        return Err(err(format!("couldn't write its log: {e}")));
     }
-    Ok(exit_code(child.wait()?))
+    if let Some(e) = unshown {
+        return Err(err(format!("couldn't write the step's output: {e}")));
+    }
+    Ok(Ended {
+        code: exit_code(status),
+        last: String::from_utf8_lossy(&last).trim_end().to_owned(),
+    })
 }
 fn show(o: &Output) -> Result<()> {
     io::stdout().write_all(&o.stdout)?;
@@ -262,7 +303,7 @@ fn main() {
     }
     if mode == "--worker" {
         let result = match env::args().nth(2).as_deref() {
-            Some("gate") => gate::gate(),
+            Some("gate") => std::process::exit(verdict::worker(gate::gate())),
             Some("negative") => negative::negative(),
             _ => Err(err("expected gate or negative")),
         };
@@ -276,15 +317,18 @@ fn main() {
         }
         return;
     }
-    let result = (|| -> Result<i32> {
-        if mode != "gate" && mode != "negative" {
-            return Err(err("expected gate or negative"));
-        }
-        let mut log = fs::File::create(temp().join(if mode == "gate" {
-            "flake.log"
-        } else {
-            "negative.log"
-        }))?;
+    if mode != "gate" && mode != "negative" {
+        eprintln!("expected gate or negative");
+        std::process::exit(1);
+    }
+    let gate = mode == "gate";
+    if gate {
+        verdict::clear();
+    }
+    let watched = (|| -> Result<Ended> {
+        let path = temp().join(if gate { "flake.log" } else { "negative.log" });
+        let mut log = fs::File::create(&path)
+            .map_err(|e| err(format!("couldn't create {}: {e}", path.display())))?;
         let mut c = merged(s(&env::current_exe()?), &["--worker", &mode]);
         // Every build the worker starts, its own and the nix and heavy
         // processes it runs, reads this; a caller's settings come first.
@@ -292,13 +336,66 @@ fn main() {
             "NIX_CONFIG",
             worker_config(&var("NIX_CONFIG"), builds::writes()),
         );
-        tee(c, &mut log)
+        tee(c, &mut log, &mut io::stdout())
     })();
-    match result {
-        Ok(code) => std::process::exit(code),
+    if gate {
+        std::process::exit(verdict::settle(watched));
+    }
+    match watched {
+        Ok(ended) => std::process::exit(ended.code),
         Err(e) => {
-            eprintln!("{e}");
+            // What it found has no whole log to be signed over: it can't tell.
+            let _ = fs::remove_file(temp().join("negative.json"));
+            let _ = writeln!(io::stderr(), "{e}");
             std::process::exit(1);
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A sink with no room (ENOSPC is 28).
+    struct Full;
+    impl Write for Full {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(28))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    fn three_lines() -> Command {
+        cmd("sh", &["-c", "echo one; echo two; echo three; exit 1"])
+    }
+    #[test]
+    fn a_full_log_is_the_error_once_the_command_has_said_all() {
+        let mut out = Vec::new();
+        let Err(e) = tee(three_lines(), &mut Full, &mut out) else {
+            panic!("a full log passed");
+        };
+        assert!(e.to_string().contains("No space left on device"), "{e}");
+        assert!(!e.is::<verdict::Failed>());
+        assert_eq!(out, b"one\ntwo\nthree\n");
+    }
+    #[test]
+    fn a_full_step_output_is_the_error_and_the_log_is_whole() {
+        let mut log = Vec::new();
+        let Err(e) = tee(three_lines(), &mut log, &mut Full) else {
+            panic!("a full output passed");
+        };
+        assert!(e.to_string().contains("No space left on device"), "{e}");
+        assert_eq!(log, b"one\ntwo\nthree\n");
+    }
+    #[test]
+    fn only_a_failure_said_is_a_checks() {
+        assert_eq!(verdict::worker(Ok(false)), 1);
+        assert_eq!(verdict::worker(Err(failed("refused"))), 1);
+        assert_eq!(verdict::worker(Err(err("tar failed"))), verdict::BROKEN);
+        let full = io::Error::from_raw_os_error(28);
+        assert_eq!(verdict::worker(Err(full.into())), verdict::BROKEN);
+        assert!(!run(cmd("sh", &["-c", "exit 100"])).unwrap());
+        assert!(!run(cmd("sh", &["-c", "kill -9 $$"])).unwrap());
+        // Stopped, so the failure that followed isn't a check's.
+        assert_eq!(verdict::worker(Ok(false)), verdict::BROKEN);
     }
 }

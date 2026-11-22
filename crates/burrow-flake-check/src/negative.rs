@@ -245,7 +245,7 @@ impl Negative {
             format!("{}\ntimeout = {CHECK_SECONDS}", var("NIX_CONFIG")),
         );
         let mut log = Vec::new();
-        Ok(if tee(c, &mut log)? == 0 {
+        Ok(if tee(c, &mut log, &mut io::stdout())?.code == 0 {
             Alone::Passed
         } else {
             Alone::Failed(log)

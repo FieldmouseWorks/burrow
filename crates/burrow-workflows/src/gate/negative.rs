@@ -248,6 +248,23 @@ impl Repo {
     }
 }
 
+/// A negative whose log had no room found nothing: no result is left to
+/// sign over a log cut short (#1400).
+#[test]
+fn a_log_with_no_room_leaves_nothing_to_attest() {
+    let r = Repo::new();
+    let head = r.pr("code", &[("lib.txt", Some("2\n"))]);
+    let temp = r.g.s.mkdtemp();
+    std::os::unix::fs::symlink("/dev/full", temp.join("negative.log")).unwrap();
+    let ran = r.run_with(&head, "", &[("RUNNER_TEMP", temp.to_str().unwrap())]);
+    assert!(
+        ran.code != 0 && ran.out.contains("No space left on device"),
+        "{}",
+        ran.out
+    );
+    assert!(!temp.join("negative.json").exists(), "{}", ran.out);
+}
+
 /// The job: on every PR, the head with every branch's history, its files at
 /// the workflow's commit, and the patterns of what's a test in its script,
 /// never an input a PR's caller could set.

@@ -75,7 +75,7 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
         checked(cmd("cp", &["-a", ".", s(&source)]))?;
         source
     };
-    if string(mode.evaluation(cmd(
+    if text_output(judged(mode.evaluation(cmd(
         "nix-instantiate",
         &[
             "--eval",
@@ -85,16 +85,17 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
             "--expr",
             "{ f }: (import f) ? nixConfig",
         ],
-    )))? == "true"
+    )))?)?
+        == "true"
     {
-        return Err(err(
+        return Err(failed(
             "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole `nix flake check`, without eval-apart.",
         ));
     }
-    let plan = checked(evaluate(&flake, &system, "", mode))?;
-    fs::write(temp().join("plan.json"), &plan)?;
+    let plan = judged(evaluate(&flake, &system, "", mode))?;
+    save(&temp().join("plan.json"), &plan)?;
     if jq(&plan, ".other | length")? != "0" {
-        return Err(err(format!(
+        return Err(failed(format!(
             "eval-apart doesn't check apps, overlays, hydraJobs, bundlers or the old default* outputs, and this flake has {}. Its gate is a whole `nix flake check`, without eval-apart.",
             jq(&plan, ".other")?
         )));
@@ -112,7 +113,7 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
             quote(skip)
         ),
     )?;
-    fs::write(temp().join("entries.json"), &entries)?;
+    save(&temp().join("entries.json"), &entries)?;
     let mine = lines(&jq(
         entries.as_bytes(),
         "to_entries[] | select(.value.mine) | .key",
@@ -137,15 +138,22 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
         let result = (|| -> Result<Option<String>> {
             let o = output(evaluate(&flake, &system, &format!("entry = {i};"), mode))?;
             log.push_str(&String::from_utf8_lossy(&o.stderr));
-            if !o.status.success() {
-                return Err(err("evaluation failed"));
+            if !verdict::passed("nix eval", o.status)? {
+                return Err(failed("evaluation failed"));
             }
             if jq(entry.as_bytes(), ".nixos")? == "true" {
                 return Ok(None);
             }
             let drv = jq(&o.stdout, ".drv // empty")?;
-            if drv.is_empty() || root(&drv, &roots.join(i)).is_err() {
-                return Err(err(format!("evaluating {what} gave no derivation")));
+            let none = || failed(format!("evaluating {what} gave no derivation"));
+            if drv.is_empty() {
+                return Err(none());
+            }
+            if let Err(e) = root(&drv, &roots.join(i)) {
+                // The flake's, if it named one the store hasn't got; rooting
+                // one it has is the gate's own work.
+                let has = output(cmd("nix-store", &["--check-validity", &drv]))?;
+                return Err(if has.status.success() { e } else { none() });
             }
             if jq(entry.as_bytes(), ".build")? == "true" {
                 return Ok(Some(format!("{drv}^*")));
@@ -158,17 +166,25 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
         if let Err(e) = &result {
             log.push_str(&format!("{e}\n"));
         }
-        fs::write(evals.join(format!("{i}.log")), log)?;
+        save(&evals.join(format!("{i}.log")), log)?;
         result
     });
     let mut ok = true;
     let mut targets = Vec::new();
     for (i, r) in mine.iter().zip(results) {
-        print!("{}", fs::read_to_string(evals.join(format!("{i}.log")))?);
+        // One whose log couldn't be written says why in its own error.
+        if let Ok(log) = fs::read_to_string(evals.join(format!("{i}.log"))) {
+            print!("{log}");
+        }
         match r {
             Ok(Some(t)) => targets.push(t),
             Ok(None) => (),
-            Err(_) => ok = false,
+            Err(e) => {
+                ok = false;
+                if !e.is::<verdict::Failed>() {
+                    verdict::broke(&*e);
+                }
+            }
         }
     }
     Ok(match mode {
@@ -193,18 +209,18 @@ pub(crate) fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
 fn whole(skip: &str, mode: Mode) -> Result<bool> {
     let work = Work::new("roots")?;
     let roots = &work.0;
-    let mut failed = false;
+    let mut unbuildable = false;
     let mut built = false;
     let plan = (|| -> Result<Vec<String>> {
-        let metadata = checked(cmd("nix", &locked(&["flake", "metadata", "--json", "."])))?;
+        let metadata = judged(cmd("nix", &locked(&["flake", "metadata", "--json", "."])))?;
         let url = jq(&metadata, ".url")?;
         let args = plan_args(&url, &system()?, skip);
         let mut c = cmd("nix-instantiate", &["--eval", "--strict", "--json"]);
         c.args(&args);
-        let plan = checked(mode.evaluation(c))?;
-        fs::write(temp().join("plan.json"), &plan)?;
+        let plan = judged(mode.evaluation(c))?;
+        save(&temp().join("plan.json"), &plan)?;
         if jq(&plan, ".nixConfig")? == "true" {
-            return Err(err("flake has nixConfig"));
+            return Err(failed("flake has nixConfig"));
         }
         Ok(args)
     })();
@@ -212,6 +228,10 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
     // failed plan (including nixConfig) to the actual gate.
     let plan = match plan {
         Err(e) if mode == Mode::Plan => return Err(e),
+        Err(e) if !e.is::<verdict::Failed>() => {
+            verdict::broke(&*e);
+            Err(e)
+        }
         plan => plan,
     };
     if let Ok(args) = plan {
@@ -248,7 +268,10 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
             }
         } else {
             show(&o)?;
-            failed = true;
+            if let Err(e) = verdict::passed("nix-instantiate", o.status) {
+                verdict::broke(&*e);
+            }
+            unbuildable = true;
         }
     }
     if mode == Mode::Plan {
@@ -270,7 +293,7 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
             }
             build::slot(&locked(&["flake", "check", "-L", "--keep-going"]))?
         };
-        return Ok(ok && !failed);
+        return Ok(ok && !unbuildable);
     }
     if !run(cmd("nix", &locked(&["flake", "check", "--no-build", "-L"])))? {
         return Ok(false);
@@ -279,13 +302,13 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
         for c in skip.split_whitespace() {
             println!("not building {c}");
         }
-        return Ok(!failed);
+        return Ok(!unbuildable);
     }
     let checks = attributes(skip)?;
     build::shadow_attributes(&checks);
     let mut args = vec!["build", "-L", "--no-link", "--keep-going"];
     args.extend(checks.iter().map(String::as_str));
-    Ok(build::slot(&locked(&args))? && !failed)
+    Ok(build::slot(&locked(&args))? && !unbuildable)
 }
 /// The flake's checks for this system, as attributes, but those `skip`
 /// names, each said as it's left out.
@@ -300,7 +323,7 @@ fn attributes(skip: &str) -> Result<Vec<String>> {
             "builtins.currentSystem",
         ],
     ))?;
-    let names = string(cmd(
+    let names = text_output(judged(cmd(
         "nix",
         &locked(&[
             "eval",
@@ -309,7 +332,7 @@ fn attributes(skip: &str) -> Result<Vec<String>> {
             "--apply",
             "cs: toString (builtins.attrNames cs)",
         ]),
-    ))?;
+    ))?)?;
     let mut checks = Vec::new();
     for c in names.split_whitespace() {
         if skip.split_whitespace().any(|s| s == c) {
@@ -340,13 +363,13 @@ fn check(mode: Mode) -> Result<bool> {
     let (legs, leg) = match (parse(&legs), parse(&leg)) {
         (Some(ls), Some(l)) if l <= ls => (ls, l),
         _ => {
-            return Err(err(format!(
+            return Err(failed(format!(
                 "can't run leg {leg} of {legs}: there are 1 to 8 legs, numbered from 1"
             )));
         }
     };
     if legs > 1 && var("APART") != "true" {
-        return Err(err(
+        return Err(failed(
             "legs need eval-apart: without it, the gate is one nix flake check, which can't be split",
         ));
     }
