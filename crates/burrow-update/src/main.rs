@@ -12,7 +12,8 @@
 //! It needs root, for its state and to switch, so one started as anyone
 //! else starts again through sudo. A run exits 1 when it failed, which is
 //! its own to fix (a Claude job is on it), and 0 otherwise; 2 is a usage or
-//! a config it can't take.
+//! a config it can't take; and 3 when a VM test failed its trees
+//! (burrow_update::VERDICT), which its unit takes as a success.
 
 use std::env;
 use std::io::Write;

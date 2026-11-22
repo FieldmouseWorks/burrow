@@ -49,6 +49,14 @@ pub use config::{Config, Train};
 #[derive(Debug, PartialEq, Eq)]
 pub struct Broke(pub String);
 
+/// A run's exit when a VM test failed its trees. It's said and handed to a
+/// Claude job, and the memo would answer the same for the same trees, so
+/// HOST-update's unit counts it a success (modules/updates.nix's
+/// SuccessExitStatus): nothing retries it or takes the unit for broken, and
+/// the next run is the next event's. Any other failure exits 1 and is
+/// retried, a main that doesn't build too: that's built afresh.
+pub const VERDICT: u8 = 3;
+
 impl Config {
     /// What runs a program as the user, ahead of the program: runuser, with
     /// the user's home and runtime dir, and the PATH it's given.

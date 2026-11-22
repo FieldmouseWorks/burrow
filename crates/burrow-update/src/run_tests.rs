@@ -295,7 +295,7 @@ fn a_vm_test_the_updates_break_holds_them() {
     let was = m.running();
     m.upstream("nixpkgs", &sha('c'));
     fs::write(m.home("check-breaks"), sha('c')).unwrap();
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     let failed = (
         "failed".to_string(),
         "VM test vm fails with nixpkgs aaaaaaa -> ccccccc and passes on main".to_string(),
@@ -319,7 +319,7 @@ fn a_vm_test_the_updates_break_holds_them() {
     );
     assert_eq!(m.recorded("clean-vm"), None, "never passed first time");
     // Remembered for a day: not run again.
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     assert_eq!(said(&m), failed);
     assert_eq!(vm_tests(&m), 3);
     assert!(!m.did("notices").contains("open check-vm"), "not stuck yet");
@@ -329,7 +329,7 @@ fn a_vm_test_the_updates_break_holds_them() {
         format!("{}\n", epoch() - 86_401),
     )
     .unwrap();
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     assert!(
         m.did("notices")
             .ends_with("open check-vm: Updates stuck: VM test vm fails\n")
@@ -374,7 +374,7 @@ fn a_vm_test_main_fails_too_holds_the_updates_unless_they_fix_something_serious(
     m.upstream("nixpkgs", &sha('c'));
     // burrow's commit is in every tree: the test fails on main too.
     fs::write(m.home("check-breaks"), sha('b')).unwrap();
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     let holding = (
         "failed".to_string(),
         "VM test vm fails on main as well; holding nixpkgs aaaaaaa -> ccccccc until main passes"
@@ -394,7 +394,7 @@ fn a_vm_test_main_fails_too_holds_the_updates_unless_they_fix_something_serious(
     )
     .unwrap();
     fs::write(m.path("vulnix-down"), "").unwrap();
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     assert_eq!(said(&m), holding);
     // What runs has a serious one the updates take away: they go live
     // without the test, saying so.
@@ -844,7 +844,7 @@ fn a_vm_test_failing_on_main_itself_isnt_run_on_main_again() {
     let was = m.running();
     let main = merged(&m);
     fs::write(m.home("check-breaks"), sha('c')).unwrap();
-    assert_eq!(go(&m), 1);
+    assert_eq!(go(&m), VERDICT);
     assert_eq!(
         said(&m),
         (
@@ -858,7 +858,7 @@ fn a_vm_test_failing_on_main_itself_isnt_run_on_main_again() {
     assert_eq!(vm_tests(&m), 2, "twice, on main");
     assert_eq!(m.running(), was);
     // Forced, with nothing remembered, the same.
-    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), VERDICT);
     assert_eq!(vm_tests(&m), 4);
 }
 

@@ -25,7 +25,6 @@ use crate::check::run_check;
 use crate::dispatch::{age, open, settled};
 use crate::memo::{Verdict, clean};
 use crate::run::{End, Run, Step};
-use crate::status::Outcome;
 use crate::{Broke, Config};
 
 /// How serious a known vulnerability is before taking it away lets an
@@ -88,10 +87,9 @@ impl Run<'_> {
                 );
             } else {
                 let what = self.what()?;
-                ended = Some(self.end(
-                    Outcome::Failed,
-                    &format!("VM test {c} fails with {what} and passes on main"),
-                ));
+                ended = Some(
+                    self.verdict(&format!("VM test {c} fails with {what} and passes on main")),
+                );
                 // The inputs on top of main: the same test failing with the
                 // same ones is the same job.
                 let of: Vec<String> = self
@@ -143,12 +141,9 @@ impl Run<'_> {
         let untested = self.untested.join(" ");
         if self.fixes.is_empty() {
             let what = self.what()?;
-            return Err(self.end(
-                Outcome::Failed,
-                &format!(
-                    "VM test {untested} fails on main as well; holding {what} until main passes"
-                ),
-            ));
+            return Err(self.verdict(&format!(
+                "VM test {untested} fails on main as well; holding {what} until main passes"
+            )));
         }
         println!(
             "main fails {untested}, but this fixes: {}",

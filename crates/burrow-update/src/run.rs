@@ -33,7 +33,7 @@ use crate::memo::Memo;
 use crate::running::{self, Already, Running};
 use crate::status::{Outcome, epoch, note};
 use crate::train::{self, Pr};
-use crate::{Broke, Config, is_name, push};
+use crate::{Broke, Config, VERDICT, is_name, push};
 
 /// How long a run holds off for a system that isn't main's before the
 /// owner hears of it.
@@ -226,6 +226,19 @@ impl Run<'_> {
     pub(crate) fn end(&self, outcome: Outcome, message: &str) -> End {
         note(self.cfg, outcome, message, self.behind, self.off_main);
         End::Exit(if outcome == Outcome::Failed { 1 } else { 0 })
+    }
+
+    /// Says a VM test failed the run's trees, which the memo keeps, and
+    /// ends it with [`VERDICT`].
+    pub(crate) fn verdict(&self, message: &str) -> End {
+        note(
+            self.cfg,
+            Outcome::Failed,
+            message,
+            self.behind,
+            self.off_main,
+        );
+        End::Exit(VERDICT)
     }
 
     pub(crate) fn git(&self, args: &[&str]) -> Result<String, Broke> {

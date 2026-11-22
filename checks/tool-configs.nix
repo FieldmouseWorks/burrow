@@ -18,6 +18,8 @@ let
 in
 assert burrow.events.handlers.renovate-sweep.wake == "${burrow.stateDir}/renovate-sweep/wake.json";
 assert burrow.events.handlers.renovate-sweep.gap <= 20;
+# HOST-update's verdict on a tree (burrow-update's VERDICT) is no failed unit.
+assert systemd.services."${p}-update".serviceConfig.SuccessExitStatus or null == "3";
 pkgs.runCommand "tool-configs-check" { } (
   usage (tool "update") "${p}-update [--force | status]"
   + usage (tool "switch") "${p}-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]"
