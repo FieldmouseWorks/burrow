@@ -156,7 +156,14 @@ impl Repo {
         s.git(&self.origin, &["checkout", "-q", "-B", name, "main"]);
         for (f, text) in files {
             match text {
-                Some(t) => write(&self.origin.join(f), t),
+                Some(t) => {
+                    // A file where a directory the PR emptied was.
+                    let path = self.origin.join(f);
+                    if path.is_dir() {
+                        fs::remove_dir(&path).unwrap();
+                    }
+                    write(&path, t)
+                }
                 None => fs::remove_file(self.origin.join(f)).unwrap(),
             }
         }

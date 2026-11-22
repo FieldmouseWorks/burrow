@@ -416,3 +416,45 @@ fn a_move_that_breaks_the_names_is_judged_check_by_check() {
     assert_eq!(ran.code, 1, "{}", ran.out);
     assert!(ran.found.is_none(), "{}", ran.out);
 }
+
+/// A test directory the PR makes a file of its name (#1426), beside a new
+/// test that fails on the old code.
+fn directory_made_a_file() -> (Repo, Files<'static>) {
+    let r = repo();
+    write(&r.origin.join("tests/d/x"), "x\n");
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s.git(&r.origin, &["commit", "-qm", "a test directory"]);
+    let files = vec![
+        ("lib.txt", Some("2\n")),
+        ("tests/new.txt", Some("2\n")),
+        ("tests/d/x", None),
+        ("tests/d", Some("d\n")),
+    ];
+    (r, files)
+}
+
+/// The negative tree takes the directory's files away before it adds the
+/// file, so the test is caught.
+#[test]
+fn a_directory_made_a_file_is_still_caught() {
+    let (r, files) = directory_made_a_file();
+    caught(&r.run(&r.pr("file", &files), "", NEW_FAILS));
+}
+
+/// Where the old code reads a file in that directory, no tree holds it and
+/// the file both, so it can't tell.
+#[test]
+fn a_file_in_a_directory_made_a_file_isnt_put_back() {
+    let (r, files) = directory_made_a_file();
+    edit(
+        &r,
+        "inherit system want;",
+        r#"inherit system want; x = if builtins.pathExists ./tests/d/x then "x" else "gone";"#,
+    );
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s.git(
+        &r.origin,
+        &["commit", "-qm", "t reads the directory's file"],
+    );
+    cant_tell(&r.run(&r.pr("file-read", &files), "", r#""x":"gone""#));
+}
