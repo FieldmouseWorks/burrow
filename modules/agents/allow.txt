@@ -1,13 +1,8 @@
-# Where an agent sandbox may go without --open (tinyproxy, fnmatch, one host
-# pattern per line; "*.x" doesn't match "x" itself). Add to it rather than
-# reaching for --open when a project needs something new.
-
-# Claude
-api.anthropic.com
-*.anthropic.com
-claude.ai
-*.claude.ai
-*.claude.com
+# Where every agent sandbox may go without --open (tinyproxy, fnmatch, one
+# host pattern per line; "*.x" doesn't match "x" itself). Add to it rather
+# than reaching for --open when a project needs something new. An engine's
+# own hosts are its entry's (burrow.agents.engines.NAME.hosts), on its
+# sandboxes' proxy alone.
 
 # GitHub (reads only: the VM holds no token)
 github.com

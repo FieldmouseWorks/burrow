@@ -101,16 +101,22 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 - **Today:** Host sessions rely on `/etc/claude-code/managed-settings.json`
   and Claude Code's `PreToolUse` hook invoking
   [`burrow-guard`](../crates/burrow-guard/src/main.rs). A non-Claude CLI will
-  not read those files or fire that hook format. In parallel,
-  [`modules/agents.nix`](../modules/agents.nix),
-  [`modules/agents/guest.nix`](../modules/agents/guest.nix), and
-  [`modules/agents/allow.txt`](../modules/agents/allow.txt) wire only Claude
-  Code's package, `agent.claude-token`, and Anthropic/Claude egress hosts.
+  not read those files or fire that hook format. The sandboxes are
+  per-engine: [`burrow.agents.engines`](../modules/agents/engines.nix) is a
+  table of each engine's guest packages and modules, its systemd credential
+  (`agent.credential`, exported as its `credentialEnv`), its own egress
+  hosts and an owner-approved capability list. Claude's entry is declared by
+  [`modules/claude.nix`](../modules/claude.nix);
+  [`modules/agents.nix`](../modules/agents.nix) builds one guest image and
+  one filtered proxy per entry, so a VM started for an engine (`agent new
+  --engine`) gets only that engine's packages and credential, and reaches
+  only [the shared list](../modules/agents/allow.txt) and that engine's
+  hosts. Still Claude-shaped there: `agent claude`, the host model settings
+  `agent new` copies into a VM's `~/.claude`, and `proj run --vm`, which
+  runs Claude in the default engine's VM.
 - **Target:**
-  - **Sandbox path (default for new engines):** Generalize `burrow.agents`
-    from single-engine Claude options to a per-engine table of guest
-    packages, systemd credentials, and egress host allowlists, enforcing
-    plugin capability grants inside the shared sandbox
+  - **Sandbox path (default for new engines):** Enforce plugin capability
+    grants inside the shared sandbox, from each engine's `capabilities`
     ([#743](https://github.com/FieldmouseWorks/burrow/issues/743)). Inside
     the microVM, the VM itself is the security boundary.
   - **Host path (when needed):** Keep `burrow-guard`'s ZFS-snapshot and
@@ -149,8 +155,8 @@ land:
 3. **Land the remaining decoupling as bounded follow-ups:**
    - per-engine holds, login notices, meters, and normalized `probe usage`
      accounting;
-   - generalized per-engine packages, credentials, and egress allowlists in
-     `burrow.agents` ([#743](https://github.com/FieldmouseWorks/burrow/issues/743));
+   - capability grants in `burrow.agents`' per-engine sandboxes
+     ([#743](https://github.com/FieldmouseWorks/burrow/issues/743));
    - pluggable worker dispatch in `burrow-judge`;
    - host-hook adapters into `burrow-guard` only for harnesses that need host
      execution outside a microVM.

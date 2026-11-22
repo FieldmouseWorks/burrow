@@ -502,12 +502,17 @@ Each has an entry below, and each can be imported on its own.
   flake-check.yml writes it, in shadow for now, once a repo's or its
   organization's Actions variables name it: `BURROW_BUILDS_URL`
   (`https://HOST/PATH`) and `BURROW_BUILDS_PUBLIC_KEY` (`PATH/public-key`).
-- **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
-  (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
-  permissions bypassed inside, egress only through an allowlist proxy, no
-  GitHub token; the work comes back with `agent fetch` as `refs/agents/ID/*`.
-  Idle ones stop after a day and are saved and deleted after a week. Opt-in
-  per task.
+- **`agents`** (`burrow.agents`): `agent new PROJECT [--engine NAME]`: a
+  microVM per task (microvm.nix, QEMU) on a ZFS clone of the data dataset,
+  its engine with nothing to ask inside, egress only through an allowlist
+  proxy, no GitHub token; the work comes back with `agent fetch` as
+  `refs/agents/ID/*`. Each engine is an entry of `burrow.agents.engines`
+  (Claude's is declared by the `claude` module): its guest packages and
+  modules, its login (`credentialFile`, handed in as the systemd credential
+  `agent.credential`), its own egress hosts on its own filtered proxy, and
+  the capabilities the owner approved for it. A VM for one engine gets none
+  of another's. Idle ones stop after a day and are saved and deleted after a
+  week. Opt-in per task.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
   signed in to your accounts by you, that job engines drive through
   Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
@@ -693,8 +698,8 @@ Each has an entry below, and each can be imported on its own.
 Each module is also importable on its own (`burrow.nixosModules.agents`, ...).
 
 Things you'll want to set yourself: a Claude login for the sandboxes
-(`burrow.agents.claudeTokenFile`, a `claude setup-token` token, for example
-from sops-nix), extra allowed hosts (`burrow.agents.extraAllow`), a git
+(`burrow.agents.engines.claude.credentialFile`, a `claude setup-token` token,
+for example from sops-nix), extra allowed hosts (`burrow.agents.extraAllow`), a git
 identity for the sandboxes (`burrow.agents.guestModules`), an intro for the
 machine's CLAUDE.md (`burrow.claude.machineMd` with `lib.mkBefore`), MCP
 servers of your own for every job engine and Claude session (`burrow.mcpServers`), and, to
@@ -723,4 +728,5 @@ nix build .#checks.x86_64-linux.agents -L     # boots sandboxes (needs /dev/kvm)
 
 `checks.agents` (`tests/agents.nix`) boots a host VM that boots sandboxes inside
 itself (nested KVM) and checks isolation, egress, fetch, `proj run --vm` and
-cleanup.
+cleanup, and with a second stand-in engine, that each engine's VM gets only
+its own packages, credential and hosts.

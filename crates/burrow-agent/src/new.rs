@@ -10,25 +10,26 @@ use crate::path::{project_name, resolve, slug};
 use crate::sandbox::{self, Sandbox};
 use crate::{Agent, Config, hostname, read, ssh, touch, write_line};
 
-/// The new sandbox's project, the paths it also gets, and whether it skips
-/// the allowlist.
+/// The new sandbox's project, the paths it also gets, whether it skips the
+/// allowlist, and the engine it's for.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Ask {
     pub project: String,
     pub withs: Vec<PathBuf>,
     pub open: bool,
+    pub engine: String,
 }
 
 pub fn usage(cfg: &Config) -> String {
     format!(
-        "usage: agent new PROJECT [--with {}/PATH]... [--open]",
+        "usage: agent new PROJECT [--with {}/PATH]... [--open] [--engine NAME]",
         cfg.data.display()
     )
 }
 
 /// What `agent new` was asked, the project checked to be a folder directly
 /// in the projects folder, and each --with path a path under the data
-/// dataset's mountpoint, both there.
+/// dataset's mountpoint, both there, and the engine one the machine has.
 pub fn ask(cfg: &Config, args: &[String], cwd: &Path) -> Result<Ask, String> {
     let Some((p, rest)) = args.split_first() else {
         return Err(usage(cfg));
@@ -47,11 +48,19 @@ pub fn ask(cfg: &Config, args: &[String], cwd: &Path) -> Result<Ask, String> {
         project: p.clone(),
         withs: Vec::new(),
         open: false,
+        engine: String::new(),
     };
+    let mut engine = None;
     let mut rest = rest.iter();
     while let Some(o) = rest.next() {
         match o.as_str() {
             "--open" => ask.open = true,
+            "--engine" => {
+                let Some(e) = rest.next().filter(|e| !e.is_empty()) else {
+                    return Err("--engine needs an engine's name".to_owned());
+                };
+                engine = Some(e.clone());
+            }
             "--with" => {
                 let Some(w) = rest.next().filter(|w| !w.is_empty()) else {
                     return Err(format!("--with needs a path under {}", cfg.data.display()));
@@ -74,6 +83,13 @@ pub fn ask(cfg: &Config, args: &[String], cwd: &Path) -> Result<Ask, String> {
             _ => return Err(format!("unknown option: {o}")),
         }
     }
+    let Some(engine) = engine.or_else(|| cfg.default_engine.clone()) else {
+        return Err(
+            "no default engine (burrow.agents.defaultEngine): say which with --engine".to_owned(),
+        );
+    };
+    cfg.engine(&engine)?;
+    ask.engine = engine;
     Ok(ask)
 }
 
@@ -188,6 +204,7 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
         &at(sandbox::NET),
         if ask.open { "open" } else { "filtered" },
     )?;
+    write_line(&at(sandbox::ENGINE), &ask.engine)?;
     write_line(&at(sandbox::TTL_DAYS), "7")?;
     touch(&at(sandbox::LAST_USED))?;
     let (shares, mounts) = shares(cfg, &d, &ask.project, &ask.withs)?;
@@ -198,6 +215,7 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
         sandbox::PROJECT,
         sandbox::CID,
         sandbox::NET,
+        sandbox::ENGINE,
         sandbox::TTL_DAYS,
         sandbox::LAST_USED,
         sandbox::SHARES,
@@ -206,7 +224,8 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
         chown.push(at(f).to_string_lossy().into_owned());
     }
     agent.run("chown", &chown)?;
-    symlink(&cfg.runner, at("current")).map_err(|e| format!("{dir}/current: {e}"))?;
+    symlink(&cfg.engine(&ask.engine)?.runner, at("current"))
+        .map_err(|e| format!("{dir}/current: {e}"))?;
     let sb = Sandbox::find(cfg, &id)?;
     sb.write_args(agent)?;
     agent.run("systemctl", &["start", &sb.unit()])?;
@@ -306,8 +325,19 @@ pub(crate) mod tests {
 
     pub(crate) fn config(dir: &Path) -> Config {
         serde_json::from_value(serde_json::json!({
-            "runner": "/nix/store/x-runner",
-            "forwardFiltered": "/nix/store/x-proxy-3128",
+            "engines": {
+                "claude": {
+                    "runner": "/nix/store/x-runner",
+                    "forward": "/nix/store/x-proxy-3128",
+                    "credentialFile": null
+                },
+                "other": {
+                    "runner": "/nix/store/x-other-runner",
+                    "forward": "/nix/store/x-proxy-3130",
+                    "credentialFile": null
+                }
+            },
+            "defaultEngine": "claude",
             "forwardOpen": "/nix/store/x-proxy-3129",
             "root": dir.join("agents"),
             "src": dir.join("data/dev/src"),
@@ -318,7 +348,6 @@ pub(crate) mod tests {
             "uid": 1000,
             "group": "users",
             "home": "/home/dev",
-            "tokenFile": null,
             "sudo": "/run/wrappers/bin/sudo",
             "path": "/nix/store/x/bin"
         }))
@@ -369,7 +398,29 @@ pub(crate) mod tests {
                 project: "web".to_owned(),
                 withs: vec![root.join("data/lab")],
                 open: true,
+                engine: "claude".to_owned(),
             })
+        );
+        assert_eq!(
+            ask(&["web", "--engine", "other"]).map(|a| a.engine),
+            Ok("other".to_owned())
+        );
+        assert_eq!(
+            ask(&["web", "--engine", "gone"]),
+            Err("no such engine: gone (burrow.agents.engines has claude, other)".to_owned())
+        );
+        assert_eq!(
+            ask(&["web", "--engine"]),
+            Err("--engine needs an engine's name".to_owned())
+        );
+        let mut bare = config(&root);
+        bare.default_engine = None;
+        assert_eq!(
+            super::ask(&bare, &args(&["web"]), &root),
+            Err(
+                "no default engine (burrow.agents.defaultEngine): say which with --engine"
+                    .to_owned()
+            )
         );
         assert_eq!(ask(&[]), Err(usage(&cfg)));
         assert_eq!(ask(&["a/b"]), Err("not a project name: a/b".to_owned()));

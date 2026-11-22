@@ -26,6 +26,8 @@ pkgs.testers.runNixOSTest {
       mkdir -p $out/bin
       rustc --edition=2024 ${./agents/claude.rs} -o $out/bin/claude
     '';
+    # A second engine, beside Claude: its own command, login and host.
+    otherEngine = pkgs.writeShellScriptBin "other-engine" "echo other";
     # The test commits, on the host and in the sandboxes.
     identity.programs.git.config.user = {
       name = "Test";
@@ -49,6 +51,16 @@ pkgs.testers.runNixOSTest {
       probe.repo = "o/machine";
       claude.package = vmClaude;
       agents.enable = true;
+      # Each engine's login, which the test writes before any sandbox starts.
+      agents.engines.claude.credentialFile = "/run/keys/claude-token";
+      agents.engines.other = {
+        packages = [ otherEngine ];
+        credentialFile = "/run/keys/other-token";
+        credentialEnv = "OTHER_ENGINE_TOKEN";
+        hosts = [ "other-engine.example" ];
+        proxyPort = 3130;
+        capabilities = [ "read" ];
+      };
       toolbox.enable = true;
       # Small sandboxes, so two fit (and not 2048: QEMU's microvm machine hangs).
       agents.memory = 1536;
@@ -108,7 +120,7 @@ pkgs.testers.runNixOSTest {
     # wake-ups only.
     host.wait_for_unit("burrow-events.service")
     host.succeed("mountpoint /agents")
-    for unit in ["agent-proxy.service", "agent-proxy-open.service"]:
+    for unit in ["agent-proxy-claude.service", "agent-proxy-other.service", "agent-proxy-open.service"]:
         host.wait_for_unit(unit)
     assert "agent-gc" in host.succeed("systemctl list-timers --all")
 
@@ -119,6 +131,22 @@ pkgs.testers.runNixOSTest {
     def vm(agent, cmd):
         # One command in the sandbox, quoted for agent sh.
         return dev(f"agent sh {agent} bash -c {json.dumps(cmd)} </dev/null")
+
+    def connect(agent, url, extra=""):
+        # What the sandbox's proxy answered a CONNECT to url with: 403 when
+        # it refused, anything else (it tried, and with no internet in a
+        # test, failed upstream) when it allowed it.
+        return vm(agent, f"curl -s -o /dev/null --max-time 10 -w '%{{http_connect}}' {extra} {url} || true").strip()
+
+    def allowed(agent, url):
+        got = connect(agent, url)
+        assert got not in ("403", "000"), f"{agent} refused {url}: {got}"
+
+    def refused(agent, url):
+        got = connect(agent, url)
+        assert got == "403", f"{agent} reached {url}: {got}"
+
+    host.succeed("mkdir -p /run/keys && printf claude-secret >/run/keys/claude-token && printf other-secret >/run/keys/other-token")
 
     dev("cd /data/dev/src && mkdir demo && cd demo && git init -q -b main && echo one >a && git add a && git commit -qm one")
     dev("echo lab >/data/lab/disk.img")
@@ -165,6 +193,12 @@ pkgs.testers.runNixOSTest {
         assert settings["effortLevel"] == "high", settings
         assert json.loads(vm(a, "cat ~/.claude.json"))["projects"]["/data/dev/src/demo"]["hasTrustDialogAccepted"]
 
+    with subtest("it gets its engine's login and packages, and not another engine's"):
+        assert vm(a, "printenv CLAUDE_CODE_OAUTH_TOKEN").strip() == "claude-secret"
+        vm(a, "! command -v other-engine")
+        vm(a, "! printenv OTHER_ENGINE_TOKEN")
+        vm(a, "! sudo grep -rqs other-secret /run/agent /run/credentials /etc /home")
+
     with subtest("it has KVM of its own, for projects with VMs"):
         vm(a, "test -c /dev/kvm && test -w /dev/kvm")
 
@@ -181,13 +215,13 @@ pkgs.testers.runNixOSTest {
         vm(a, "rm ~/.slow-banner")
 
     with subtest("egress: the allowlist through the proxy, and nothing else"):
-        def connect(url, extra=""):
-            return vm(a, f"curl -s -o /dev/null --max-time 10 -w '%{{http_connect}}' {extra} {url} || true").strip()
         # Refused by the proxy itself.
-        assert connect("https://example.com/") == "403", connect("https://example.com/")
-        # Allowed: the proxy tries (and, with no internet in a test, fails
-        # upstream rather than refusing).
-        assert connect("https://github.com/") not in ("403", "000"), connect("https://github.com/")
+        refused(a, "https://example.com/")
+        # Allowed: the shared list, and its own engine's hosts.
+        allowed(a, "https://github.com/")
+        allowed(a, "https://api.anthropic.com/")
+        # Another engine's hosts are that engine's alone.
+        refused(a, "https://other-engine.example/")
         # Around the proxy: no route out, and no way to the host's own ports.
         vm(a, "! curl -s --noproxy '*' --max-time 5 http://1.1.1.1/")
         vm(a, "! curl -s --noproxy '*' --max-time 5 http://10.0.2.2:3129/")
@@ -197,12 +231,29 @@ pkgs.testers.runNixOSTest {
         dev("echo '{}' > ~/.claude/settings.json")
         o = dev("agent new demo --open").strip()
         assert json.loads(vm(o, "cat ~/.claude/settings.json")) == {}
-        assert vm(o, "curl -s -o /dev/null --max-time 10 -w '%{http_connect}' https://example.com/ || true").strip() != "403"
+        assert connect(o, "https://example.com/") != "403"
 
     with subtest("a second sandbox costs only its own changes"):
         used = int(host.succeed(f"zfs get -Hp -o value used rpool/agents/{o}"))
         print(f"{o} uses {used} bytes")
         assert used < 256 * 1024 * 1024, used
+
+    with subtest("a sandbox for another engine gets its packages, login and hosts, and none of Claude's"):
+        # Two running fit; this one needs o's room.
+        dev(f"agent stop {o}")
+        e = dev("agent new demo --engine other").strip()
+        assert e == "demo-3", e
+        assert host.succeed(f"cat /agents/{e}/engine").strip() == "other"
+        assert vm(e, "other-engine").strip() == "other"
+        vm(e, "! command -v claude")
+        assert vm(e, "printenv OTHER_ENGINE_TOKEN").strip() == "other-secret"
+        vm(e, "! printenv CLAUDE_CODE_OAUTH_TOKEN")
+        vm(e, "! sudo grep -rqs claude-secret /run/agent /run/credentials /etc /home")
+        allowed(e, "https://github.com/")
+        allowed(e, "https://other-engine.example/")
+        refused(e, "https://api.anthropic.com/")
+        refused(e, "https://claude.ai/")
+        dev(f"agent stop {e}")
 
     with subtest("killing a VM changes nothing outside it"):
         host.succeed(f"systemctl kill -s KILL microvm@{a}.service")
@@ -239,8 +290,8 @@ pkgs.testers.runNixOSTest {
         host.succeed("mkdir -p /tmp/gh; echo '{\"state\":\"open\"}' >/tmp/gh/repos_o_r_issues_1; echo '[]' >/tmp/gh/repos_o_r_issues_1_comments")
         job = dev("proj run --vm demo silent").strip()
         sandbox = host.succeed(f"cat /data/dev/jobs/{job}/agent").strip()
-        assert sandbox == "demo-3", sandbox
-        assert "[vm demo-3]" in dev("proj status")
+        assert sandbox == "demo-4", sandbox
+        assert "[vm demo-4]" in dev("proj status")
         # A turn ends once every sandbox it boots has booted, so it gets the
         # agent's wait for each of them.
         def ended(job, turn=1, boots=1):
@@ -296,8 +347,8 @@ pkgs.testers.runNixOSTest {
         assert dev(f"git -C /data/dev/src/demo show refs/agents/{a}/heads/feat:a").strip() == "two"
 
     with subtest("a stopped sandbox comes back on use"):
-        dev("agent stop demo-3")
+        dev("agent stop demo-4")
         assert "stopped" in dev("agent ls")
-        assert vm("demo-3", "hostname").strip() == "demo-3"
+        assert vm("demo-4", "hostname").strip() == "demo-4"
   '';
 }

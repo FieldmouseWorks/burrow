@@ -70,43 +70,168 @@ impl Account for ClaudeCode {
 /// shown to be fresh (read_fresh).
 pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
     read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, TIMEOUT)
+        ask_usage(claude, dir, TIMEOUT, None)
     })
+    .map_err(Unread::said)
 }
 
-/// How long check_login may take in all: a copy of the meter is waited out
-/// (SNAPSHOT at most) and then one live reading asked, inside HOST-health's
-/// check timeout (modules/updates.nix checkTimeout, 90s).
-const LOGIN_BUDGET: Duration = Duration::from_secs(80);
+/// How long check_login may take in all: a copy of the meter waited out
+/// (SNAPSHOT), another session's newer one waited out in turn, and a live
+/// reading asked, inside HOST-health's timeout for it (modules/updates.nix
+/// checkTimeouts.claude-login, 150s).
+const LOGIN_BUDGET: Duration = Duration::from_secs(140);
+/// The least of LOGIN_BUDGET a live reading is asked with: a copy whose wait
+/// would leave less isn't waited out.
+const ASK_LEAST: Duration = Duration::from_secs(10);
 
 /// Whether CLAUDE is logged in as the user it runs as, within LOGIN_BUDGET.
 /// `get_usage` answers `success` to the request alone, and from a cached copy
 /// or with null limits when the endpoint failed on an expired or revoked
 /// login, so only a fresh answer from its endpoint shows it, and a copy's
-/// recency shows nothing about the login now. A copy under SNAPSHOT old would
-/// be what answers, so it is waited out first; then a live reading of the
-/// meter (read_usage's) is asked, whatever the copy's age. A copy dated ahead
-/// of this clock proves nothing and is not waited out: the reading refuses it.
+/// recency shows nothing about the login now (login_within). A reading that
+/// fails on the endpoint's rate limit alone doesn't fail the login
+/// (login_shown): Claude Code's debug log says which it was.
 pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
     let start = Instant::now();
-    if let Some(at) = copied_at()? {
-        let age = crate::now() - at;
-        if (0.0..SNAPSHOT).contains(&age) {
-            thread::sleep(Duration::from_secs_f64(SNAPSHOT - age + 1.0));
+    // Its debug log, in a private folder of its own, removed on drop.
+    let logs = tempfile::Builder::new()
+        .prefix("debug-")
+        .tempdir_in(dir)
+        .map_err(|e| format!("a folder for Claude Code's debug log: {e}"))?;
+    let log = logs.path().join("claude.log");
+    login_within(
+        LOGIN_BUDGET,
+        &mut copied_at,
+        &mut crate::now,
+        &mut || start.elapsed(),
+        &mut thread::sleep,
+        &mut |left| {
+            // Each asking's log on its own: an earlier one's says nothing.
+            let _ = std::fs::remove_file(&log);
+            ask_usage(claude, dir, left, Some(&log))
+        },
+        &mut || String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned(),
+    )
+}
+
+/// check_login's steps, with the copy's time (COPIED), the clock, the time
+/// spent (ELAPSED), the waiting (SLEEP) and the asking (ASK, given the time
+/// left) and the debug LOG of the last asking handed in. A copy under SNAPSHOT old would be what answers, so it is
+/// waited out first; then a live reading of the meter (read_fresh's) is
+/// asked. The user's other Claude Code sessions fetch the meter too, and may
+/// write a new copy during the wait or the asking: that says nothing about
+/// the login, so the new copy is waited out in turn, while BUDGET leaves
+/// ASK_LEAST to ask with. A copy dated ahead of this clock proves nothing and
+/// is not waited out: the reading refuses it. A reading that failed is
+/// judged by login_shown.
+fn login_within(
+    budget: Duration,
+    copied: &mut dyn FnMut() -> Result<Option<f64>, String>,
+    clock: &mut dyn FnMut() -> f64,
+    elapsed: &mut dyn FnMut() -> Duration,
+    sleep: &mut dyn FnMut(Duration),
+    ask: &mut dyn FnMut(Duration) -> Result<Value, String>,
+    log: &mut dyn FnMut() -> String,
+) -> Result<(), String> {
+    loop {
+        let seen = copied()?;
+        if let Some(at) = seen {
+            let age = clock() - at;
+            if (0.0..SNAPSHOT).contains(&age) {
+                let wait = Duration::from_secs_f64(SNAPSHOT - age + 1.0);
+                if elapsed() + wait + ASK_LEAST > budget {
+                    return Err(format!(
+                        "Claude Code's cached meter was fetched {age:.0}s ago, by another of this user's sessions, and waiting it out leaves too little of {}s to ask its endpoint: the login wasn't checked",
+                        budget.as_secs()
+                    ));
+                }
+                sleep(wait);
+                continue;
+            }
+        }
+        let left = budget.saturating_sub(elapsed());
+        if left < ASK_LEAST {
+            return Err(format!(
+                "another of this user's sessions kept refreshing Claude Code's cached meter, leaving too little of {}s to ask its endpoint: the login wasn't checked",
+                budget.as_secs()
+            ));
+        }
+        let mut answer = Value::Null;
+        let failed = match read_fresh(copied, clock, &mut || {
+            answer = ask(left)?;
+            Ok(answer.clone())
+        }) {
+            Ok(_) => return Ok(()),
+            Err(e) => e,
+        };
+        let copy = matches!(failed, Unread::Copy(_));
+        match login_shown(Err(failed.said()), &answer, &log()) {
+            Ok(()) => return Ok(()),
+            // Another session's copy, written since it was looked at, may be
+            // what answered: wait that one out.
+            Err(_) if copy && copied()? != seen => continue,
+            Err(e) => return Err(e),
         }
     }
-    let left = LOGIN_BUDGET.saturating_sub(start.elapsed());
-    read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, left)
-    })
-    .map(|_| ())
+}
+
+/// Whether the login is shown working, given a live READING of the meter,
+/// the ANSWER it was read from and Claude Code's debug LOG of the asking. A
+/// reading is the proof; a failed one still leaves the login working when
+/// the usage endpoint answered nothing but 429 (usage_statuses) and the
+/// answer has plan limits. That endpoint is shared by every Claude Code
+/// logged in as this user, and a 429 is remembered for the bearer for
+/// minutes, so it often answers from its copy on a rate limit; an expired or
+/// revoked login gets a 401 or no plan limits instead. With no 429 in the
+/// log, or anything else beside it, the reading's error stands.
+fn login_shown(reading: Result<(), String>, answer: &Value, log: &str) -> Result<(), String> {
+    let Err(failed) = reading else {
+        return Ok(());
+    };
+    let statuses = usage_statuses(log);
+    if answer["rate_limits_available"] == true
+        && !statuses.is_empty()
+        && statuses.iter().all(|status| *status == 429)
+    {
+        return Ok(());
+    }
+    Err(failed)
+}
+
+/// The HTTP statuses Claude Code's debug LOG shows its usage endpoint
+/// answering: the three-digit numbers on its lines about that endpoint,
+/// which 2.1.330 writes as `fetchUtilization: 429 remembered for this
+/// bearer; not asking again for 300s`, `fetchUtilization: 200 after 1
+/// attempt(s)` and `Failed to load usage data: Request failed with status
+/// code 429` (checked against remi's). Should a later Claude Code word them
+/// otherwise, none are found and a rate limit fails the login again.
+fn usage_statuses(log: &str) -> Vec<u16> {
+    const ABOUT: [&str; 2] = ["fetchUtilization:", "Failed to load usage data:"];
+    log.lines()
+        .filter_map(|line| {
+            ABOUT
+                .iter()
+                .find_map(|about| line.split_once(about).map(|(_, said)| said))
+        })
+        .flat_map(|said| said.split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|word| word.len() == 3 && word.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|word| word.parse().ok())
+        .filter(|status| (100..600).contains(status))
+        .collect()
 }
 
 /// Claude Code's answer to `get_usage`, without the scan of local
-/// transcripts the meter has no use for. It makes no model call.
-fn ask_usage(claude: &Path, dir: &Path, timeout: Duration) -> Result<Value, String> {
+/// transcripts the meter has no use for. It makes no model call. With a
+/// LOG, Claude Code writes its debug log there.
+fn ask_usage(
+    claude: &Path,
+    dir: &Path,
+    timeout: Duration,
+    log: Option<&Path>,
+) -> Result<Value, String> {
     {
-        let mut child = Command::new(claude)
+        let mut command = Command::new(claude);
+        command
             .args([
                 "-p",
                 "--input-format",
@@ -115,7 +240,11 @@ fn ask_usage(claude: &Path, dir: &Path, timeout: Duration) -> Result<Value, Stri
                 "stream-json",
                 "--verbose",
             ])
-            .args(["--strict-mcp-config", "--no-session-persistence"])
+            .args(["--strict-mcp-config", "--no-session-persistence"]);
+        if let Some(log) = log {
+            command.arg("--debug-file").arg(log);
+        }
+        let mut child = command
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -321,6 +450,25 @@ fn copy_in(config: &Value) -> Result<Option<(f64, Reading)>, String> {
     }
     reading(&copy["utilization"]).map(|r| Some((at, r)))
 }
+
+/// Why `get_usage` gave no reading.
+#[derive(Debug, PartialEq)]
+enum Unread {
+    /// Claude Code's copy of the meter may be what answered: it changed while
+    /// it was asked, or was under SNAPSHOT old when it was.
+    Copy(String),
+    /// Anything else.
+    Not(String),
+}
+
+impl Unread {
+    fn said(self) -> String {
+        match self {
+            Unread::Copy(said) | Unread::Not(said) => said,
+        }
+    }
+}
+
 /// The meter from one `get_usage` (ASK), only if it can be shown to be fresh.
 /// The copy is looked at first, then the clock, then it's asked: Claude Code
 /// picks its answer after all of them, so a copy already past SNAPSHOT by this
@@ -334,18 +482,21 @@ fn read_fresh(
     copied: &mut dyn FnMut() -> Result<Option<f64>, String>,
     clock: &mut dyn FnMut() -> f64,
     ask: &mut dyn FnMut() -> Result<Value, String>,
-) -> Result<Reading, String> {
-    let before = copied()?;
+) -> Result<Reading, Unread> {
+    let before = copied().map_err(Unread::Not)?;
     let asked = clock();
-    let answer = ask()?;
-    let after = copied()?;
+    let answer = ask().map_err(Unread::Not)?;
+    let after = copied().map_err(Unread::Not)?;
     if after != before {
-        return Err(
+        return Err(Unread::Copy(
             "Claude Code's cached meter changed while get_usage was answering, so its answer may be that copy"
                 .to_owned(),
-        );
+        ));
     }
-    usage(&answer, before, asked)
+    usage(&answer, before, asked).map_err(|e| match before {
+        Some(at) if asked - at < SNAPSHOT => Unread::Copy(e),
+        _ => Unread::Not(e),
+    })
 }
 
 /// The weekly meter in a `get_usage` answer, asked at NOW with Claude Code's
