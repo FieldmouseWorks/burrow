@@ -2,14 +2,18 @@
 //! body, from nginx or curl on this machine, answered with a bare status and
 //! the connection closed. Anything else is turned away.
 
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
+use rustix::event::{PollFd, PollFlags, poll};
 use sha2::Sha256;
+
+use crate::taken::Taken;
 
 /// GitHub's cap on a delivery.
 pub const MAX_BODY: usize = 25 * 1024 * 1024;
@@ -152,15 +156,42 @@ fn linger(stream: &mut TcpStream) {
 /// What answers a request: the status it gets.
 pub type Handle = Arc<dyn Fn(&Request) -> u16 + Send + Sync>;
 
-/// Serve each request on 127.0.0.1:PORT (0: any free port) with `handle`, a
-/// thread a connection, from a thread of its own. Returns the port it
-/// listens on, and that thread, which ends only in a panic: the service is
-/// no use without it (`supervise`).
+/// Serve each request on 127.0.0.1:PORT (0: any free port) with `handle`, as
+/// `serve` does.
 pub fn listen(port: u16, handle: Handle) -> io::Result<(u16, JoinHandle<()>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
+    serve(listener, handle, Taken::default())
+}
+
+/// The listening socket systemd holds for this service, handed over as its
+/// stdin. It outlives the process: a connection that comes while there's
+/// none waits on it for the next, where a port the process bound itself
+/// refuses it.
+pub fn handed() -> io::Result<TcpListener> {
+    let listener = TcpListener::from(io::stdin().as_fd().try_clone_to_owned()?);
+    listener.local_addr().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("stdin isn't their listening socket ({e})"),
+        )
+    })?;
+    Ok(listener)
+}
+
+/// Serve each request on `listener` with `handle`, a thread a connection,
+/// from a thread of its own, taking none once `taken` is stopped. Returns
+/// the port it listens on, and that thread, which ends only in a panic: the
+/// service is no use without it (`supervise`).
+pub fn serve(
+    listener: TcpListener,
+    handle: Handle,
+    taken: Taken,
+) -> io::Result<(u16, JoinHandle<()>)> {
     let port = listener.local_addr()?.port();
+    // `accept` waits in poll, never holding `taken` while it does.
+    listener.set_nonblocking(true)?;
     let accepting = thread::Builder::new().spawn(move || {
-        accept(&listener, &handle, |work| {
+        accept(&listener, &handle, &taken, |work| {
             thread::Builder::new().spawn(work).map(drop)
         })
     })?;
@@ -174,22 +205,37 @@ pub fn listen(port: u16, handle: Handle) -> io::Result<(u16, JoinHandle<()>)> {
 fn accept(
     listener: &TcpListener,
     handle: &Handle,
+    taken: &Taken,
     spawn: impl Fn(Box<dyn FnOnce() + Send>) -> io::Result<()>,
 ) {
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else {
-            // Out of descriptors, say: give some time to close.
-            thread::sleep(Duration::from_millis(100));
-            continue;
+    loop {
+        let waited = poll(&mut [PollFd::new(listener, PollFlags::IN)], None);
+        let got = waited
+            .map_err(io::Error::from)
+            .and_then(|_| taken.take(|| listener.accept()));
+        let ((mut stream, _), unanswered) = match got {
+            Ok(got) => got,
+            // A signal, or one that went away before it was taken.
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {
+                continue;
+            }
+            Err(_) => {
+                // Out of descriptors, say: give some time to close.
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
         };
         let handle = handle.clone();
-        let work = Box::new(move || match read(&mut stream) {
-            Ok(req) => answer(&mut stream, handle(&req)),
-            Err(Some(code)) => {
-                answer(&mut stream, code);
-                linger(&mut stream);
+        let work = Box::new(move || {
+            match read(&mut stream) {
+                Ok(req) => answer(&mut stream, handle(&req)),
+                Err(Some(code)) => {
+                    answer(&mut stream, code);
+                    linger(&mut stream);
+                }
+                Err(None) => {}
             }
-            Err(None) => {}
+            drop(unanswered);
         });
         if let Err(e) = spawn(work) {
             eprintln!("no thread for a connection ({e}); dropped it");
@@ -236,6 +282,7 @@ pub mod tests {
     use sha2::Sha256;
 
     use super::{Handle, accept, listen, signed};
+    use crate::taken::Taken;
 
     pub fn sign(secret: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
@@ -370,7 +417,7 @@ pub mod tests {
         let handle: Handle = Arc::new(|_| 202);
         let tried = AtomicUsize::new(0);
         thread::spawn(move || {
-            accept(&listener, &handle, |work| {
+            accept(&listener, &handle, &Taken::default(), |work| {
                 if tried.fetch_add(1, Ordering::SeqCst) == 0 {
                     Err(io::Error::other("no threads left"))
                 } else {

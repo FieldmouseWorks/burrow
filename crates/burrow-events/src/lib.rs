@@ -52,6 +52,7 @@ pub mod line;
 pub mod outbox;
 pub mod passes;
 pub mod routes;
+pub mod taken;
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
