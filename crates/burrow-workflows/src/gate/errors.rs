@@ -95,7 +95,8 @@ fn a_log_with_no_room_is_an_error_and_says_why() {
         assert!(
             s.said
                 .lines()
-                .any(|l| l.starts_with("::error title=") && l.contains(ENOSPC)),
+                // The title whole: GitHub ends a property at a comma.
+                .any(|l| l.starts_with("::error title=The gate broke::") && l.contains(ENOSPC)),
             "{}",
             s.said
         );

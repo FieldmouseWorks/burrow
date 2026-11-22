@@ -99,7 +99,7 @@ pub fn settle(watched: Result<Ended>) -> i32 {
         Some(why) => {
             let _ = writeln!(
                 out,
-                "::error title=The gate broke, so no check's failure::{}",
+                "::error title=The gate broke::{}",
                 why.replace('%', "%25")
             );
             format!("error {why}\n")
