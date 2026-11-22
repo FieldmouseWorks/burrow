@@ -101,9 +101,14 @@ pkgs.testers.runNixOSTest {
         machine.succeed("runuser -u dev -- settings offer claude models stand-in-one stand-in-two")
         machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-one high")
         machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-one\", effort: \"high\"}' ${config}", timeout=60)
-        # Everyone reads it; only the flow's controller writes it.
-        machine.succeed("runuser -u dev -- test -r ${config}")
-        machine.fail("runuser -u dev -- test -w ${nodes.machine.burrow.autoland.flowConfigs}")
+        # Everyone reads it, as they read a store path, and none of those who
+        # read it, or have a producer work on it, writes it or could put
+        # another in its place: not burrow.user, the flow's controller (whose
+        # proofs' recipes it holds) or a producer.
+        for who in ["dev", "conary-flow", "autoland-judge"]:
+            machine.succeed(f"runuser -u {who} -- test -r ${config}")
+            for path in ["${config}", "$(dirname ${config})", "${nodes.machine.burrow.autoland.flowConfigs}", "${nodes.machine.burrow.stateDir}"]:
+                machine.fail(f"runuser -u {who} -- test -w {path}")
         # A change to the role is read at the next render, with no deploy.
         machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-two")
         machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-two\", effort: null}' ${config}", timeout=60)
