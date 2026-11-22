@@ -75,6 +75,15 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(140);
 /// would leave less isn't waited out.
 const ASK_LEAST: Duration = Duration::from_secs(10);
 
+/// Why check_login didn't show the login working.
+#[derive(Debug, PartialEq)]
+pub enum Unshown {
+    /// The login itself failed (login_shown): a new one is what fixes it.
+    LoginFailed(String),
+    /// Anything else, which says nothing against the login.
+    Unknown(String),
+}
+
 /// Whether CLAUDE is logged in as the user it runs as, within LOGIN_BUDGET.
 /// `get_usage` answers `success` to the request alone, and from a cached copy
 /// or with null limits when the endpoint failed on an expired or revoked
@@ -82,13 +91,13 @@ const ASK_LEAST: Duration = Duration::from_secs(10);
 /// recency shows nothing about the login now (login_within). A reading that
 /// fails on the endpoint's rate limit alone doesn't fail the login
 /// (login_shown): Claude Code's debug log says which it was.
-pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
+pub fn check_login(claude: &Path, dir: &Path) -> Result<(), Unshown> {
     let start = Instant::now();
     // Its debug log, in a private folder of its own, removed on drop.
     let logs = tempfile::Builder::new()
         .prefix("debug-")
         .tempdir_in(dir)
-        .map_err(|e| format!("a folder for Claude Code's debug log: {e}"))?;
+        .map_err(|e| Unshown::Unknown(format!("a folder for Claude Code's debug log: {e}")))?;
     let log = logs.path().join("claude.log");
     login_within(
         LOGIN_BUDGET,
@@ -123,18 +132,18 @@ fn login_within(
     sleep: &mut dyn FnMut(Duration),
     ask: &mut dyn FnMut(Duration) -> Result<Value, String>,
     log: &mut dyn FnMut() -> String,
-) -> Result<(), String> {
+) -> Result<(), Unshown> {
     loop {
-        let seen = copied()?;
+        let seen = copied().map_err(Unshown::Unknown)?;
         if let Some(at) = seen {
             let age = clock() - at;
             if (0.0..SNAPSHOT).contains(&age) {
                 let wait = Duration::from_secs_f64(SNAPSHOT - age + 1.0);
                 if elapsed() + wait + ASK_LEAST > budget {
-                    return Err(format!(
+                    return Err(Unshown::Unknown(format!(
                         "Claude Code's cached meter was fetched {age:.0}s ago, by another of this user's sessions, and waiting it out leaves too little of {}s to ask its endpoint: the login wasn't checked",
                         budget.as_secs()
-                    ));
+                    )));
                 }
                 sleep(wait);
                 continue;
@@ -142,10 +151,10 @@ fn login_within(
         }
         let left = budget.saturating_sub(elapsed());
         if left < ASK_LEAST {
-            return Err(format!(
+            return Err(Unshown::Unknown(format!(
                 "another of this user's sessions kept refreshing Claude Code's cached meter, leaving too little of {}s to ask its endpoint: the login wasn't checked",
                 budget.as_secs()
-            ));
+            )));
         }
         let mut answer = Value::Null;
         let failed = match read_fresh(copied, clock, &mut || {
@@ -160,7 +169,7 @@ fn login_within(
             Ok(()) => return Ok(()),
             // Another session's copy, written since it was looked at, may be
             // what answered: wait that one out.
-            Err(_) if copy && copied()? != seen => continue,
+            Err(_) if copy && copied().map_err(Unshown::Unknown)? != seen => continue,
             Err(e) => return Err(e),
         }
     }
@@ -174,19 +183,72 @@ fn login_within(
 /// logged in as this user, and a 429 is remembered for the bearer for
 /// minutes, so it often answers from its copy on a rate limit; an expired or
 /// revoked login gets a 401 or no plan limits instead. With no 429 in the
-/// log, or anything else beside it, the reading's error stands.
-fn login_shown(reading: Result<(), String>, answer: &Value, log: &str) -> Result<(), String> {
+/// log, or anything else beside it, the reading's error stands, with the
+/// endpoint's failure from the log.
+///
+/// The login itself failed only on an answer with no plan limits (logged
+/// out, or its tokens cleared once their refresh was refused) or when the
+/// endpoint refused it and then so was its refresh (login_refused). A 401
+/// alone doesn't show that: an access token that ran out while its refresh
+/// couldn't get through gets one too, and the next refresh mends it.
+fn login_shown(reading: Result<(), String>, answer: &Value, log: &str) -> Result<(), Unshown> {
     let Err(failed) = reading else {
         return Ok(());
     };
+    match answer["rate_limits_available"].as_bool() {
+        Some(false) => return Err(Unshown::LoginFailed(failed)),
+        // No answer, so the log says nothing about this asking.
+        None => return Err(Unshown::Unknown(failed)),
+        Some(true) => {}
+    }
     let statuses = usage_statuses(log);
-    if answer["rate_limits_available"] == true
-        && !statuses.is_empty()
-        && statuses.iter().all(|status| *status == 429)
-    {
+    if !statuses.is_empty() && statuses.iter().all(|status| *status == 429) {
         return Ok(());
     }
-    Err(failed)
+    let failed = match endpoint_failure(log) {
+        Some(why) => format!("{failed} (its usage endpoint: {why})"),
+        None => failed,
+    };
+    Err(if login_refused(log) {
+        Unshown::LoginFailed(failed)
+    } else {
+        Unshown::Unknown(failed)
+    })
+}
+
+/// What begins Claude Code's debug line on a reading it couldn't load.
+const NOT_LOADED: &str = "Failed to load usage data:";
+/// And on a refresh of the login that failed, refused or not got through.
+const NOT_REFRESHED: &str = "OAuth refresh failed (expected):";
+/// What both say after that when an HTTP status was the failure.
+const STATUS: &str = "Request failed with status code ";
+
+/// Whether the debug LOG shows the login refused for good: the reading's
+/// last word a 401 or 403 (a revoked token's), and its refresh refused with
+/// a 400 or 401, on which 2.1.330 drops the tokens. A refresh that met a
+/// 5xx, no network or another process's lock is none of these.
+fn login_refused(log: &str) -> bool {
+    let status = |said: &str| said.trim().strip_prefix(STATUS)?.parse::<u16>().ok();
+    let last = log.lines().rev().find_map(|l| l.split_once(NOT_LOADED));
+    matches!(last.and_then(|(_, said)| status(said)), Some(401 | 403))
+        && log
+            .lines()
+            .filter_map(|l| l.split_once(NOT_REFRESHED))
+            .any(|(_, said)| matches!(status(said), Some(400 | 401)))
+}
+
+/// How the debug LOG says the usage endpoint last failed: the message of its
+/// NOT_LOADED line, or the status alone from the error 2.1.330 logs in its
+/// place on a 5xx, whose response body stays out of the journal.
+fn endpoint_failure(log: &str) -> Option<String> {
+    log.lines().rev().find_map(|line| {
+        if let Some((_, said)) = line.split_once(NOT_LOADED) {
+            return Some(said.trim().to_owned());
+        }
+        let (_, said) = line.split_once("/api/oauth/usage,status=")?;
+        let status: String = said.chars().take_while(char::is_ascii_digit).collect();
+        Some(format!("{STATUS}{status}"))
+    })
 }
 
 /// The HTTP statuses Claude Code's debug LOG shows its usage endpoint
@@ -197,7 +259,7 @@ fn login_shown(reading: Result<(), String>, answer: &Value, log: &str) -> Result
 /// code 429` (checked against remi's). Should a later Claude Code word them
 /// otherwise, none are found and a rate limit fails the login again.
 fn usage_statuses(log: &str) -> Vec<u16> {
-    const ABOUT: [&str; 2] = ["fetchUtilization:", "Failed to load usage data:"];
+    const ABOUT: [&str; 2] = ["fetchUtilization:", NOT_LOADED];
     log.lines()
         .filter_map(|line| {
             ABOUT
@@ -264,8 +326,15 @@ fn ask_usage(
             });
         }
         let answer = sent.and_then(|_| {
-            rx.recv_timeout(timeout)
-                .map_err(|_| "Claude Code didn't answer get_usage".to_owned())
+            rx.recv_timeout(timeout).map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => format!(
+                    "Claude Code didn't answer get_usage in {}s",
+                    timeout.as_secs()
+                ),
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "Claude Code exited before it answered get_usage".to_owned()
+                }
+            })
         });
         let _ = child.kill();
         let _ = child.wait();
