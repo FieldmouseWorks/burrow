@@ -134,6 +134,28 @@ The workspace is the project as it is, untracked files included: approving
 `workspace` gives the plugin whatever is in that folder. A workdir outside
 the projects folder, such as a worktree in a job's scratch, is refused.
 
+## A plugin's conformance check
+
+`lib.engineConformance` ([lib/engine-conformance.nix](../lib/engine-conformance.nix))
+builds a VM test for any engine's plugin, given its package, its engine's
+name and the owner's list. An engine adds one to `checks.agents`
+([checks/agents.nix](../checks/agents.nix)), which a machine builds, since
+it needs nested KVM; the example plugin's is there. From a proj job, as a
+Conary runner calls it, it checks three things:
+
+- `cn plugin check` (Conary's runner's own check) passes on the plugin, in
+  its sandbox with the owner's list.
+- The fixture ([`burrow-example-plugin`](../crates/burrow-example-plugin/src/around.rs),
+  put around the plugin) runs a job in the plugin's engine. It passes the
+  describe and Conary's own jobs to the plugin, so the plugin's describe
+  decides what's granted. It answers its own job itself, as the plugin,
+  trying every capability as its grant renders it. It runs once with the
+  owner's list and once with every name a list can hold.
+- What the plugin declares, it requires. Each of those has to work and be
+  in `PROJ_CAPABILITIES`. Nothing it doesn't declare may work, however much
+  is approved, and no GitHub login may be in its environment. A capability
+  it declares that the owner didn't approve fails the check, naming it.
+
 ## Remaining surfaces to make modular
 
 Swapping in another LLM harness (for example, Antigravity or another agent
@@ -250,9 +272,10 @@ land:
 3. **Land the remaining decoupling as bounded follow-ups:**
    - per-engine holds, login notices, meters, and normalized `probe usage`
      accounting;
-   - a conformance check for every engine plugin in
-     [its sandbox](#a-plugins-sandbox)
-     ([#1391](https://github.com/FieldmouseWorks/burrow/issues/1391));
+   - each engine's plugin wired to
+     [its conformance check](#a-plugins-conformance-check) as it lands
+     ([#744](https://github.com/FieldmouseWorks/burrow/issues/744),
+     [#1385](https://github.com/FieldmouseWorks/burrow/issues/1385));
    - pluggable worker dispatch in `burrow-judge`;
    - host-hook adapters into `burrow-guard` only for harnesses that need host
      execution outside a microVM.
@@ -261,9 +284,10 @@ land:
 
 Adding a new LLM harness (such as Antigravity) to the pipeline requires:
 
-1. One executable plugin/adapter crate passing `cn plugin check` (handling
-   launch, stream normalization, refusal classification, and credential
-   isolation).
+1. One executable plugin/adapter crate passing
+   [its conformance check](#a-plugins-conformance-check), `cn plugin check`
+   included (handling launch, stream normalization, refusal classification,
+   and credential isolation).
 2. One Nix module (or machine flake config) declaring its package, sops
    secret, egress host allowlist, and sandbox/guard wiring.
 3. Zero changes to Conary's landing flow, `burrow-settings`, the inbox, the

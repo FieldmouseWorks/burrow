@@ -1,7 +1,7 @@
-# An engine plugin's conformance check (docs/engines.md, "A plugin's
-# conformance check"): a VM test that runs the plugin in its engine's
-# sandbox, as burrow.agents.engines would on a machine, and holds it to
-# Conary's contract and to what it declares.
+# An engine plugin's conformance check: a VM test that runs the plugin in
+# its engine's sandbox, as burrow.agents.engines would on a machine, and
+# holds it to Conary's contract and to what it declares. docs/engines.md,
+# "A plugin's conformance check", says what it checks.
 #
 #   self.lib.engineConformance {
 #     inherit pkgs;
@@ -10,19 +10,6 @@
 #     capabilities = [ ... ]; # what its owner approves (the engine's list)
 #     engine = { };           # more of its engine's entry: packages, say
 #   }
-#
-# From a proj job, as a Conary runner would call it:
-#
-# - `cn plugin check` (Conary's runner's own check) on the plugin, in its
-#   engine with the owner's list.
-# - The fixture (crates/burrow-example-plugin, put around the plugin) in a
-#   job: the plugin's describe decides what's granted, and the fixture tries
-#   every capability, granted or not. Once with the owner's list and once
-#   with everything approved.
-# - Each try held to the plugin's describe: what it declares it requires, so
-#   that works under its grant, and nothing it doesn't declare does, however
-#   much the owner approved. A capability the plugin declares and the owner
-#   didn't approve fails it, by name.
 #
 # It needs /dev/kvm, nested: CI only evaluates it (checks/agents.nix).
 { self }:
