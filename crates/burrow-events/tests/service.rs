@@ -96,6 +96,12 @@ impl Service {
         true
     }
 
+    /// As systemd stops it.
+    fn stop(&self) {
+        let pid = rustix::process::Pid::from_child(&self.child);
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    }
+
     fn running(&mut self) -> bool {
         thread::sleep(Duration::from_millis(300));
         self.child.try_wait().unwrap().is_none()
@@ -120,6 +126,18 @@ fn post(port: u16, path: &str, body: &[u8], headers: &[(&str, &str)]) -> u16 {
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     out.split(' ').nth(1).unwrap().parse().unwrap()
+}
+
+/// A delivery the service has taken and is reading: it has asked for the
+/// body (100 Continue), two bytes that haven't been sent.
+fn half_sent(port: u16) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(b"POST /burrow/hook HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n")
+        .unwrap();
+    let mut asked = [0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+    s.read_exact(&mut asked).unwrap();
+    s
 }
 
 // With no handlers it still runs: exiting would be a restart every few
@@ -237,6 +255,62 @@ fn a_delivery_waits_for_the_service_across_its_restart() {
     let next = Service::start_on(dir.path(), config, &creds, &socket);
     assert_eq!(sent.join().unwrap(), 202);
     drop(next);
+}
+
+// A stop answers what the service had taken, and what comes meanwhile waits
+// on the socket for the next.
+#[test]
+fn a_stop_answers_what_it_took_and_takes_no_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, creds) = landing(dir.path(), 9);
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let hooks = socket.local_addr().unwrap().port();
+    let mut first = Service::start_on(dir.path(), config.clone(), &creds, &socket);
+    first.said("deliveries on 127.0.0.1:");
+    let mut taken = half_sent(hooks);
+    first.stop();
+    assert!(first.running(), "it went with a delivery unanswered");
+    let later = thread::spawn(move || deliver(hooks));
+    thread::sleep(Duration::from_millis(300));
+    taken.write_all(b"{}").unwrap();
+    let mut out = String::new();
+    taken.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 401 "), "{out}");
+    assert!(first.child.wait().unwrap().success());
+    assert!(!later.is_finished(), "a stopping service took one more");
+    let next = Service::start_on(dir.path(), config, &creds, &socket);
+    assert_eq!(later.join().unwrap(), 202);
+    drop(next);
+}
+
+// A client that never finishes sending holds a stop up no longer than GitHub
+// waits for an answer.
+#[test]
+fn a_stalled_client_holds_a_stop_up_only_so_long() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, creds) = landing(dir.path(), 9);
+    let mut svc = Service::start(dir.path(), config, &creds);
+    let _stalled = half_sent(svc.port("deliveries on 127.0.0.1:"));
+    svc.stop();
+    assert!(svc.running(), "it went with a delivery unanswered");
+    svc.said("burrow-events: stopping with a delivery unanswered");
+    assert!(svc.child.wait().unwrap().success());
+}
+
+// With nothing to answer a stop is at once, deliveries or none.
+#[test]
+fn an_idle_stop_is_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hooked, creds) = landing(dir.path(), 9);
+    let unhooked = json!({"deliveries": false, "kickPort": 0, "handlers": {}});
+    for config in [hooked, unhooked] {
+        let mut svc = Service::start(dir.path(), config, &creds);
+        svc.said("kicks on");
+        svc.stop();
+        assert!(!svc.running(), "still up");
+        assert!(svc.child.wait().unwrap().success());
+    }
 }
 
 // Deliveries with no socket handed over are a failure, said.

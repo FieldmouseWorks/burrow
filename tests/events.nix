@@ -5,8 +5,9 @@
 # start those and nothing else), that one signed otherwise doesn't, that a
 # kick on the local port does, that a wake-up a pass booked comes on time,
 # that a new secret is the one checked once it's written, that a switch
-# leaves the handler's units be, and that no delivery is refused while the
-# service restarts for a switch, crashes or is stopped.
+# leaves the handler's units be, that no delivery is refused while the
+# service restarts for a switch, crashes or is stopped, and that a stop
+# answers what it had taken first.
 #
 #   nix build .#checks.x86_64-linux.events-service -L
 { self, pkgs }:
@@ -21,6 +22,16 @@ let
       touch /var/lib/probe/booked
       echo "{\"sam/later\": $(( $(date +%s) + 8 ))}" >/var/lib/probe/wake.json
     fi
+  '';
+  # A delivery whose body is sent only once the test says, after the service
+  # has taken it and asked for it. Unsigned, so its answer is a 401.
+  halfSent = pkgs.writeShellScript "half-sent" ''
+    exec 3<>/dev/tcp/127.0.0.1/8787
+    printf 'POST /burrow/hook HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n' >&3
+    read -r _ <&3 && read -r _ <&3 && touch /tmp/half-sent
+    while ! [ -e /tmp/send-rest ]; do sleep 0.1; done
+    printf '{}' >&3
+    cat <&3 >/tmp/half-answer
   '';
   # With burrow-events off a handler's units are still there, and a switch
   # still leaves their running passes be.
@@ -203,6 +214,25 @@ pkgs.testers.runNixOSTest {
         assert deliver(body, "hook-secret") == "401"
         assert deliver(body, "new-secret") == "202"
         machine.wait_until_succeeds("grep -x sam/n /var/lib/probe/passes", timeout=60)
+
+    with subtest("a stop answers what it took first, and leaves a running pass's start be"):
+        # systemctl waits on this one while the service drains.
+        machine.succeed("touch /var/lib/probe/slow")
+        machine.succeed("curl -fsS -d ''' http://127.0.0.1:8788/kick/probe")
+        machine.wait_until_succeeds("systemctl show -p ActiveState --value probe.service | grep -x activating", timeout=60)
+        machine.succeed("${halfSent} >/dev/null 2>&1 &")
+        machine.wait_until_succeeds("test -e /tmp/half-sent", timeout=30)
+        failed = machine.succeed("journalctl -u burrow-events.service | grep -c 'failed; again' || true")
+        machine.succeed("systemctl stop --no-block burrow-events.service")
+        time.sleep(1)
+        machine.succeed("touch /tmp/send-rest")
+        machine.wait_until_succeeds("systemctl show -p ActiveState --value burrow-events.service | grep -x inactive", timeout=30)
+        machine.wait_until_succeeds("grep -q '^HTTP/1.1 401 ' /tmp/half-answer", timeout=10)
+        machine.succeed("journalctl --sync")
+        assert machine.succeed("journalctl -u burrow-events.service | grep -c 'failed; again' || true") == failed, "a stop failed a running pass"
+        machine.succeed("rm /var/lib/probe/slow")
+        machine.succeed("systemctl start burrow-events.service")
+        machine.wait_for_open_port(8788)
 
     with subtest("the catch-up doesn't fail while burrow-events is down"):
         # Its own start runs every full pass anyway; a failed unit would read
