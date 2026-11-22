@@ -78,9 +78,8 @@ let
   # The longest a Renovate run goes on (seconds): renovate-sweep waits that
   # long after taking a refresh request back before a job may push.
   renovateRunFor = 2 * 3600;
-  # How long a run of HOST-update has to work in (seconds). systemd ends
-  # one past it; what one waits for heavy slots it hands back
-  # (crates/burrow-update's limit.rs).
+  # How long a run of HOST-update has to work in (seconds), what it waits
+  # for heavy slots aside (crates/burrow-update's limit.rs).
   updateWorkFor = 4 * 3600;
 
   vars = {
@@ -134,7 +133,6 @@ let
     path = lib.makeBinPath [ pkgs.coreutils config.programs.git.package config.nix.package machineGh tools.proj ]
       + ":/run/current-system/sw/bin";
     configuration = config.burrow.switch.configName;
-    workLimit = updateWorkFor;
     # burrow.cpu's slots, which the VM tests wait for where the machine has
     # them, ahead of other work.
     heavy = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else null;
@@ -753,6 +751,7 @@ in
         # The system's tools, on the PATH of what it runs as root: the switch,
         # and the activation that runs.
         path = [ "/run/current-system/sw" ];
+        environment.BURROW_UPDATE_WORK_LIMIT = toString updateWorkFor;
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${updateTool}/bin/${update}";
@@ -760,9 +759,10 @@ in
           # kept as the unit's success: burrow-events would retry a failed
           # unit on the same trees, and burrow-units hand it to a second job.
           SuccessExitStatus = "3";
-          TimeoutStartSec = updateWorkFor;
-          # Only the run itself may hand back a wait.
-          NotifyAccess = "main";
+          # The run keeps its own limit, and is killed (SIGKILL) past it:
+          # systemd forgets an extended timeout at each daemon-reload, the
+          # run's own switch's included (tests/update-limit.nix).
+          TimeoutStartSec = "infinity";
           Nice = 10;
         };
       };

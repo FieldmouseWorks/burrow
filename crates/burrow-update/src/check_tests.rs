@@ -9,7 +9,14 @@ use crate::testing::{Machine, bin, sha};
 
 /// A VM test as a run of its own would run it, with all its time left.
 fn run_check(cfg: &Config, name: &str, commit: &str, main: &str, log: &Path) -> bool {
-    super::run_check(cfg, &Limit::begin(cfg), name, commit, main, log)
+    super::run_check(
+        cfg,
+        &Limit::begin(cfg).ok().unwrap(),
+        name,
+        commit,
+        main,
+        log,
+    )
 }
 
 #[test]

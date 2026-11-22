@@ -10,7 +10,6 @@ publish.workspace = true
 burrow-settings = { path = "../burrow-settings" }
 burrow-probe = { path = "../burrow-probe" }
 burrow-process = { path = "../burrow-process" }
-burrow-systemd = { path = "../burrow-systemd" }
 burrow-github = { path = "../burrow-github" }
 burrow-usage-reset = { path = "../burrow-usage-reset" }
 burrow-events = { path = "../burrow-events" }

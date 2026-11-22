@@ -809,7 +809,6 @@ dependencies = [
  "burrow-probe",
  "burrow-process",
  "burrow-settings",
- "burrow-systemd",
  "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
@@ -954,9 +953,9 @@ version = "0.0.0"
 dependencies = [
  "burrow-github",
  "burrow-switch",
- "burrow-systemd",
  "burrow-test",
  "jiff 1.0.1",
+ "nix",
  "rustix",
  "serde",
  "serde_json",

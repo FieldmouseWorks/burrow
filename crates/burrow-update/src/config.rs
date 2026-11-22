@@ -1,8 +1,8 @@
 //! What HOST-update's steps are told: modules/updates.nix writes it for the
 //! machine.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -33,13 +33,10 @@ pub struct Config {
     /// What takes one of the machine's heavy slots for a VM test (burrow.cpu's
     /// heavy), when it has them.
     pub heavy: Option<PathBuf>,
-    /// The seconds a run has to work in, its waits for a slot aside: its
-    /// unit's TimeoutStartSec (limit.rs).
-    pub work_limit: u64,
-    /// Where the unit it runs in hears it (NOTIFY_SOCKET), not the file's
-    /// to say: none by hand.
+    /// What a run has to work in, its waits for a slot aside (limit.rs):
+    /// its unit's to say (`WORK_LIMIT`), not the file's, and none by hand.
     #[serde(skip)]
-    pub notify: Option<OsString>,
+    pub work_limit: Option<Duration>,
     /// burrow-update itself, unwrapped: what a VM test runs in its heavy
     /// slot, as the user, to look at origin's main once more before the
     /// test starts (`unless-moved`, follow.rs).
@@ -145,7 +142,7 @@ mod tests {
             "update": "box-update", "host": "box", "state": "/s", "work": "/w",
             "user": "sam", "home": "/home/sam", "uid": 1000, "runuser": "/b/runuser", "path": "/b",
             "configuration": "box", "system": "x86_64-linux", "heavy": "/b/heavy",
-            "workLimit": 14400, "program": "/b/burrow-update", "project": "homelab", "app": "workers",
+            "program": "/b/burrow-update", "project": "homelab", "app": "workers",
             "train": {"repo": "sam/homelab", "branch": "box-update", "settled": "review-settled",
                       "context": "conary/train", "steward": "sams-steward"},
             "origin": "https://github.com/sam/homelab", "flake": "/home/sam/homelab",

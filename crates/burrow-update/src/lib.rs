@@ -33,7 +33,7 @@ mod check;
 pub mod config;
 mod dispatch;
 pub mod follow;
-mod limit;
+pub mod limit;
 mod live;
 mod memo;
 mod push;

@@ -88,7 +88,7 @@ impl Machine {
         let config = serde_json::json!({
             "update": "box-update", "host": "box", "state": m.path("state"), "work": m.path("scratch/work"),
             "user": "sam", "home": m.path("home"), "uid": 1000, "runuser": b.join("runuser"), "path": "/b",
-            "configuration": "box", "system": "x86_64-linux", "heavy": null, "workLimit": 14400,
+            "configuration": "box", "system": "x86_64-linux", "heavy": null,
             "program": BIN, "project": "homelab", "app": null, "train": null,
             "origin": "https://github.com/sam/homelab", "flake": m.path("operator"),
             "group": "users", "owner": "Sam", "manifest": null,
@@ -139,6 +139,25 @@ fn said(out: &Output) -> (Option<i32>, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[test]
+fn a_work_limit_it_cant_read_exits_2_rather_than_running_with_none() {
+    let m = Machine::new();
+    for limit in ["4h", "0", "-1", ""] {
+        let out = m
+            .command(&[])
+            .env("IN_SUDO", "1")
+            .env("BURROW_UPDATE_WORK_LIMIT", limit)
+            .arg("__through-sudo")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{limit}: {out:?}");
+        assert!(
+            said(&out).2.contains("not seconds to work in"),
+            "{limit}: {out:?}"
+        );
+    }
 }
 
 #[test]

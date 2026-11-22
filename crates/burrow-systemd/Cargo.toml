@@ -1,6 +1,6 @@
 [package]
 name = "burrow-systemd"
-description = "Shared systemd notification and inspection of runner cgroups"
+description = "Shared inspection of systemd runner cgroups"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

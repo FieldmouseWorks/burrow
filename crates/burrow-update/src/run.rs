@@ -62,7 +62,7 @@ pub(crate) type Step = Result<(), End>;
 pub struct Run<'a> {
     pub(crate) cfg: &'a Config,
     /// What it has to work in, which every pass of the run shares.
-    pub(crate) limit: &'a Limit<'a>,
+    pub(crate) limit: &'a Limit,
     pub(crate) api: &'a mut dyn Api,
     pub(crate) memo: Memo<'a>,
     /// The VM tests it runs.
@@ -143,7 +143,13 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         eprintln!("{}: {c}: not a VM test's name", cfg.update);
         return 2;
     }
-    let limit = Limit::begin(cfg);
+    let limit = match Limit::begin(cfg) {
+        Ok(limit) => limit,
+        Err(Broke(why)) => {
+            eprintln!("{}: {why}", cfg.update);
+            return 1;
+        }
+    };
     // Each pass afresh: nothing the one before found or did carries over,
     // but what the memo kept of the trees it built and tested, and the
     // time it has left.
@@ -167,7 +173,7 @@ impl<'a> Run<'a> {
     /// A run as it begins, with nothing found yet.
     fn new(
         cfg: &'a Config,
-        limit: &'a Limit<'a>,
+        limit: &'a Limit,
         api: &'a mut dyn Api,
         force: bool,
         checks: &[String],

@@ -20,8 +20,10 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::time::Duration;
 
 use burrow_update::follow::{UNLESS_MOVED, unless_moved};
+use burrow_update::limit::WORK_LIMIT;
 use burrow_update::{Config, is_commit, run, status};
 
 /// The word a HOST-update that isn't root starts again with, through sudo.
@@ -108,7 +110,15 @@ fn main() -> ExitCode {
         eprintln!("{}: {}: {e}", cfg.update, cfg.tools.sudo.display());
         return ExitCode::FAILURE;
     }
-    cfg.notify = env::var_os("NOTIFY_SOCKET");
+    if let Some(said) = env::var_os(WORK_LIMIT) {
+        match said.to_str().and_then(|s| s.parse().ok()) {
+            Some(secs @ 1..) => cfg.work_limit = Some(Duration::from_secs(secs)),
+            _ => {
+                eprintln!("{}: {WORK_LIMIT}: not seconds to work in", cfg.update);
+                return ExitCode::from(2);
+            }
+        }
+    }
     match word {
         Word::Status => {
             let mut out = std::io::stdout().lock();
