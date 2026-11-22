@@ -603,8 +603,9 @@ Each has an entry below, and each can be imported on its own.
   runs a heavy job (a gate, a VM test, a replay, a large build) in one of
   `heavy.slots` machine-wide slots, for every repo and account alike, waiting
   in line while all are busy (the longest waiter gets the next one freed,
-  after HOST-update's VM tests, which ask with `--first`), and tells it its share of the threads in `HEAVY_JOBS`
-  (and `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`); `heavy --all -- COMMAND`
+  after HOST-update's VM tests, which ask with `--first`), and tells it its
+  share of the threads in `HEAVY_JOBS` (and `CARGO_BUILD_JOBS`,
+  `RUST_TEST_THREADS`); `heavy --all -- COMMAND`
   takes every slot instead, for a run that must have the machine to itself
   (a long gate with a deadline, a nightly); `heavy status` says which are
   busy. A repo's own queue (the steward's proof slots, a repo's gate lock)
