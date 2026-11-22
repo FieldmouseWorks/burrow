@@ -416,3 +416,90 @@ fn a_move_that_breaks_the_names_is_judged_check_by_check() {
     assert_eq!(ran.code, 1, "{}", ran.out);
     assert!(ran.found.is_none(), "{}", ran.out);
 }
+
+/// The repo, with checks of its own from `tests/checks`, so a test file
+/// can add one the base hasn't: no control on the base can pass it.
+fn checks_from_tests() -> Repo {
+    let r = repo();
+    edit(
+        &r,
+        "checks.${system} = {",
+        r#"checks.${system} = builtins.listToAttrs (map (f: {
+          name = builtins.replaceStrings [ ".nix" ] [ "" ] f;
+          value = import (./tests/checks + "/${f}") { inherit system; };
+        }) (builtins.attrNames (builtins.readDir ./tests/checks))) // {"#,
+    );
+    write(
+        &r.origin.join("tests/checks/old.nix"),
+        r#"{ system }: derivation { name = "old"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }
+"#,
+    );
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s
+        .git(&r.origin, &["commit", "-qm", "checks the tests give"]);
+    r
+}
+
+/// A check the new tests add, holding the code and, as `extra`, more.
+fn new_check(extra: &str) -> String {
+    format!(
+        r#"{{ system }}: derivation {{ name = "new"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; newlib = builtins.readFile ../../lib.txt; {extra} }}
+"#
+    )
+}
+
+/// The new check on the old code.
+const NEW_CHECK_FAILS: &str = r#""newlib":"1\n""#;
+
+/// A check only the new tests define fails on the old code for its own
+/// sake beside a replaced test file it never reads, and beside a file made
+/// a directory: caught, as it is beside a plain deletion (#1434).
+#[test]
+fn a_new_check_beside_a_replaced_file_it_doesnt_read_is_caught() {
+    let r = checks_from_tests();
+    let check = new_check("");
+    let base = vec![
+        ("lib.txt", Some("2\n")),
+        ("tests/checks/new.nix", Some(check.as_str())),
+    ];
+    let mut split = base.clone();
+    split.extend([
+        ("tests/part.rs", None),
+        ("tests/part/mod.rs", Some("part\n")),
+    ]);
+    let mut directory = base.clone();
+    directory.extend([
+        ("tests/unnamed.txt", None),
+        ("tests/unnamed.txt/case", Some("unnamed\n")),
+    ]);
+    let mut deleting = base;
+    deleting.push(("tests/unnamed.txt", None));
+    for (name, files) in [
+        ("new-split", split),
+        ("new-directory", directory),
+        ("new-deleting", deleting),
+    ] {
+        let ran = r.run(&r.pr(name, &files), "", NEW_CHECK_FAILS);
+        assert_eq!(ran.code, 0, "{name}: {}", ran.out);
+        assert_eq!(ran.result(), "fail", "{name}: {}", ran.out);
+    }
+}
+
+/// One that reads the replaced file has no control to show its failure
+/// is its own and not the file's absence: it can't tell.
+#[test]
+fn a_new_check_reading_a_replaced_file_cant_tell() {
+    let r = checks_from_tests();
+    let check =
+        new_check(r#"newpart = if builtins.pathExists ../part.rs then "file" else "gone";"#);
+    let files = [
+        ("lib.txt", Some("2\n")),
+        ("tests/checks/new.nix", Some(check.as_str())),
+        ("tests/part.rs", None),
+        ("tests/part/mod.rs", Some("part\n")),
+    ];
+    let ran = r.run(&r.pr("new-reads", &files), "", NEW_CHECK_FAILS);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("so it reads them"), "{}", ran.out);
+}

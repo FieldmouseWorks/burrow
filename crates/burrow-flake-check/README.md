@@ -164,7 +164,10 @@ are what fail it (`src/removal.rs`):
   check, the failure is the new tests', as judged above. Not compiling for
   want of what the change adds is one. The removal alone is the base with
   those files taken away and, where the PR replaced one, its old content in
-  what replaced it.
+  what replaced it. A check only the new tests define has no control
+  there: the removal alone breaks it unless its derivation is the same with
+  every deleted file put back (a directory that took one's place gone to
+  make room), which says it reads none of them (#1434).
 - Where the removal breaks it by itself, it counts only if it fails, judged
   the same way, with them put back beside the new tests.
 - Where it doesn't, the tree made the failure: it can't tell, so nothing is
