@@ -228,8 +228,8 @@ impl Run<'_> {
         End::Exit(if outcome == Outcome::Failed { 1 } else { 0 })
     }
 
-    /// Says the run failed on its trees' own word (one doesn't build, or
-    /// fails a VM test), which the memo keeps, and ends it with [`VERDICT`].
+    /// Says a VM test failed the run's trees, which the memo keeps, and
+    /// ends it with [`VERDICT`].
     pub(crate) fn verdict(&self, message: &str) -> End {
         note(
             self.cfg,
@@ -554,7 +554,7 @@ impl Run<'_> {
             // Best effort: a failure to remember only means a rebuild.
             let _ = self.memo.failed("build");
         }
-        let e = self.verdict("main itself doesn't build");
+        let e = self.end(Outcome::Failed, "main itself doesn't build");
         self.dispatch(
             "build-main",
             &format!(

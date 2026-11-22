@@ -258,7 +258,7 @@ fn main_itself_not_building_is_mains_to_fix() {
     m.upstream("nixpkgs", &sha('c'));
     // burrow's commit is in every tree, main's included.
     fs::write(m.home("build-breaks"), sha('b')).unwrap();
-    assert_eq!(go(&m), VERDICT);
+    assert_eq!(go(&m), 1);
     assert_eq!(
         said(&m),
         ("failed".into(), "main itself doesn't build".into())
@@ -275,7 +275,7 @@ fn main_itself_not_building_is_mains_to_fix() {
     );
     // A day's memory: the bump's tree isn't built again, main is.
     let built = m.kept("built").lines().count();
-    assert_eq!(go(&m), VERDICT);
+    assert_eq!(go(&m), 1);
     let again: Vec<String> = m
         .kept("built")
         .lines()
@@ -285,7 +285,7 @@ fn main_itself_not_building_is_mains_to_fix() {
     assert_eq!(again, [m.work(&["rev-parse", "HEAD^{tree}"])]);
     // Forced, it's all tried again.
     let built = m.kept("built").lines().count();
-    assert_eq!(once(&m.cfg, &mut Fake::default(), true), VERDICT);
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
     assert!(m.kept("built").lines().count() - built > 1);
 }
 
