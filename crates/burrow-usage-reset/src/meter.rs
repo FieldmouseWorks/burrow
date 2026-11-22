@@ -191,13 +191,13 @@ pub fn claude(reading: &Reading, at: f64) -> Snapshot {
 /// An account whose every fresh reading is kept as Claude's meter in DIR;
 /// keeping it never changes what the pass decides.
 pub struct Meter<A> {
-    pub account: A,
+    pub inner: A,
     pub dir: PathBuf,
 }
 impl<A: Account> Account for Meter<A> {
     fn read(&mut self) -> Result<Reading, String> {
         let started = crate::now();
-        let reading = self.account.read()?;
+        let reading = self.inner.read()?;
         let mut snapshot = claude(&reading, crate::now());
         snapshot.requested_at = Some(started);
         if let Err(e) = snapshot.record(&self.dir, "claude") {
@@ -205,8 +205,14 @@ impl<A: Account> Account for Meter<A> {
         }
         Ok(reading)
     }
+    /// A copy isn't kept: nothing says when it was asked for, so it can't
+    /// show proj a refusal over, and it would take the place of a reading
+    /// that can.
+    fn copy(&mut self) -> Option<(f64, Reading)> {
+        self.inner.copy()
+    }
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
-        self.account.reset(keep)
+        self.inner.reset(keep)
     }
 }
 
@@ -321,19 +327,22 @@ mod tests {
                     session: None,
                 })
             }
+            fn copy(&mut self) -> Option<(f64, Reading)> {
+                None
+            }
             fn reset(&mut self, _: &mut dyn FnMut() -> Result<(), String>) -> Reset {
                 unreachable!()
             }
         }
         let dir = tempfile::tempdir().unwrap();
         let mut metered = Meter {
-            account: Delayed { observed: 0.0 },
+            inner: Delayed { observed: 0.0 },
             dir: dir.path().into(),
         };
         metered.read().unwrap();
         let snapshot = Snapshot::read(dir.path(), "claude", crate::now()).unwrap();
         assert!(
-            snapshot.requested_at.unwrap() <= metered.account.observed,
+            snapshot.requested_at.unwrap() <= metered.inner.observed,
             "a delayed response must not postdate an intervening refusal"
         );
     }

@@ -76,7 +76,7 @@ fn run() -> Result<(), String> {
         dir,
     };
     let mut claude = Meter {
-        account: claude,
+        inner: claude,
         dir: cfg.meters.clone(),
     };
     let now = now();
