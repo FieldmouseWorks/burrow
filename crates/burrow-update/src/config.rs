@@ -2,6 +2,7 @@
 //! machine.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -32,6 +33,10 @@ pub struct Config {
     /// What takes one of the machine's heavy slots for a VM test (burrow.cpu's
     /// heavy), when it has them.
     pub heavy: Option<PathBuf>,
+    /// What a run has to work in, its waits for a slot aside (limit.rs):
+    /// its unit's to say (`WORK_LIMIT`), not the file's, and none by hand.
+    #[serde(skip)]
+    pub work_limit: Option<Duration>,
     /// burrow-update itself, unwrapped: what a VM test runs in its heavy
     /// slot, as the user, to look at origin's main once more before the
     /// test starts (`unless-moved`, follow.rs).

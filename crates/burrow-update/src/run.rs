@@ -29,6 +29,7 @@ use rustix::fs::{FlockOperation, flock};
 
 use crate::bump::{self, CLAUDE};
 use crate::dispatch::{dispatch, open, settled};
+use crate::limit::Limit;
 use crate::memo::Memo;
 use crate::running::{self, Already, Running};
 use crate::status::{Outcome, epoch, note};
@@ -60,6 +61,8 @@ pub(crate) type Step = Result<(), End>;
 /// A run, as it goes: what it found, and what it's done so far.
 pub struct Run<'a> {
     pub(crate) cfg: &'a Config,
+    /// What it has to work in, which every pass of the run shares.
+    pub(crate) limit: &'a Limit,
     pub(crate) api: &'a mut dyn Api,
     pub(crate) memo: Memo<'a>,
     /// The VM tests it runs.
@@ -140,10 +143,18 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         eprintln!("{}: {c}: not a VM test's name", cfg.update);
         return 2;
     }
+    let limit = match Limit::begin(cfg) {
+        Ok(limit) => limit,
+        Err(Broke(why)) => {
+            eprintln!("{}: {why}", cfg.update);
+            return 1;
+        }
+    };
     // Each pass afresh: nothing the one before found or did carries over,
-    // but what the memo kept of the trees it built and tested.
+    // but what the memo kept of the trees it built and tested, and the
+    // time it has left.
     loop {
-        let mut r = Run::new(cfg, &mut *api, force, &checks);
+        let mut r = Run::new(cfg, &limit, &mut *api, force, &checks);
         match r.steps() {
             Ok(()) => return 0,
             Err(End::Exit(code)) => return code,
@@ -160,10 +171,17 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
 
 impl<'a> Run<'a> {
     /// A run as it begins, with nothing found yet.
-    fn new(cfg: &'a Config, api: &'a mut dyn Api, force: bool, checks: &[String]) -> Run<'a> {
+    fn new(
+        cfg: &'a Config,
+        limit: &'a Limit,
+        api: &'a mut dyn Api,
+        force: bool,
+        checks: &[String],
+    ) -> Run<'a> {
         Run {
             rules: rules(cfg, checks),
             cfg,
+            limit,
             api,
             memo: Memo { cfg, force },
             checks: checks.to_vec(),

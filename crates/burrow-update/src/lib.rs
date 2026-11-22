@@ -14,6 +14,8 @@
 //!   a run found live
 //! - push.rs: what went live, onto main
 //! - check.rs: a VM test, in a heavy slot where the machine has them
+//! - limit.rs: the time a run has to work in, which its waits for slots
+//!   don't use up
 //! - follow.rs: main looked at again before each VM test and the switch,
 //!   and the run started over when it moved
 //! - dispatch.rs: a problem, handed to a Claude job and told to the owner
@@ -31,6 +33,7 @@ mod check;
 pub mod config;
 mod dispatch;
 pub mod follow;
+pub mod limit;
 mod live;
 mod memo;
 mod push;

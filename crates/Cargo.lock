@@ -664,6 +664,7 @@ name = "burrow-heavy"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
+ "nix",
  "rustix",
  "serde",
  "serde_json",
@@ -968,6 +969,7 @@ dependencies = [
  "burrow-switch",
  "burrow-test",
  "jiff 1.0.1",
+ "nix",
  "rustix",
  "serde",
  "serde_json",

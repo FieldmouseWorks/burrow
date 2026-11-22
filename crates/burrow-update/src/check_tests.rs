@@ -7,6 +7,18 @@ use std::fs;
 use super::*;
 use crate::testing::{Machine, bin, sha};
 
+/// A VM test as a run of its own would run it, with all its time left.
+fn run_check(cfg: &Config, name: &str, commit: &str, main: &str, log: &Path) -> bool {
+    super::run_check(
+        cfg,
+        &Limit::begin(cfg).ok().unwrap(),
+        name,
+        commit,
+        main,
+        log,
+    )
+}
+
 #[test]
 fn a_vm_test_waits_for_a_heavy_slot_where_the_machine_has_them() {
     let mut m = Machine::new();

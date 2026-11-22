@@ -1,10 +1,13 @@
 //! heavy: one machine-wide set of slots for heavy work (a gate, a VM test, a
 //! replay, a large build), shared by every repo, runner and account.
 //!
-//!   heavy [--wait SECONDS] [--all] -- COMMAND...  |  heavy status
+//!   heavy [--wait SECONDS] [--first | --all] -- COMMAND...  |  heavy status
 //!
-//! COMMAND runs in the first free slot, and waits for one while all are
-//! busy (up to `--wait` seconds, then exit 75). It gets the slot's share of
+//! COMMAND runs in the first free slot, and waits in line for one while all
+//! are busy or others wait ahead of it (up to `--wait` seconds, then exit
+//! 75): a slot freed is the longest waiter's (line.rs), `--first`'s before
+//! anyone else's, which is for what the machine's own deploy waits on
+//! (HOST-update's VM tests). It gets the slot's share of
 //! the threads in HEAVY_JOBS, and CARGO_BUILD_JOBS and RUST_TEST_THREADS from
 //! it unless they're set already. NIX_CONFIG defaults to max-jobs = 1 and
 //! cores = the share, before any caller settings so those win. These bound
@@ -21,6 +24,7 @@
 //! slot's descriptor (it's close-on-exec), so a daemon it leaves behind
 //! can't hold the slot.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -35,16 +39,20 @@ use rustix::io::Errno;
 
 pub mod config;
 pub mod cpus;
+mod line;
 mod run;
 
 pub use config::Config;
+pub use line::Class;
+use line::Place;
 
 /// The exit status when no slot came free within `--wait`.
 pub const BUSY: u8 = 75;
 /// The exit status for a call heavy can't read.
 pub const USAGE: u8 = 2;
 
-const USAGE_LINE: &str = "usage: heavy [--wait SECONDS] [--all] -- COMMAND...  |  heavy status";
+const USAGE_LINE: &str =
+    "usage: heavy [--wait SECONDS] [--first | --all] -- COMMAND...  |  heavy status";
 
 /// A line to stderr, best effort: heavy's own words are only ever
 /// diagnostics, and the command's status is what the caller acts on.
@@ -63,11 +71,12 @@ pub(crate) use note;
 pub enum Call {
     /// Which slots are busy.
     Status,
-    /// COMMAND in a slot, or in every slot with `all`, giving up after
-    /// `wait` seconds if one is set.
+    /// COMMAND in a slot, or in every slot as `Class::All`, after whoever
+    /// is ahead of its class in the line, giving up after `wait` seconds if
+    /// one is set.
     Run {
         wait: Option<u64>,
-        all: bool,
+        class: Class,
         command: Vec<OsString>,
     },
 }
@@ -79,7 +88,7 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
         return Some(Call::Status);
     }
     let mut wait = None;
-    let mut all = false;
+    let mut class = Class::Ordinary;
     let mut rest = args;
     loop {
         match rest {
@@ -92,8 +101,16 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
                 rest = more;
             }
             [flag] if flag == "--wait" => return None,
-            [flag, more @ ..] if flag == "--all" => {
-                all = true;
+            [flag, more @ ..] if flag == "--all" || flag == "--first" => {
+                let asked = if flag == "--all" {
+                    Class::All
+                } else {
+                    Class::First
+                };
+                if class != Class::Ordinary && class != asked {
+                    return None;
+                }
+                class = asked;
                 rest = more;
             }
             [dashes, more @ ..] if dashes == "--" => {
@@ -108,7 +125,7 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
     }
     Some(Call::Run {
         wait,
-        all,
+        class,
         command: rest.to_vec(),
     })
 }
@@ -141,14 +158,14 @@ pub fn main(config: &Config, args: &[OsString]) -> u8 {
         }
         Call::Run {
             wait,
-            all: false,
-            command,
-        } => take(config, share, wait, &command),
-        Call::Run {
-            wait,
-            all: true,
+            class: Class::All,
             command,
         } => take_all(config, threads, wait, &command),
+        Call::Run {
+            wait,
+            class,
+            command,
+        } => take(config, share, class, wait, &command),
     }
 }
 
@@ -238,23 +255,36 @@ impl Clock {
     }
 }
 
-/// Takes the first free slot and runs the command in it, waiting for one
-/// while every slot is busy, or while an `--all` run waits for them.
-fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
+/// Takes the first free slot and runs the command in it, waiting in line
+/// for one while every slot is busy, while anyone is ahead, or while an
+/// `--all` run has the turn. The place goes once it has the slot.
+fn take(config: &Config, share: u64, class: Class, wait: Option<u64>, command: &[OsString]) -> u8 {
+    let place = match Place::take(&config.dir, class) {
+        Ok(place) => place,
+        Err(code) => return code,
+    };
     let mut clock = Clock::new(wait);
     let mut said = false;
+    // Whether the last look found someone ahead, rather than no slot free.
+    let behind = Cell::new(false);
     let waiting = || {
-        format!(
-            "heavy: all {} slots busy, waiting (heavy status)",
-            config.slots
-        )
+        if behind.get() {
+            "heavy: others are ahead in line, waiting (heavy status)".to_owned()
+        } else {
+            format!(
+                "heavy: all {} slots busy, waiting (heavy status)",
+                config.slots
+            )
+        }
     };
     let got = clock.poll(&mut said, waiting, || {
-        if all_waiting(config)? {
+        behind.set(!place.is_next()?);
+        if behind.get() || all_waiting(config)? {
             return Ok(None);
         }
         attempt(config)
     });
+    drop(place);
     match got {
         Err(code) => code,
         Ok(Some((i, slot))) => {
@@ -263,19 +293,29 @@ fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) ->
             code
         }
         Ok(None) => {
-            note!("heavy: every slot still busy after {}s", wait.unwrap_or(0));
+            let waited = wait.unwrap_or(0);
+            if behind.get() {
+                note!("heavy: others still ahead in line after {waited}s");
+            } else {
+                note!("heavy: every slot still busy after {waited}s");
+            }
             BUSY
         }
     }
 }
 
 /// Takes every slot, lowest first, and runs the command in all of them
-/// with all of the threads. It first takes the turn (the `all` file), which
+/// with all of the threads. It first takes the turn (the `all` file), at
+/// the head of the line and after any `--all` that came before it, which
 /// ordinary runs look at before they take a slot: while it's held, none
 /// starts, so the machine empties under the run instead of new arrivals
 /// taking each slot as it comes free. Holding the turn throughout also
 /// keeps two of these from waiting on each other's slots.
 fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
+    let place = match Place::take(&config.dir, Class::All) {
+        Ok(place) => place,
+        Err(code) => return code,
+    };
     let mut clock = Clock::new(wait);
     let mut said = false;
     let waiting = || {
@@ -284,7 +324,14 @@ fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsStrin
             config.slots
         )
     };
-    let turn = match clock.poll(&mut said, waiting, || lock(&config.all())) {
+    let next = || {
+        if place.is_next()? {
+            lock(&config.all())
+        } else {
+            Ok(None)
+        }
+    };
+    let turn = match clock.poll(&mut said, waiting, next) {
         Err(code) => return code,
         Ok(Some(turn)) => turn,
         Ok(None) => {
@@ -295,6 +342,8 @@ fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsStrin
             return BUSY;
         }
     };
+    // The turn holds the rest off from here on.
+    drop(place);
     let mut held = Vec::new();
     for i in 1..=config.slots {
         match clock.poll(&mut said, waiting, || lock(&config.slot(i))) {
@@ -347,7 +396,8 @@ fn attempt(config: &Config) -> Result<Option<(u32, File)>, u8> {
     Ok(None)
 }
 
-/// A lock file, opened read-only: anyone may lock what they can read.
+/// A lock file, or the slots' directory, opened read-only: anyone may lock
+/// what they can read.
 fn open(path: &Path) -> Result<File, u8> {
     File::open(path).map_err(|e| {
         note!("heavy: cannot open {}: {e}", path.display());
@@ -380,7 +430,7 @@ mod tests {
     fn run(wait: Option<u64>, command: &[&str]) -> Option<Call> {
         Some(Call::Run {
             wait,
-            all: false,
+            class: Class::Ordinary,
             command: args(command),
         })
     }
@@ -388,7 +438,7 @@ mod tests {
     fn run_all(wait: Option<u64>, command: &[&str]) -> Option<Call> {
         Some(Call::Run {
             wait,
-            all: true,
+            class: Class::All,
             command: args(command),
         })
     }
@@ -430,6 +480,15 @@ mod tests {
             run_all(Some(5), &["x"])
         );
         assert_eq!(parse(&args(&["--", "--all"])), run(None, &["--all"]));
+        assert_eq!(
+            parse(&args(&["--first", "--wait", "5", "--", "x"])),
+            Some(Call::Run {
+                wait: Some(5),
+                class: Class::First,
+                command: args(&["x"]),
+            })
+        );
+        assert_eq!(parse(&args(&["--", "--first"])), run(None, &["--first"]));
     }
 
     #[test]
@@ -446,6 +505,9 @@ mod tests {
             &["--wait", "+1", "--", "x"],
             &["--all"],
             &["--all", "--"],
+            &["--first"],
+            &["--first", "--all", "x"],
+            &["--all", "--first", "x"],
         ] {
             assert_eq!(parse(&args(bad)), None, "{bad:?}");
         }

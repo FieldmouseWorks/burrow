@@ -142,6 +142,25 @@ fn said(out: &Output) -> (Option<i32>, String, String) {
 }
 
 #[test]
+fn a_work_limit_it_cant_read_exits_2_rather_than_running_with_none() {
+    let m = Machine::new();
+    for limit in ["4h", "0", "-1", ""] {
+        let out = m
+            .command(&[])
+            .env("IN_SUDO", "1")
+            .env("BURROW_UPDATE_WORK_LIMIT", limit)
+            .arg("__through-sudo")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{limit}: {out:?}");
+        assert!(
+            said(&out).2.contains("not seconds to work in"),
+            "{limit}: {out:?}"
+        );
+    }
+}
+
+#[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new();
     let out = Command::new(BIN).output().unwrap();
@@ -310,9 +329,13 @@ fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
             .output()
             .unwrap()
     };
-    // Still main: the command runs, as itself (and its exit is its own).
+    // Still main: the command runs, as itself (and its exit is its own),
+    // once it has said it's in its slot, and all it says goes to the log.
     let out = word(&[&main, "--", "sh", "-c", "echo tested; exit 3"]);
-    assert_eq!(said(&out), (Some(3), "tested\n".into(), String::new()));
+    assert_eq!(
+        said(&out),
+        (Some(3), "in a slot\n".into(), "tested\n".into())
+    );
 
     // main moved: nothing runs, and the clone has heard where it went.
     let now = lands(&other, "two");
@@ -321,7 +344,7 @@ fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
         said(&out),
         (
             Some(1),
-            String::new(),
+            "in a slot\n".into(),
             format!("main moved to {now}: not testing a tree on {main}\n")
         )
     );

@@ -2,7 +2,7 @@
 //! tool, as it's wrapped, is held to the rest by the `cpu` check (checks/cpu.nix).
 
 use std::fs::{self, File};
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
@@ -455,6 +455,120 @@ fn all_gives_back_what_it_took_when_its_wait_runs_out() {
         (out.status.code(), text(&out.stdout)),
         (Some(0), "1\n".into())
     );
+}
+
+/// A heavy that waits, killed if it's still about when the test ends.
+struct Waiter(Child);
+
+impl Waiter {
+    /// Starts heavy to note `name` in `order` once it runs, and returns once
+    /// it says it waits: it's in line by then.
+    fn start(s: &Slots, options: &[&str], name: &str) -> Waiter {
+        let note = format!("echo {name} >>order");
+        let mut child = s
+            .heavy(&[options, &["--", "sh", "-c", &note]].concat())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut said = String::new();
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        stderr.read_line(&mut said).unwrap();
+        let waiter = Waiter(child);
+        assert!(said.contains("waiting"), "{name}: {said}");
+        waiter
+    }
+
+    fn done(mut self) {
+        assert!(exits(&mut self.0).success());
+    }
+}
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn order(s: &Slots) -> String {
+    fs::read_to_string(s.path().join("order")).unwrap_or_default()
+}
+
+#[test]
+fn the_longest_waiter_takes_the_next_slot_freed() {
+    let s = Slots::new(2, 3);
+    let (_busy, freed) = (s.hold(1), s.hold(2));
+    let mut waiters = Vec::new();
+    let mut began = None;
+    for name in ["a", "b", "c", "d"] {
+        waiters.push(Waiter::start(&s, &[], name));
+        began.get_or_insert_with(Instant::now);
+        thread::sleep(Duration::from_millis(300));
+    }
+    // Just past the longest waiter's look (they look each second), so the
+    // others' looks come first: unordered, one of those would get the slot.
+    let began: Instant = began.unwrap();
+    thread::sleep(Duration::from_millis(2100).saturating_sub(began.elapsed()));
+    drop(freed);
+    waiters.into_iter().for_each(Waiter::done);
+    assert_eq!(order(&s), "a\nb\nc\nd\n");
+}
+
+#[test]
+fn a_newcomer_never_takes_the_slot_a_waiter_is_in_line_for() {
+    let s = Slots::new(1, 3);
+    let held = s.hold(1);
+    let waiter = Waiter::start(&s, &[], "waiter");
+    drop(held);
+    let out = s.run(&["--wait", "0", "--", "touch", "newcomer"]);
+    assert_eq!(out.status.code(), Some(75));
+    let err = text(&out.stderr);
+    assert!(err.contains("others still ahead in line after 0s"), "{err}");
+    assert!(!s.path().join("newcomer").exists());
+    waiter.done();
+    assert_eq!(order(&s), "waiter\n");
+}
+
+#[test]
+fn first_goes_ahead_of_whoever_waits_and_in_order_among_its_own() {
+    let s = Slots::new(1, 3);
+    let held = s.hold(1);
+    let ordinary = Waiter::start(&s, &[], "ordinary");
+    let update = Waiter::start(&s, &["--first"], "update");
+    let later = Waiter::start(&s, &["--first"], "later");
+    drop(held);
+    for waiter in [update, later, ordinary] {
+        waiter.done();
+    }
+    assert_eq!(order(&s), "update\nlater\nordinary\n");
+}
+
+#[test]
+fn all_goes_ahead_of_first_and_in_order_among_its_own() {
+    let s = Slots::new(1, 3);
+    let held = s.hold(1);
+    let first = Waiter::start(&s, &["--first"], "first");
+    let all = Waiter::start(&s, &["--all"], "all");
+    let next = Waiter::start(&s, &["--all"], "next");
+    drop(held);
+    for waiter in [all, next, first] {
+        waiter.done();
+    }
+    assert_eq!(order(&s), "all\nnext\nfirst\n");
+}
+
+#[test]
+fn a_waiter_that_is_killed_or_gives_up_leaves_the_line() {
+    let s = Slots::new(1, 3);
+    let held = s.hold(1);
+    let killed = Waiter::start(&s, &[], "killed");
+    let mut gave_up = Waiter::start(&s, &["--wait", "1"], "gave-up");
+    let next = Waiter::start(&s, &[], "next");
+    assert_eq!(exits(&mut gave_up.0).code(), Some(75));
+    drop(killed);
+    drop(held);
+    next.done();
+    assert_eq!(order(&s), "next\n");
 }
 
 /// A cancellable run, whose worker writes its pid to `worker` once its

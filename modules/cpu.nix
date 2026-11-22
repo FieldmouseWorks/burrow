@@ -5,7 +5,8 @@
 # gate, a VM test, a replay, a large build), each with its share of the
 # threads for cargo and test runners to size themselves by. A repo's own
 # queue (the steward's proof slots, a repo's gate lock) decides which of its
-# jobs goes next; heavy decides whether the machine has room for it now.
+# jobs goes next; heavy decides whether the machine has room for it now,
+# and serves who waits for room in the order they came, HOST-update first.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -113,7 +114,8 @@ in
             heavy --all -- COMMAND...         take every slot: the machine to itself
             heavy status                      which slots are busy
 
-        It waits for a free slot, then runs the command with HEAVY_JOBS (its
+        It waits in line for a slot (first come, first served, after the
+        machine's update), then runs the command with HEAVY_JOBS (its
         share of the threads), CARGO_BUILD_JOBS and RUST_TEST_THREADS set.
         NIX_CONFIG defaults to max-jobs = 1 and cores = that share, before
         any caller settings so those win (per-client build limits, not a CPU quota):
