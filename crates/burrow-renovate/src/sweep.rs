@@ -15,7 +15,7 @@
 //! marker naming the head it cleared and the base it was cleared for,
 //! sealed, `<!-- major-verdict: ok|held SHA on BASE MAC -->`, and labels the
 //! PR major-ok or major-held for people to see. The sweep seals both verdicts
-//! on the head and base it hands a major over on (major-seal) and puts the
+//! on the head and base it hands a major over on (seal.rs) and puts the
 //! markers in the task, as the steward gives a judge its seals: the job runs
 //! nothing of the sweep's, whose state its sandbox needn't see, and can
 //! seal no head it wasn't handed. A verdict counts only for the
@@ -53,6 +53,7 @@ mod job;
 mod pr;
 mod request;
 mod scan;
+mod seal;
 mod steward;
 mod task;
 mod wake;
@@ -241,25 +242,17 @@ impl Config {
         }
     }
 
-    /// The marker major-seal seals verdict `v` on major `m` with, in `repo`.
+    /// The marker that seals verdict `v` on major `m`, in `repo`.
     fn seal(&self, repo: &str, m: &Major, v: &str) -> Result<String, Broke> {
-        let seal = &self.tools.seal;
-        let out = Command::new(seal)
-            .args([repo, &m.n, v, &m.sha, &m.base])
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .output()
-            .map_err(|e| Broke(format!("{}: {e}", seal.display())))?;
-        let marker = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if !out.status.success() || !marker.starts_with("<!-- ") {
-            return Err(Broke(format!(
-                "{repo}: {} {} {v}: {}",
-                seal.display(),
-                m.n,
-                out.status
-            )));
+        seal::Verdict {
+            repo,
+            n: &m.n,
+            verdict: v,
+            head: &m.sha,
+            base: &m.base,
         }
-        Ok(marker)
+        .marker(&self.state)
+        .map_err(|why| Broke(format!("{repo}: sealing #{} {v}: {why}", m.n)))
     }
 
     /// The majors waiting on the owner, in one notice: the held ones apart
@@ -785,21 +778,22 @@ impl Sweep<'_> {
         }))
     }
 
-    /// Whether major-seal says `mac` seals verdict `v` on PR `n`'s `sha`
-    /// for `base`.
+    /// Whether `mac` seals verdict `v` on PR `n`'s `sha` for `base`.
     fn sealed(&self, n: &str, v: &str, sha: &str, base: &str, mac: &str) -> bool {
-        let seal = &self.cfg.tools.seal;
-        match Command::new(seal)
-            .args(["--check", self.repo, n, v, sha, base, mac])
-            .stdin(Stdio::null())
-            .status()
-        {
-            Ok(s) => s.success(),
-            Err(e) => {
-                complain(&format!("{}: {}: {e}", self.cfg.name, seal.display()));
-                false
-            }
-        }
+        let verdict = seal::Verdict {
+            repo: self.repo,
+            n,
+            verdict: v,
+            head: sha,
+            base,
+        };
+        verdict.sealed(&self.cfg.state, mac).unwrap_or_else(|why| {
+            complain(&format!(
+                "{}: {}: checking #{n}'s seal: {why}",
+                self.cfg.name, self.repo
+            ));
+            false
+        })
     }
 
     /// When a lock file refresh lock-age refused for age only can go

@@ -7,7 +7,7 @@ fn its_config_is_every_setting_and_only_those() {
         "settled": "review-settled", "covered": "/s/autoland/repos.json",
         "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200, "held": ["hold", "needs-owner"],
         "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
-                  "seal": "/b/major-seal", "lockWait": "/b/lock-wait"},
+                  "lockWait": "/b/lock-wait"},
     });
     let cfg: Config = serde_json::from_value(config.clone()).unwrap();
     assert_eq!(cfg.app.unwrap().bot, "sam-workers");
