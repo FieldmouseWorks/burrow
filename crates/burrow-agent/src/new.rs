@@ -330,14 +330,20 @@ pub(crate) mod tests {
                     "runner": "/nix/store/x-runner",
                     "forward": "/nix/store/x-proxy-3128",
                     "credentialFile": null,
-                    "capabilities": ["workspace", "mcp"]
+                    "capabilities": ["workspace", "mcp"],
+                    "mcpServers": ["ledger", "signed-in"]
                 },
                 "other": {
                     "runner": "/nix/store/x-other-runner",
                     "forward": "/nix/store/x-proxy-3130",
                     "credentialFile": null,
-                    "capabilities": ["network"]
+                    "capabilities": ["mcp", "network"],
+                    "mcpServers": []
                 }
+            },
+            "mcpServers": {
+                "ledger": {"command": "/bin/ledger", "args": [], "env": {}, "actsAsOwner": false},
+                "signed-in": {"command": "/bin/signed-in", "args": [], "env": {}, "actsAsOwner": true}
             },
             "defaultEngine": "claude",
             "forwardOpen": "/nix/store/x-proxy-3129",

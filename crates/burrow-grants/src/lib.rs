@@ -1,7 +1,8 @@
 //! The job contract's capabilities, and which of them an engine plugin is
 //! granted: those its describe declares and its engine's owner-approved list
-//! (`burrow.agents.engines.NAME.capabilities`) names. docs/engines.md,
-//! "A plugin's grants", states the rule.
+//! (`burrow.agents.engines.NAME.capabilities`) names, and the MCP servers
+//! behind its `mcp` (mcp.rs). docs/engines.md, "A plugin's grants", states
+//! the rule.
 //!
 //! A grant names a capability and carries none of the host's paths or
 //! environment. Those burrow-proj resolves for a job on the host can hold
@@ -13,6 +14,7 @@ use conary_core::plugin::{self, Kind};
 use serde::{Serialize, Serializer};
 use std::{collections::BTreeMap, fmt};
 
+pub mod mcp;
 #[cfg(test)]
 mod tests;
 
@@ -128,6 +130,9 @@ pub enum Why {
     Never(&'static str),
     UnknownName,
     UnknownDevice,
+    ServerNotApproved,
+    McpNotGranted,
+    UnknownServer,
 }
 
 impl fmt::Display for Why {
@@ -142,6 +147,14 @@ impl fmt::Display for Why {
             Self::UnknownName => "the owner's list names it and no capability has that name",
             Self::UnknownDevice => {
                 "the plugin declares it as a device and no capability is that device"
+            }
+            Self::ServerNotApproved => {
+                "mcp is granted and the owner hasn't approved this server \
+                 (burrow.agents.engines.NAME.mcpServers)"
+            }
+            Self::McpNotGranted => "the owner approved the server and mcp isn't granted",
+            Self::UnknownServer => {
+                "the owner's list names it and burrow.mcpServers has no such server"
             }
         })
     }
@@ -160,25 +173,38 @@ impl fmt::Display for Refusal {
     }
 }
 
+/// What the owner approved for one engine's plugin.
+#[derive(Clone, Copy, Debug)]
+pub struct Approved<'a> {
+    /// `burrow.agents.engines.NAME.capabilities`.
+    pub capabilities: &'a [String],
+    /// `burrow.agents.engines.NAME.mcpServers`.
+    pub mcp_servers: &'a [String],
+    /// What those servers' names are looked up in.
+    pub registry: &'a mcp::Registry,
+}
+
 /// A plugin's effective grants. Only [`Grants::new`] makes one, so holding
 /// one means the rule was applied.
 #[derive(Debug)]
 pub struct Grants {
     items: Vec<Capability>,
+    servers: BTreeMap<String, mcp::Server>,
     refusals: Vec<Refusal>,
 }
 
 impl Grants {
     /// `kinds` is every kind the plugin serves (conary-core's
     /// `Plugin::kinds`: describe's `kinds`, `v2_kinds` and `v4_kinds`),
-    /// `offered` its describe's `capabilities`, and `approved` its engine's
-    /// list. `offered.sandbox` says where it runs and grants nothing.
-    pub fn new(kinds: &[Kind], offered: &plugin::Capabilities, approved: &[String]) -> Self {
+    /// `offered` its describe's `capabilities`, and `approved` what the
+    /// owner approved for its engine. `offered.sandbox` says where it runs
+    /// and grants nothing.
+    pub fn new(kinds: &[Kind], offered: &plugin::Capabilities, approved: &Approved<'_>) -> Self {
         let mut items = Vec::new();
         let mut refused = BTreeMap::new();
         for &capability in Capability::ALL {
             let name = capability.name();
-            let is_approved = approved.iter().any(|a| a == name);
+            let is_approved = approved.capabilities.iter().any(|a| a == name);
             let asked = is_approved || offered.devices.iter().any(|d| d == name);
             match (
                 capability.declaration(),
@@ -204,7 +230,7 @@ impl Grants {
                 .find(|(withheld, _)| *withheld == name)
                 .map(|(_, why)| Why::Never(why))
         };
-        for name in approved {
+        for name in approved.capabilities {
             if !Capability::ALL.iter().any(|c| c.name() == name) {
                 refused.insert(name, withheld(name).unwrap_or(Why::UnknownName));
             }
@@ -219,15 +245,18 @@ impl Grants {
                     .or_insert_with(|| withheld(device).unwrap_or(Why::UnknownDevice));
             }
         }
+        let (servers, mut refusals) = approved
+            .registry
+            .select(items.contains(&Capability::Mcp), approved.mcp_servers);
+        refusals.extend(refused.into_iter().map(|(name, why)| Refusal {
+            capability: name.to_owned(),
+            why,
+        }));
+        refusals.sort_by(|a, b| a.capability.cmp(&b.capability));
         Self {
             items,
-            refusals: refused
-                .into_iter()
-                .map(|(name, why)| Refusal {
-                    capability: name.to_owned(),
-                    why,
-                })
-                .collect(),
+            servers,
+            refusals,
         }
     }
 
@@ -239,7 +268,13 @@ impl Grants {
         self.items.contains(&capability)
     }
 
-    /// What was declared or approved and isn't granted, by name, each with why.
+    /// The only MCP servers the plugin reaches, by name.
+    pub fn servers(&self) -> &BTreeMap<String, mcp::Server> {
+        &self.servers
+    }
+
+    /// What was declared or approved and isn't granted, by name (a server's
+    /// is `mcp:NAME`), each with why.
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }

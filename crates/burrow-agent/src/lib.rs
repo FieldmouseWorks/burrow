@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
-use burrow_grants::Grants;
+use burrow_grants::{Approved, Grants, mcp};
 use conary_core::plugin;
 use serde::Deserialize;
 
@@ -61,6 +61,9 @@ pub const DAY: u64 = 86_400;
 pub struct Config {
     /// What a sandbox can be started for, by name.
     pub engines: BTreeMap<String, Engine>,
+    /// The machine's MCP servers (burrow.mcpServers), which only a plugin's
+    /// grants read.
+    pub mcp_servers: mcp::Registry,
     /// The engine `agent new` takes when it's given none.
     pub default_engine: Option<String>,
     /// What QEMU runs for each connection to the proxy address with
@@ -100,17 +103,28 @@ pub struct Engine {
     pub credential_file: Option<PathBuf>,
     /// What the owner approved its plugin's runs may be granted.
     pub capabilities: Vec<String>,
-}
-
-impl Engine {
-    /// What a plugin run as this engine is granted: what it declares, of
-    /// what the owner approved for this engine.
-    pub fn grants(&self, kinds: &[plugin::Kind], offered: &plugin::Capabilities) -> Grants {
-        Grants::new(kinds, offered, &self.capabilities)
-    }
+    /// The MCP servers the owner approved for its plugin, by name.
+    pub mcp_servers: Vec<String>,
 }
 
 impl Config {
+    /// What a plugin run as `engine` is granted: what it declares, of what
+    /// the owner approved for that engine.
+    pub fn grants(
+        &self,
+        engine: &str,
+        kinds: &[plugin::Kind],
+        offered: &plugin::Capabilities,
+    ) -> Result<Grants, String> {
+        let engine = self.engine(engine)?;
+        let approved = Approved {
+            capabilities: &engine.capabilities,
+            mcp_servers: &engine.mcp_servers,
+            registry: &self.mcp_servers,
+        };
+        Ok(Grants::new(kinds, offered, &approved))
+    }
+
     /// The engine called `name`.
     pub fn engine(&self, name: &str) -> Result<&Engine, String> {
         self.engines.get(name).ok_or_else(|| {
@@ -341,14 +355,13 @@ mod tests {
             devices: vec![],
             mcp: true,
         };
-        let granted = |engine: &str| {
-            let engine = cfg.engine(engine).unwrap();
-            engine
-                .grants(&[plugin::Kind::Job], &offered)
-                .items()
-                .to_vec()
-        };
-        assert_eq!(granted("claude"), [Capability::Workspace, Capability::Mcp]);
-        assert_eq!(granted("other"), [Capability::Network]);
+        let granted = |engine: &str| cfg.grants(engine, &[plugin::Kind::Job], &offered).unwrap();
+        let claude = granted("claude");
+        assert_eq!(claude.items(), [Capability::Workspace, Capability::Mcp]);
+        assert_eq!(claude.servers().keys().collect::<Vec<_>>(), ["ledger"]);
+        // The same machine's other engine has mcp, and none of its servers.
+        let other = granted("other");
+        assert_eq!(other.items(), [Capability::Mcp, Capability::Network]);
+        assert!(other.servers().is_empty());
     }
 }

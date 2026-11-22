@@ -80,6 +80,17 @@ in
               plugin yet, so no sandbox is narrowed by them.
             '';
           };
+          mcpServers = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            example = [ "conary" ];
+            description = ''
+              The MCP servers the owner approves for this engine's plugin, by
+              their name in burrow.mcpServers. Its `mcp` capability reaches
+              these and no others, and never one that has actsAsOwner set
+              (docs/engines.md, "A plugin's grants").
+            '';
+          };
         };
       });
     };

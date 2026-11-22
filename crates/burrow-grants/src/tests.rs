@@ -13,6 +13,16 @@ fn approved(names: &[&str]) -> Vec<String> {
     names.iter().map(|&n| n.to_owned()).collect()
 }
 
+/// Grants on a machine with no MCP servers (theirs are mcp/tests.rs).
+fn granted(kinds: &[Kind], offered: &plugin::Capabilities, capabilities: &[String]) -> Grants {
+    let approved = Approved {
+        capabilities,
+        mcp_servers: &[],
+        registry: &mcp::Registry::default(),
+    };
+    Grants::new(kinds, offered, &approved)
+}
+
 fn why(grants: &Grants, name: &str) -> Option<Why> {
     grants
         .refusals()
@@ -23,7 +33,7 @@ fn why(grants: &Grants, name: &str) -> Option<Why> {
 
 #[test]
 fn declared_and_approved_is_granted() {
-    let grants = Grants::new(
+    let grants = granted(
         &[Kind::Job],
         &offered(true, true, &["kvm"]),
         &approved(&["workspace", "heavy", "kvm", "mcp", "network"]),
@@ -36,7 +46,7 @@ fn declared_and_approved_is_granted() {
 
 #[test]
 fn declared_and_not_approved_is_absent() {
-    let grants = Grants::new(
+    let grants = granted(
         &[Kind::Job],
         &offered(true, true, &["kvm"]),
         &approved(&["workspace"]),
@@ -49,7 +59,7 @@ fn declared_and_not_approved_is_absent() {
 
 #[test]
 fn approved_and_not_declared_is_absent() {
-    let grants = Grants::new(
+    let grants = granted(
         &[Kind::Review],
         &offered(false, false, &[]),
         &approved(&["workspace", "heavy", "kvm", "mcp", "network"]),
@@ -62,7 +72,7 @@ fn approved_and_not_declared_is_absent() {
 
 #[test]
 fn nothing_is_granted_without_an_approved_list() {
-    let grants = Grants::new(&[Kind::Job], &offered(true, true, &["kvm"]), &[]);
+    let grants = granted(&[Kind::Job], &offered(true, true, &["kvm"]), &[]);
     assert_eq!(grants.items(), []);
 }
 
@@ -87,7 +97,7 @@ fn never_granted_whatever_is_declared_or_approved() {
         (&devices[..], vec![]),
         (&[][..], approved(&names)),
     ] {
-        let grants = Grants::new(&[Kind::Job], &offered(true, true, devices), &approved);
+        let grants = granted(&[Kind::Job], &offered(true, true, devices), &approved);
         assert!(!grants.holds(C::Github));
         assert!(!grants.holds(C::Environment));
         assert!(matches!(why(&grants, "environment"), Some(Why::Never(_))));
@@ -97,7 +107,7 @@ fn never_granted_whatever_is_declared_or_approved() {
         }
     }
     // Everything else the two sides agree on is still granted.
-    let all = Grants::new(
+    let all = granted(
         &[Kind::Job],
         &offered(true, true, &devices),
         &approved(&names),
@@ -112,7 +122,7 @@ fn never_granted_whatever_is_declared_or_approved() {
 
 #[test]
 fn a_device_name_declares_no_other_capability() {
-    let grants = Grants::new(
+    let grants = granted(
         &[Kind::Review],
         &offered(false, false, &["network", "gpu", "heavy"]),
         &approved(&["network", "heavy"]),
@@ -124,7 +134,7 @@ fn a_device_name_declares_no_other_capability() {
 
 #[test]
 fn a_refusal_names_the_capability_and_why() {
-    let grants = Grants::new(
+    let grants = granted(
         &[Kind::Job],
         &offered(false, false, &["settings-write"]),
         &approved(&["kvm", "heavvy"]),
