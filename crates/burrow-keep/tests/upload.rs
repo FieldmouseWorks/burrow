@@ -85,9 +85,8 @@ fn a_job_with_no_token_says_it_cant_write_and_doesnt_fail() {
 #[test]
 fn a_store_that_doesnt_answer_fails_the_step() {
     let t = tempfile::tempdir().unwrap();
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/builds", closed.local_addr().unwrap());
-    drop(closed);
+    let closed = burrow_test::ClosedPort::new();
+    let url = format!("http://{}/builds", closed.addr());
     let o = upload(t.path(), &url, Some(&tokens()));
     assert!(!o.status.success());
     let said = String::from_utf8_lossy(&o.stderr);
