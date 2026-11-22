@@ -73,7 +73,9 @@ let
     stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
     machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
-    inherit (config.burrow) mcpServers;
+    # Whether a plugin may have one is burrow-agent's to know: a job on the
+    # host has every server.
+    mcpServers = lib.mapAttrs (_: server: removeAttrs server [ "actsAsOwner" ]) config.burrow.mcpServers;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;

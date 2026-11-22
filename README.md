@@ -520,7 +520,7 @@ Each has an entry below, and each can be imported on its own.
   (Claude's is declared by the `claude` module): its guest packages and
   modules, its login (`credentialFile`, handed in as the systemd credential
   `agent.credential`), its own egress hosts on its own filtered proxy, and
-  the capabilities the owner approved for it
+  the capabilities and MCP servers the owner approved for it
   ([a plugin's grants](docs/engines.md#a-plugins-grants)). A VM for one engine gets none
   of another's. Idle ones stop after a day and are saved and deleted after a
   week. Opt-in per task.

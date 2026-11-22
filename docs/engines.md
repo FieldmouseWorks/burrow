@@ -65,7 +65,17 @@ or the App's installation authority (`github`, and `environment`, the login
 environment that carries them), a write to the settings store, and plugin
 installation. What a job is authorized to do that needs those reaches it only
 through host-mediated services: proj's jobs socket, the probe, heavy slots
-and MCP servers.
+and the MCP servers below.
+
+`mcp` by itself reaches no server. A plugin granted it reaches those of
+`burrow.mcpServers` that its engine's
+`burrow.agents.engines.NAME.mcpServers` lists, and never one whose
+`actsAsOwner` is set, listed or not: the signed-in browser sets it, since
+whatever drives that browser is the owner to every site it's signed in to.
+A module that adds another such server sets it there. A granted server is
+its command, arguments and the `env` the registry sets. Its `envVars` are
+never filled for a plugin and its host paths aren't part of the grant. A
+refused server is named `mcp:NAME`.
 
 A grant is the capability's name. The runner that gives it to a sandbox
 ([#1390](https://github.com/FieldmouseWorks/burrow/issues/1390)) renders it
