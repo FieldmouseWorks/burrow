@@ -384,8 +384,9 @@ Each has an entry below, and each can be imported on its own.
   hold), due at once when one of its steps has failed three times in a row;
   proj, every job's turn waiting in line (`proj.stallAfterMinutes`), running
   past its timeout, awaiting GitHub past `awaitHours`, or ended without
-  saying what comes next or in a failure (at once). Past a deadline it kicks that item's pass (one kick for
-  all that share it, and none again when the run it started fails), then hands
+  saying what comes next or in a failure (at once). Past a deadline it kicks
+  that item's pass (one kick for all that share it, and none again when the
+  run it started fails), then hands
   every stall that's ready to one Claude job ahead of proj's line, then puts
   what's still stuck on the steward's stuck issue, whose own `--unstick` job
   takes it from there. A job of its own that's still waiting for a slot once
