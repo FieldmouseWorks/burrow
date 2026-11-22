@@ -48,6 +48,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
+use burrow_grants::{Approved, Grants, mcp};
+use conary_core::plugin;
 use serde::Deserialize;
 
 /// A day, the unit of a sandbox's time to live.
@@ -59,6 +61,9 @@ pub const DAY: u64 = 86_400;
 pub struct Config {
     /// What a sandbox can be started for, by name.
     pub engines: BTreeMap<String, Engine>,
+    /// The machine's MCP servers (burrow.mcpServers), which only a plugin's
+    /// grants read.
+    pub mcp_servers: mcp::Registry,
     /// The engine `agent new` takes when it's given none.
     pub default_engine: Option<String>,
     /// What QEMU runs for each connection to the proxy address with
@@ -96,9 +101,30 @@ pub struct Engine {
     pub forward: PathBuf,
     /// Its login for the sandboxes, when the machine gives them one.
     pub credential_file: Option<PathBuf>,
+    /// What the owner approved its plugin's runs may be granted.
+    pub capabilities: Vec<String>,
+    /// The MCP servers the owner approved for its plugin, by name.
+    pub mcp_servers: Vec<String>,
 }
 
 impl Config {
+    /// What a plugin run as `engine` is granted: what it declares, of what
+    /// the owner approved for that engine.
+    pub fn grants(
+        &self,
+        engine: &str,
+        kinds: &[plugin::Kind],
+        offered: &plugin::Capabilities,
+    ) -> Result<Grants, String> {
+        let engine = self.engine(engine)?;
+        let approved = Approved {
+            capabilities: &engine.capabilities,
+            mcp_servers: &engine.mcp_servers,
+            registry: &self.mcp_servers,
+        };
+        Ok(Grants::new(kinds, offered, &approved))
+    }
+
     /// The engine called `name`.
     pub fn engine(&self, name: &str) -> Result<&Engine, String> {
         self.engines.get(name).ok_or_else(|| {
@@ -312,4 +338,30 @@ pub fn stamp() -> String {
     jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use burrow_grants::Capability;
+    use conary_core::plugin;
+
+    #[test]
+    fn a_plugin_is_granted_from_its_own_engines_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::new::tests::config(dir.path());
+        let offered = plugin::Capabilities {
+            sandbox: plugin::Sandbox::Needs,
+            network: true,
+            devices: vec![],
+            mcp: true,
+        };
+        let granted = |engine: &str| cfg.grants(engine, &[plugin::Kind::Job], &offered).unwrap();
+        let claude = granted("claude");
+        assert_eq!(claude.items(), [Capability::Workspace, Capability::Mcp]);
+        assert_eq!(claude.servers().keys().collect::<Vec<_>>(), ["ledger"]);
+        // The same machine's other engine has mcp, and none of its servers.
+        let other = granted("other");
+        assert_eq!(other.items(), [Capability::Mcp, Capability::Network]);
+        assert!(other.servers().is_empty());
+    }
 }

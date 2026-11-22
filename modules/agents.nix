@@ -115,8 +115,13 @@ let
     engines = lib.mapAttrs (_: engine: {
       runner = runner engine;
       forward = forward engine.proxyPort;
-      inherit (engine) credentialFile;
+      inherit (engine) credentialFile capabilities mcpServers;
     }) cfg.engines;
+    # What a plugin could be granted of each server. Never its envVars or
+    # host paths, which are a host job's.
+    mcpServers = lib.mapAttrs (_: server: {
+      inherit (server) command args env actsAsOwner;
+    }) config.burrow.mcpServers;
     inherit (cfg) defaultEngine;
     forwardOpen = forward 3129;
     root = cfg.stateDir;
@@ -139,6 +144,7 @@ let
   agent = pkgs.runCommand "agent" {
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "agent";
+    passthru.config = agentConfig;
   } ''
     makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-agent}/bin/burrow-agent \
       $out/bin/agent --add-flags ${agentConfig}

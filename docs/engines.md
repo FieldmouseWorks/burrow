@@ -35,10 +35,51 @@ remaining work fits the active redesigns.
   [`engine/capabilities.rs`](../crates/burrow-proj/src/engine/capabilities.rs)
   resolves what a job is granted (workspace, git metadata, MCP servers, host
   sockets, environment) separately from how an engine renders those grants.
+  [`burrow-grants`](../crates/burrow-grants/src/lib.rs) is the one list of
+  those capabilities and decides [a plugin's grants](#a-plugins-grants).
 - **Front doors.** All GitHub-issue doors (`probe`, `engines`, `undo`,
   `settings`, `inbox`; [front-door.md](front-door.md)) are harness-agnostic,
   and live interactive sessions start on demand rather than through standing
   Claude-only servers.
+
+## A plugin's grants
+
+An engine plugin is granted a capability only when its `describe` declares
+it **and** the owner lists it in that engine's
+`burrow.agents.engines.NAME.capabilities`. Neither alone grants anything, so
+an engine with no list gets nothing.
+[`burrow-grants`](../crates/burrow-grants/src/lib.rs) computes this for any
+engine, and says for each refusal which capability and why.
+
+Conary's `describe` declares capabilities in this way:
+
+- `network` declares `network`, `mcp` declares `mcp`, and the device `kvm`
+  declares `kvm`. Any other device is refused.
+- Serving the `job` kind declares the rest of the job contract, which
+  `describe` has no field for: `workspace`, `job-state`, `git-metadata`,
+  `toolchains`, `system`, `probe`, `units-clear`, `heavy` and `nix`.
+- `sandbox` says where the plugin runs and grants nothing.
+
+Never granted, whatever a plugin declares or the owner lists: a GitHub token
+or the App's installation authority (`github`, and `environment`, the login
+environment that carries them), a write to the settings store, and plugin
+installation. What a job is authorized to do that needs those reaches it only
+through host-mediated services: proj's jobs socket, the probe, heavy slots
+and the MCP servers below.
+
+`mcp` by itself reaches no server. A plugin granted it reaches those of
+`burrow.mcpServers` that its engine's
+`burrow.agents.engines.NAME.mcpServers` lists, and never one whose
+`actsAsOwner` is set, listed or not: the signed-in browser sets it, since
+whatever drives that browser is the owner to every site it's signed in to.
+A module that adds another such server sets it there. A granted server is
+its command, arguments and the `env` the registry sets. Its `envVars` are
+never filled for a plugin and its host paths aren't part of the grant. A
+refused server is named `mcp:NAME`.
+
+A grant is the capability's name. The runner that gives it to a sandbox
+([#1390](https://github.com/FieldmouseWorks/burrow/issues/1390)) renders it
+there, and never copies the host job's paths or environment for it.
 
 ## Remaining surfaces to make modular
 
@@ -115,8 +156,9 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   `agent new` copies into a VM's `~/.claude`, and `proj run --vm`, which
   runs Claude in the default engine's VM.
 - **Target:**
-  - **Sandbox path (default for new engines):** Enforce plugin capability
-    grants inside the shared sandbox, from each engine's `capabilities`
+  - **Sandbox path (default for new engines):** Enforce
+    [a plugin's grants](#a-plugins-grants) inside the shared sandbox: they
+    are computed, and no runner applies them yet
     ([#743](https://github.com/FieldmouseWorks/burrow/issues/743)). Inside
     the microVM, the VM itself is the security boundary.
   - **Host path (when needed):** Keep `burrow-guard`'s ZFS-snapshot and
@@ -155,7 +197,7 @@ land:
 3. **Land the remaining decoupling as bounded follow-ups:**
    - per-engine holds, login notices, meters, and normalized `probe usage`
      accounting;
-   - capability grants in `burrow.agents`' per-engine sandboxes
+   - enforcing capability grants in `burrow.agents`' per-engine sandboxes
      ([#743](https://github.com/FieldmouseWorks/burrow/issues/743));
    - pluggable worker dispatch in `burrow-judge`;
    - host-hook adapters into `burrow-guard` only for harnesses that need host

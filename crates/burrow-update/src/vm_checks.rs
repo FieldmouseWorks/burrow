@@ -264,5 +264,5 @@ pub(crate) fn vulns(cfg: &Config, system: &str) -> Option<BTreeSet<String>> {
 }
 
 #[cfg(test)]
-#[path = "vm_tests_tests.rs"]
+#[path = "vm_checks_tests.rs"]
 mod tests;

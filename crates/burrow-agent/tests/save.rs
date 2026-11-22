@@ -27,9 +27,12 @@ impl Machine {
                 "claude": {
                     "runner": "/nix/store/x-runner",
                     "forward": "/nix/store/x-proxy-3128",
-                    "credentialFile": null
+                    "credentialFile": null,
+                    "capabilities": [],
+                    "mcpServers": []
                 }
             },
+            "mcpServers": {},
             "defaultEngine": "claude",
             "forwardOpen": "/nix/store/x-proxy-3129",
             "root": at.join("agents"),

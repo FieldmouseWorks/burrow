@@ -249,7 +249,8 @@ Each has an entry below, and each can be imported on its own.
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and
-  the network and login/App environment. A turn whose conversation is lost
+  the network and login/App environment. An engine plugin is granted only
+  [part of that contract](docs/engines.md#a-plugins-grants). A turn whose conversation is lost
   receives the preceding turns' questions and answers.
   Local jobs inspect and recover other host jobs with the ordinary
   `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
@@ -520,7 +521,8 @@ Each has an entry below, and each can be imported on its own.
   (Claude's is declared by the `claude` module): its guest packages and
   modules, its login (`credentialFile`, handed in as the systemd credential
   `agent.credential`), its own egress hosts on its own filtered proxy, and
-  the capabilities the owner approved for it. A VM for one engine gets none
+  the capabilities and MCP servers the owner approved for it
+  ([a plugin's grants](docs/engines.md#a-plugins-grants)). A VM for one engine gets none
   of another's. Idle ones stop after a day and are saved and deleted after a
   week. Opt-in per task.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,

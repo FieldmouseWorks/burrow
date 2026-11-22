@@ -55,12 +55,22 @@ in
         env = mkOption {
           type = types.attrsOf types.str;
           default = { };
-          description = "Environment given to this server by every engine.";
+          description = "Environment given to this server by every engine, an approved plugin's included.";
         };
         envVars = mkOption {
           type = types.listOf types.str;
           default = [ ];
-          description = "Additional environment names copied from the job into each engine's server config.";
+          description = "Additional environment names copied from the job into each engine's server config. Never filled for an engine plugin.";
+        };
+        actsAsOwner = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Whether its tools can act as the owner (a browser signed in to
+            their accounts, say). No engine plugin gets such a server, even
+            one listed in burrow.agents.engines.NAME.mcpServers. Jobs on the
+            host and Claude sessions still have it.
+          '';
         };
         readPaths = mkOption {
           type = types.listOf types.str;

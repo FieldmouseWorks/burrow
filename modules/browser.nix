@@ -196,6 +196,8 @@ in
     environment.systemPackages = [ mcp ];
     # Claude's tools for it, in every session of burrow.user's.
     burrow.mcpServers.browser = {
+      # Signed in as them, and it evaluates script in their pages.
+      actsAsOwner = true;
       command = "/run/current-system/sw/bin/burrow-browser-mcp";
       envVars = [ "XDG_RUNTIME_DIR" ];
       writePaths = [ "/run/user/${uid}/burrow-browser" ];

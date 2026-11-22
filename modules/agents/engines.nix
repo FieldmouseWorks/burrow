@@ -71,10 +71,24 @@ in
           capabilities = mkOption {
             type = types.listOf types.str;
             default = [ ];
+            example = [ "workspace" "job-state" "heavy" ];
             description = ''
-              What the owner has approved this engine's runs may be granted
-              (#743's grants). Carried as data only: nothing grants or
-              enforces them yet.
+              The job capabilities the owner approves for this engine's
+              plugin, by name (crates/burrow-grants lists them). It is granted
+              those of them its describe declares, and no others
+              (docs/engines.md, "A plugin's grants"). Nothing runs an engine
+              plugin yet, so no sandbox is narrowed by them.
+            '';
+          };
+          mcpServers = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            example = [ "conary" ];
+            description = ''
+              The MCP servers the owner approves for this engine's plugin, by
+              their name in burrow.mcpServers. Its `mcp` capability reaches
+              these and no others, and never one that has actsAsOwner set
+              (docs/engines.md, "A plugin's grants").
             '';
           };
         };

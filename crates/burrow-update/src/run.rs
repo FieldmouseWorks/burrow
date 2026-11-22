@@ -15,7 +15,7 @@
 //! strands the box. While that PR is open it brings in nothing newer, unless
 //! its head is stuck (train.rs says when): then a fresh bump replaces it.
 //!
-//! Its steps, in order: this file's, to the build; vm_tests.rs, the VM
+//! Its steps, in order: this file's, to the build; vm_checks.rs, the VM
 //! tests; live.rs, live and confirmed; and this file's again, put up. Before
 //! each VM test and the switch it looks at main again, and starts over from
 //! it when it moved (follow.rs).
