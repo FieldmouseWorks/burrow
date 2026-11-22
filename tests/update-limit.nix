@@ -13,7 +13,11 @@ let
   tool = example.burrow.tools.update;
   real = example.systemd.services.${tool.meta.mainProgram or tool.name};
   program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-update}/bin/burrow-update";
-  limit = 20;
+  # A run's own work on a slow CI runner (git, the reload, the confirm) has
+  # taken 18s: the limit is well past that, so only what a case holds back
+  # can use it up.
+  limit = 60;
+  past = limit + 5;
   stand = name: text: pkgs.writeShellScript name text;
   nix = pkgs.writeShellScriptBin "nix" ''
     case "$*" in
@@ -58,11 +62,14 @@ let
     timers = [ ];
     tools = lib.genAttrs [ "sudo" "notify" "vulnix" "curl" "install" "logger" "systemctl" ] (name: stand name "exit 0") // {
       boot = null;
-      # As switch-to-configuration does: PID 1 reloads, then there's more.
+      # As switch-to-configuration does: PID 1 reloads, then there's more,
+      # for as long as a case holds it and then /t/activation.
       switch = stand "switch" ''
         [ "$1" = --toplevel ] || exit 0
         touch /t/switching
         ${pkgs.systemd}/bin/systemctl daemon-reload
+        cut -d ' ' -f 1 /proc/uptime >/t/reloaded
+        while [ -e /t/held ]; do sleep 0.2; done
         sleep "$(cat /t/activation)"
       '';
       confirm = stand "confirm" "touch /t/confirmed";
@@ -139,7 +146,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a reload while it waits, past the limit"):
         started(activation=2)
-        time.sleep(${toString limit} + 5)
+        time.sleep(${toString past})
         machine.succeed("systemctl daemon-reload")
         time.sleep(2)
         machine.succeed("touch /t/release")
@@ -147,7 +154,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a re-exec while it waits, past the limit"):
         started(activation=2)
-        time.sleep(${toString limit} + 5)
+        time.sleep(${toString past})
         machine.succeed("systemctl daemon-reexec")
         time.sleep(2)
         machine.succeed("touch /t/release")
@@ -155,21 +162,32 @@ pkgs.testers.runNixOSTest {
 
     with subtest("its switch's reload, past the limit"):
         started(activation=2)
-        time.sleep(${toString limit} + 5)
+        time.sleep(${toString past})
         machine.succeed("touch /t/release")
         lived("its switch's reload, past the limit")
 
     with subtest("its switch's reload, before the limit"):
-        started(activation=14)
-        time.sleep(12)
+        case = "its switch's reload, before the limit"
+        started(activation=2)
+        began = int(shows("InactiveExitTimestampMonotonic")) / 1e6
+        machine.succeed("touch /t/held")
+        time.sleep(${toString (limit / 2)})
         machine.succeed("touch /t/release")
-        lived("its switch's reload, before the limit")
+        # Held by the machine's clock, not for a time guessed from how fast
+        # it is: the run ends past the limit having worked for less.
+        while float(machine.succeed("cut -d ' ' -f 1 /proc/uptime")) - began < ${toString past}:
+            time.sleep(1)
+        reloaded = machine.execute("cat /t/reloaded")[1].strip()
+        check(f"{case}: it came before", bool(reloaded) and float(reloaded) - began < ${toString limit},
+              f"began {began}, reloaded {reloaded or 'never'}")
+        machine.succeed("rm /t/held")
+        lived(case)
 
     with subtest("work past the limit"):
         started(activation=300)
         time.sleep(12)
         machine.succeed("touch /t/release")
-        machine.wait_for_file("/t/switching", timeout=15)
+        machine.wait_for_file("/t/switching", timeout=${toString limit})
         result = ended()
         confirmed = machine.execute("test -e /t/confirmed")[0] == 0
         left = machine.execute("pgrep -xf 'sleep 300'")[0] == 0
