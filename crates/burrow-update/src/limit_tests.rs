@@ -84,26 +84,32 @@ fn an_update_that_waits_longer_than_its_work_limit_isnt_killed_for_it() {
 #[test]
 fn each_wait_comes_back_and_the_work_between_them_doesnt() {
     let mut m = Machine::new();
-    m.cfg.work_limit = 2;
+    m.cfg.work_limit = 4;
     let unit = Unit::start(&mut m);
     let limit = Limit::begin(&m.cfg);
+    let waited = Cell::new(Duration::ZERO);
     let slot_after = |wait: u64| {
         let (said, mut says) = std::io::pipe().unwrap();
         let heavy = thread::spawn(move || {
             thread::sleep(Duration::from_millis(wait));
             std::io::Write::write_all(&mut says, format!("{IN_SLOT}\n").as_bytes()).unwrap();
         });
+        let since = Instant::now();
         limit.wait(said);
+        waited.set(waited.get() + since.elapsed());
         heavy.join().unwrap();
     };
     slot_after(1500);
-    thread::sleep(Duration::from_millis(700));
+    let worked = Duration::from_secs(2);
+    thread::sleep(worked);
     slot_after(1500);
-    let ends = unit.ends(Duration::from_secs(2));
-    // 2s to work in and 3s waited, however much of the 2s was worked.
+    let given = Duration::from_secs(4) + waited.get();
+    let ends = unit.ends(Duration::from_secs(4));
+    // Measured, not assumed: a loaded machine waits longer. Short of the
+    // work between them coming back too, by half of it at least.
     assert!(
-        ends >= Duration::from_millis(4900) && ends < Duration::from_millis(5500),
-        "{ends:?}"
+        ends + Duration::from_millis(100) >= given && ends < given + worked / 2,
+        "{ends:?}, given {given:?}"
     );
 }
 
