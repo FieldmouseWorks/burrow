@@ -2,9 +2,9 @@
 //! test beside the machine's other gates and VM tests ran ten times its
 //! usual length and past the test driver's hour; waiting for a slot happens
 //! before the build starts, so it doesn't use up that hour, nor the run's
-//! own limit (limit.rs). It waits ahead of other work (heavy's `--first`),
-//! as it's how a fix reaches the machine: behind every job's build once a
-//! test, main moved on before a run got through them. Once it has
+//! own limit (limit.rs). It waits ahead of other work (heavy's `--first`):
+//! it's how a fix reaches the machine, and a run that went to the back of
+//! the line for each test would see main move before its last. Once it has
 //! the slot, it looks at main again before it starts (follow.rs's
 //! `unless-moved`): a slot can take longer to come than main takes to move.
 

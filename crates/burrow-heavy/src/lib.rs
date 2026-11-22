@@ -24,6 +24,7 @@
 //! slot's descriptor (it's close-on-exec), so a daemon it leaves behind
 //! can't hold the slot.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -264,14 +265,21 @@ fn take(config: &Config, share: u64, class: Class, wait: Option<u64>, command: &
     };
     let mut clock = Clock::new(wait);
     let mut said = false;
+    // Whether the last look found someone ahead, rather than no slot free.
+    let behind = Cell::new(false);
     let waiting = || {
-        format!(
-            "heavy: all {} slots busy, waiting (heavy status)",
-            config.slots
-        )
+        if behind.get() {
+            "heavy: others are ahead in line, waiting (heavy status)".to_owned()
+        } else {
+            format!(
+                "heavy: all {} slots busy, waiting (heavy status)",
+                config.slots
+            )
+        }
     };
     let got = clock.poll(&mut said, waiting, || {
-        if !place.is_next()? || all_waiting(config)? {
+        behind.set(!place.is_next()?);
+        if behind.get() || all_waiting(config)? {
             return Ok(None);
         }
         attempt(config)
@@ -285,7 +293,12 @@ fn take(config: &Config, share: u64, class: Class, wait: Option<u64>, command: &
             code
         }
         Ok(None) => {
-            note!("heavy: every slot still busy after {}s", wait.unwrap_or(0));
+            let waited = wait.unwrap_or(0);
+            if behind.get() {
+                note!("heavy: others still ahead in line after {waited}s");
+            } else {
+                note!("heavy: every slot still busy after {waited}s");
+            }
             BUSY
         }
     }

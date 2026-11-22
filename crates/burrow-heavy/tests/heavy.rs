@@ -522,6 +522,8 @@ fn a_newcomer_never_takes_the_slot_a_waiter_is_in_line_for() {
     drop(held);
     let out = s.run(&["--wait", "0", "--", "touch", "newcomer"]);
     assert_eq!(out.status.code(), Some(75));
+    let err = text(&out.stderr);
+    assert!(err.contains("others still ahead in line after 0s"), "{err}");
     assert!(!s.path().join("newcomer").exists());
     waiter.done();
     assert_eq!(order(&s), "waiter\n");
