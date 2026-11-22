@@ -629,14 +629,10 @@ fn check(root: &Path) -> BTreeSet<String> {
     walk(root).finish()
 }
 
-/// The files under `root`'s members that only `cargo test` compiles, each by
-/// its canonical path.
-pub(crate) fn test_only(root: &Path) -> BTreeSet<PathBuf> {
-    walk(root)
-        .read
-        .into_iter()
-        .filter_map(|(file, only)| only.then_some(file))
-        .collect()
+/// The files the walk reads under `root`'s members, each by its canonical
+/// path and with whether only `cargo test` compiles it.
+pub(crate) fn compiled(root: &Path) -> BTreeMap<PathBuf, bool> {
+    walk(root).read
 }
 
 fn walk(root: &Path) -> Guard {
