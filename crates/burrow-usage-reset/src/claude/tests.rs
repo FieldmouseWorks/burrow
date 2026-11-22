@@ -239,6 +239,64 @@ fn the_meter() {
     assert!(usage(&none, None, NOW).unwrap_err().contains("logged in"));
 }
 
+/// Claude Code 2.1.330's debug log of a `get_usage` its endpoint refused
+/// with STATUS, as remi's showed a 429.
+fn refused_with(status: u16) -> String {
+    format!(
+        "2026-11-21T22:47:06.725Z [DEBUG] fetchUtilization: GET /api/oauth/usage (attempt 1)
+2026-11-21T22:47:06.784Z [DEBUG] fetchUtilization: {status} remembered for this bearer; not asking again for 300s
+2026-11-21T22:47:06.785Z [ERROR] Failed to load usage data: Request failed with status code {status}
+"
+    )
+}
+
+#[test]
+fn the_endpoints_answers_in_its_log() {
+    assert_eq!(usage_statuses(&refused_with(429)), [429, 429]);
+    assert_eq!(
+        usage_statuses(
+            "x [DEBUG] fetchUtilization: GET /api/oauth/usage (attempt 1)\n\
+             x [DEBUG] fetchUtilization: 200 after 1 attempt(s)\n\
+             x [DEBUG] [Bootstrap] Fetch ok, 404 of them\n"
+        ),
+        [200]
+    );
+    assert_eq!(usage_statuses(""), [] as [u16; 0]);
+}
+
+#[test]
+fn a_rate_limit_isnt_a_failed_login() {
+    let failed = || usage(&from_the_copy(10.0), None, NOW).map(|_| ());
+    assert!(failed().is_err());
+    // The endpoint's rate limit: the login works.
+    assert_eq!(
+        login_shown(failed(), &from_the_copy(10.0), &refused_with(429)),
+        Ok(())
+    );
+    // Even with no copy to answer from.
+    let mut nothing = from_the_copy(10.0);
+    nothing["rate_limits"]["seven_day"] = Value::Null;
+    assert_eq!(
+        login_shown(Err("x".into()), &nothing, &refused_with(429)),
+        Ok(())
+    );
+    // A refusal of the login, or nothing in the log to say why: its error.
+    assert_eq!(
+        login_shown(failed(), &from_the_copy(10.0), &refused_with(401)),
+        failed()
+    );
+    assert_eq!(login_shown(failed(), &from_the_copy(10.0), ""), failed());
+    let both = refused_with(429) + &refused_with(401);
+    assert_eq!(login_shown(failed(), &from_the_copy(10.0), &both), failed());
+    // No plan limits, or no answer at all, fails whatever the log says.
+    let none =
+        json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
+    assert!(login_shown(Err("x".into()), &none, &refused_with(429)).is_err());
+    assert!(login_shown(Err("x".into()), &Value::Null, &refused_with(429)).is_err());
+    // A reading is the proof.
+    assert_eq!(login_shown(Ok(()), &fetched(10.0), ""), Ok(()));
+}
+
 /// `read_fresh` where the copy's time reads from COPIES in turn, the clock
 /// goes on by a minute with every look, and asking is noted.
 fn asked_through(copies: Vec<Result<Option<f64>, String>>, start: f64) -> Result<Reading, String> {
