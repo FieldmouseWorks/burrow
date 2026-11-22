@@ -11,7 +11,8 @@ run on that on its `conary/train/` branch, lands a green one's PRs in order
 through their own merges, and splits a red one to find the PR that broke
 it. On each head it lands it posts its status (CONTEXT) first, which the
 repo's rules require; one red alone gets a failure, which a fix job takes,
-and one GitHub refused an error.
+until a step releases it because that candidate's gate passed since, and one
+GitHub refused an error.
 
 cn asks this very command for the App's tokens (`autoland-steward token
 OWNER/REPO`, steward.py), one for each repo it calls: printed into cn's
@@ -35,7 +36,7 @@ CONTEXT = CFG["trainContext"]
 # Why the train holds a PR out, as cn says it: until what, in words, and
 # the stage that leaves it at (stages.py). Never the train's own, whose label
 # is Renovate's stop label: one held out is free for its bot to rebase.
-HELD = {"red": ("it was red alone in it, until a new head", S.FIX),
+HELD = {"red": ("it was red alone in it, until a new head or that gate's pass", S.FIX),
         "conflict": ("it won't merge after the PRs ahead of it, until they've landed or left", S.BASE),
         # Its merge changes nothing after them: once they've landed, it's
         # closed (step.py's mergeable), or left to its dependency bot.
@@ -197,7 +198,7 @@ def join(repo, pr, reviewed):
             return "elsewhere", None
         if got["joined"]:
             log(f"{repo}#{n}: joined its train at {head[:7]}")
-    t = TRAINS.setdefault(repo, {"joined": [], "in_flight": None, "candidates": []})
+    t = TRAINS.setdefault(repo, {"joined": [], "in_flight": None, "red_alone": [], "candidates": []})
     if not any(m["pr"] == n for m in t["joined"]):
         t["joined"].append({"pr": n})
     return None
@@ -267,10 +268,11 @@ def stop(repo, why):
 
 
 def idle(t):
-    """Nothing for a step to do: nothing in the train or in flight, and the
-    last candidate finished (the step that finished it cleaned up)."""
+    """Nothing for a step to do: nothing in the train or in flight, no PR
+    held red alone (a step is what releases one), and the last candidate
+    finished (the step that finished it cleaned up)."""
     last = t["candidates"][-1]["state"]["state"] if t["candidates"] else "finished"
-    return not t["joined"] and t["in_flight"] is None and last == "finished"
+    return not t["joined"] and t["in_flight"] is None and not t["red_alone"] and last == "finished"
 
 
 def step(repo):
@@ -298,6 +300,8 @@ def step(repo):
     got = cn(*args)
     said = [f"candidate {short(c)} {v}" for c, v in got["verdicts"]]
     said += [f"#{x['pr']} red alone" for x in got["red"]]
+    said += [f"#{n} released, the gate it was red alone in passed since" for n in got["released"]]
+    said += [f"#{x['pr']} still held red alone, its gate unread: {x['why']}" for x in got["unread"]]
     said += [f"#{x['pr']} won't merge" for x in got["conflicts"]]
     said += [f"#{x['pr']} refused: {x['why']}" for x in got["refused"]]
     said += [f"#{n} merged" for n in got["landed"]]
