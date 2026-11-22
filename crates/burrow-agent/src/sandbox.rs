@@ -12,6 +12,8 @@ pub const PROJECT: &str = "project";
 pub const CID: &str = "cid";
 pub const NET: &str = "net";
 pub const ENGINE: &str = "engine";
+/// The engine whose plugin's clone this is: a sandbox with no VM to start.
+pub const PLUGIN: &str = "plugin";
 pub const TTL_DAYS: &str = "ttl-days";
 pub const LAST_USED: &str = "last-used";
 pub const REMOVED: &str = "removed";
@@ -77,6 +79,12 @@ impl Sandbox {
     /// network as. One made before sandboxes had engines has none, and
     /// won't start again: it'd be a guess which login and hosts it gets.
     pub fn engine<'c>(&self, cfg: &'c Config) -> Result<&'c Engine, String> {
+        if self.file(PLUGIN).exists() {
+            return Err(format!(
+                "{} is the clone a plugin's run left, so it won't start: `agent fetch` its work and `agent rm` it",
+                self.id
+            ));
+        }
         let at = self.file(ENGINE);
         if !at.exists() {
             return Err(format!(
@@ -124,6 +132,28 @@ impl Sandbox {
             .lines()
             .map(|l| l.split('\t').next().unwrap_or("").to_owned())
             .collect())
+    }
+
+    /// Deletes it: its clone, the snapshot that came from, its directory.
+    /// Its work is saved first, by whoever calls.
+    pub fn destroy(&self, agent: &Agent) -> Result<(), String> {
+        let cfg = agent.cfg;
+        agent.run(
+            "zfs",
+            &["destroy", "-r", &format!("{}/{}", cfg.dataset, self.id)],
+        )?;
+        agent.run(
+            "zfs",
+            &[
+                "destroy",
+                &format!("{}@agent-{}", cfg.data_dataset, self.id),
+            ],
+        )?;
+        // zfs usually removes the mountpoint itself.
+        if self.dir.is_dir() {
+            fs::remove_dir(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        }
+        Ok(())
     }
 
     /// Writes its QEMU arguments, which the runner reads at every start, with

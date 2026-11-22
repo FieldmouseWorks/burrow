@@ -29,7 +29,8 @@ impl Machine {
                     "forward": "/nix/store/x-proxy-3128",
                     "credentialFile": null,
                     "capabilities": [],
-                    "mcpServers": []
+                    "mcpServers": [],
+                    "plugin": null
                 }
             },
             "mcpServers": {},
@@ -43,6 +44,18 @@ impl Machine {
             "user": "dev",
             "uid": 1000,
             "group": "users",
+            "gid": 100,
+            "plugins": {
+                "system": {"root": "/nix/store/x", "closure": "/nix/store/x-paths"},
+                "toolchains": {"root": "/nix/store/x", "closure": "/nix/store/x-paths"},
+                "nix": {"root": "/nix/store/x", "closure": "/nix/store/x-paths"},
+                "virtiofsd": {"root": "/nix/store/x", "closure": "/nix/store/x-paths"},
+                "forward": "/nix/store/x-service",
+                "socat": "/nix/store/x-socat",
+                "heavy": null,
+                "unitsClear": null,
+                "jobSockets": at.join("scratch/jobs"),
+            },
             "home": at.join("home"),
             "sudo": "/run/wrappers/bin/sudo",
             "path": "/nonexistent"

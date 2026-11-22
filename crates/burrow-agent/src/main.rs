@@ -14,9 +14,11 @@ use burrow_agent::list::{self, header, line};
 use burrow_agent::new;
 use burrow_agent::sandbox::{self, Sandbox};
 use burrow_agent::save::{Saved, save};
-use burrow_agent::{Agent, Config, exit_code, mtime, now, ssh, touch, write_line};
+use burrow_agent::{
+    Agent, Config, confine, exit_code, git_config, mtime, now, plugin, ssh, touch, write_line,
+};
 
-const USAGE: &str = "usage: agent new|claude|sh|ls|fetch|path|stop|start|rm|keep|gc";
+const USAGE: &str = "usage: agent new|claude|sh|ls|fetch|path|stop|start|rm|keep|gc|plugin";
 
 /// Why `agent` stops: what it says, and how it exits.
 enum Stop {
@@ -124,12 +126,9 @@ fn run(agent: &Agent, w: &[String]) -> Result<(), Stop> {
         "fetch" => {
             agent.as_user(w)?;
             let sb = Sandbox::find(cfg, &id("fetch ID")?)?;
-            if save(agent, &sb)? == Saved::NotARepository {
-                eprintln!(
-                    "agent: {} is not a git repository of its own; nothing to fetch into",
-                    sb.project()?
-                );
-                return Err(Stop::Code(2));
+            match confine::save(agent, &sb)? {
+                0 => {}
+                code => return Err(Stop::Code(code.clamp(1, 255) as u8)),
             }
             let listed = agent
                 .command("git")
@@ -145,6 +144,43 @@ fn run(agent: &Agent, w: &[String]) -> Result<(), Stop> {
             if !listed.success() {
                 return Err(Stop::Code(exit_code(listed).clamp(1, 255) as u8));
             }
+        }
+        "_save" => {
+            let sb = Sandbox::find(cfg, &id("_save ID")?)?;
+            if save(agent, &sb)? == Saved::NotARepository {
+                eprintln!(
+                    "agent: {} is not a git repository of its own; nothing to fetch into",
+                    sb.project()?
+                );
+                return Err(Stop::Code(2));
+            }
+        }
+        "_sanitize" => git_config::sanitize(agent, Path::new(&id("_sanitize GIT")?))?,
+        "plugin" => {
+            agent.as_user(w)?;
+            plugin::client::call(agent, &id("plugin ENGINE")?)?;
+        }
+        // The two halves of an engine's plugin service, which only systemd
+        // starts (modules/agents/plugins.nix).
+        "_plugin" | "_plugin-end" => {
+            if !rustix::process::geteuid().is_root() {
+                return Err(Stop::Failed(format!(
+                    "{word} is the plugin service's, as root"
+                )));
+            }
+            match (word, &w[1..]) {
+                ("_plugin", [engine, call]) => {
+                    plugin::serve::serve(agent, engine, Path::new(call))?
+                }
+                ("_plugin-end", [call]) => plugin::workspace::end(agent, Path::new(call))?,
+                _ => return Err(Stop::Usage(USAGE.to_owned())),
+            }
+        }
+        "_hold" => hold()?,
+        "_jobs" => {
+            let socket = id("_jobs SOCKET")?;
+            let (from, mut to) = (std::io::stdin().lock(), std::io::stdout().lock());
+            plugin::jobs::pass(Path::new(&socket), from, &mut to)?;
         }
         "start" => {
             agent.as_root(w)?;
@@ -239,6 +275,20 @@ fn shell(agent: &Agent, id: &str, command: &[String]) -> Result<(), Stop> {
     };
     let e = ssh::ssh(agent, &sb, tty, &[line])?.exec();
     Err(format!("ssh: {e}").into())
+}
+
+/// Inside a heavy slot: says the slot's share, then holds it until stdin
+/// ends, which is when a plugin's connection does (plugin/vm.rs).
+fn hold() -> Result<(), String> {
+    use std::io::{Write, copy, sink, stdin, stdout};
+    let share = env::var("HEAVY_JOBS").map_err(|_| "_hold runs inside a heavy slot".to_owned())?;
+    let mut out = stdout().lock();
+    if writeln!(out, "{share}").and_then(|()| out.flush()).is_err() {
+        // Whoever waited for it has gone.
+        return Ok(());
+    }
+    let _ = copy(&mut stdin().lock(), &mut sink());
+    Ok(())
 }
 
 fn running(agent: &Agent, sb: &Sandbox) -> bool {
@@ -338,7 +388,6 @@ fn gc(agent: &Agent) -> Result<(), Stop> {
 }
 
 fn gc_one(agent: &Agent, sb: &Sandbox, now: i64) -> Result<(), String> {
-    let cfg = agent.cfg;
     if running(agent, sb) {
         let idle = now - mtime(&sb.file(sandbox::LAST_USED))? as i64;
         if list::in_use(sb.cid()?) {
@@ -362,18 +411,7 @@ fn gc_one(agent: &Agent, sb: &Sandbox, now: i64) -> Result<(), String> {
             sb.project()?
         );
         stop_vm(agent, sb)?;
-        agent.run(
-            "zfs",
-            &["destroy", "-r", &format!("{}/{}", cfg.dataset, sb.id)],
-        )?;
-        agent.run(
-            "zfs",
-            &["destroy", &format!("{}@agent-{}", cfg.data_dataset, sb.id)],
-        )?;
-        // zfs usually removes the mountpoint itself.
-        if sb.dir.is_dir() {
-            fs::remove_dir(&sb.dir).map_err(|e| format!("{}: {e}", sb.dir.display()))?;
-        }
+        sb.destroy(agent)?;
     } else {
         eprintln!(
             "{}: expired, but its work couldn't be saved (fetch exit {rc}); keeping it",
