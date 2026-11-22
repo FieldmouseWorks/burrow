@@ -4,7 +4,7 @@ use super::*;
 mod classify;
 #[path = "removal.rs"]
 mod removal;
-use removal::Change;
+use removal::{Change, Names};
 // Go's and Rust's sibling files (`foo_test.go`, `foo_tests.rs`) use the
 // suffix pattern globally; other suffix-named tests count when they live
 // under one of the test-directory patterns.
@@ -57,6 +57,11 @@ struct Negative {
     when: String,
     /// What the negative tree applies to the fork's.
     changes: Vec<Change>,
+    /// The checks that aren't built here (build-skip).
+    skip: String,
+    /// The controls built (removal.rs), and whether each passed: checks and
+    /// trees can share one.
+    controls: std::sync::Mutex<std::collections::BTreeMap<String, bool>>,
     /// The lock files whose inputs are in the store apart already, so a
     /// host out of reach costs its timeout once a run, not once a check.
     apart: std::sync::Mutex<Vec<String>>,
@@ -271,7 +276,7 @@ impl Negative {
             return Ok(false);
         };
         if self.removal_breaks(Some(t))? {
-            return self.fails_restored(Some(t), log);
+            return self.fails_restored(t, log);
         }
         self.tests_own(t, timed_out)
     }
@@ -430,12 +435,14 @@ pub fn negative() -> Result<bool> {
         fork: String::new(),
         when: String::new(),
         changes: vec![],
+        skip: var("SKIP"),
+        controls: Default::default(),
         apart: Default::default(),
     };
     let work = n.work.0.clone();
     let base = var("BASE");
     let head = n.head.clone();
-    let skip = var("SKIP");
+    let skip = n.skip.clone();
     let tip = string(git(&[
         "rev-parse",
         "--verify",
@@ -501,18 +508,25 @@ pub fn negative() -> Result<bool> {
     let negative_dir = work.join("negative");
     let base_dir = work.join("base");
     let nn = output(n.eval(&negative_dir, None, false))?;
-    if !nn.status.success() {
+    let mut new_names = nn.stdout.clone();
+    let names_broken = !nn.status.success();
+    if names_broken {
         classify::errors(&nn.stderr);
         n.failed_there(&nn, &negative_dir, &base_dir, None)?;
-        if n.removal_breaks(None)? && !n.fails_restored(None, &[])? {
-            return Ok(false);
+        match n.names_failed()? {
+            Names::Unsure => return Ok(false),
+            Names::Restored(names) => new_names = names,
+            Names::Caught => {
+                println!(
+                    "the checks don't evaluate with the new tests on the old code: they fail there"
+                );
+                return n.found("fail", Some(&tree));
+            }
         }
-        println!("the checks don't evaluate with the new tests on the old code: they fail there");
-        return n.found("fail", Some(&tree));
     }
     let base_names = lines(&jq(&bn.stdout, ".[]")?);
     let mut names = base_names.clone();
-    names.extend(lines(&jq(&nn.stdout, ".[]")?));
+    names.extend(lines(&jq(&new_names, ".[]")?));
     names.sort();
     names.dedup();
     fs::create_dir(work.join("roots"))?;
@@ -527,7 +541,8 @@ pub fn negative() -> Result<bool> {
     });
     let mut targets = Vec::new();
     let mut caught = false;
-    let mut unsure = false;
+    // Without the names nothing passed there, so only a catch counts.
+    let mut unsure = names_broken;
     for (i, name) in names.iter().enumerate() {
         let b = evals[i * 2].as_ref().map_err(|e| err(e.to_string()))?;
         let neg = evals[i * 2 + 1].as_ref().map_err(|e| err(e.to_string()))?;
@@ -544,7 +559,10 @@ pub fn negative() -> Result<bool> {
         if nv.is_empty() {
             println!("check {name} doesn't evaluate with the new tests on the old code:");
             classify::errors(&neg.stderr);
-            n.failed_there(neg, &negative_dir, &base_dir, Some(&q))?;
+            // Broken names say it of every check, and were tried again.
+            if !names_broken {
+                n.failed_there(neg, &negative_dir, &base_dir, Some(&q))?;
+            }
             n.checks.push(name.clone());
             let t = Target {
                 i,
@@ -553,7 +571,10 @@ pub fn negative() -> Result<bool> {
                 drv: nv,
                 base: bv,
             };
-            if caught || !n.removal_breaks(Some(&t))? || n.fails_restored(Some(&t), &[])? {
+            if caught
+                || (!names_broken && !n.removal_breaks(Some(&t))?)
+                || n.fails_restored(&t, &[])?
+            {
                 caught = true;
             } else {
                 unsure = true;

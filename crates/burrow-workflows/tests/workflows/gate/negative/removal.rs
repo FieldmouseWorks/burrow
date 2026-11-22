@@ -1,7 +1,7 @@
 //! A failure the negative tree made itself, by taking away a test file the
 //! old code names, isn't the new tests' (#1418). It counts only where the
 //! removal alone doesn't break the check, or where the check fails with
-//! those files put back too.
+//! those files put back too, on paths a control shows it passes on.
 
 use super::{Ran, Repo};
 use crate::harness::{read, write};
@@ -16,13 +16,17 @@ const NEW_FAILS: &str = r#""pair":"1\n/2\n""#;
 const BOTH: &str = r#""part":"both""#;
 /// t with neither.
 const NEITHER: &str = r#""part":"neither""#;
+/// t with the new spelling alone, as `#[path]` to the old one can't read.
+const DIRECTORY: &str = r#""part":"directory""#;
+/// t with a failing test in the file that replaced the module's.
+const SPLIT_FAILS: &str = r#""body":"2\n""#;
 
 /// A PR's files.
 type Files<'a> = Vec<(&'a str, Option<&'a str>)>;
 
 /// The repo, with t pairing the code with a test file of its own, so a
 /// case can fail the new test alone, and saying which spelling of a module
-/// it finds; and with a test nothing names.
+/// it finds and what the new one holds; and with a test nothing names.
 fn repo() -> Repo {
     let r = Repo::new();
     edit(
@@ -30,6 +34,7 @@ fn repo() -> Repo {
         "inherit system want;",
         r#"inherit system want;
           pair = builtins.readFile ./lib.txt + "/" + (if builtins.pathExists ./tests/new.txt then builtins.readFile ./tests/new.txt else "none");
+          body = if builtins.pathExists ./tests/part/mod.rs then builtins.readFile ./tests/part/mod.rs else "none";
           part = if builtins.pathExists ./tests/part.rs
             then (if builtins.pathExists ./tests/part/mod.rs then "both" else "file")
             else (if builtins.pathExists ./tests/part/mod.rs then "directory" else "neither");"#,
@@ -170,8 +175,8 @@ fn a_wait_beside_a_move_is_still_caught() {
     caught(&ran);
 }
 
-/// Putting back makes no failure of its own: a file the PR replaced, at
-/// the other spelling of its module, stays away.
+/// Putting back makes no failure of its own: a file the PR replaced, where
+/// the old code finds the other spelling of its module, stays away.
 #[test]
 fn a_replaced_file_isnt_put_back() {
     let r = repo();
@@ -269,4 +274,145 @@ fn an_evaluation_wanting_a_file_taken_away_is_no_catch() {
         ],
     );
     caught(&r.run(&head, "", NEW_FAILS));
+}
+
+/// A replaced file's absence is no catch where the old code names that
+/// very path (`#[path]`): not alone, beside another move, nor where the two
+/// spellings can't stand together.
+#[test]
+fn a_replaced_file_the_old_code_names_is_no_catch() {
+    let r = repo();
+    let split = vec![
+        ("lib.txt", Some("2\n")),
+        ("tests/part.rs", None),
+        ("tests/part/mod.rs", Some("part\n")),
+    ];
+    let mut beside_a_move = split.clone();
+    beside_a_move.extend(moved().into_iter().skip(1));
+    let named = format!("{DIRECTORY} {NEITHER}");
+    for (name, files, fail) in [
+        ("path", split.clone(), named.clone()),
+        ("path-clash", split, format!("{named} {BOTH}")),
+        ("path-move", beside_a_move, format!("{named} {GONE}")),
+    ] {
+        let ran = r.run(&r.pr(name, &files), "", &fail);
+        assert_eq!(ran.code, 1, "{name}: {}", ran.out);
+        assert!(ran.found.is_none(), "{name}: {}", ran.out);
+    }
+}
+
+/// A file made a directory breaks the old code's read of it, whether it
+/// must be there or is only read where it is: no catch either, for a check
+/// or for the checks' names.
+#[test]
+fn a_directory_where_the_old_code_reads_a_file_is_no_catch() {
+    for (file, text, from, to) in [
+        (
+            "tests/data",
+            "data\n",
+            "inherit system want;",
+            "inherit system want; data = builtins.readFile ./tests/data;",
+        ),
+        (
+            "tests/data",
+            "data\n",
+            "inherit system want;",
+            r#"inherit system want; data = if builtins.pathExists ./tests/data then builtins.readFile ./tests/data else "none";"#,
+        ),
+        (
+            "tests/names",
+            "{ }\n",
+            "checks.${system} = {",
+            "checks.${system} = import ./tests/names // {",
+        ),
+    ] {
+        let r = repo();
+        edit(&r, from, to);
+        write(&r.origin.join(file), text);
+        r.g.s.git(&r.origin, &["add", "-A"]);
+        r.g.s.git(&r.origin, &["commit", "-qm", "a file it reads"]);
+        let case = format!("{file}/case");
+        let head = r.pr(
+            "dir",
+            &[
+                ("lib.txt", Some("2\n")),
+                (file, None),
+                (case.as_str(), Some(text)),
+            ],
+        );
+        let ran = r.run(&head, "", "");
+        assert_eq!(ran.code, 1, "{to}: {}", ran.out);
+        assert!(ran.found.is_none(), "{to}: {}", ran.out);
+    }
+}
+
+/// A test that fails on the old code is still caught beside a replaced
+/// file: in a file that stayed, where the old one can go back, and in the
+/// replacement, where the old code finds that.
+#[test]
+fn a_test_beside_a_replaced_file_is_still_caught() {
+    let r = repo();
+    let code = ("lib.txt", Some("2\n"));
+    let new = ("tests/new.txt", Some("2\n"));
+    let gone = ("tests/part.rs", None);
+    let same = ("tests/part/mod.rs", Some("part\n"));
+    let changed = ("tests/part/mod.rs", Some("2\n"));
+    let path = vec![code, new, gone, same];
+    let split = vec![code, gone, changed];
+    let mut split_move = moved();
+    split_move.extend([gone, changed]);
+    for (name, files, fail) in [
+        ("path", path, format!("{DIRECTORY} {NEITHER} {NEW_FAILS}")),
+        ("split", split, format!("{BOTH} {NEITHER} {SPLIT_FAILS}")),
+        (
+            "split-move",
+            split_move,
+            format!("{GONE} {BOTH} {NEITHER} {SPLIT_FAILS}"),
+        ),
+    ] {
+        let ran = r.run(&r.pr(name, &files), "", &fail);
+        assert_eq!(ran.code, 0, "{name}: {}", ran.out);
+        assert_eq!(ran.result(), "fail", "{name}: {}", ran.out);
+    }
+}
+
+/// Where a move breaks the checks' names, each check is judged with the
+/// file put back: a failing test there is caught, one that passes signs
+/// nothing, and one that isn't built here isn't built.
+#[test]
+fn a_move_that_breaks_the_names_is_judged_check_by_check() {
+    let r = repo();
+    edit(
+        &r,
+        "checks.${system} = {",
+        "checks.${system} = import ./tests/names.nix // {",
+    );
+    write(&r.origin.join("tests/names.nix"), "{ }\n");
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s
+        .git(&r.origin, &["commit", "-qm", "names a test gives"]);
+    let files = |text| {
+        [
+            ("lib.txt", Some("2\n")),
+            ("tests/names.nix", None),
+            ("tests/moved/names.nix", Some("{ }\n")),
+            ("tests/new.txt", Some(text)),
+        ]
+    };
+    let head = r.pr("names-moved-catch", &files("2\n"));
+    caught(&r.run(&head, "", NEW_FAILS));
+
+    let ran = r.run(&head, "t", NEW_FAILS);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(
+        !ran.builds().iter().any(|b| b.contains("-t.drv^*")),
+        "{}",
+        ran.out
+    );
+
+    let head = r.pr("names-moved", &files("1\n"));
+    let ran = r.run(&head, "", NEW_FAILS);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
 }

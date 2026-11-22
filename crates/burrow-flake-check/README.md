@@ -160,22 +160,36 @@ formats, compiles or evaluates, whatever its tests assert (#1418). A check
 that fails there, built or evaluated, is caught only where the new tests
 are what fail it (`src/removal.rs`):
 
-- With no test file deleted, or where the check passes on the base with
-  only those files taken away, the failure is the new tests', as judged
-  above. Not compiling for want of what the change adds is one.
-- Where taking them away breaks it by itself, it counts only if it fails,
-  judged the same way, with them put back beside the new tests.
+- With no test file deleted, or where the removal alone doesn't break the
+  check, the failure is the new tests', as judged above. Not compiling for
+  want of what the change adds is one. The removal alone is the base with
+  those files taken away and, where the PR replaced one, its old content in
+  what replaced it.
+- Where the removal breaks it by itself, it counts only if it fails, judged
+  the same way, with them put back beside the new tests.
 - Where it doesn't, the tree made the failure: it can't tell, so nothing is
-  signed unless another check catches the base.
+  signed unless another check catches the base. Where the removal breaks
+  the checks' names, each check is judged on the tree with them put back,
+  and only a catch is signed.
 
-A file the PR replaced isn't put back, as the two together would fail by
-themselves: one that became a directory, or a Rust module's or target's
-other spelling (`x.rs`, `x/mod.rs`, `x/main.rs`). These trees are only to
-judge by: the one signed is the negative tree. They're built only for a
-check that failed, until one is caught.
+A file the PR replaced is one that became a directory, or took a Rust
+module's or target's other spelling (`x.rs`, `x/mod.rs`, `x/main.rs`). Its
+paths don't say whether old code finds the replacement (`mod x;` does,
+`#[path]` doesn't) or whether the two clash (they do for `mod x;`), so a
+control does: the base with the files at the paths of the tree to judge by,
+and only old content in them. The replaced file stays away where that
+passes; else it goes back beside its replacement where that does (a
+directory's can't). Where neither does, a failure can't be told from the
+file's absence or the clash, so it can't tell.
 
-Two limits. A test changed in the file that moved isn't run by the old
-code, at either path, so it can't be the catch. And other copies that
+These trees are only to judge by: the one signed is the negative tree.
+They're built only for a check that failed, until one is caught, and never
+for one that isn't built here (build-skip).
+
+Three limits. A test changed in a file that moved out of the old code's
+reach isn't run by it, so it can't be the catch. A replaced file whose old
+content doesn't work from its new path (a relative `include_str!`, say)
+can't be shown to be found there, so it can't tell. And other copies that
 clash side by side (a Go test helper's in one package, two pytest modules
 of one name) aren't told apart from a failing test, where the removal
 breaks the check as well.
