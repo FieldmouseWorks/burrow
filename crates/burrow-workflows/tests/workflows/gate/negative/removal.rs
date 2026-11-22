@@ -456,5 +456,13 @@ fn a_file_in_a_directory_made_a_file_isnt_put_back() {
         &r.origin,
         &["commit", "-qm", "t reads the directory's file"],
     );
-    cant_tell(&r.run(&r.pr("file-read", &files), "", r#""x":"gone""#));
+    let ran = r.run(&r.pr("file-read", &files), "", r#""x":"gone""#);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(
+        ran.out
+            .contains("nor with it beside what replaced it: a failure there can be the tree's"),
+        "{}",
+        ran.out
+    );
 }
