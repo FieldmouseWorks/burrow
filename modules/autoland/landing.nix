@@ -40,11 +40,13 @@ let
   socket = "/run/conary-flow/conaryd.sock";
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-landing;
   # conaryd's events file for every repo it may have, each reading its own
-  # flow configuration (`flow_config`, keyed OWNER/NAME: its shadow's),
+  # flow configuration (`flow_config`, keyed OWNER/NAME: its shadow's, as
+  # the machine renders it live, autoland/shadow.nix),
   # held to Conary's own types as the machine's build loads it (`cn flow
   # settings --events-config`), as the flow configurations are.
   # burrow-landing narrows `repos` and `flow_config` to the ones it gives.
   flowConfigs = lib.genAttrs cfg.conaryd autoland.flow.config;
+  flowBases = lib.genAttrs cfg.conaryd autoland.flow.file;
   template = pkgs.runCommand "conaryd-events.json" {
     events = builtins.toJSON {
       listen = "127.0.0.1:${toString cfg.port}";
@@ -210,8 +212,8 @@ in
       } {
         # Conary's train steps only on its evidence, which a repo's
         # trainNegative renders.
-        assertion = !lib.any (f: f.trainWithoutEvidence) (lib.attrValues flowConfigs);
-        message = "burrow.landing.conaryd: ${lib.concatStringsSep ", " (lib.attrNames (lib.filterAttrs (_: f: f.trainWithoutEvidence) flowConfigs))} run a train with no trainNegative, so no evidence, and conaryd's train steps only on evidence.";
+        assertion = !lib.any (f: f.trainWithoutEvidence) (lib.attrValues flowBases);
+        message = "burrow.landing.conaryd: ${lib.concatStringsSep ", " (lib.attrNames (lib.filterAttrs (_: f: f.trainWithoutEvidence) flowBases))} run a train with no trainNegative, so no evidence, and conaryd's train steps only on evidence.";
       }];
 
       burrow.events.landing = {
@@ -240,8 +242,11 @@ in
           # And with the carry of the flow's state, after one a worker held
           # off (burrow.ledger.flow.needs).
           wantedBy = [ "multi-user.target" ] ++ ledger.flow.needs;
-          after = [ "network-online.target" ] ++ autoland.flow.needs;
-          wants = [ "network-online.target" ];
+          # After its configs' render, which it reads at each pass: wanted,
+          # not required, so a render a role refused leaves the last good
+          # configs read.
+          after = [ "network-online.target" ] ++ autoland.flow.needs ++ autoland.flow.render;
+          wants = [ "network-online.target" ] ++ autoland.flow.render;
           requires = autoland.flow.needs;
           unitConfig.ConditionPathExists = [ "${ledger.dir}/key.pub" events given ];
           environment = ledger.env // ledger.flow.env // {

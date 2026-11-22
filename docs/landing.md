@@ -43,7 +43,10 @@ repo now. Only burrow-landing writes it. Everything that could land reads it:
   go to conaryd's listener exactly as GitHub signed them.
 - conaryd reads its events file. It lists the repos the record gives
   conaryd whose automated work is allowed, and no others, each with its own
-  flow configuration (`flow_config`), the one its shadow reads. Its
+  flow configuration (`flow_config`), the one its shadow reads, as the
+  machine renders it with each role-run plugin's live choice
+  (`autoland-flow-configs`, autoland/shadow.nix), read again at each
+  pass. Its
   `evidence.fresh` is the machine's fresh runners
   (`burrow.dispatch.fresh`) for a repo in their `repos` or whose
   `trainFresh` setting is true (a private repo, on the runners dispatch

@@ -5,7 +5,7 @@ pub mod credit;
 pub mod door;
 pub mod landing;
 mod live;
-pub use live::{path_exists, receipt_key};
+pub use live::{path_exists, publish, receipt_key};
 pub mod roles;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};

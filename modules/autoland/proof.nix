@@ -179,8 +179,10 @@ in
     systemd.services.autoland-proof = {
       description = "Conary's proof producer: the flow's proofs, run and signed";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      # After the flow's configs are rendered, which it reads at each
+      # request (autoland/shadow.nix).
+      after = [ "network-online.target" ] ++ autoland.flow.render;
+      wants = [ "network-online.target" ] ++ autoland.flow.render;
       environment = lib.optionalAttrs (app != null) app.env;
       # With no controller, the assertion above says why, rather than
       # flow.producer's throw.

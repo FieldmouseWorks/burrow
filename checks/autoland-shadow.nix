@@ -31,9 +31,13 @@ let
   machine = base true;
   units = machine.systemd.services;
   shadow = units."autoland-shadow@";
-  configs = lib.removeSuffix "/%I.json" shadow.unitConfig.ConditionPathExists;
+  # The unit reads the live configs, which the machine renders from the
+  # base the build renders (autoland/shadow.nix): with no role-run plugin,
+  # the same.
+  live = lib.removeSuffix "/%I.json" shadow.unitConfig.ConditionPathExists;
+  configs = machine.burrow.autoland.flow.base;
   # The flow config of each machine's homelab and plain, as JSON.
-  read = m: let s = m.systemd.services."autoland-shadow@"; dir = lib.removeSuffix "/%I.json" s.unitConfig.ConditionPathExists;
+  read = m: let dir = m.burrow.autoland.flow.base;
     in { homelab = "${dir}/sam/homelab.json"; plain = "${dir}/sam/plain.json"; };
   withApp = read machine;
   noApp = read (base false);
@@ -74,7 +78,8 @@ let
     onSuccess = units."autoland@".unitConfig.OnSuccess == [ "autoland-shadow@%i.service" ];
     hourly = (units.autoland.unitConfig.OnSuccess or [ ]) == [ ];
     noPost = !(units."autoland@".serviceConfig ? ExecStartPost);
-    exec = shadow.serviceConfig.ExecStart == "${machine.burrow.ledger.package}/bin/cn flow compare %I --config ${configs}/%I.json";
+    exec = shadow.serviceConfig.ExecStart == "${machine.burrow.ledger.package}/bin/cn flow compare %I --config ${live}/%I.json"
+      && live == machine.burrow.autoland.flowConfigs;
     timeout = shadow.serviceConfig.TimeoutStartSec == "10min";
     user = shadow.serviceConfig.User == machine.burrow.user && !(shadow.environment ? CONARY_DATA);
     controlledHolds = lib.all (a: a.assertion) controlled.assertions;

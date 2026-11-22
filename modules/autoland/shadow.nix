@@ -11,7 +11,7 @@
 # Each repo's flow config is the steward's own settings for it, in the
 # flow's terms (Conary's flow::Config), at OWNER/NAME.json lowercased, as
 # burrow-events names a pass's instance. The seal keys stay out of it:
-# they're secrets, and a config is a store path. The judge's is named by
+# they're secrets, and a config is everyone's to read. The judge's is named by
 # its file instead (`judge_key_file`, which Conary reads at each load):
 # autoland-flow-keys's copy of its credential, which only the flow's
 # controller can read. renovate-sweep's (`major_key`) isn't given to the flow yet.
@@ -22,17 +22,40 @@
 # `plugins`, what it's asked to run with in `execution`, and, where the repo
 # has evidence, its producer in the producers file `evidence.producers`
 # names, trusted for its checks there alone (none, and it's left out). With
-# none enabled, none of the three is. A role's choice is the one the
-# settings source declares, since a build reads no live settings: a role
-# set live (`proj settings role` or `model`) to anything else has its jobs
-# refuse the flow's choice, rebuilt or not (burrow#1274).
-{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles }:
+# none enabled, none of the three is.
+#
+# A build renders each config's base, held to Conary's loader, with the
+# choices that are a plugin's own (the proof plugin's). A choice that's a
+# role's (fix, judge, job) is the settings' to make, live, and model ids
+# live only in the role overlay, so no build can render one: the machine
+# does. `autoland-flow-configs` writes each base with each role's choice
+# into the live directory every reader of the flow's configs reads (the
+# flow, its shadow and the plugins), at boot, at each switch and whenever
+# the role settings change (crates/burrow-flow-files, render.rs). conaryd
+# reads its config at each pass, so `proj settings role`, `model` or `proj
+# engines use` takes effect with no deploy (burrow#1393). A role whose
+# choice its jobs would refuse (no model, or one its engine doesn't offer)
+# fails the render, which then writes nothing.
+{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles, config }:
 let
+  inherit (config.burrow) stateDir;
+  settingsSource = config.burrow.settings;
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
   stewardLogin = "${cfg.app.slug}[bot]";
   # The plugins turned on, by the kind the flow knows each by.
   enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix job judge proof; };
+  # Those whose choice is a role's, rendered live, and those whose choice
+  # is their own, rendered by the build.
+  roleRun = lib.filterAttrs (_: p: p ? role) enabled;
+  ownChoice = lib.filterAttrs (_: p: !(p ? role)) enabled;
+  # Where the flow's configs are read, as the machine renders them:
+  # everyone's to read and, as with the store path each base is, none of
+  # its readers' to write. A producer takes a proof's recipe from here and
+  # signs it, so not the flow's controller's either, which asks for them:
+  # only the renderer's, a user that does nothing else.
+  live = "${stateDir}/flow-configs";
+  renderUnit = "autoland-flow-configs";
   # The flow's seal keys, in a directory of the flow's controller alone
   # for as long as a unit of its own is up: systemd reads each key file as
   # root and hands it to the unit as a credential, which the unit, as the
@@ -168,10 +191,10 @@ let
   # settings fail the machine's build, rather than every shadow once it's
   # live.
   #
-  # Each enabled plugin's choice (`execution`) is its own command's, run
-  # here: a role's is read from the settings source, as its jobs read it.
+  # The base: each plugin whose choice is its own has it in `execution`,
+  # its command's, run here. A role's is the machine's to render (above).
   flowFile = repo: let
-    kinds = lib.attrNames enabled;
+    kinds = lib.attrNames ownChoice;
     rendered = flowConfig repo;
   in pkgs.runCommand "autoland-shadow.json" {
     config = builtins.toJSON rendered;
@@ -186,7 +209,7 @@ let
     passthru.trainWithoutEvidence = rendered.settings.train && rendered.evidence == null;
   } ''
     ${lib.optionalString (kinds != [ ]) ''
-      ${lib.concatMapStrings (k: "${enabled.${k}.choice} > choice-${k}.json\n") kinds}
+      ${lib.concatMapStrings (k: "${ownChoice.${k}.choice} > choice-${k}.json\n") kinds}
       jq -cS ${lib.concatMapStrings (k: "--slurpfile ${k} choice-${k}.json ") kinds} \
         '. + {execution: {${lib.concatMapStringsSep ", " (k: "${k}: $" + k + "[0]") kinds}}}' "$configPath" > config.json
       configPath=config.json
@@ -194,16 +217,68 @@ let
     HOME=$TMPDIR ${ledger.package}/bin/cn flow settings --config "$configPath" >/dev/null
     cp "$configPath" "$out"
   '';
-  configs = pkgs.linkFarm "autoland-shadow" (map (repo: {
+  base = pkgs.linkFarm "autoland-shadow" (map (repo: {
     name = "${lib.toLower repo}.json";
     path = flowFile repo;
   }) cfg.shadow);
-  config = "${configs}/%I.json";
+  # What renders the live configs from the base (crates/burrow-flow-files,
+  # render.rs): the settings source, whose role overlay it reads, and each
+  # role-run plugin's role.
+  manifest = pkgs.writeText "autoland-flow-configs.json" (builtins.toJSON {
+    settings = settingsSource.file;
+    inherit base;
+    out = live;
+    roles = lib.mapAttrs (_: p: p.role) roleRun;
+  });
+  # The role settings, where `proj settings role`, `model`, `offer` and
+  # `proj engines use` write them (burrow-settings' roles_file).
+  rolesFile = "${lib.removeSuffix ".json" settingsSource.effective.overlay}.roles.json";
+  instanceConfig = "${live}/%I.json";
+  render = lib.optional (cfg.shadow != [ ]) "${renderUnit}.service";
 in
 {
-  inherit configs needs judgeKey;
-  # One repo's, by its name.
+  inherit needs judgeKey base live;
+  # One repo's base, by its name, as the build renders it.
   file = flowFile;
+  # One repo's live config, by its name: what the flow reads.
+  liveFile = repo: "${live}/${lib.toLower repo}.json";
+  # The unit that renders them, for their readers to come after: none with
+  # no shadowed repo, which has none to render.
+  inherit render;
+  # The renderer: at boot and at each switch as multi-user.target starts
+  # it (a switch starts the target again once systemd has reloaded, so on
+  # the new base: a path unit on /run/current-system would fire before that
+  # and run the old one), and at each change to the role settings, by its
+  # path unit. Not a timer: nothing else changes what it writes, and a
+  # change that comes as it runs is read again before it ends (render.rs).
+  renderer = let on = cfg.shadow != [ ]; in {
+    # The renderer's own user, and the directory only it writes.
+    users = lib.optionalAttrs on {
+      users.${renderUnit} = { isSystemUser = true; group = renderUnit; };
+      groups.${renderUnit} = { };
+    };
+    tmpfiles = lib.optionalAttrs on { ${live}.d = { mode = "0755"; user = renderUnit; group = renderUnit; }; };
+    services = lib.optionalAttrs on { ${renderUnit} = {
+      description = "autoland: render the flow's configs with each role's live choice";
+      wantedBy = [ "multi-user.target" ];
+      # No start limit: a few role changes in a row are a few starts, and
+      # one refused by the limit fails the path unit too, which then hears
+      # no change again. It writes nothing it's started by, so can't loop.
+      startLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        User = renderUnit;
+        NoNewPrivileges = true;
+        ExecStart = "${flowFiles}/bin/burrow-flow-files render ${manifest}";
+        UMask = "0022";
+        TimeoutStartSec = "1min";
+      };
+    }; };
+    paths = lib.optionalAttrs on { ${renderUnit} = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig.PathChanged = [ rolesFile ];
+    }; };
+  };
   # The unit holding the flow's seal keys, null with none.
   keys = if seals == { } then null else {
     name = keysUnit;
@@ -232,10 +307,12 @@ in
   service = {
     description = "autoland: Conary's flow beside the steward's pass of %I";
     restartIfChanged = false;
-    after = [ "network-online.target" ] ++ needs;
+    # After a render under way, and starting none: it runs after each
+    # pass, and a pass changes nothing the render reads.
+    after = [ "network-online.target" ] ++ needs ++ render;
     wants = [ "network-online.target" ];
     requires = needs;
-    unitConfig.ConditionPathExists = config;
+    unitConfig.ConditionPathExists = instanceConfig;
     environment = ledger.env // ledger.flow.env // {
       CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
     };
@@ -243,7 +320,7 @@ in
       Type = "oneshot";
       # The flow's controller where it has one (burrow.ledger.controllerUser).
       User = ledger.flow.user;
-      ExecStart = "${ledger.package}/bin/cn flow compare %I --config ${config}";
+      ExecStart = "${ledger.package}/bin/cn flow compare %I --config ${instanceConfig}";
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";
       Nice = 15;

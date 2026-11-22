@@ -19,14 +19,6 @@ let
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);
-  # The settings source as a build reads it: the schema's declared defaults
-  # and nothing live, its overlay a path no machine has and no old proj
-  # role files to move.
-  declared = pkgs.writeText "burrow-settings-declared.json" (builtins.toJSON (settings // {
-    overlay = "/var/empty/burrow-settings-declared/overlay.json";
-    legacyRoles = null;
-    legacyEnginesLock = null;
-  }));
   command = pkgs.writeShellScriptBin "settings" ''
     exec ${package}/bin/burrow-settings ${tracked} "$@"
   '';
@@ -45,9 +37,6 @@ in {
     };
     effective = lib.mkOption { type = lib.types.attrs; readOnly = true; internal = true; };
     file = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; };
-    # What a build can read of the role map: the declared defaults, never a
-    # live change (`proj settings role`), which a build doesn't see.
-    declared = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; };
     command = lib.mkOption { type = lib.types.str; readOnly = true; internal = true; };
     door = {
       enable = lib.mkEnableOption "independent settings issue door";
@@ -58,7 +47,7 @@ in {
     };
   };
   config = lib.mkMerge [ {
-    burrow.settings = { effective = settings; file = tracked; inherit declared; command = "${package}/bin/burrow-settings"; };
+    burrow.settings = { effective = settings; file = tracked; command = "${package}/bin/burrow-settings"; };
     environment.systemPackages = [ command ];
     systemd.tmpfiles.rules = [ "d ${stateDir}/settings 0755 ${user} - -" ];
   } (lib.mkIf cfg.door.enable {

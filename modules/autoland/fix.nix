@@ -22,7 +22,6 @@ let
   inherit (config.burrow.github) machineApp;
   flow = config.burrow.ledger.flow;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-fix;
-  flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   # Null with no controller, which the assertion below refuses.
   socket = if flow.producers == null then null else "${flow.producers}/fix/broker.sock";
 
@@ -91,19 +90,6 @@ in
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for fixes.";
     };
-
-    choice = lib.mkOption {
-      type = lib.types.str;
-      readOnly = true;
-      internal = true;
-      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${cfg.role}";
-      defaultText = lib.literalMD "the command that prints the fixing role's choice";
-      description = ''
-        The command that prints what the flow configuration's `execution`
-        asks fixes to run with: the fixing role's engine,
-        model and effort as the settings source declares them.
-      '';
-    };
   };
 
   options.burrow.autoland.plugins.job = {
@@ -133,19 +119,6 @@ in
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for the job kind.";
     };
-
-    choice = lib.mkOption {
-      type = lib.types.str;
-      readOnly = true;
-      internal = true;
-      default = "${flowFiles}/bin/burrow-flow-files choice ${config.burrow.settings.declared} ${job.role}";
-      defaultText = lib.literalMD "the command that prints the stuck role's choice";
-      description = ''
-        The command that prints what the flow configuration's `execution`
-        asks the job kind to run with: the stuck role's engine, model and
-        effort as the settings source declares them.
-      '';
-    };
   };
 
   config = lib.mkIf (autoland.enable && (cfg.enable || job.enable)) {
@@ -163,8 +136,10 @@ in
     systemd.services.burrow-fix = {
       description = "Conary's fix broker: the flow's fixes and stuck-role jobs, as proj jobs";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      # After the flow's configs are rendered, which it reads at each
+      # request (autoland/shadow.nix).
+      after = [ "network-online.target" ] ++ autoland.flow.render;
+      wants = [ "network-online.target" ] ++ autoland.flow.render;
       # With no controller, the assertion above says why, rather than
       # flow.producer's throw.
       serviceConfig = lib.optionalAttrs (flow.controller != null) (flow.producer "fix") // {

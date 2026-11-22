@@ -585,7 +585,9 @@ dependencies = [
  "burrow-settings",
  "conary-core",
  "conary-github",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

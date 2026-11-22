@@ -10,6 +10,13 @@
 # flow (the shadow's and conaryd's) require the keys' unit. With the judge
 # off there's no such unit (checks/autoland-flow-plugins.nix).
 #
+# The configs are the machine's live ones (burrow#1393): with the judging
+# role set to no model, as a build's choice would be, nothing is rendered;
+# setting one through the settings door renders them, by the path unit on
+# the role settings, with the judge's choice on that model, and a change to
+# it is rendered again with no deploy, however many come in a row. A
+# switch to another base renders that, on the same choice.
+#
 # The judge's producer and looks aren't started: only the flow's half is
 # tested here, and that the producer's config names the same key file
 # (tests/judge-look.nix and crates/burrow-judge, which checks the producer
@@ -72,19 +79,51 @@ pkgs.testers.runNixOSTest {
       systemd.services.autoland-judge.wantedBy = lib.mkForce [ ];
       users.users.dev.isNormalUser = true;
       environment.systemPackages = [ pkgs.jq ];
+      # No GitHub here: a pass would fail, and a switch with it.
+      burrow.events.enable = lib.mkForce false;
+      # Another base, to switch to: one setting of the steward's changed.
+      specialisation.rebased.configuration.burrow.autoland.labels.hold = "parked";
     };
   };
 
   testScript = { nodes, ... }: let
     config = "${nodes.machine.burrow.autoland.flowConfigs}/${repo}.json";
     keyFile = "/run/autoland-flow-keys/judge-seal";
+    role = nodes.machine.burrow.autoland.plugins.judge.role;
   in ''
     machine.wait_for_unit("multi-user.target")
 
+    with subtest("the configs are rendered on the judging role as it's set live"):
+        # At boot the judging role names no model, which its jobs would
+        # refuse: the render fails, and writes nothing.
+        machine.wait_until_succeeds("systemctl show -P Result autoland-flow-configs.service | grep -qv success", timeout=60)
+        machine.fail("test -e ${config}")
+        machine.succeed("runuser -u dev -- settings offer claude models stand-in-one stand-in-two")
+        machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-one high")
+        machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-one\", effort: \"high\"}' ${config}", timeout=60)
+        # Everyone reads it, as they read a store path, and none of those who
+        # read it, or have a producer work on it, writes it or could put
+        # another in its place: not burrow.user, the flow's controller (whose
+        # proofs' recipes it holds) or a producer.
+        for who in ["dev", "conary-flow", "autoland-judge"]:
+            machine.succeed(f"runuser -u {who} -- test -r ${config}")
+            for path in ["${config}", "$(dirname ${config})", "${nodes.machine.burrow.autoland.flowConfigs}", "${nodes.machine.burrow.stateDir}"]:
+                machine.fail(f"runuser -u {who} -- test -w {path}")
+        # A change to the role is read at the next render, with no deploy.
+        machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-two")
+        machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-two\", effort: null}' ${config}", timeout=60)
+
+    with subtest("many changes in a row leave it hearing the next"):
+        # More than systemd's default start limit (five in ten seconds).
+        for effort in ["low", "medium", "high"] * 4:
+            machine.succeed(f"runuser -u dev -- settings model ${role} claude stand-in-one {effort}")
+            machine.wait_until_succeeds(f"jq -e '.execution.judge.effort == \"{effort}\"' ${config}", timeout=30)
+        machine.succeed("systemctl is-active autoland-flow-configs.path")
+
     with subtest("the config names the key's file and holds no key"):
         machine.succeed("jq -e '.settings.judge_key_file == \"${keyFile}\" and (.settings | has(\"judge_key\") | not)' ${config}")
-        # conaryd's is the same file: its repo's entry links to it.
-        machine.succeed("jq -e --arg c \"$(readlink -f ${config})\" '.flow_config[\"${repo}\"] == $c' ${nodes.machine.burrow.landing.eventsTemplate}")
+        # conaryd's is the same file: its repo's entry names it.
+        machine.succeed("jq -e '.flow_config[\"${repo}\"] == \"${config}\"' ${nodes.machine.burrow.landing.eventsTemplate}")
         # And the judge's producer, holding the same sealFile as its own
         # credential, checks the flow names that file before it judges.
         machine.succeed("jq -e '.flow_key == \"${keyFile}\" and .seal == \"judge-seal\"' /etc/burrow/autoland-judge-plugin.json")
@@ -130,6 +169,11 @@ pkgs.testers.runNixOSTest {
         machine.fail("test -e ${keyFile}")
         machine.succeed("systemctl start autoland-flow-keys.service")
         machine.succeed("runuser -u conary-flow -- test -r ${keyFile}")
+
+    with subtest("a switch renders the new base on the live choice"):
+        machine.succeed("jq -e '.settings.hold_label != \"parked\"' ${config}")
+        machine.succeed("/run/current-system/specialisation/rebased/bin/switch-to-configuration test >&2")
+        machine.wait_until_succeeds("jq -e '.settings.hold_label == \"parked\" and .execution.judge.model == \"stand-in-one\"' ${config}", timeout=60)
 
     with subtest("no store path of the machine holds the key"):
         # Its whole closure: the rendered configs and units included.

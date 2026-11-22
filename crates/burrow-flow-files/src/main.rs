@@ -9,11 +9,10 @@
 //! holds its producers file to it: `cn flow settings` reads the flow
 //! config, not the producers file it names.
 //!
-//! `burrow-flow-files choice SETTINGS ROLE` prints, as JSON, what the
-//! flow's configuration asks a plugin on ROLE to run with (its
-//! `execution`): the role's engine, model and effort in the settings source
-//! SETTINGS (`burrow_settings::Config`), as the plugin's jobs are held to
-//! them (`burrow_producer::jobs::choice`).
+//! `burrow-flow-files render MANIFEST` writes each repo's flow config as
+//! the flow reads it on the machine: its base, as the build rendered it,
+//! with each role-run plugin's choice (`execution`) as the settings say now
+//! ([`render`]).
 //!
 //! `burrow-flow-files judge-key CONFIG SEAL` loads CONFIG as the flow does
 //! (`flow::Config::load`, which reads a key its `judge_key_file` names) and
@@ -25,6 +24,8 @@ use conary_github::events::Runtime;
 use conary_github::flow::{Config, SealKey};
 use std::path::Path;
 use std::process::ExitCode;
+
+mod render;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -40,7 +41,7 @@ fn main() -> ExitCode {
                 .map_err(|e| e.to_string())
         },
         Some("producers") => |p| Producers::load(p).map(drop),
-        Some("choice") => return choice(&files),
+        Some("render") => return render(&files),
         Some("judge-key") => return judge_key(&files),
         _ => return usage(),
     };
@@ -61,25 +62,24 @@ fn main() -> ExitCode {
     }
 }
 
-fn choice(args: &[String]) -> ExitCode {
-    let [settings, role] = args else {
+fn render(args: &[String]) -> ExitCode {
+    let [manifest] = args else {
         return usage();
     };
-    let chosen = std::fs::read(settings)
-        .map_err(|e| format!("{settings}: {e}"))
+    let read = std::fs::read(manifest)
+        .map_err(|e| format!("{manifest}: {e}"))
         .and_then(|bytes| {
-            serde_json::from_slice::<burrow_settings::Config>(&bytes)
-                .map_err(|e| format!("{settings}: {e}"))
+            serde_json::from_slice::<render::Manifest>(&bytes)
+                .map_err(|e| format!("{manifest}: {e}"))
         })
-        .and_then(|cfg| burrow_producer::jobs::choice(&cfg, role))
-        .and_then(|c| serde_json::to_string(&c).map_err(|e| e.to_string()));
-    match chosen {
-        Ok(json) => {
-            println!("{json}");
+        .and_then(|m| render::render(&m).map(|n| (n, m.out)));
+    match read {
+        Ok((n, out)) => {
+            println!("rendered {n} flow configs in {}", out.display());
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{role}: {e}");
+            eprintln!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -112,7 +112,7 @@ fn judge_key(args: &[String]) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files choice SETTINGS ROLE | burrow-flow-files judge-key CONFIG SEAL"
+        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files render MANIFEST | burrow-flow-files judge-key CONFIG SEAL"
     );
     ExitCode::from(2)
 }
