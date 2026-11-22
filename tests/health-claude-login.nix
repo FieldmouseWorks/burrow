@@ -45,7 +45,9 @@ let
         reply '{"rate_limits_available":false,"subscription_type":null,"rate_limits":null}' ;;
       revoked)
         logged "OAuth refresh failed (expected): Request failed with status code 400"
-        refused 401; reply '{"rate_limits_available":true,"rate_limits":null}' ;;
+        reply '{"rate_limits_available":true,"rate_limits":null}'
+        # 2.1.330 appends its log behind its answer.
+        sleep 0.2; refused 401 ;;
       refresh-down)
         logged '"AxiosError: [url=https://platform.claude.com/v1/oauth/token,status=503] AxiosError: Request failed with status code 503"'
         refused 401; reply '{"rate_limits_available":true,"rate_limits":null}' ;;
@@ -55,8 +57,8 @@ let
         reply '{"rate_limits_available":true,"rate_limits":null}' ;;
       offline)
         logged "OAuth refresh failed (expected): connect ECONNREFUSED 127.0.0.1:9"
-        logged "Failed to load usage data: connect ECONNREFUSED 127.0.0.1:9"
-        reply '{"rate_limits_available":true,"rate_limits":null}' ;;
+        reply '{"rate_limits_available":true,"rate_limits":null}'
+        sleep 0.2; logged "Failed to load usage data: connect ECONNREFUSED 127.0.0.1:9" ;;
       errored) echo '{"type":"control_response","response":{"subtype":"error","request_id":"usage","error":"get_usage is not supported in this context"}}' ;;
       silent) ;;
       broken) exit 1 ;;

@@ -305,6 +305,17 @@ fn a_rate_limit_isnt_a_failed_login() {
 }
 
 #[test]
+fn only_an_answer_not_from_the_endpoint_waits_for_the_log() {
+    // One from the endpoint is killed at once, before it writes its copy.
+    assert!(!unfetched(&fetched(10.0)));
+    assert!(!unfetched(&json!({"rate_limits_available": false})));
+    assert!(unfetched(&from_the_copy(10.0)));
+    assert!(unfetched(
+        &json!({"rate_limits_available": true, "rate_limits": null})
+    ));
+}
+
+#[test]
 fn only_a_failed_login_asks_for_a_new_one() {
     // As 2.1.330 logged and answered each against a stand-in endpoint.
     let none =

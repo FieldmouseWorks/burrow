@@ -74,6 +74,11 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(140);
 /// The least of LOGIN_BUDGET a live reading is asked with: a copy whose wait
 /// would leave less isn't waited out.
 const ASK_LEAST: Duration = Duration::from_secs(10);
+/// How long Claude Code is left up after an answer its endpoint didn't give,
+/// when its debug log is wanted: 2.1.330 appends that behind its answer, so
+/// killed on it, the line saying why is lost. An answer from the endpoint
+/// gets none, as Claude Code would then write its copy of it (read_fresh).
+const LOGGED: Duration = Duration::from_secs(1);
 
 /// Why check_login didn't show the login working.
 #[derive(Debug, PartialEq)]
@@ -336,6 +341,9 @@ fn ask_usage(
                 }
             })
         });
+        if log.is_some() && answer.as_ref().is_ok_and(|a| unfetched(&a["response"])) {
+            thread::sleep(LOGGED);
+        }
         let _ = child.kill();
         let _ = child.wait();
         let answer = answer?;
@@ -347,6 +355,11 @@ fn ask_usage(
         }
         Ok(answer["response"].clone())
     }
+}
+
+/// Whether a `get_usage` ANSWER has plan limits its endpoint didn't give.
+fn unfetched(answer: &Value) -> bool {
+    answer["rate_limits_available"] == true && !answer["rate_limits"]["limits"].is_array()
 }
 
 impl ClaudeCode {

@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Unshown::LoginFailed(why)) => {
             eprintln!(
-                "burrow-claude-login: Claude Code can't authenticate as {user}, its login expired, revoked or missing: {why}. Log in again on this machine as {user} (run claude, then /login)."
+                "burrow-claude-login: Claude Code can't authenticate as {user}: its login expired, was revoked or is missing ({why}). Log in again on this machine as {user} (run claude, then /login)."
             );
             ExitCode::FAILURE
         }
