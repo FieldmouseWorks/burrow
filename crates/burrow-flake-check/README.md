@@ -151,6 +151,29 @@ tests catching the base when the same check passes on the base and on the
 PR's head: a test that a wait ends waits forever on the code with that
 bug. Anything else about a timeout can't tell (#1212).
 
+## A failure the negative tree made
+
+The negative tree is the base's code with the head's version of each test
+file the PR changes, deletions included, so it can take away a file the old
+code names: a moved test module's, and then nothing that declares it
+formats, compiles or evaluates, whatever its tests assert (#1418). A check
+that fails there, built or evaluated, is caught only where the new tests
+are what fail it (`src/removal.rs`):
+
+- With no test file deleted, or where the check passes on the base with
+  only those files taken away, the failure is the new tests', as judged
+  above. Not compiling for want of what the change adds is one.
+- Where taking them away breaks it by itself, it counts only if it fails,
+  judged the same way, with them put back beside the new tests.
+- Where it doesn't, the tree made the failure: it can't tell, so nothing is
+  signed unless another check catches the base.
+
+A file the PR replaced isn't put back, as the two together would fail by
+themselves: one that became a directory, or a Rust module's or target's
+other spelling (`x.rs`, `x/mod.rs`, `x/main.rs`). These trees are only to
+judge by: the one signed is the negative tree. They're built only for a
+check that failed, until one is caught.
+
 ## A gate that breaks
 
 A gate that didn't pass is signed `fail` only when it said that a check, or

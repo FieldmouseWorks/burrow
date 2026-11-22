@@ -27,6 +27,9 @@ mod inputs;
 /// Which of burrow's own files it has to take as tests: each one only
 /// `cargo test` compiles.
 mod layout;
+/// A failure the negative tree made by taking a test file away, which
+/// isn't the new tests'.
+mod removal;
 /// Which new tests count as having passed on the old code: those a check
 /// that passed runs.
 mod runs;
@@ -436,6 +439,17 @@ fn a_pr_that_adds_no_test_to_code_needs_none() {
 #[test]
 fn a_deleted_test_is_gone_from_the_negative_tree() {
     let r = Repo::new();
+    // t reads the added test apart, so it's that failing here: failing for
+    // the deleted one alone is no catch (removal.rs).
+    let flake = read(&r.origin.join("flake.nix"));
+    let reads = flake.replace(
+        "inherit system want;",
+        r#"inherit system want; new = if builtins.pathExists ./tests/new.txt then builtins.readFile ./tests/new.txt else "none";"#,
+    );
+    assert_ne!(reads, flake);
+    write(&r.origin.join("flake.nix"), &reads);
+    r.g.s
+        .git(&r.origin, &["commit", "-qam", "t reads the added test"]);
     let head = r.pr(
         "swap",
         &[
@@ -444,7 +458,7 @@ fn a_deleted_test_is_gone_from_the_negative_tree() {
             ("tests/new.txt", Some("2\n")),
         ],
     );
-    let ran = r.run(&head, "", r#""want":"nothing""#);
+    let ran = r.run(&head, "", r#""new":"2\n""#);
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     let tree = ran.found.as_ref().unwrap()["tree"]
         .as_str()
