@@ -132,7 +132,7 @@ let
     rendered = let r = on.systemd; in
       r.paths.autoland-flow-configs.pathConfig.PathChanged == [ "/var/lib/burrow/settings/overlay.roles.json" ]
       && lib.elem "multi-user.target" r.services.autoland-flow-configs.wantedBy
-      && r.services.autoland-flow-configs.serviceConfig.User == "conary-flow"
+      && r.services.autoland-flow-configs.serviceConfig.User == "autoland-flow-configs"
       && lib.elem "autoland-flow-configs.service" r.services."autoland-shadow@".after
       && !(lib.elem "autoland-flow-configs.service" r.services."autoland-shadow@".wants)
       && lib.elem "autoland-flow-configs.service" r.services.burrow-fix.after

@@ -40,7 +40,6 @@
 let
   inherit (config.burrow) stateDir;
   settingsSource = config.burrow.settings;
-  flowGroup = config.users.users.${ledger.flow.user}.group;
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
   stewardLogin = "${cfg.app.slug}[bot]";
@@ -50,8 +49,11 @@ let
   # is their own, rendered by the build.
   roleRun = lib.filterAttrs (_: p: p ? role) enabled;
   ownChoice = lib.filterAttrs (_: p: !(p ? role)) enabled;
-  # Where the flow's configs are read, as the machine renders them: the
-  # flow's controller's to write, everyone's to read, as a store path was.
+  # Where the flow's configs are read, as the machine renders them:
+  # everyone's to read and, as with the store path each base is, none of
+  # its readers' to write. A producer takes a proof's recipe from here and
+  # signs it, so not the flow's controller's either, which asks for them:
+  # only the renderer's, a user that does nothing else.
   live = "${stateDir}/flow-configs";
   renderUnit = "autoland-flow-configs";
   # The flow's seal keys, in a directory of the flow's controller alone
@@ -250,8 +252,12 @@ in
   # path unit. Not a timer: nothing else changes what it writes, and a
   # change that comes as it runs is read again before it ends (render.rs).
   renderer = let on = cfg.shadow != [ ]; in {
-    # Their directory: the flow's controller's to write, everyone's to read.
-    tmpfiles = lib.optionalAttrs on { ${live}.d = { mode = "0755"; user = ledger.flow.user; group = flowGroup; }; };
+    # The renderer's own user, and the directory only it writes.
+    users = lib.optionalAttrs on {
+      users.${renderUnit} = { isSystemUser = true; group = renderUnit; };
+      groups.${renderUnit} = { };
+    };
+    tmpfiles = lib.optionalAttrs on { ${live}.d = { mode = "0755"; user = renderUnit; group = renderUnit; }; };
     services = lib.optionalAttrs on { ${renderUnit} = {
       description = "autoland: render the flow's configs with each role's live choice";
       wantedBy = [ "multi-user.target" ];
@@ -259,12 +265,10 @@ in
       # one refused by the limit fails the path unit too, which then hears
       # no change again. It writes nothing it's started by, so can't loop.
       startLimitIntervalSec = 0;
-      # One of the flow's own units (burrow.ledger keeps the controller to
-      # those): what it writes, every pass of the flow reads.
-      environment = ledger.flow.env;
       serviceConfig = {
         Type = "oneshot";
-        User = ledger.flow.user;
+        User = renderUnit;
+        NoNewPrivileges = true;
         ExecStart = "${flowFiles}/bin/burrow-flow-files render ${manifest}";
         UMask = "0022";
         TimeoutStartSec = "1min";

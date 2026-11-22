@@ -926,6 +926,7 @@ in
       // lib.optionalAttrs (shadow.keys != null) { ${shadow.keys.name} = shadow.keys.service; }
       // shadow.renderer.services;
     systemd.paths = shadow.renderer.paths;
+    users = shadow.renderer.users;
     # The steward's state, and its clones of the repos, which are its alone.
     # What the retired review service kept (its queue, answers, sessions and
     # snapshots) is removed.

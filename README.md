@@ -369,7 +369,7 @@ Each has an entry below, and each can be imported on its own.
   (autoland/shadow.nix): its executable, its choice (the proof plugin's
   its own, in the base the build renders; a role's as the role settings say
   now, rendered on the machine into `burrow.stateDir`/flow-configs by
-  `autoland-flow-configs` at boot, each switch and each change to the role
+  `autoland-flow-configs`, a user of its own that alone can write there, at boot, each switch and each change to the role
   settings, so `proj settings model` reaches conaryd's next pass with no
   deploy, and a role its jobs would refuse fails the render, which keeps
   the last good configs), and, where the repo has
