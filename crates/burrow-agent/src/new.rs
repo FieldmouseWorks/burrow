@@ -329,12 +329,14 @@ pub(crate) mod tests {
                 "claude": {
                     "runner": "/nix/store/x-runner",
                     "forward": "/nix/store/x-proxy-3128",
-                    "credentialFile": null
+                    "credentialFile": null,
+                    "capabilities": ["workspace", "mcp"]
                 },
                 "other": {
                     "runner": "/nix/store/x-other-runner",
                     "forward": "/nix/store/x-proxy-3130",
-                    "credentialFile": null
+                    "credentialFile": null,
+                    "capabilities": ["network"]
                 }
             },
             "defaultEngine": "claude",

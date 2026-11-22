@@ -391,7 +391,9 @@ checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 name = "burrow-agent"
 version = "0.0.0"
 dependencies = [
+ "burrow-grants",
  "burrow-test",
+ "conary-core",
  "jiff 1.0.1",
  "rustix",
  "serde",
@@ -601,6 +603,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-grants"
+version = "0.0.0"
+dependencies = [
+ "conary-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-guard"
 version = "0.0.0"
 dependencies = [
@@ -803,6 +814,7 @@ dependencies = [
  "boon",
  "burrow-events",
  "burrow-github",
+ "burrow-grants",
  "burrow-heavy",
  "burrow-notify",
  "burrow-probe",

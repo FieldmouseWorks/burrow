@@ -1,0 +1,18 @@
+[package]
+name = "burrow-grants"
+description = "The job capabilities and an engine plugin's grant of them: what it declares and the owner approved"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Conary owns what a plugin's describe declares. Pinned by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "585c52f964ba543ec13cfbd647aaf4fef721ce4d" }
+serde.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

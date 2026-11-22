@@ -48,6 +48,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
+use burrow_grants::Grants;
+use conary_core::plugin;
 use serde::Deserialize;
 
 /// A day, the unit of a sandbox's time to live.
@@ -96,6 +98,16 @@ pub struct Engine {
     pub forward: PathBuf,
     /// Its login for the sandboxes, when the machine gives them one.
     pub credential_file: Option<PathBuf>,
+    /// What the owner approved its plugin's runs may be granted.
+    pub capabilities: Vec<String>,
+}
+
+impl Engine {
+    /// What a plugin run as this engine is granted: what it declares, of
+    /// what the owner approved for this engine.
+    pub fn grants(&self, kinds: &[plugin::Kind], offered: &plugin::Capabilities) -> Grants {
+        Grants::new(kinds, offered, &self.capabilities)
+    }
 }
 
 impl Config {
@@ -312,4 +324,31 @@ pub fn stamp() -> String {
     jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use burrow_grants::Capability;
+    use conary_core::plugin;
+
+    #[test]
+    fn a_plugin_is_granted_from_its_own_engines_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::new::tests::config(dir.path());
+        let offered = plugin::Capabilities {
+            sandbox: plugin::Sandbox::Needs,
+            network: true,
+            devices: vec![],
+            mcp: true,
+        };
+        let granted = |engine: &str| {
+            let engine = cfg.engine(engine).unwrap();
+            engine
+                .grants(&[plugin::Kind::Job], &offered)
+                .items()
+                .to_vec()
+        };
+        assert_eq!(granted("claude"), [Capability::Workspace, Capability::Mcp]);
+        assert_eq!(granted("other"), [Capability::Network]);
+    }
 }
