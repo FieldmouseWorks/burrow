@@ -129,7 +129,8 @@ Each has an entry below, and each can be imported on its own.
   hour's, not a retry. It deploys main
   too, so a merged PR goes live the same way. It never tests or switches to a
   main that has moved on: it looks again before each VM test (and in its
-  heavy slot) and before the switch, and starts over from the new head. The `proj-config` health check
+  heavy slot) and before the switch, and starts over from the new head. Waiting
+  for a slot doesn't count against its time limit. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
   and the role settings every turn reads before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. A check that
@@ -601,7 +602,8 @@ Each has an entry below, and each can be imported on its own.
   builds, so a gate keeps its share whatever else runs. `heavy -- COMMAND`
   runs a heavy job (a gate, a VM test, a replay, a large build) in one of
   `heavy.slots` machine-wide slots, for every repo and account alike, waiting
-  while all are busy, and tells it its share of the threads in `HEAVY_JOBS`
+  in line while all are busy (the longest waiter gets the next one freed,
+  after HOST-update's VM tests, which ask with `--first`), and tells it its share of the threads in `HEAVY_JOBS`
   (and `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`); `heavy --all -- COMMAND`
   takes every slot instead, for a run that must have the machine to itself
   (a long gate with a deadline, a nightly); `heavy status` says which are

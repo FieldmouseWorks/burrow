@@ -88,7 +88,7 @@ impl Machine {
         let config = serde_json::json!({
             "update": "box-update", "host": "box", "state": m.path("state"), "work": m.path("scratch/work"),
             "user": "sam", "home": m.path("home"), "uid": 1000, "runuser": b.join("runuser"), "path": "/b",
-            "configuration": "box", "system": "x86_64-linux", "heavy": null,
+            "configuration": "box", "system": "x86_64-linux", "heavy": null, "workLimit": 14400,
             "program": BIN, "project": "homelab", "app": null, "train": null,
             "origin": "https://github.com/sam/homelab", "flake": m.path("operator"),
             "group": "users", "owner": "Sam", "manifest": null,
@@ -310,9 +310,13 @@ fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
             .output()
             .unwrap()
     };
-    // Still main: the command runs, as itself (and its exit is its own).
+    // Still main: the command runs, as itself (and its exit is its own),
+    // once it has said it's in its slot, and all it says goes to the log.
     let out = word(&[&main, "--", "sh", "-c", "echo tested; exit 3"]);
-    assert_eq!(said(&out), (Some(3), "tested\n".into(), String::new()));
+    assert_eq!(
+        said(&out),
+        (Some(3), "in a slot\n".into(), "tested\n".into())
+    );
 
     // main moved: nothing runs, and the clone has heard where it went.
     let now = lands(&other, "two");
@@ -321,7 +325,7 @@ fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
         said(&out),
         (
             Some(1),
-            String::new(),
+            "in a slot\n".into(),
             format!("main moved to {now}: not testing a tree on {main}\n")
         )
     );

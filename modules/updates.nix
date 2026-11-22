@@ -78,6 +78,10 @@ let
   # The longest a Renovate run goes on (seconds): renovate-sweep waits that
   # long after taking a refresh request back before a job may push.
   renovateRunFor = 2 * 3600;
+  # How long a run of HOST-update has to work in (seconds). systemd ends
+  # one past it; what one waits for heavy slots it hands back
+  # (crates/burrow-update's limit.rs).
+  updateWorkFor = 4 * 3600;
 
   vars = {
     HOST = config.networking.hostName;
@@ -130,7 +134,9 @@ let
     path = lib.makeBinPath [ pkgs.coreutils config.programs.git.package config.nix.package machineGh tools.proj ]
       + ":/run/current-system/sw/bin";
     configuration = config.burrow.switch.configName;
-    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    workLimit = updateWorkFor;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has
+    # them, ahead of other work.
     heavy = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else null;
     # Itself, unwrapped: what a VM test runs in its slot to look at main
     # once more before it starts.
@@ -754,7 +760,9 @@ in
           # kept as the unit's success: burrow-events would retry a failed
           # unit on the same trees, and burrow-units hand it to a second job.
           SuccessExitStatus = "3";
-          TimeoutStartSec = "4h";
+          TimeoutStartSec = updateWorkFor;
+          # Only the run itself may hand back a wait.
+          NotifyAccess = "main";
           Nice = 10;
         };
       };

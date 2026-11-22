@@ -9,9 +9,12 @@
 //!
 //! Inside the slot it's `unless-moved`, a word of burrow-update's own that
 //! heavy runs as the user: the run, as root, isn't in there. A look that
-//! can't reach origin goes on: it's no sign that main moved.
+//! can't reach origin goes on: it's no sign that main moved. It says it's
+//! in the slot first (`IN_SLOT`), which ends the run's wait (limit.rs).
 
 use std::ffi::OsString;
+use std::io::Write as _;
+use std::os::fd::AsFd as _;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -21,6 +24,9 @@ use crate::run::{End, Run, Step};
 /// The word heavy runs a VM test through: `burrow-update unless-moved WORK
 /// MAIN -- COMMAND...`.
 pub const UNLESS_MOVED: &str = "unless-moved";
+
+/// All `unless-moved` says on stdout, as it starts: that it has its slot.
+pub(crate) const IN_SLOT: &str = "in a slot";
 
 impl Run<'_> {
     /// That origin's main is still the one this run took: it fetches it,
@@ -39,10 +45,14 @@ impl Run<'_> {
     }
 }
 
-/// `unless-moved`: COMMAND, unless origin's main has moved past `main`
-/// (`moved`); then it says so and exits 1. Its exit, when COMMAND can't
-/// start.
+/// `unless-moved`: says it's in its slot, then runs COMMAND, all it says
+/// going to stderr (the test's log), unless origin's main has moved past
+/// `main` (`moved`); then it says so and exits 1. Its exit, when COMMAND
+/// can't start.
 pub fn unless_moved(work: &Path, main: &str, command: &[OsString]) -> u8 {
+    if let Err(e) = writeln!(std::io::stdout(), "{IN_SLOT}") {
+        eprintln!("couldn't say it's in its slot: {e}");
+    }
     if let Some(now) = moved(work, main) {
         eprintln!("main moved to {now}: not testing a tree on {main}");
         return 1;
@@ -50,7 +60,14 @@ pub fn unless_moved(work: &Path, main: &str, command: &[OsString]) -> u8 {
     let Some((program, args)) = command.split_first() else {
         return 2;
     };
-    let e = Command::new(program).args(args).exec();
+    let log = match std::io::stderr().as_fd().try_clone_to_owned() {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("stderr: {e}");
+            return 127;
+        }
+    };
+    let e = Command::new(program).args(args).stdout(log).exec();
     eprintln!("{}: {e}", program.to_string_lossy());
     127
 }

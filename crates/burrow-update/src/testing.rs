@@ -50,8 +50,8 @@ pub const BRANCH: &str = "box-update";
 ///   WORK/flake.lock's (a lock as `lock` writes one), and `flake update
 ///   INPUT` locks INPUT to HOME/upstream-INPUT's commit, when there is one,
 ///   or fails, with HOME/unfetchable-INPUT there.
-/// - heavy takes a slot (HOME/nix.log says so), runs HOME/in-slot once
-///   when it's there (what happens while it waits: main moving, say), and
+/// - heavy, which is asked for a slot `--first`, takes one (HOME/nix.log
+///   says so), runs HOME/in-slot once when it's there (what happens while it waits: main moving, say), and
 ///   runs what follows `--`.
 /// - burrow-update stands in for the program itself (CARGO_BIN_EXE_ isn't
 ///   a unit test's), doing as `unless-moved` does with plain git.
@@ -170,8 +170,8 @@ echo "$sys"
             (
                 "heavy",
                 r#"#!/bin/sh
-[ "$1" = -- ] || exit 9
-shift
+[ "$1" = --first ] && [ "$2" = -- ] || exit 9
+shift 2
 echo "slot taken" >>"$HOME/nix.log"
 if [ -e "$HOME/in-slot" ]; then sh "$HOME/in-slot"; rm "$HOME/in-slot"; fi
 exec "$@"
@@ -183,10 +183,11 @@ exec "$@"
 [ "$1" = unless-moved ] && [ "$4" = -- ] || exit 9
 work=$2 main=$3
 shift 4
+echo "in a slot"
 if git -C "$work" fetch -q origin main && now=$(git -C "$work" rev-parse refs/remotes/origin/main); then
   [ "$now" = "$main" ] || { echo "main moved to $now" >&2; exit 1; }
 fi
-exec "$@"
+exec "$@" >&2
 "#,
             ),
             (
@@ -420,6 +421,8 @@ impl Machine {
             configuration: "box".into(),
             system: "x86_64-linux".into(),
             heavy: None,
+            work_limit: 4 * 3600,
+            notify: None,
             program: bin().join("burrow-update"),
             project: "homelab".into(),
             app: None,

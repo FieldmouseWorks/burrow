@@ -79,7 +79,7 @@ fn main() -> ExitCode {
         eprintln!("usage: burrow-update CONFIG [--force | status]");
         return ExitCode::from(2);
     };
-    let cfg = match Config::read(Path::new(config)) {
+    let mut cfg = match Config::read(Path::new(config)) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("burrow-update: {e}");
@@ -108,6 +108,7 @@ fn main() -> ExitCode {
         eprintln!("{}: {}: {e}", cfg.update, cfg.tools.sudo.display());
         return ExitCode::FAILURE;
     }
+    cfg.notify = env::var_os("NOTIFY_SOCKET");
     match word {
         Word::Status => {
             let mut out = std::io::stdout().lock();

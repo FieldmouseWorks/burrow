@@ -1,4 +1,5 @@
-# heavy's slots: one holder at a time per slot, its share of the
+# heavy's slots: one holder at a time per slot, given in the order its
+# waiters came, --first's ahead; its share of the
 # threads (all of them with --all), nested calls let through, the exit status and stdin passed
 # on, a cancelled workload stopped before its slot goes, a bounded
 # wait refused on time; and the example's gate slice weighted.
@@ -115,5 +116,23 @@ $threads" ] || { echo "--all: not every slot and $threads threads"; exit 1; }
   $h -- touch ran 2>err
   [ -e ran ] || { echo "an unbounded wait didn't get the slot"; exit 1; }
   wait
+
+  # A slot freed is the waiter's, not a newcomer's, and a --first one's
+  # before that: in the sandbox, as wrapped, on a directory only read.
+  rm -f held done order
+  chmod 0555 /build/heavy
+  $h -- sh -c 'touch held; while [ ! -e done ]; do sleep 0.1; done' & hp=$!
+  ready $hp test -e held
+  $h -- sh -c 'echo waiter >>order' 2>waits & wp=$!
+  ready $wp grep -q waiting waits
+  $h --first -- sh -c 'echo first >>order' 2>firsts & fp=$!
+  ready $fp grep -q waiting firsts
+  touch done; wait $hp
+  rc=0; $h --wait 0 -- sh -c 'echo newcomer >>order' 2>err || rc=$?
+  [ "$rc" = 75 ] || { echo "a newcomer got ahead of who waits ($rc)"; exit 1; }
+  wait $fp; wait $wp
+  [ "$(cat order)" = "first
+waiter" ] || { echo "out of order: $(cat order)"; exit 1; }
+  chmod 0755 /build/heavy
   touch $out
 ''

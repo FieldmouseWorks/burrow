@@ -168,7 +168,7 @@ impl Run<'_> {
     /// before it started or as it ran, is no failure: the run starts over.
     fn test(&self, c: &str, commit: &str, log: &Path) -> Result<bool, End> {
         self.still_main()?;
-        let passed = run_check(self.cfg, c, commit, &self.main, log);
+        let passed = run_check(self.cfg, self.limit, c, commit, &self.main, log);
         if !passed {
             self.still_main()?;
         }

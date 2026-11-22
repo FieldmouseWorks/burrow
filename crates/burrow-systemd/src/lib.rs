@@ -1,5 +1,21 @@
-//! Shared inspection of work inside systemd units.
+//! What units share: telling systemd about their own, and inspection of
+//! the work inside them.
+use std::ffi::OsStr;
+use std::os::linux::net::SocketAddrExt as _;
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::{fs, path::Path};
+
+/// Tells systemd `state` (sd_notify(3)) at `socket`, the NOTIFY_SOCKET it
+/// gave the unit: a path, or an abstract name after an @.
+pub fn notify(socket: &OsStr, state: &str) -> std::io::Result<()> {
+    let address = match socket.as_bytes().strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(socket)?,
+    };
+    UnixDatagram::unbound()?.send_to_addr(state.as_bytes(), &address)?;
+    Ok(())
+}
 
 /// Whether a Runner.Worker process is anywhere in this cgroup: an error
 /// when the cgroup, or the name of a process in it, can't be read. A
@@ -43,6 +59,26 @@ fn working_in(cg: &Path, proc: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_and_an_abstract_name_both_hear_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify");
+        let name = path.as_os_str().as_bytes();
+        let by_name = [&b"@"[..], name].concat();
+        for (socket, at) in [
+            (UnixDatagram::bind(&path).unwrap(), path.as_os_str()),
+            (
+                UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name).unwrap()).unwrap(),
+                OsStr::from_bytes(&by_name),
+            ),
+        ] {
+            notify(at, "READY=1").unwrap();
+            let mut heard = [0; 16];
+            let n = socket.recv(&mut heard).unwrap();
+            assert_eq!(&heard[..n], b"READY=1");
+        }
+    }
     #[test]
     fn a_listener_is_idle_but_a_worker_in_a_child_cgroup_is_busy() {
         let dir = tempfile::tempdir().unwrap();
