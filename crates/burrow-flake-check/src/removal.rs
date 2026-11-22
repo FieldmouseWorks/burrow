@@ -44,10 +44,14 @@ impl Change {
             && (self.within(gone)
                 || matches!((module(&self.path), module(gone)), (Some(a), Some(b)) if a == b))
     }
-    /// Whether this added file made a deleted one a directory, so that no
-    /// tree holds both.
+    /// Whether this added file made a deleted one a directory.
     fn within(&self, gone: &str) -> bool {
         self.status == "A" && Path::new(&self.path).starts_with(gone)
+    }
+    /// Whether no tree holds both this added file and a deleted one: one's
+    /// path is the other's directory, either way round.
+    fn clashes(&self, gone: &str) -> bool {
+        self.within(gone) || (self.status == "A" && Path::new(gone).starts_with(&self.path))
     }
     /// A deleted file's old content, where the file that took its place is.
     fn standing_in(&self, gone: &Change) -> Change {
@@ -63,9 +67,11 @@ impl Change {
 enum Away {
     /// All, as the negative tree does.
     Deleted,
-    /// Those the PR replaced.
+    /// Those the PR replaced, and those no tree holds beside what it added.
     Replaced,
-    /// Those that became directories: the fewest a tree can.
+    /// Those no tree holds beside what the PR added: a file that became a
+    /// directory, or one in a directory that became a file. The fewest a
+    /// tree can.
     Directories,
 }
 impl Away {
@@ -92,23 +98,26 @@ pub(super) fn tree_with<'a>(
     changes: impl IntoIterator<Item = &'a Change>,
 ) -> Result<String> {
     checked(index_git(index, &["read-tree", fork]))?;
-    for c in changes {
-        if c.deletes() {
-            checked(index_git(
-                index,
-                &["update-index", "--force-remove", "--", &c.path],
-            ))?;
-        } else {
-            checked(index_git(
-                index,
-                &[
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    &format!("{},{},{}", c.mode, c.id, c.path),
-                ],
-            ))?;
-        }
+    // The removals first: a deleted file can be in the way of a directory
+    // or file of its name the PR adds (#1426).
+    let (gone, added): (Vec<&Change>, Vec<&Change>) =
+        changes.into_iter().partition(|c| c.deletes());
+    for c in gone {
+        checked(index_git(
+            index,
+            &["update-index", "--force-remove", "--", &c.path],
+        ))?;
+    }
+    for c in added {
+        checked(index_git(
+            index,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("{},{},{}", c.mode, c.id, c.path),
+            ],
+        ))?;
     }
     string(index_git(index, &["write-tree"]))
 }
@@ -124,8 +133,11 @@ impl Negative {
     fn away(&self, away: Away) -> Vec<Change> {
         let left = |gone: &Change| match away {
             Away::Deleted => true,
-            Away::Replaced => self.changes.iter().any(|a| a.replaces(&gone.path)),
-            Away::Directories => self.changes.iter().any(|a| a.within(&gone.path)),
+            Away::Replaced => self
+                .changes
+                .iter()
+                .any(|a| a.replaces(&gone.path) || a.clashes(&gone.path)),
+            Away::Directories => self.changes.iter().any(|a| a.clashes(&gone.path)),
         };
         self.changes
             .iter()
@@ -138,7 +150,6 @@ impl Negative {
     /// failure with the new tests there more than a file's absence, or two
     /// copies' clash.
     fn stands(&self, t: Option<&Target>, away: Away) -> Result<bool> {
-        // The removals first: a file can be in its directory's way.
         let mut changes = self.away(away);
         for gone in self.changes.iter().filter(|c| c.deletes()) {
             let placed = self.changes.iter().filter(|a| a.replaces(&gone.path));

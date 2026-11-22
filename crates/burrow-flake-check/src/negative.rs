@@ -724,23 +724,26 @@ fn coverage(
         for (j, f) in added.iter().enumerate() {
             let index = work.join(format!("one/{j}.index"));
             checked(index_git(&index, &["read-tree", tree]))?;
-            let at = string(git(&[
+            // What the fork had at f: a file, nothing, or a directory the
+            // PR made a file of (#1426), put back file by file.
+            let was = nul(&checked(git(&[
                 "--literal-pathspecs",
                 "ls-tree",
-                "--format=%(objectmode),%(objectname)",
+                "-r",
+                "-z",
+                "--format=%(objectmode),%(objectname),%(path)",
                 fork,
                 "--",
                 f,
-            ]))?;
-            if at.is_empty() {
+            ]))?)?;
+            checked(index_git(
+                &index,
+                &["update-index", "--force-remove", "--", f],
+            ))?;
+            for at in &was {
                 checked(index_git(
                     &index,
-                    &["update-index", "--force-remove", "--", f],
-                ))?;
-            } else {
-                checked(index_git(
-                    &index,
-                    &["update-index", "--cacheinfo", &format!("{at},{f}")],
+                    &["update-index", "--add", "--cacheinfo", at],
                 ))?;
             }
             let one = string(index_git(&index, &["write-tree"]))?;
