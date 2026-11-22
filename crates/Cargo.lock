@@ -545,6 +545,7 @@ dependencies = [
 name = "burrow-example-plugin"
 version = "0.0.0"
 dependencies = [
+ "burrow-grants",
  "conary-core",
  "serde",
  "serde_json",

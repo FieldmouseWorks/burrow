@@ -1,14 +1,20 @@
 //! A test fixture: an engine plugin for the sandbox's checks
-//! (tests/agents-plugins.nix). It runs no model.
+//! (tests/agents-plugins.nix, lib/engine-conformance.nix). It runs no model.
 //!
-//! It declares the whole job contract. Conary's conformance job gets its
-//! offline answer. Any other job's prompt is a [`Look`]: it tries every
-//! capability by the way a grant renders it, whatever it was told it holds,
-//! and reports what worked ([`Report`]), so a check sees what is withheld
-//! as well as what is granted. It uses the root it has in its VM to try.
+//! It declares the whole job contract ([`DECLARES`] narrows it). Conary's
+//! conformance job gets its offline answer. Any other job's prompt is a
+//! [`Look`]: it tries every capability by the way a grant renders it,
+//! whatever it was told it holds, and reports what worked ([`Report`]), so a
+//! check sees what is withheld as well as what is granted. It uses the root
+//! it has in its VM to try. Put around another plugin ([`AROUND`]), it tries
+//! them under that plugin's describe, and [`holds`] says whether what worked
+//! is what that plugin declares.
 
+pub mod around;
 mod escape;
 mod uses;
+
+use burrow_grants::Capability;
 
 use conary_core::plugin::{
     Answer, CONTRACTS, Capabilities, Executed, Identity, Kind, Next, Request, Response, Sandbox,
@@ -20,6 +26,13 @@ use std::path::PathBuf;
 
 /// The variable that has the fixture declare a sandbox of its own.
 pub const BRINGS: &str = "EXAMPLE_PLUGIN_BRINGS_SANDBOX";
+
+/// The variable that has it declare, of `network`, `mcp` and `kvm`, only
+/// those it names (space-separated), rather than all three.
+pub const DECLARES: &str = "EXAMPLE_PLUGIN_DECLARES";
+
+/// The variable that puts it around the plugin at that path ([`around`]).
+pub const AROUND: &str = "EXAMPLE_PLUGIN_AROUND";
 
 /// What a job asks it to try.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -77,6 +90,12 @@ fn describe() -> Answer {
     } else {
         Sandbox::Needs
     };
+    let declares = std::env::var(DECLARES).ok();
+    let declares = |field: &str| {
+        declares
+            .as_deref()
+            .is_none_or(|names| names.split_whitespace().any(|n| n == field))
+    };
     Answer::Describe {
         versions: CONTRACTS.map(str::to_owned).to_vec(),
         kinds: vec![],
@@ -85,9 +104,13 @@ fn describe() -> Answer {
         models: vec![],
         capabilities: Some(Capabilities {
             sandbox,
-            network: true,
-            devices: vec!["kvm".to_owned()],
-            mcp: true,
+            network: declares("network"),
+            devices: if declares("kvm") {
+                vec!["kvm".to_owned()]
+            } else {
+                vec![]
+            },
+            mcp: declares("mcp"),
         }),
         meters: vec![],
     }
@@ -97,17 +120,8 @@ fn describe() -> Answer {
 pub fn answer(request: &Request) -> Result<Response, String> {
     let answer = match &request.task {
         Task::Describe => describe(),
-        Task::Job {
-            repo,
-            workdir,
-            prompt,
-            ..
-        } => {
-            let conformance = fixtures().into_iter().any(|f| {
-                matches!(f.task, Task::Job { repo: r, workdir: w, prompt: p, .. }
-                    if r == *repo && w == *workdir && p == *prompt)
-            });
-            let summary = if conformance {
+        Task::Job { prompt, .. } => {
+            let summary = if conformance(&request.task) {
                 "the fixture's job is finished".to_owned()
             } else {
                 let look: Look = serde_json::from_str(prompt)
@@ -134,6 +148,74 @@ pub fn answer(request: &Request) -> Result<Response, String> {
         }),
         answer,
     })
+}
+
+/// Whether `task` is one of Conary's conformance jobs, rather than a look.
+pub fn conformance(task: &Task) -> bool {
+    let Task::Job {
+        repo,
+        workdir,
+        prompt,
+        ..
+    } = task
+    else {
+        return false;
+    };
+    fixtures().into_iter().any(|f| {
+        matches!(f.task, Task::Job { repo: r, workdir: w, prompt: p, .. }
+            if r == *repo && w == *workdir && p == *prompt)
+    })
+}
+
+/// The environment variables that would carry a GitHub login, which no
+/// plugin is granted.
+const LOGINS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN_SOCKET"];
+
+/// What's wrong, by `report`, with a plugin that declares `declared`: each
+/// capability it declares, it requires, so that has to work under its
+/// grant, and the plugin told of it; none it doesn't declare may work or be
+/// told of, whatever the owner approved; and no GitHub login is there. Empty
+/// when it holds.
+pub fn holds(declared: &[Capability], report: &Report) -> Vec<String> {
+    let mut wrong = Vec::new();
+    let is_declared = |name: &str| declared.iter().any(|c| c.name() == name);
+    let said = |name: &str| report.said.get(name).map_or("", String::as_str).trim();
+    for name in declared.iter().map(|c| c.name()) {
+        match report.works.get(name) {
+            None => wrong.push(format!(
+                "{name}: declared, and the fixture has no way to try it"
+            )),
+            Some(false) => wrong.push(format!(
+                "{name}: declared, so required, and unavailable under its grant: {}",
+                said(name)
+            )),
+            Some(true) => {}
+        }
+        if !report.told.iter().any(|t| t == name) {
+            wrong.push(format!(
+                "{name}: declared, and the plugin wasn't told it holds it"
+            ));
+        }
+    }
+    for (name, _) in report.works.iter().filter(|(_, works)| **works) {
+        if !is_declared(name) {
+            wrong.push(format!(
+                "{name}: not declared, and available: {}",
+                said(name)
+            ));
+        }
+    }
+    for name in report.told.iter().filter(|t| !is_declared(t)) {
+        wrong.push(format!(
+            "{name}: not declared, and the plugin was told it holds it"
+        ));
+    }
+    for login in LOGINS.iter().filter(|l| report.env.iter().any(|e| e == *l)) {
+        wrong.push(format!(
+            "github: never granted, and {login} is in its environment"
+        ));
+    }
+    wrong
 }
 
 fn report(look: &Look) -> Report {
@@ -191,5 +273,63 @@ mod tests {
         assert_eq!(v2_kinds, [Kind::Job]);
         assert!(declared.network && declared.mcp);
         assert_eq!(declared.devices, ["kvm"]);
+    }
+
+    fn reported(works: &[(&str, bool)], told: &[&str]) -> Report {
+        Report {
+            works: works.iter().map(|&(n, w)| (n.to_owned(), w)).collect(),
+            said: works
+                .iter()
+                .map(|&(n, _)| (n.to_owned(), format!("{n} said")))
+                .collect(),
+            told: told.iter().map(|&t| t.to_owned()).collect(),
+            ..Report::default()
+        }
+    }
+
+    #[test]
+    fn it_holds_when_what_works_is_what_is_declared() {
+        let declared = [Capability::Workspace, Capability::Network];
+        let report = reported(
+            &[("workspace", true), ("network", true), ("kvm", false)],
+            &["workspace", "network"],
+        );
+        assert_eq!(holds(&declared, &report), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_required_capability_that_does_not_work_fails_it_by_name() {
+        let declared = [Capability::Workspace, Capability::Network];
+        let report = reported(&[("workspace", true), ("network", false)], &["workspace"]);
+        assert_eq!(
+            holds(&declared, &report),
+            [
+                "network: declared, so required, and unavailable under its grant: network said",
+                "network: declared, and the plugin wasn't told it holds it",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undeclared_capability_that_works_fails_it() {
+        let mut report = reported(&[("workspace", true), ("kvm", true)], &["workspace", "kvm"]);
+        report.env = vec!["GH_TOKEN".to_owned()];
+        assert_eq!(
+            holds(&[Capability::Workspace], &report),
+            [
+                "kvm: not declared, and available: kvm said",
+                "kvm: not declared, and the plugin was told it holds it",
+                "github: never granted, and GH_TOKEN is in its environment",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_declared_capability_the_fixture_cannot_try_fails_it() {
+        let report = reported(&[], &["environment"]);
+        assert_eq!(
+            holds(&[Capability::Environment], &report),
+            ["environment: declared, and the fixture has no way to try it"]
+        );
     }
 }

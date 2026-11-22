@@ -25,34 +25,12 @@ let
     system = "${pkgs.ripgrep}/bin/rg";
     toolchains = "${pkgs.rustup}/bin/rustup";
   };
-  grantable = [
-    "workspace" "job-state" "git-metadata" "toolchains" "system" "probe"
-    "units-clear" "heavy" "nix" "kvm" "mcp" "network"
-  ];
-  # What no owner's list can grant.
-  withheld = [ "github" "environment" "github-token" "github-installation" "settings-write" "plugin-install" ];
+  inherit (import ./agents/capabilities.nix) grantable withheld;
 in
 pkgs.testers.runNixOSTest {
   name = "agents-plugins";
 
-  nodes.host = { pkgs, ... }: let
-    inherit (import ./proj/stand-ins.nix { inherit pkgs; }) gh;
-    # A job's engine here only makes the test's calls, with the job's
-    # sockets and a login environment that holds a token.
-    caller = pkgs.writeShellScriptBin "claude" ''
-      [ "''${1:-}" = --version ] && { echo "caller fixture"; exit 0; }
-      cat >/dev/null
-      echo '{"type":"system","subtype":"init","session_id":"caller"}'
-      export GH_TOKEN=caller-gh-token
-      sh /tmp/calls >/tmp/calls.log 2>&1
-      echo $? >/tmp/calls.exit
-      proj done >/dev/null
-      echo '{"type":"result","session_id":"caller","result":"called","is_error":false}'
-    '';
-    notes = pkgs.writeShellScript "notes-mcp" ''
-      read -r line
-      echo "$(id -un) $SETTING ''${GH_TOKEN-no-token} $line"
-    '';
+  nodes.host = { pkgs, config, ... }: let
     engine = name: port: capabilities: {
       inherit plugin capabilities;
       credentialFile = "/run/keys/${name}-token";
@@ -61,28 +39,12 @@ pkgs.testers.runNixOSTest {
       proxyPort = port;
     };
   in {
-    imports = [ self.nixosModules.default ./agents/host.nix ];
+    imports = [ (import ./agents/plugin-host.nix { inherit self; }) ];
     burrow = {
-      claude.enable = true;
-      claude.package = caller;
-      proj.enable = true;
-      proj.gh = gh;
-      probe.repo = "o/machine";
-      cpu.enable = true;
-      cpu.heavy.slots = 1;
-      watchdog.units.enable = true;
-      mcpServers.notes = {
-        command = "${notes}";
-        env.SETTING = "registry-setting";
-        envVars = [ "GH_TOKEN" ];
-      };
       mcpServers.signed-in = {
-        command = "${notes}";
+        inherit (config.burrow.mcpServers.notes) command;
         actsAsOwner = true;
       };
-      agents.enable = true;
-      agents.memory = 1536;
-      agents.vcpus = 2;
       agents.engines.full = engine "full" 3131 (grantable ++ withheld) // {
         mcpServers = [ "notes" "signed-in" ];
       };
@@ -91,21 +53,17 @@ pkgs.testers.runNixOSTest {
       agents.engines.brings = engine "brings" 3134 grantable // { plugin = brings; };
     };
 
-    programs.git.enable = true;
-    environment.systemPackages = [ example pkgs.socat ];
     environment.etc."host-only".source = hostOnly;
     networking.hosts."127.0.0.1" = [ "full.example" "bare.example" "forbidden.example" ];
-    boot.kernelModules = [ "vhost_vsock" ];
 
-    # What's there to be reached: an engine's host, and the host itself
-    # beside the proxy.
+    # What's there to be reached beside the proxy and an engine's host
+    # (./agents/plugin-host.nix): the host itself.
     systemd.services = pkgs.lib.mapAttrs (_: listen: {
       wantedBy = [ "multi-user.target" ];
       path = [ pkgs.socat pkgs.coreutils pkgs.bash ];
       serviceConfig.Restart = "on-failure";
       script = "exec socat ${listen}";
     }) {
-      reach-tcp = "TCP4-LISTEN:443,fork,reuseaddr SYSTEM:'echo engine-reached'";
       reach-udp = "UDP4-RECVFROM:5353,fork EXEC:cat";
       reach-vsock = "VSOCK-LISTEN:9999,fork SYSTEM:'echo host-vsock'";
     };
