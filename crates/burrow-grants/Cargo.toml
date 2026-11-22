@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 # Conary owns what a plugin's describe declares. Pinned by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "585c52f964ba543ec13cfbd647aaf4fef721ce4d" }
+conary-core.workspace = true
 serde.workspace = true
 
 [lints]
