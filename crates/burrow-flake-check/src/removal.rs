@@ -174,7 +174,7 @@ impl Negative {
 }
 fn tree_made(what: &str) -> bool {
     println!(
-        "{what} fails with test files the old code names taken away, and not with them put back: the tree made that failure, not the new tests, so it can't tell. A new test the old code runs has to fail without the change."
+        "{what} fails with test files the old code names taken away, and not with them put back: the tree made that failure, not the new tests, so it can't tell. A new test has to fail where the old code runs it: one in a file that moved isn't run there, so leave that file where it was, or fail one in a file that stayed."
     );
     false
 }

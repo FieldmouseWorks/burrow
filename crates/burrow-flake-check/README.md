@@ -174,6 +174,12 @@ other spelling (`x.rs`, `x/mod.rs`, `x/main.rs`). These trees are only to
 judge by: the one signed is the negative tree. They're built only for a
 check that failed, until one is caught.
 
+Two limits. A test changed in the file that moved isn't run by the old
+code, at either path, so it can't be the catch. And other copies that
+clash side by side (a Go test helper's in one package, two pytest modules
+of one name) aren't told apart from a failing test, where the removal
+breaks the check as well.
+
 ## A gate that breaks
 
 A gate that didn't pass is signed `fail` only when it said that a check, or

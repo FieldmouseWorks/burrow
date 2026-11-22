@@ -74,12 +74,17 @@ fn caught(ran: &Ran) {
 }
 
 /// The moved test passes on old code and new alike: t fails only for the
-/// file taken away, so nothing is signed.
+/// file taken away, so nothing is signed. The same for a test changed as
+/// it moved: the old code never runs it, so it can't be seen to fail there.
 #[test]
 fn a_moved_test_the_old_code_names_is_no_catch() {
     let r = repo();
-    let ran = r.run(&r.pr("moved", &moved()), "", GONE);
-    cant_tell(&ran);
+    for (name, text) in [("moved", "1\n"), ("moved-changed", "2\n")] {
+        let mut files = moved();
+        files.pop();
+        files.push(("tests/moved/want.txt", Some(text)));
+        cant_tell(&r.run(&r.pr(name, &files), "", GONE));
+    }
 }
 
 /// The same where t never ends without the file, and passes on the head,
