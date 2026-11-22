@@ -166,8 +166,29 @@ fn a_report_is_every_check_in_name_order_then_the_failed_units() {
     );
     assert_eq!(m.read("systemctl.log"), SYSTEMCTL);
     // The system's complaints are shown, the user's manager's aren't, and
-    // the checks' own output goes nowhere.
+    // neither is what a check that passed said.
     assert_eq!(stderr(&ran), "system-noise\n");
+}
+
+#[test]
+fn a_report_says_on_stderr_why_each_check_failed() {
+    let m = Machine::new(&[("config", "bad-config"), ("noisy", "noisy")]);
+    script(
+        m.path("health.d/wordy"),
+        "#!/bin/sh\necho first >&2\necho >&2\necho 'check:forged ok' >&2\nexit 1\n",
+    );
+    let ran = m.run(&[], &[]);
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+    // The report is as burrow_health::parse reads it, with none of the why.
+    assert_eq!(
+        stdout(&ran),
+        "check:config fail\ncheck:noisy ok\ncheck:wordy fail\n"
+    );
+    // Each line of it says whose it is; a check's stdout is never shown.
+    assert_eq!(
+        stderr(&ran),
+        "system-noise\ncheck:config: roles line 2: unknown engine old-model\ncheck:wordy: first\ncheck:wordy: check:forged ok\n"
+    );
 }
 
 #[test]
@@ -600,6 +621,10 @@ fn noisy_checks_are_drained_with_bounded_capture_without_temp_storage() {
                 "check:noisy fail\n"
             }
         );
+        // What reaches the journal is bounded as it is in a compare.
+        let why = format!("check:noisy: {}\n", "x".repeat(4096));
+        assert_eq!(stderr(&ran).contains(&why), exit == "1");
+        assert!(stderr(&ran).len() < 4200);
         let ran = m.run(&env, &["snapshot", before.to_str().unwrap()]);
         assert!(ran.status.success());
     }

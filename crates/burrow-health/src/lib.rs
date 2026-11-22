@@ -1,6 +1,7 @@
 //! HOST-health: is the machine at least as healthy as it was a moment ago?
 //!
-//!   HOST-health                         run the checks now and print them
+//!   HOST-health                         run the checks now and print them,
+//!                                       and on stderr why each one failed
 //!   HOST-health snapshot FILE           record which checks pass, and which
 //!                                       units have failed
 //!   HOST-health compare FILE [SECONDS]  after a change: wait up to SECONDS

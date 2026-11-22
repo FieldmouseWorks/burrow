@@ -281,13 +281,20 @@ fn a_rate_limit_isnt_a_failed_login() {
         Ok(())
     );
     // A refusal of the login, or nothing in the log to say why: its error.
+    let why = failed().unwrap_err();
+    let refused = Err(Unshown::Unknown(format!(
+        "{why} (its usage endpoint: Request failed with status code 401)"
+    )));
     assert_eq!(
         login_shown(failed(), &from_the_copy(10.0), &refused_with(401)),
-        failed()
+        refused
     );
-    assert_eq!(login_shown(failed(), &from_the_copy(10.0), ""), failed());
+    assert_eq!(
+        login_shown(failed(), &from_the_copy(10.0), ""),
+        Err(Unshown::Unknown(why.clone()))
+    );
     let both = refused_with(429) + &refused_with(401);
-    assert_eq!(login_shown(failed(), &from_the_copy(10.0), &both), failed());
+    assert_eq!(login_shown(failed(), &from_the_copy(10.0), &both), refused);
     // No plan limits, or no answer at all, fails whatever the log says.
     let none =
         json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
@@ -295,6 +302,72 @@ fn a_rate_limit_isnt_a_failed_login() {
     assert!(login_shown(Err("x".into()), &Value::Null, &refused_with(429)).is_err());
     // A reading is the proof.
     assert_eq!(login_shown(Ok(()), &fetched(10.0), ""), Ok(()));
+}
+
+#[test]
+fn only_an_answer_not_from_the_endpoint_waits_for_the_log() {
+    // One from the endpoint is killed at once, before it writes its copy.
+    assert!(!unfetched(&fetched(10.0)));
+    assert!(!unfetched(&json!({"rate_limits_available": false})));
+    assert!(unfetched(&from_the_copy(10.0)));
+    assert!(unfetched(
+        &json!({"rate_limits_available": true, "rate_limits": null})
+    ));
+}
+
+#[test]
+fn only_a_failed_login_asks_for_a_new_one() {
+    // As 2.1.330 logged and answered each against a stand-in endpoint.
+    let none =
+        json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
+    let unread = json!({"rate_limits_available": true, "rate_limits": null});
+    let shown = |answer: &Value, log: &str| login_shown(Err("x".into()), answer, log);
+    let login = |answer: &Value, log: &str| {
+        let shown = shown(answer, log);
+        assert!(matches!(shown, Err(Unshown::LoginFailed(_))), "{shown:?}");
+    };
+    let refresh = |how: &str| format!("2026 [ERROR] OAuth refresh failed (expected): {how}\n");
+    let refresh_refused = refresh("Request failed with status code 400");
+    // Logged out, or cleared when its refresh was refused.
+    login(&none, "");
+    login(&none, &refresh_refused);
+    // Revoked: the endpoint refused it, then the token endpoint its refresh.
+    for status in [401, 403] {
+        login(&unread, &(refresh_refused.clone() + &refused_with(status)));
+    }
+
+    let unknown = |answer: &Value, log: &str, says: &str| match shown(answer, log) {
+        Err(Unshown::Unknown(why)) => assert!(why.contains(says), "{why}"),
+        other => panic!("{other:?}"),
+    };
+    // Refused with no refresh refused: it didn't get through, or wasn't tried.
+    for how in [
+        "connect ECONNREFUSED 127.0.0.1:9",
+        "Request failed with status code 503",
+    ] {
+        unknown(
+            &unread,
+            &(refresh(how) + &refused_with(401)),
+            "status code 401",
+        );
+    }
+    unknown(&unread, &refused_with(403), "status code 403");
+    // Another session's refresh won the race, and then the retry failed.
+    let retried = refresh_refused.clone()
+        + &refused_with(401)
+        + "2026 [ERROR] Failed to load usage data: timeout of 5000ms exceeded\n";
+    unknown(&unread, &retried, "timeout of 5000ms exceeded");
+    // A 5xx: the status, without the body beside it.
+    let down = "2026 [ERROR] \"AxiosError: [url=/api/oauth/usage,status=500,body=private] x\"\n";
+    assert_eq!(
+        shown(&unread, down),
+        Err(Unshown::Unknown(
+            "x (its usage endpoint: Request failed with status code 500)".into()
+        ))
+    );
+    // No answer: whatever the log holds, it isn't this asking's.
+    let log = refresh_refused + &refused_with(401);
+    assert_eq!(shown(&Value::Null, &log), Err(Unshown::Unknown("x".into())));
 }
 
 /// `read_fresh` where the copy's time reads from COPIES in turn, the clock
@@ -354,7 +427,7 @@ fn login_through(
     first: Option<f64>,
     rewrites: &[f64],
     answer: Value,
-) -> (Result<(), String>, Vec<f64>) {
+) -> (Result<(), Unshown>, Vec<f64>) {
     login_logged(first, rewrites, answer, "")
 }
 
@@ -364,7 +437,7 @@ fn login_logged(
     rewrites: &[f64],
     answer: Value,
     log: &str,
-) -> (Result<(), String>, Vec<f64>) {
+) -> (Result<(), Unshown>, Vec<f64>) {
     const ASKING: f64 = 2.0;
     let t = std::cell::Cell::new(0.0);
     let copy = || {
@@ -433,7 +506,7 @@ fn another_sessions_copy_is_waited_out_in_turn() {
     let none =
         json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
     let (e, asked) = login_through(None, &[1.0], none);
-    assert!(e.unwrap_err().contains("logged in"));
+    assert!(matches!(e, Err(Unshown::LoginFailed(e)) if e.contains("logged in")));
     assert_eq!(asked, [0.0, 62.0]);
     // A rate-limited endpoint answering from a copy that changed while it
     // was asked shows the login working, as on its own (login_shown): not
@@ -454,12 +527,14 @@ fn another_sessions_copy_is_waited_out_in_turn() {
     // checked, and it says so rather than call it failed.
     let often: Vec<f64> = (0..10).map(|n| 20.0 + 30.0 * f64::from(n)).collect();
     let (e, asked) = login_through(Some(NOW - 30.0), &often, fetched(5.0));
-    let e = e.unwrap_err();
+    let Err(Unshown::Unknown(e)) = e else {
+        panic!("{e:?}")
+    };
     assert!(e.contains("login wasn't checked"), "{e}");
     assert_eq!(asked, [] as [f64; 0]);
     // A copy dated ahead of the clock isn't waited out: the reading refuses it.
     let (e, asked) = login_through(Some(NOW + 5.0), &[], fetched(5.0));
-    assert!(e.unwrap_err().contains("snapshot"));
+    assert!(matches!(e, Err(Unshown::Unknown(e)) if e.contains("snapshot")));
     assert_eq!(asked, [0.0]);
 }
 

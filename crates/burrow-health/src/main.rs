@@ -1,6 +1,10 @@
 //! burrow-health CONFIG [snapshot FILE | compare FILE [SECONDS]]: HOST-health,
 //! with modules/updates.nix's config (lib.rs says what each does).
 //!
+//! A report run now has why each check failed on stderr (the heartbeat's
+//! journal), a line each after the check's key; its stdout is the report
+//! alone, as `parse` reads it.
+//!
 //! A compare's stdout is its verdict, `healthy` (then what it didn't count,
 //! a line each) or what regressed, which HOST-update puts in what it says; a
 //! snapshot it can't read is said there too, and fails it.
@@ -60,7 +64,15 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     match ask {
-        Ask::Now => print(&cfg, &render(&report(&cfg)), ExitCode::SUCCESS),
+        Ask::Now => {
+            let (report, details) = report_details(&cfg);
+            for (key, text) in details {
+                for line in text.lines().filter(|line| !line.is_empty()) {
+                    say(&format!("{key}: {line}"));
+                }
+            }
+            print(&cfg, &render(&report), ExitCode::SUCCESS)
+        }
         Ask::Snapshot(file) => match fs::write(&file, render(&report(&cfg))) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
