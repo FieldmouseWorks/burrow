@@ -14,6 +14,7 @@ mod fence;
 mod recovery;
 
 #[cfg(test)]
+#[path = "migrate/regressions_tests.rs"]
 mod regressions;
 
 fn text(path: &Path) -> Result<Option<String>, String> {

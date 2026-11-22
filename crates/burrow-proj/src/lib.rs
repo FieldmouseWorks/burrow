@@ -350,6 +350,7 @@ mod tests {
 #[cfg(test)]
 mod policy_scale_tests;
 #[cfg(test)]
+#[path = "regression_569_tests.rs"]
 mod regression_569;
 
 pub mod policy;

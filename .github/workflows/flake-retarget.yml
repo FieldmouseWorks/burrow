@@ -8,7 +8,7 @@
 # workflow's concurrency group takes the two as one workflow, as autoland does by
 # these files' names), and its
 # calls match flake.yml's, each only on a new base
-# (crates/burrow-workflows/src/lane.rs).
+# (crates/burrow-workflows/tests/workflows/lane.rs).
 name: flake
 on:
   pull_request:

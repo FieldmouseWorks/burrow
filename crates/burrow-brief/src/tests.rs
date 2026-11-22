@@ -96,7 +96,6 @@ fn code(dir: &Path, out: &mut Vec<PathBuf>) {
             .any(|ext| name.ends_with(&format!(".{ext}")))
             && !name.ends_with("_tests.rs")
             && name != "tests.rs"
-            && name != "testing.rs"
         {
             out.push(path);
         }

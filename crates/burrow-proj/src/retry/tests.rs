@@ -8,16 +8,16 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 #[allow(dead_code)]
-#[path = "fixtures/pick.rs"]
+#[path = "tests/fixtures/pick.rs"]
 mod legacy_pick;
 #[allow(dead_code)]
-#[path = "fixtures/slot.rs"]
+#[path = "tests/fixtures/slot.rs"]
 mod legacy_slot;
 #[allow(dead_code)]
-#[path = "fixtures/nonblocking/pick.rs"]
+#[path = "tests/fixtures/nonblocking/pick.rs"]
 mod nonblocking_pick;
 #[allow(dead_code)]
-#[path = "fixtures/nonblocking/slot.rs"]
+#[path = "tests/fixtures/nonblocking/slot.rs"]
 mod nonblocking_slot;
 
 const MODE: &str = "BURROW_RETRY_TEST_MODE";

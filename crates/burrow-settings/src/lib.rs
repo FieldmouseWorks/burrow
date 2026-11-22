@@ -692,4 +692,5 @@ pub mod schema;
 pub mod show;
 
 #[cfg(test)]
+#[path = "admission_receipts_tests.rs"]
 mod admission_receipts;
