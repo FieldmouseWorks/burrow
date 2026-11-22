@@ -103,7 +103,13 @@ fn never_granted_whatever_is_declared_or_approved() {
         assert!(matches!(why(&grants, "environment"), Some(Why::Never(_))));
         for (name, reason) in refused {
             assert!(!grants.items().iter().any(|c| c.name() == name), "{name}");
-            assert_eq!(why(&grants, name), Some(Why::Never(reason)), "{name}");
+            // Named as what asked for it: a capability, the owner's list or a device.
+            let named = if name == "github" || approved.iter().any(|a| a == name) {
+                name.to_owned()
+            } else {
+                format!("device:{name}")
+            };
+            assert_eq!(why(&grants, &named), Some(Why::Never(reason)), "{name}");
         }
     }
     // Everything else the two sides agree on is still granted.
@@ -129,7 +135,30 @@ fn a_device_name_declares_no_other_capability() {
     );
     assert_eq!(grants.items(), []);
     assert_eq!(why(&grants, "network"), Some(Why::NotDeclared));
-    assert_eq!(why(&grants, "gpu"), Some(Why::UnknownDevice));
+    assert_eq!(why(&grants, "device:gpu"), Some(Why::UnknownDevice));
+}
+
+#[test]
+fn a_refused_device_reads_as_no_granted_capability() {
+    let names = ["workspace", "heavy", "mcp", "network"];
+    let grants = granted(
+        &[Kind::Job],
+        &offered(true, true, &names),
+        &approved(&names),
+    );
+    assert_eq!(grants.items(), [C::Workspace, C::Heavy, C::Mcp, C::Network]);
+    for name in names {
+        assert_eq!(why(&grants, name), None, "{name} is granted");
+        let device = format!("device:{name}");
+        assert_eq!(why(&grants, &device), Some(Why::UnknownDevice), "{name}");
+    }
+}
+
+#[test]
+fn a_refused_capability_hides_no_refused_device() {
+    let grants = granted(&[Kind::Job], &offered(false, false, &["heavy"]), &[]);
+    assert_eq!(why(&grants, "heavy"), Some(Why::NotApproved));
+    assert_eq!(why(&grants, "device:heavy"), Some(Why::UnknownDevice));
 }
 
 #[test]
@@ -141,7 +170,7 @@ fn a_refusal_names_the_capability_and_why() {
     );
     let said: Vec<String> = grants.refusals().iter().map(|r| r.to_string()).collect();
     for expected in [
-        format!("\"settings-write\" refused: {NO_SETTINGS}"),
+        format!("\"device:settings-write\" refused: {NO_SETTINGS}"),
         format!("\"kvm\" refused: {}", Why::NotDeclared),
         format!("\"heavvy\" refused: {}", Why::UnknownName),
         format!("\"nix\" refused: {}", Why::NotApproved),

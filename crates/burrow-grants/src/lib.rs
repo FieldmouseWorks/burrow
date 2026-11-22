@@ -12,7 +12,10 @@
 
 use conary_core::plugin::{self, Kind};
 use serde::{Serialize, Serializer};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 pub mod mcp;
 #[cfg(test)]
@@ -162,6 +165,8 @@ impl fmt::Display for Why {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
+    /// The capability's name, `mcp:NAME` for a server or `device:NAME` for a
+    /// device that is no capability.
     pub capability: String,
     pub why: Why,
 }
@@ -235,19 +240,22 @@ impl Grants {
                 refused.insert(name, withheld(name).unwrap_or(Why::UnknownName));
             }
         }
-        for device in &offered.devices {
+        let (servers, mut refusals) = approved
+            .registry
+            .select(items.contains(&Capability::Mcp), approved.mcp_servers);
+        // A device's name is whatever the plugin wrote, a granted capability's
+        // or server's too, so its refusal says it is the device's.
+        for device in offered.devices.iter().collect::<BTreeSet<_>>() {
             let known = Capability::ALL
                 .iter()
                 .any(|c| matches!(c.declaration(), Declaration::Device(d) if d == device));
             if !known {
-                refused
-                    .entry(device)
-                    .or_insert_with(|| withheld(device).unwrap_or(Why::UnknownDevice));
+                refusals.push(Refusal {
+                    capability: format!("device:{device}"),
+                    why: withheld(device).unwrap_or(Why::UnknownDevice),
+                });
             }
         }
-        let (servers, mut refusals) = approved
-            .registry
-            .select(items.contains(&Capability::Mcp), approved.mcp_servers);
         refusals.extend(refused.into_iter().map(|(name, why)| Refusal {
             capability: name.to_owned(),
             why,
@@ -273,8 +281,8 @@ impl Grants {
         &self.servers
     }
 
-    /// What was declared or approved and isn't granted, by name (a server's
-    /// is `mcp:NAME`), each with why.
+    /// What was declared or approved and isn't granted, named as
+    /// [`Refusal::capability`] says, each with why.
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }
