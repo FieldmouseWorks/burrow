@@ -57,6 +57,8 @@ esac
             b.join("polite"),
             "#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30 &\necho $! >>\"$PIDS\"\nwait\n",
         );
+        // Done in two seconds.
+        script(b.join("patient"), "#!/bin/sh\nsleep 2\n");
         script(
             b.join("stubborn"),
             "#!/bin/sh\ntrap '' TERM\nsleep 30 &\necho $! >>\"$PIDS\"\nwait\nwait\n",
@@ -248,6 +250,17 @@ fn a_check_that_runs_out_of_time_fails_and_leaves_nothing_behind() {
     );
     let pid = m.read("pids");
     assert!(gone(pid.trim()), "the check's own child is still running");
+
+    // One given longer than the rest has it, and only that one.
+    let m = Machine::new(&[("patient", "patient"), ("waits", "patient")]);
+    let mut config: serde_json::Value = serde_json::from_str(&m.read("config.json")).unwrap();
+    config["checkTimeouts"] = serde_json::json!({"patient": 5});
+    fs::write(m.path("config.json"), config.to_string()).unwrap();
+    let ran = m.run(&[], &[]);
+    assert_eq!(
+        (ran.status.code(), stdout(&ran)),
+        (Some(0), "check:patient ok\ncheck:waits fail\n".to_owned())
+    );
 }
 
 #[test]

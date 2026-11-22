@@ -314,7 +314,7 @@ fn asked_through(copies: Vec<Result<Option<f64>, String>>, start: f64) -> Result
             Ok(fetched(95.0))
         },
     );
-    out.inspect(|_| assert!(asked))
+    out.inspect(|_| assert!(asked)).map_err(Unread::said)
 }
 
 #[test]
@@ -344,6 +344,123 @@ fn freshness_holds_across_the_asking() {
     let unknown = || Err("unreadable".to_owned());
     assert!(asked_through(vec![unknown()], NOW).is_err());
     assert!(asked_through(vec![Ok(old), unknown()], NOW).is_err());
+}
+
+/// `login_within` on a clock from NOW that only waiting and asking move: the
+/// copy is FIRST until another session writes one at each of REWRITES
+/// (seconds in), and each asking takes ASKING seconds and gets ANSWER, with
+/// no debug log. What it says, and the seconds in at which it asked.
+fn login_through(
+    first: Option<f64>,
+    rewrites: &[f64],
+    answer: Value,
+) -> (Result<(), String>, Vec<f64>) {
+    login_logged(first, rewrites, answer, "")
+}
+
+/// login_through, each asking leaving LOG as Claude Code's debug log.
+fn login_logged(
+    first: Option<f64>,
+    rewrites: &[f64],
+    answer: Value,
+    log: &str,
+) -> (Result<(), String>, Vec<f64>) {
+    const ASKING: f64 = 2.0;
+    let t = std::cell::Cell::new(0.0);
+    let copy = || {
+        rewrites
+            .iter()
+            .rev()
+            .find(|&&at| at <= t.get())
+            .map(|at| NOW + at)
+            .or(first)
+    };
+    let mut asked = Vec::new();
+    let out = login_within(
+        LOGIN_BUDGET,
+        &mut || Ok(copy()),
+        &mut || NOW + t.get(),
+        &mut || Duration::from_secs_f64(t.get()),
+        &mut |wait| t.set(t.get() + wait.as_secs_f64()),
+        &mut |left| {
+            assert!(left >= ASK_LEAST, "{left:?}");
+            asked.push(t.get());
+            t.set(t.get() + ASKING);
+            Ok(answer.clone())
+        },
+        &mut || log.to_owned(),
+    );
+    assert!(t.get() <= LOGIN_BUDGET.as_secs_f64(), "{}", t.get());
+    (out, asked)
+}
+
+#[test]
+fn another_sessions_copy_is_waited_out_in_turn() {
+    // No copy, or one too old to answer: asked at once.
+    assert_eq!(login_through(None, &[], fetched(5.0)), (Ok(()), vec![0.0]));
+    assert_eq!(
+        login_through(Some(NOW - 90.0), &[], fetched(5.0)),
+        (Ok(()), vec![0.0])
+    );
+    // A copy 30s old: waited out, then asked.
+    assert_eq!(
+        login_through(Some(NOW - 30.0), &[], fetched(5.0)),
+        (Ok(()), vec![31.0])
+    );
+    // Another session writes a copy 20s into that wait. Asked once the first
+    // copy is out, Claude Code would answer from the new one (as the check
+    // did before), so that one is waited out too.
+    let e = read_fresh(
+        &mut || Ok(Some(NOW + 20.0)),
+        &mut || NOW + 31.0,
+        &mut || Ok(fetched(5.0)),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, Unread::Copy(e) if e.contains("snapshot 11s")),
+        "{e:?}"
+    );
+    assert_eq!(
+        login_through(Some(NOW - 30.0), &[20.0], fetched(5.0)),
+        (Ok(()), vec![81.0])
+    );
+    // Or writes one while it's being asked: the answer may be that copy.
+    assert_eq!(
+        login_through(Some(NOW - 30.0), &[32.0], fetched(5.0)),
+        (Ok(()), vec![31.0, 93.0])
+    );
+    // A login that fails says so, even when a copy raced its first asking.
+    let none =
+        json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
+    let (e, asked) = login_through(None, &[1.0], none);
+    assert!(e.unwrap_err().contains("logged in"));
+    assert_eq!(asked, [0.0, 62.0]);
+    // A rate-limited endpoint answering from a copy that changed while it
+    // was asked shows the login working, as on its own (login_shown): not
+    // waited out again.
+    assert_eq!(
+        login_logged(
+            Some(NOW - 30.0),
+            &[32.0],
+            from_the_copy(10.0),
+            &refused_with(429)
+        ),
+        (Ok(()), vec![31.0])
+    );
+    let (e, asked) = login_logged(None, &[1.0], from_the_copy(10.0), &refused_with(401));
+    assert!(e.is_err());
+    assert_eq!(asked, [0.0, 62.0]);
+    // Copies written faster than they can be waited out: the login isn't
+    // checked, and it says so rather than call it failed.
+    let often: Vec<f64> = (0..10).map(|n| 20.0 + 30.0 * f64::from(n)).collect();
+    let (e, asked) = login_through(Some(NOW - 30.0), &often, fetched(5.0));
+    let e = e.unwrap_err();
+    assert!(e.contains("login wasn't checked"), "{e}");
+    assert_eq!(asked, [] as [f64; 0]);
+    // A copy dated ahead of the clock isn't waited out: the reading refuses it.
+    let (e, asked) = login_through(Some(NOW + 5.0), &[], fetched(5.0));
+    assert!(e.unwrap_err().contains("snapshot"));
+    assert_eq!(asked, [0.0]);
 }
 
 #[test]

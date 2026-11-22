@@ -65,6 +65,9 @@ pub struct Config {
     pub systemctl: PathBuf,
     /// Seconds a check may run before it fails.
     pub check_timeout: u64,
+    /// By check: seconds it may run instead, for one that waits on purpose.
+    #[serde(default)]
+    pub check_timeouts: BTreeMap<String, u64>,
     /// Seconds a compare waits before each look, to let restarts and
     /// reconnects settle.
     pub settle: u64,
@@ -261,7 +264,9 @@ pub fn report(cfg: &Config) -> Vec<Line> {
 
 /// The report and bounded stderr from failed checks, run once per look.
 pub fn report_details(cfg: &Config) -> (Vec<Line>, Vec<(String, String)>) {
-    let (mut lines, mut details) = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    let (mut lines, mut details) = checks(&cfg.dir, |name| {
+        Duration::from_secs(*cfg.check_timeouts.get(name).unwrap_or(&cfg.check_timeout))
+    });
     for name in &cfg.required {
         if !lines.iter().any(|l| l.check() == Some(name)) {
             let key = format!("{CHECK}{name}");
@@ -278,8 +283,8 @@ pub fn report_details(cfg: &Config) -> (Vec<Line>, Vec<(String, String)>) {
 }
 
 /// Every executable in `dir` but its dotfiles, in name order, as a check
-/// that passes or fails.
-fn checks(dir: &Path, within: Duration) -> (Vec<Line>, Vec<(String, String)>) {
+/// that passes or fails, each given WITHIN its name to run.
+fn checks(dir: &Path, within: impl Fn(&str) -> Duration) -> (Vec<Line>, Vec<(String, String)>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return (Vec::new(), Vec::new());
     };
@@ -294,11 +299,9 @@ fn checks(dir: &Path, within: Duration) -> (Vec<Line>, Vec<(String, String)>) {
         .map(|n| dir.join(n))
         .filter(|path| rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok())
         .map(|path| {
-            let key = format!(
-                "{CHECK}{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-            let (passed, text) = run_check(&path, within);
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let key = format!("{CHECK}{name}");
+            let (passed, text) = run_check(&path, within(&name));
             if !passed && !text.is_empty() {
                 details.push((key.clone(), text));
             }
