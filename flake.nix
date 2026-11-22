@@ -115,6 +115,7 @@
           dir = "crates";
           members = true;
           include = [
+            ".cargo"
             ".github/workflows"
             ".github/flake-check"
             "templates/project/.github/workflows/flake.yml"

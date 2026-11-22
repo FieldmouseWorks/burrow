@@ -331,8 +331,7 @@ mod tests {
     #[test]
     fn a_judge_job_starts_fresh_without_a_writer_or_reviewer_session() {
         // Exercise the steward's actual creation path without its service imports.
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/autoland/step_jobs.py");
+        let path = burrow_test::manifest_dir!().join("../../modules/autoland/step_jobs.py");
         let output = std::process::Command::new("python3")
             .args([
                 "-c",

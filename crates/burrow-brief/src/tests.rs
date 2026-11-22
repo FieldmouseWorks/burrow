@@ -105,7 +105,7 @@ fn code(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Where the text's copies lived before it moved here, from the root of
 /// burrow's tree: the crates, and the steward's tasks beside them.
 fn roots() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = burrow_test::manifest_dir!().join("../..");
     vec![root.join("crates"), root.join("modules/autoland")]
 }
 

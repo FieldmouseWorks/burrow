@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::process::Command;
 
 #[test]
 fn the_reference_command_documents_every_option_and_its_read_door() {
@@ -22,7 +22,7 @@ fn the_reference_command_documents_every_option_and_its_read_door() {
             setting.name
         );
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = burrow_test::manifest_dir!().join("../..");
     assert_eq!(
         text,
         std::fs::read_to_string(root.join("docs/settings-reference.md")).unwrap(),

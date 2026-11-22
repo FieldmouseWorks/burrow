@@ -431,6 +431,7 @@ dependencies = [
 name = "burrow-brief"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "serde_json",
 ]
 
@@ -599,6 +600,7 @@ name = "burrow-github"
 version = "0.0.0"
 dependencies = [
  "burrow-process",
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",

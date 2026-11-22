@@ -677,7 +677,7 @@ fn a_key_comes_only_from_its_credential() {
 
 /// Each source file's public functions, each signature as one line.
 fn public_signatures() -> Vec<(String, String)> {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = burrow_test::manifest_dir!().join("src");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(src).unwrap() {
         let path = entry.unwrap().path();
@@ -730,8 +730,7 @@ fn nothing_public_signs_a_statement_a_caller_hands_it_or_reads_a_record_back() {
         public_in(&signatures, "sign.rs"),
         ["check", "conclusion", "for_tests", "load", "text"]
     );
-    let sign =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sign.rs")).unwrap();
+    let sign = std::fs::read_to_string(burrow_test::manifest_dir!().join("src/sign.rs")).unwrap();
     assert!(
         sign.contains(
             "    #[cfg(any(test, feature = \"test-key\"))]\n    pub fn for_tests(producer: &str, secret: [u8; 32]) -> Self {"
@@ -765,8 +764,7 @@ fn nothing_public_signs_a_statement_a_caller_hands_it_or_reads_a_record_back() {
         ]
     );
     let records =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/records.rs"))
-            .unwrap();
+        std::fs::read_to_string(burrow_test::manifest_dir!().join("src/records.rs")).unwrap();
     let record = records.split("pub struct Record<T> {").nth(1).unwrap();
     let fields = &record[..record.find('}').unwrap()];
     assert!(!fields.contains("pub "), "{fields}");

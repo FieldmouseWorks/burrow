@@ -30,7 +30,7 @@ pub(crate) fn validates(json: &Value) -> Result<(), String> {
 // changes the file in the same commit. UPDATE_SCHEMA=1 writes it afresh.
 #[test]
 fn the_schema_is_checked_in() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SCHEMA);
+    let path = burrow_test::manifest_dir!().join(SCHEMA);
     let made = Snapshot::schema();
     if std::env::var_os("UPDATE_SCHEMA").is_some() {
         fs::write(&path, &made).unwrap();

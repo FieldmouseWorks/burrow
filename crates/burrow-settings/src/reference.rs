@@ -129,9 +129,7 @@ mod tests {
     /// it again: `cargo run -p burrow-settings -- reference > docs/settings-reference.md`.
     #[test]
     fn the_reference_is_the_schemas() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(PATH);
+        let path = burrow_test::manifest_dir!().join("../..").join(PATH);
         let kept = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(
             kept == markdown(),

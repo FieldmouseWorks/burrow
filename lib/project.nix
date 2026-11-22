@@ -585,6 +585,16 @@ let
         CARGO_PROFILE = "dev";
         nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
         buildInputs = rustCfg.buildInputs pkgs;
+        # The dependencies' build runs on crane's stand-in source, which
+        # keeps a .cargo/config.toml but nothing beside it, where a config
+        # names files (a workspace wrapper). An included .cargo goes in
+        # whole, each on its own so the stand-in changes only with it.
+        extraDummyScript = lib.concatMapStrings (p: ''
+          mkdir -p $out/${p}
+          chmod -R u+w $out/${p}
+          cp -rT ${builtins.path { path = self + "/${p}"; name = "dot-cargo"; }} $out/${p}
+          chmod -R u+w $out/${p}
+        '') (builtins.filter (p: baseNameOf p == ".cargo") rustCfg.include);
       };
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
