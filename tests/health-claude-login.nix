@@ -60,6 +60,7 @@ let
         reply '{"rate_limits_available":true,"rate_limits":null}'
         sleep 0.2; logged "Failed to load usage data: connect ECONNREFUSED 127.0.0.1:9" ;;
       errored) echo '{"type":"control_response","response":{"subtype":"error","request_id":"usage","error":"get_usage is not supported in this context"}}' ;;
+      session-error) echo '{"type":"control_response","response":{"subtype":"error","request_id":"usage","error":"OAuth session expired and could not be refreshed"}}' ;;
       silent) ;;
       broken) exit 1 ;;
     esac
@@ -111,6 +112,7 @@ pkgs.runCommand "health-claude-login-check" { } ''
   server-error:status code 500
   offline:connect ECONNREFUSED
   errored:not supported in this context
+  session-error:OAuth session expired and could not be refreshed
   silent:exited before it answered
   broken:burrow-claude-login:
   CASES

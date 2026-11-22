@@ -23,6 +23,8 @@ use crate::pass::{Account, Reading, Reset};
 
 /// How long Claude Code has to answer, or to show the next screen.
 const TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the debug log is looked at while waiting on it.
+const LOG_POLL: Duration = Duration::from_millis(50);
 /// How often the screen is looked at while waiting on it.
 const POLL: Duration = Duration::from_millis(500);
 /// How long the reset's dialog is left up before its yes is pressed: it
@@ -74,11 +76,11 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(140);
 /// The least of LOGIN_BUDGET a live reading is asked with: a copy whose wait
 /// would leave less isn't waited out.
 const ASK_LEAST: Duration = Duration::from_secs(10);
-/// How long Claude Code is left up after an answer its endpoint didn't give,
-/// when its debug log is wanted: 2.1.330 appends that behind its answer, so
-/// killed on it, the line saying why is lost. An answer from the endpoint
-/// gets none, as Claude Code would then write its copy of it (read_fresh).
-const LOGGED: Duration = Duration::from_secs(1);
+/// The most Claude Code is left up after an answer its endpoint didn't give,
+/// for its debug log to say why: 2.1.330 appends that behind its answer, so
+/// killed on it, the line is lost. An answer from the endpoint gets none, as
+/// Claude Code would then write its copy of it (read_fresh).
+const LOGGED: Duration = Duration::from_secs(3);
 
 /// Why check_login didn't show the login working.
 #[derive(Debug, PartialEq)]
@@ -341,8 +343,18 @@ fn ask_usage(
                 }
             })
         });
-        if log.is_some() && answer.as_ref().is_ok_and(|a| unfetched(&a["response"])) {
-            thread::sleep(LOGGED);
+        if let Some(log) = log
+            && answer.as_ref().is_ok_and(|a| unfetched(&a["response"]))
+        {
+            let answered = Instant::now();
+            while answered.elapsed() < LOGGED
+                && endpoint_failure(&String::from_utf8_lossy(
+                    &std::fs::read(log).unwrap_or_default(),
+                ))
+                .is_none()
+            {
+                thread::sleep(LOG_POLL);
+            }
         }
         let _ = child.kill();
         let _ = child.wait();
