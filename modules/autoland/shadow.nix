@@ -243,18 +243,22 @@ in
   # The unit that renders them, for their readers to come after: none with
   # no shadowed repo, which has none to render.
   inherit render;
-  # The renderer: at boot, at each switch (a new base or renderer, as
-  # /run/current-system changes), and at each change to the role settings,
-  # by its path unit. Not a timer: nothing else changes what it writes, and
-  # a change that comes as it runs is read again before it ends (render.rs).
+  # The renderer: at boot and at each switch as multi-user.target starts
+  # it (a switch starts the target again once systemd has reloaded, so on
+  # the new base: a path unit on /run/current-system would fire before that
+  # and run the old one), and at each change to the role settings, by its
+  # path unit. Not a timer: nothing else changes what it writes, and a
+  # change that comes as it runs is read again before it ends (render.rs).
   renderer = let on = cfg.shadow != [ ]; in {
     # Their directory: the flow's controller's to write, everyone's to read.
     tmpfiles = lib.optionalAttrs on { ${live}.d = { mode = "0755"; user = ledger.flow.user; group = flowGroup; }; };
     services = lib.optionalAttrs on { ${renderUnit} = {
       description = "autoland: render the flow's configs with each role's live choice";
       wantedBy = [ "multi-user.target" ];
-      # The path unit starts it on a switch: a running one is let finish.
-      restartIfChanged = false;
+      # No start limit: a few role changes in a row are a few starts, and
+      # one refused by the limit fails the path unit too, which then hears
+      # no change again. It writes nothing it's started by, so can't loop.
+      startLimitIntervalSec = 0;
       # One of the flow's own units (burrow.ledger keeps the controller to
       # those): what it writes, every pass of the flow reads.
       environment = ledger.flow.env;
@@ -268,7 +272,7 @@ in
     }; };
     paths = lib.optionalAttrs on { ${renderUnit} = {
       wantedBy = [ "multi-user.target" ];
-      pathConfig.PathChanged = [ rolesFile "/run/current-system" ];
+      pathConfig.PathChanged = [ rolesFile ];
     }; };
   };
   # The unit holding the flow's seal keys, null with none.
@@ -299,10 +303,10 @@ in
   service = {
     description = "autoland: Conary's flow beside the steward's pass of %I";
     restartIfChanged = false;
-    # After its config's render: wanted, not required, so a render a role
-    # refused leaves the last good config read.
+    # After a render under way, and starting none: it runs after each
+    # pass, and a pass changes nothing the render reads.
     after = [ "network-online.target" ] ++ needs ++ render;
-    wants = [ "network-online.target" ] ++ render;
+    wants = [ "network-online.target" ];
     requires = needs;
     unitConfig.ConditionPathExists = instanceConfig;
     environment = ledger.env // ledger.flow.env // {

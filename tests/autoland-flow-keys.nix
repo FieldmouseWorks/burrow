@@ -14,7 +14,8 @@
 # role set to no model, as a build's choice would be, nothing is rendered;
 # setting one through the settings door renders them, by the path unit on
 # the role settings, with the judge's choice on that model, and a change to
-# it is rendered again with no deploy.
+# it is rendered again with no deploy, however many come in a row. A
+# switch to another base renders that, on the same choice.
 #
 # The judge's producer and looks aren't started: only the flow's half is
 # tested here, and that the producer's config names the same key file
@@ -78,6 +79,8 @@ pkgs.testers.runNixOSTest {
       systemd.services.autoland-judge.wantedBy = lib.mkForce [ ];
       users.users.dev.isNormalUser = true;
       environment.systemPackages = [ pkgs.jq ];
+      # Another base, to switch to: one setting of the steward's changed.
+      specialisation.rebased.configuration.burrow.autoland.labels.hold = "parked";
     };
   };
 
@@ -102,6 +105,13 @@ pkgs.testers.runNixOSTest {
         # A change to the role is read at the next render, with no deploy.
         machine.succeed("runuser -u dev -- settings model ${role} claude stand-in-two")
         machine.wait_until_succeeds("jq -e '.execution.judge == {engine: \"claude\", model: \"stand-in-two\", effort: null}' ${config}", timeout=60)
+
+    with subtest("many changes in a row leave it hearing the next"):
+        # More than systemd's default start limit (five in ten seconds).
+        for effort in ["low", "medium", "high"] * 4:
+            machine.succeed(f"runuser -u dev -- settings model ${role} claude stand-in-one {effort}")
+            machine.wait_until_succeeds(f"jq -e '.execution.judge.effort == \"{effort}\"' ${config}", timeout=30)
+        machine.succeed("systemctl is-active autoland-flow-configs.path")
 
     with subtest("the config names the key's file and holds no key"):
         machine.succeed("jq -e '.settings.judge_key_file == \"${keyFile}\" and (.settings | has(\"judge_key\") | not)' ${config}")
@@ -152,6 +162,11 @@ pkgs.testers.runNixOSTest {
         machine.fail("test -e ${keyFile}")
         machine.succeed("systemctl start autoland-flow-keys.service")
         machine.succeed("runuser -u conary-flow -- test -r ${keyFile}")
+
+    with subtest("a switch renders the new base on the live choice"):
+        machine.succeed("jq -e '.settings.hold_label != \"parked\"' ${config}")
+        machine.succeed("/run/current-system/specialisation/rebased/bin/switch-to-configuration test >&2")
+        machine.wait_until_succeeds("jq -e '.settings.hold_label == \"parked\" and .execution.judge.model == \"stand-in-one\"' ${config}", timeout=60)
 
     with subtest("no store path of the machine holds the key"):
         # Its whole closure: the rendered configs and units included.
