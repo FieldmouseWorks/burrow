@@ -104,7 +104,8 @@
       # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl, and baseline_docs's the docs the
       # steward's config carries (modules/autoland/baseline-docs.json) and
-      # their links. No test reads README.md, AGENTS.md, CLAUDE.md or any
+      # their links, and burrow-test's build two checkouts with the repo's
+      # .cargo. No test reads README.md, AGENTS.md, CLAUDE.md or any
       # other doc under docs/: they're the docs lane's (.github/workflows/flake.yml).
       # Their nix is the newest, as the hosted runners' install-nix is: the
       # build store's shadow (burrow-flake-check) asks an HTTP store about
