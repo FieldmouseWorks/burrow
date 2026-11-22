@@ -205,7 +205,6 @@ in
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for judgments.";
     };
-
   };
 
   config = lib.mkIf cfg.enable {

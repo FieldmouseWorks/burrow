@@ -11,7 +11,7 @@
 # Each repo's flow config is the steward's own settings for it, in the
 # flow's terms (Conary's flow::Config), at OWNER/NAME.json lowercased, as
 # burrow-events names a pass's instance. The seal keys stay out of it:
-# they're secrets, and a config is a store path. The judge's is named by
+# they're secrets, and a config is everyone's to read. The judge's is named by
 # its file instead (`judge_key_file`, which Conary reads at each load):
 # autoland-flow-keys's copy of its credential, which only the flow's
 # controller can read. renovate-sweep's (`major_key`) isn't given to the flow yet.

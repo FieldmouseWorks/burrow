@@ -692,7 +692,7 @@ in
         What runs Conary's flow as the steward's App (autoland/landing.nix):
         the credentials its token reads, the token's command, each
         shadowed repo's flow configuration by name (live, and as built),
-        the units running the flow require, the judge's key file, and the
+        the units a flow's unit requires, the judge's key file, and the
         unit rendering the configs (autoland/shadow.nix).
       '';
     };
