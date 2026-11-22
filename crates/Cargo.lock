@@ -539,6 +539,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-example-plugin"
+version = "0.0.0"
+dependencies = [
+ "conary-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-firmware"
 version = "0.0.0"
 dependencies = [

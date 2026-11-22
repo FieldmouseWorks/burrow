@@ -522,8 +522,12 @@ Each has an entry below, and each can be imported on its own.
   `agent.credential`), its own egress hosts on its own filtered proxy, and
   the capabilities and MCP servers the owner approved for it
   ([a plugin's grants](docs/engines.md#a-plugins-grants)). A VM for one engine gets none
-  of another's. Idle ones stop after a day and are saved and deleted after a
-  week. Opt-in per task.
+  of another's. An engine's `plugin` runs in
+  [a VM of its own per call](docs/engines.md#a-plugins-sandbox), as
+  `agent-plugin-NAME`, with its grants and nothing else. `agent fetch` runs
+  git confined to the sandbox's clone and the project's repository, so a
+  link planted in a clone reaches nothing else. Idle ones stop after a day
+  and are saved and deleted after a week. Opt-in per task.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
   signed in to your accounts by you, that job engines drive through
   Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
@@ -740,4 +744,8 @@ nix build .#checks.x86_64-linux.agents -L     # boots sandboxes (needs /dev/kvm)
 `checks.agents` (`tests/agents.nix`) boots a host VM that boots sandboxes inside
 itself (nested KVM) and checks isolation, egress, fetch, `proj run --vm` and
 cleanup, and with a second stand-in engine, that each engine's VM gets only
-its own packages, credential and hosts.
+its own packages, credential and hosts. Its other half
+(`tests/agents-plugins.nix`, `.#checks.x86_64-linux.agents.entries.plugins`
+alone) runs the example plugin (`crates/burrow-example-plugin`) through
+Conary's runner: each grant works, and without it isn't there for the VM's
+root either.

@@ -133,14 +133,7 @@ pub fn new(agent: &Agent, args: &[String]) -> Result<String, String> {
 pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     let cfg = agent.cfg;
     let settings = claude_settings(&cfg.home)?;
-    let n = next_number(&cfg.root)?;
-    let id = format!("{}-{n}", slug(&ask.project));
-    let d = cfg.root.join(&id);
-    let snapshot = format!("{}@agent-{id}", cfg.data_dataset);
-    let mine = format!("{}/{id}", cfg.dataset);
-    agent.run("zfs", &["snapshot", &snapshot])?;
-    agent.run("zfs", &["create", &mine])?;
-    agent.run("zfs", &["clone", &snapshot, &format!("{mine}/data")])?;
+    let (n, id, d) = clone(agent, &ask.project)?;
     let owned = format!("{}:kvm", cfg.user);
     let dir = d.to_string_lossy().into_owned();
     agent.run("chown", &[&owned, &dir])?;
@@ -230,6 +223,21 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     sb.write_args(agent)?;
     agent.run("systemctl", &["start", &sb.unit()])?;
     Ok(id)
+}
+
+/// A new sandbox's number, id and directory, with its clone of the data as
+/// of now in it.
+pub(crate) fn clone(agent: &Agent, project: &str) -> Result<(u32, String, PathBuf), String> {
+    let cfg = agent.cfg;
+    let n = next_number(&cfg.root)?;
+    let id = format!("{}-{n}", slug(project));
+    let snapshot = format!("{}@agent-{id}", cfg.data_dataset);
+    let mine = format!("{}/{id}", cfg.dataset);
+    agent.run("zfs", &["snapshot", &snapshot])?;
+    agent.run("zfs", &["create", &mine])?;
+    agent.run("zfs", &["clone", &snapshot, &format!("{mine}/data")])?;
+    let dir = cfg.root.join(&id);
+    Ok((n, id, dir))
 }
 
 /// Only the host's model choices belong in the guest: its `model`, and the
@@ -331,14 +339,16 @@ pub(crate) mod tests {
                     "forward": "/nix/store/x-proxy-3128",
                     "credentialFile": null,
                     "capabilities": ["workspace", "mcp"],
-                    "mcpServers": ["ledger", "signed-in"]
+                    "mcpServers": ["ledger", "signed-in"],
+                    "plugin": null
                 },
                 "other": {
                     "runner": "/nix/store/x-other-runner",
                     "forward": "/nix/store/x-proxy-3130",
                     "credentialFile": null,
                     "capabilities": ["mcp", "network"],
-                    "mcpServers": []
+                    "mcpServers": [],
+                    "plugin": null
                 }
             },
             "mcpServers": {
@@ -355,6 +365,18 @@ pub(crate) mod tests {
             "user": "dev",
             "uid": 1000,
             "group": "users",
+            "gid": 100,
+            "plugins": {
+                "system": {"root": "/nix/store/x-system", "closure": "/nix/store/x-system-paths"},
+                "toolchains": {"root": "/nix/store/x-toolchains", "closure": "/nix/store/x-toolchains-paths"},
+                "nix": {"root": "/nix/store/x-nix", "closure": "/nix/store/x-nix-paths"},
+                "virtiofsd": {"root": "/nix/store/x-virtiofsd", "closure": "/nix/store/x-virtiofsd-paths"},
+                "forward": "/nix/store/x-service",
+                "socat": "/nix/store/x-socat/bin/socat",
+                "heavy": "/nix/store/x-heavy/bin/heavy",
+                "unitsClear": "/run/burrow-units/clear.sock",
+                "jobSockets": dir.join("scratch/jobs"),
+            },
             "home": "/home/dev",
             "sudo": "/run/wrappers/bin/sudo",
             "path": "/nix/store/x/bin"

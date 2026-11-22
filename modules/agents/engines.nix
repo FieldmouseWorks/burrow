@@ -68,6 +68,16 @@ in
               filter after an engine is added; 3129 is the open proxy's.
             '';
           };
+          plugin = mkOption {
+            type = types.nullOr types.package;
+            default = null;
+            description = ''
+              The engine's plugin: a package whose main program speaks
+              Conary's plugin contract. It runs only in a sandbox of this
+              engine, through burrow.agents.plugins.NAME, with the grants
+              below (docs/engines.md, "A plugin's sandbox").
+            '';
+          };
           capabilities = mkOption {
             type = types.listOf types.str;
             default = [ ];
@@ -76,8 +86,8 @@ in
               The job capabilities the owner approves for this engine's
               plugin, by name (crates/burrow-grants lists them). It is granted
               those of them its describe declares, and no others
-              (docs/engines.md, "A plugin's grants"). Nothing runs an engine
-              plugin yet, so no sandbox is narrowed by them.
+              (docs/engines.md, "A plugin's grants"). They narrow its
+              plugin's sandbox; `agent new`'s are the same without them.
             '';
           };
           mcpServers = mkOption {
