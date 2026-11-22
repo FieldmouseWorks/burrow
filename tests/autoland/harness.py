@@ -194,6 +194,7 @@ print(json.dumps(do[sub]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
 IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "reseated": [],
+        "released": [], "unread": [],
         "finished": [], "now": {"state": "idle"}}
 
 
@@ -201,7 +202,7 @@ def cn(**do):
     """What cn answers from now on (an empty train, a PR joined, left, an
     idle step, unless told otherwise), and a log that starts over."""
     with open(CN, "w") as f:
-        json.dump({"show": {"joined": [], "in_flight": None, "candidates": []}, "join": {"joined": True},
+        json.dump({"show": {"joined": [], "in_flight": None, "red_alone": [], "candidates": []}, "join": {"joined": True},
                    "leave": {"left": True}, "step": IDLE, **do}, f)
     open(CN_LOG, "w").close()
 

@@ -27,7 +27,7 @@ LEAVE = ["train", "leave", "sam/r", "5", "--why", "unready"]
 
 def train(prs, state="gating", joined=(5,)):
     """A train with one candidate in flight, of `prs`."""
-    return {"joined": [{"pr": n} for n in joined], "in_flight": CAND,
+    return {"joined": [{"pr": n} for n in joined], "in_flight": CAND, "red_alone": [],
             "candidates": [{"candidate": CAND, "state": {"state": state}, "prs": list(prs)}]}
 
 
@@ -87,7 +87,7 @@ assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), statu
 # Once it's in at this head, it isn't joined again, and its status names the
 # candidate in flight: its own (gating, or green and landing), or the one
 # ahead of it, and how many joined before it. Each is a wait of its own.
-idle = {"joined": [{"pr": 7}, {"pr": 9}, {"pr": 5}], "in_flight": None, "candidates": []}
+idle = {"joined": [{"pr": 7}, {"pr": 9}, {"pr": 5}], "in_flight": None, "red_alone": [], "candidates": []}
 for show, says in ((train([5, 7]), "In the train, gating in candidate ABCDEFGH with #7."),
                    (train([5], "green"), "In the train, landing in candidate ABCDEFGH."),
                    (train([7], joined=(7, 5)), "In the train, behind candidate ABCDEFGH, 1 ahead of it."),
@@ -192,7 +192,7 @@ T.leave = kept_leave
 # says which, with what GitHub said when it refused the merge.
 for held, checks, says in (("conflict", CI_GREEN, "it won't merge after the PRs ahead of it, until they've landed or left"),
                            ("empty", CI_GREEN, "it changes nothing after the PRs ahead of it, until they've landed or left"),
-                           ("red", CI_GREEN, "it was red alone in it, until a new head"),
+                           ("red", CI_GREEN, "it was red alone in it, until a new head or that gate's pass"),
                            ("refused", CI_GREEN + [mark("ERROR", "GitHub refused its merge: 2 of 3 required checks are expected")],
                             "GitHub refused its merge: 2 of 3 required checks are expected, until the default branch moves")):
     fresh_pr_state()
@@ -220,8 +220,8 @@ seen()
 status, _ = run(clean(), 800)
 assert cn_runs() == [SHOW, JOIN + ["--negative", "check / negative"]] and "In the train" in status, (cn_runs(), status)
 del S.CFG["repos"]["sam/r"]["trainNegative"]
-# Held out, it isn't labelled in the train: the new head that lets one red
-# alone back in is Renovate's to push, for one of its own.
+# Held out, it isn't labelled in the train: a new head, which lets one red
+# alone back in, is Renovate's to push, for one of its own.
 fresh_pr_state()
 seen(join={"joined": False, "held": "red"})
 status, _ = run(clean(labels=["waiting: train"]), 700)
@@ -365,12 +365,15 @@ S.CFG["repos"]["sam/r"] = {"train": True}
 # Nothing in it, nothing in flight and the last candidate finished: no step.
 PRS["v"] = [mkpr(base="trunk")]  # not reviewed yet
 assert kicked() == [SHOW], cn_runs()
-done = {"joined": [], "in_flight": None, "candidates": [{"candidate": CAND, "state": {"state": "finished"}, "prs": [3]}]}
+done = {"joined": [], "in_flight": None, "red_alone": [], "candidates": [{"candidate": CAND, "state": {"state": "finished"}, "prs": [3]}]}
 assert kicked(show=done) == [SHOW], cn_runs()
 # A candidate that landed but isn't finished yet, or one in flight, is.
 landed = {**done, "candidates": [{**done["candidates"][0], "state": {"state": "landed"}}]}
 assert kicked(show=landed) == [SHOW, STEP], cn_runs()
 assert kicked(show={**done, "in_flight": CAND}) == [SHOW, STEP], cn_runs()
+# However idle, so is a train that holds a PR red alone: its step is what
+# releases that one once the gate it was red in passes (Conary#555).
+assert kicked(show={**done, "red_alone": [4]}) == [SHOW, STEP], cn_runs()
 # GitHub unavailable: another pass in five minutes, and no stall. Any other
 # failure is the steward's pass failing on the repo, for the watchdog.
 PRS["v"] = [clean(base="trunk")]
@@ -393,6 +396,12 @@ out = io.StringIO()
 with contextlib.redirect_stdout(out):
     kicked(show=train([5], "green"), step={**IDLE, "landed": [4], "unready": [5], "reseated": [6]})
 assert "sam/r: train: #4 merged; #5 out, no longer settled; #6 back in alone, R2 since it joined" in out.getvalue(), out.getvalue()
+# And which it released, or couldn't read for that: not idle.
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    kicked(show=train([5], "green"), step={**IDLE, "released": [4], "unread": [{"pr": 7, "why": "HTTP 422"}]})
+assert ("sam/r: train: #4 released, the gate it was red alone in passed since; "
+        "#7 still held red alone, its gate unread: HTTP 422") in out.getvalue(), out.getvalue()
 # Nor is it stepped when a PR in it wasn't seen to at all: it may not be
 # settled any more. One that isn't in it stops nothing.
 kept_handle = S.step.handle
