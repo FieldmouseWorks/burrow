@@ -50,7 +50,7 @@ fn strays(crates: &Path) -> BTreeSet<String> {
 
 #[test]
 fn one_way_to_github() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let crates = burrow_test::manifest_dir!().parent().unwrap();
     assert_eq!(
         strays(crates),
         BTreeSet::new(),

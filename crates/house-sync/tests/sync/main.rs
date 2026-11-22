@@ -22,7 +22,7 @@ use house_sync::pass::{self, Ask};
 use serde_json::json;
 
 fn house() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../house")
+    burrow_test::manifest_dir!().join("../../house")
 }
 
 fn block(name: &str) -> String {

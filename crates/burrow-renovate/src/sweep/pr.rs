@@ -16,7 +16,7 @@ use super::shown;
 static FROM_TO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"from v?(?<a>[0-9]+)\S* to v?(?<b>[0-9]+)").expect("a regex"));
 
-/// A job's verdict on a major, as major-seal prints it.
+/// A job's verdict on a major, as seal.rs writes it.
 static VERDICT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"<!-- major-verdict: (?<v>ok|held) (?<sha>[0-9a-f]{40}) on (?<base>\S+) (?<mac>[0-9a-f]{32}) -->",
@@ -144,7 +144,7 @@ pub(crate) fn finished(checks: &[Check]) -> String {
 
 /// The verdicts `me` marked on `sha` for `base` in what `gh pr view --json
 /// comments` said, oldest first: each (ok|held, its seal), to check with
-/// major-seal.
+/// seal.rs.
 pub(crate) fn verdicts(said: &[u8], me: &str, sha: &str, base: &str) -> Vec<(String, String)> {
     let Ok(said) = serde_json::from_slice::<Value>(said) else {
         return Vec::new();

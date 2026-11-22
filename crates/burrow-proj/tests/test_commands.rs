@@ -39,7 +39,7 @@ fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 
 #[test]
 fn tests_start_proj_programs_without_the_job_environment() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = burrow_test::manifest_dir!();
     let mut files = Vec::new();
     walk(&root.join("src"), &mut files);
     walk(&root.join("tests"), &mut files);

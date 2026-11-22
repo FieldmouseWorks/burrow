@@ -431,6 +431,7 @@ dependencies = [
 name = "burrow-brief"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "serde_json",
 ]
 
@@ -541,6 +542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-example-plugin"
+version = "0.0.0"
+dependencies = [
+ "conary-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-firmware"
 version = "0.0.0"
 dependencies = [
@@ -599,6 +609,7 @@ name = "burrow-github"
 version = "0.0.0"
 dependencies = [
  "burrow-process",
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -864,12 +875,14 @@ dependencies = [
  "burrow-process",
  "burrow-settings",
  "burrow-test",
+ "conary-github",
  "jiff 1.0.1",
  "md-5",
  "regex",
  "rustix",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
 ]
 

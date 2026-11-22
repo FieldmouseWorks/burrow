@@ -1,0 +1,4 @@
+#!/bin/sh
+# The workspace's rustc, at a path each checkout has to itself (config.toml).
+# Not named rustc: sccache would take it for the compiler.
+exec "$@"

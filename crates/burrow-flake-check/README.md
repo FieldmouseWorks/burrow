@@ -180,7 +180,10 @@ control does: the base with the files at the paths of the tree to judge by,
 and only old content in them. The replaced file stays away where that
 passes; else it goes back beside its replacement where that does (a
 directory's can't). Where neither does, a failure can't be told from the
-file's absence or the clash, so it can't tell.
+file's absence or the clash, so it can't tell. A file in a directory the PR
+made a file of its name can't go back beside it either. Every tree takes the
+deleted files away before it adds any, so that one's in the other's way in
+none.
 
 These trees are only to judge by: the one signed is the negative tree.
 They're built only for a check that failed, until one is caught, and never
