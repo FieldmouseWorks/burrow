@@ -1,7 +1,7 @@
 use super::*;
 use crate::plugin::render::{Service, Workspace};
 
-const DIR: &str = "/run/agent-plugin-run/claude-1/work";
+const DIR: &str = "/run/agent-plugin-run/example-1/work";
 const PROXY: &str = "/nix/store/x-proxy-3128";
 
 fn args(a: &Attach) -> String {
