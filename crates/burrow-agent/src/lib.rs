@@ -15,6 +15,8 @@
 //! agent rm ID                 stop it, save its work, delete it in a day
 //! agent keep ID [DAYS]        undo an rm; keep it DAYS (default 7) from now
 //! agent gc                    what the hourly timer runs
+//! agent plugin ENGINE         the engine's plugin, on stdio, in a VM of its own
+//!                             (plugin.rs; installed as agent-plugin-ENGINE)
 //! ```
 //!
 //! The VM sees the project (a clone, so nothing it does touches the real
@@ -32,9 +34,12 @@
 //! A sandbox nobody has used for 7 days is saved (agent fetch) and deleted by
 //! `agent gc`; one left running unused for a day is stopped first.
 
+pub mod confine;
+pub mod git_config;
 pub mod list;
 pub mod new;
 pub mod path;
+pub mod plugin;
 pub mod sandbox;
 pub mod save;
 pub mod ssh;
@@ -49,7 +54,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
 use burrow_grants::{Approved, Grants, mcp};
-use conary_core::plugin;
+use conary_core::plugin as contract;
 use serde::Deserialize;
 
 /// A day, the unit of a sandbox's time to live.
@@ -81,11 +86,14 @@ pub struct Config {
     pub user: String,
     pub uid: u32,
     pub group: String,
+    pub gid: u32,
     pub home: PathBuf,
     pub sudo: PathBuf,
+    /// What running an engine's plugin takes of the machine.
+    pub plugins: PluginHost,
     /// Where the programs it runs by name are: zfs, git, ssh, ssh-keygen,
-    /// socat, systemctl, runuser, install and chown. Ahead of the PATH it
-    /// was given.
+    /// socat, systemctl, runuser, setpriv, bwrap, timeout, install and
+    /// chown. Ahead of the PATH it was given.
     pub path: String,
 }
 
@@ -105,6 +113,47 @@ pub struct Engine {
     pub capabilities: Vec<String>,
     /// The MCP servers the owner approved for its plugin, by name.
     pub mcp_servers: Vec<String>,
+    /// Its plugin, when the machine configures one.
+    pub plugin: Option<Plugin>,
+}
+
+/// An engine's configured plugin. Its executable is inside the image, so
+/// nothing a plugin says or writes chooses what runs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Plugin {
+    /// The plugin guest's microvm runner.
+    pub runner: PathBuf,
+    /// The list of that guest's store paths: all its store holds ungranted.
+    pub closure: PathBuf,
+    /// Where its service listens, for the user alone.
+    pub socket: PathBuf,
+}
+
+/// Programs a grant or the runner brings, and the list of their store paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Tools {
+    pub root: PathBuf,
+    pub closure: PathBuf,
+}
+
+/// The machine's values that running a plugin reads, all modules/agents'.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PluginHost {
+    pub system: Tools,
+    pub toolchains: Tools,
+    pub nix: Tools,
+    pub virtiofsd: Tools,
+    /// What QEMU runs for a connection to a service.
+    pub forward: PathBuf,
+    /// socat, as the guest has it.
+    pub socat: PathBuf,
+    pub heavy: Option<PathBuf>,
+    pub units_clear: Option<PathBuf>,
+    /// Where proj makes each job's sockets: a directory per job.
+    pub job_sockets: PathBuf,
 }
 
 impl Config {
@@ -113,8 +162,8 @@ impl Config {
     pub fn grants(
         &self,
         engine: &str,
-        kinds: &[plugin::Kind],
-        offered: &plugin::Capabilities,
+        kinds: &[contract::Kind],
+        offered: &contract::Capabilities,
     ) -> Result<Grants, String> {
         let engine = self.engine(engine)?;
         let approved = Approved {
@@ -265,6 +314,32 @@ impl<'a> Agent<'a> {
             .status()
             .is_ok_and(|s| s.success())
     }
+}
+
+/// A command as `user` and `group` alone, with nothing of the caller's
+/// environment and no way to more privilege (no sudo).
+pub(crate) fn account_command(path: &OsStr, user: &str, group: &str) -> Command {
+    let mut c = Command::new("setpriv");
+    c.env_clear()
+        .env("PATH", path)
+        .arg(format!("--reuid={user}"))
+        .arg(format!("--regid={group}"))
+        .args(["--clear-groups", "--no-new-privs", "--"]);
+    c
+}
+
+pub(crate) fn as_account(agent: &Agent, user: &str, group: &str) -> Command {
+    account_command(&agent.path, user, group)
+}
+
+/// This process's stderr, for a child's output: stdout is the answer's.
+pub(crate) fn stderr() -> Result<Stdio, String> {
+    use std::os::fd::AsFd;
+    io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(Stdio::from)
+        .map_err(|e| format!("stderr: {e}"))
 }
 
 fn shown<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> String {

@@ -244,15 +244,6 @@ let
     makeBinaryWrapper ${inputs.self.packages.${system}.burrow-firmware}/bin/burrow-firmware \
       $out/bin/firmware-check --add-flags ${firmwareConfig}
   '';
-  # What seals renovate-sweep's verdicts on majors (updates/major-seal.py),
-  # with the seal the autoland steward checks them with beside it, linted as
-  # it's built.
-  majorSealSrc = pkgs.runCommand "major-seal-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
-    mkdir $out
-    cp ${./updates/major-seal.py} $out/major-seal.py
-    cp ${./autoland/seal.py} $out/seal.py
-    flake8 --ignore E501,W503 $out
-  '';
   # What runs Renovate here is this one (updates/renovate-package.nix).
   renovatePackage = import ./updates/renovate-package.nix pkgs;
   # Every release age a Renovate config sets, its presets resolved by
@@ -298,9 +289,6 @@ let
   '';
   lockWait = pkgs.writeShellScriptBin "lock-wait" ''
     exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
-  '';
-  majorSeal = pkgs.writeShellScriptBin "major-seal" ''
-    exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   # renovate-run (crates/burrow-renovate), with its config built in.
   renovateWake = "${cfg.renovate.dir}/wake.json";
@@ -360,7 +348,6 @@ let
       git = lib.getExe config.programs.git.package;
       proj = "${tools.proj}/bin/proj";
       notify = lib.getExe tools.notify;
-      seal = "${majorSeal}/bin/major-seal";
       lockWait = "${lockWait}/bin/lock-wait";
     };
   });

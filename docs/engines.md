@@ -64,8 +64,8 @@ Never granted, whatever a plugin declares or the owner lists: a GitHub token
 or the App's installation authority (`github`, and `environment`, the login
 environment that carries them), a write to the settings store, and plugin
 installation. What a job is authorized to do that needs those reaches it only
-through host-mediated services: proj's jobs socket, the probe, heavy slots
-and the MCP servers below.
+through host-mediated services: proj's jobs socket (to read), the probe,
+heavy slots and the MCP servers below.
 
 `mcp` by itself reaches no server. A plugin granted it reaches those of
 `burrow.mcpServers` that its engine's
@@ -78,8 +78,61 @@ never filled for a plugin and its host paths aren't part of the grant. A
 refused server is named `mcp:NAME`.
 
 A grant is the capability's name. The runner that gives it to a sandbox
-([#1390](https://github.com/FieldmouseWorks/burrow/issues/1390)) renders it
-there, and never copies the host job's paths or environment for it.
+([below](#a-plugins-sandbox)) renders it there, and never copies the host
+job's paths or environment for it.
+
+## A plugin's sandbox
+
+`burrow.agents.engines.NAME.plugin` configures an engine's plugin. It runs
+only in a microVM of that engine, through `burrow.agents.plugins.NAME`
+(installed as `agent-plugin-NAME`): an executable that takes no arguments
+and speaks the plugin contract on stdio, so Conary's runner and
+`cn plugin check` use it as they would the plugin. It hands the request to
+the engine's socket, which only `burrow.user` can open, and the service
+behind it ([`burrow-agent`](../crates/burrow-agent/src/plugin.rs)) does the
+rest. A call lives as long as its connection: killing the caller ends it.
+
+- `describe` runs with nothing granted: no login, workspace, service or
+  network.
+- A job's request runs the plugin's describe that way again and takes the
+  grants from that answer and the owner's list, never from the caller. Then
+  a second VM boots with them, so a job costs two boots, inside its caller's
+  deadline.
+- Only `describe` and `job` requests run. A plugin that declares
+  `sandbox: brings` has its describe run here and its job refused: saying so
+  never gets a plugin onto the host.
+- The VM's user has root, as in every sandbox, so no guard is inside it.
+  What isn't granted isn't attached: no share, forward, device or file. Its
+  `/nix/store` holds its image's closure and its granted tools', not the
+  host's store. It has no vsock, and no NIC without `network` or a service.
+- A job gets its own engine's login (`credentialFile`), and no other's.
+
+What each grant is in the VM:
+
+| Grant | In the VM |
+| --- | --- |
+| `workspace` | A clone of the project the `workdir` is in, at the same path. The work comes back as `agent fetch` brings it, to `refs/agents/ID/`, and the clone is deleted; one that can't be saved is kept for `agent ls`. |
+| `git-metadata` | That clone's `.git`, its configs cut to what names branches and remotes, without logins. Ungranted, it's covered from outside the VM. |
+| `job-state` | proj's jobs socket at `PROJ_HOST_JOBS_SOCKET`, for `status`, `state`, `lifecycle`, `log` and `list` alone: a plugin that could `reply` into a host job would have that job's authority. Never the job's directory. |
+| `probe` | proj's probe socket, at `PROJ_PROBE_SOCKET`. |
+| `units-clear` | The unit watch's socket, at `UNITS_CLEAR_SOCKET`. |
+| `heavy` | `heavy -- COMMAND`: the host takes a slot and holds it while the command runs. |
+| `system` | The toolbox's everyday tools, git, curl and jq. |
+| `toolchains` | The toolbox's languages, with a Cargo and rustup home of the VM's own. |
+| `nix` | Nix on a store of the VM's own. Never the host's daemon, whose fixed-output builds would fetch around the proxy. |
+| `kvm` | Nested virtualization. |
+| `mcp` | `PROJ_MCP_SERVERS`: each approved server as a stdio command. The host runs the server as `burrow.user`. |
+| `network` | The engine's filtered proxy and nothing else: the shared list and that engine's hosts. |
+
+A service is carried to the host connection by connection, and the host
+connects as `burrow.user`. The jobs and probe sockets are taken only from a
+job's scratch, where proj makes them. A grant with nothing behind it in a
+call (no such socket, no heavy slots) is logged and left out of
+`PROJ_CAPABILITIES`.
+
+The workspace is the project as it is, untracked files included: approving
+`workspace` gives the plugin whatever is in that folder. A workdir outside
+the projects folder, such as a worktree in a job's scratch, is refused.
 
 ## Remaining surfaces to make modular
 
@@ -156,10 +209,10 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   `agent new` copies into a VM's `~/.claude`, and `proj run --vm`, which
   runs Claude in the default engine's VM.
 - **Target:**
-  - **Sandbox path (default for new engines):** Enforce
-    [a plugin's grants](#a-plugins-grants) inside the shared sandbox: they
-    are computed, and no runner applies them yet
-    ([#743](https://github.com/FieldmouseWorks/burrow/issues/743)). Inside
+  - **Sandbox path (default for new engines):**
+    [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. proj
+    doesn't run engines through it yet
+    ([#745](https://github.com/FieldmouseWorks/burrow/issues/745)). Inside
     the microVM, the VM itself is the security boundary.
   - **Host path (when needed):** Keep `burrow-guard`'s ZFS-snapshot and
     one-way-door decision logic engine-agnostic and add a thin hook/policy
@@ -197,8 +250,9 @@ land:
 3. **Land the remaining decoupling as bounded follow-ups:**
    - per-engine holds, login notices, meters, and normalized `probe usage`
      accounting;
-   - enforcing capability grants in `burrow.agents`' per-engine sandboxes
-     ([#743](https://github.com/FieldmouseWorks/burrow/issues/743));
+   - a conformance check for every engine plugin in
+     [its sandbox](#a-plugins-sandbox)
+     ([#1391](https://github.com/FieldmouseWorks/burrow/issues/1391));
    - pluggable worker dispatch in `burrow-judge`;
    - host-hook adapters into `burrow-guard` only for harnesses that need host
      execution outside a microVM.

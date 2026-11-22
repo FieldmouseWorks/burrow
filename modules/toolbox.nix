@@ -3,6 +3,9 @@
 # VM as on the host.
 inputs:
 { config, lib, options, pkgs, ... }:
+let
+  tools = import ./toolbox/packages.nix pkgs;
+in
 {
   imports = [ (import ./common.nix inputs) ];
 
@@ -14,27 +17,7 @@ inputs:
       # there is one.
       (config.burrow.tools.gh or gh)
       (config.burrow.tools.git-lfs or git-lfs)
-      jujutsu
-      mergiraf
-      # search and files
-      ripgrep
-      fd
-      tree
-      file
-      unzip
-      zip
-      zstd
-      # languages and builds
-      gcc
-      gnumake
-      pkg-config
-      python3
-      uv
-      nodejs_22
-      pnpm
-      rustup
-      go
-      sqlite
+    ] ++ tools.system ++ tools.toolchains ++ [
       # VMs and backups
       qemu_kvm
       rclone

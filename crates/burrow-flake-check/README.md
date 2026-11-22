@@ -166,8 +166,8 @@ are what fail it (`src/removal.rs`):
   those files taken away and, where the PR replaced one, its old content in
   what replaced it. A check only the new tests define has no control
   there: the removal alone breaks it unless its derivation is the same with
-  every deleted file put back (a directory that took one's place gone to
-  make room), which says it reads none of them (#1434).
+  every deleted file put back (a file or directory that took one's place
+  gone to make room), which says it reads none of them (#1434).
 - Where the removal breaks it by itself, it counts only if it fails, judged
   the same way, with them put back beside the new tests.
 - Where it doesn't, the tree made the failure: it can't tell, so nothing is
@@ -183,7 +183,10 @@ control does: the base with the files at the paths of the tree to judge by,
 and only old content in them. The replaced file stays away where that
 passes; else it goes back beside its replacement where that does (a
 directory's can't). Where neither does, a failure can't be told from the
-file's absence or the clash, so it can't tell.
+file's absence or the clash, so it can't tell. A file in a directory the PR
+made a file of its name can't go back beside it either. Every tree takes the
+deleted files away before it adds any, so that one's in the other's way in
+none.
 
 These trees are only to judge by: the one signed is the negative tree.
 They're built only for a check that failed, until one is caught, and never

@@ -267,7 +267,7 @@ fn only_our_own_sealed_verdict_on_this_head_and_base_counts() {
         m.pass()
     };
     // A verdict for another base (it was retargeted since), one that names
-    // none or has no seal, one with a seal major-seal won't take (another
+    // none or has no seal, one with a seal the sweep won't take (another
     // verdict's, another key's: another Claude job quoting a marker posts
     // as our login too), and someone else's sealed one: none is one, the
     // job is asked again, and it isn't listed.
@@ -294,14 +294,23 @@ fn only_our_own_sealed_verdict_on_this_head_and_base_counts() {
         let task = p.task();
         assert!(task.contains("A marker written any other way doesn't count"));
     }
-    // major-seal is asked of exactly what the marker names.
-    let p = pass(&|_| vec![marked("me", &marker(3, "ok", "main", &"f".repeat(32)))]);
-    let asked = format!(
-        "major-seal --check {REPO} 3 ok {} main {}",
-        sha(3),
-        "f".repeat(32)
+    // The seal is checked on the repo in lower case: a clone's remote
+    // needn't spell it as GitHub does, and a verdict sealed as one counts
+    // as the other.
+    let m = Machine::new();
+    fs::write(
+        m.path("projects/r/.origin"),
+        "https://github.com/Sam/R.git\n",
+    )
+    .unwrap();
+    m.prs(&[pr(3)]);
+    m.comments(3, &[m.verdict(3, "held", "main", "me")]);
+    let p = m.pass();
+    assert!(
+        p.jobs.is_empty() && p.majors().1.contains("held them"),
+        "{:#?}",
+        p.notices
     );
-    assert!(p.log.contains(&asked), "{:#?}", p.log);
     // The newest sealed one is the one, whatever came before it, a marker
     // for another head among them.
     let p = pass(&|m| {
@@ -334,7 +343,7 @@ fn one_handed_over_before_verdicts_were_sealed_goes_once_more() {
     let p = m.pass();
     assert!(p.task().contains("#2 ") && p.majors().0 == "close");
     // And one handed over when its job sealed its verdict itself, with a
-    // token for major-seal its sandbox may not have let it read
+    // token for the sealer its sandbox may not have let it read
     // (Conary#271).
     let m = Machine::new();
     m.prs(&[pr(2)]);
@@ -362,10 +371,10 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
     // or base it wasn't handed.
     let sealed = |n: u64, base: &str| {
         format!(
-            "- #{n} on {} for {base}: ok `<!-- major-verdict: ok {} on {base} sealed-{n}-ok -->`, held `<!-- major-verdict: held {} on {base} sealed-{n}-held -->`",
+            "- #{n} on {} for {base}: ok `{}`, held `{}`",
             sha(n),
-            sha(n),
-            sha(n)
+            marker(n, "ok", base, &mac(n, "ok", base)),
+            marker(n, "held", base, &mac(n, "held", base))
         )
     };
     assert!(
@@ -377,15 +386,7 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
         "{task}"
     );
     assert!(!task.contains("#6 on"), "{task}");
-    assert!(!task.contains("major-seal"), "{task}");
-    for asked in [
-        format!("major-seal {REPO} 1 ok {} main", sha(1)),
-        format!("major-seal {REPO} 1 held {} main", sha(1)),
-        format!("major-seal {REPO} 3 ok {} release", sha(3)),
-        format!("major-seal {REPO} 3 held {} release", sha(3)),
-    ] {
-        assert!(p.log.contains(&asked), "{asked}: {:#?}", p.log);
-    }
+    assert!(!task.contains("verdict.key"), "{task}");
     // Nothing's kept for the job to read.
     assert!(!m.state("seal").exists());
     // A job handed only red CI is told of no markers.
@@ -393,10 +394,11 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
     m.prs(&[red(6)]);
     assert!(!m.pass().task().contains("verdict markers, sealed"));
     // With no seal, no job: the head isn't kept as handed, and the next
-    // pass hands it over.
+    // pass hands it over. Here the key can't be read or made.
     let m = Machine::new();
     m.prs(&[pr(1)]);
-    m.set("seal-fails", "");
+    fs::remove_file(m.state("verdict.key")).unwrap();
+    fs::create_dir(m.state("verdict.key")).unwrap();
     let p = m.sweep(&[]);
     assert_eq!(p.code, Some(1));
     assert!(
@@ -404,8 +406,22 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
         "{:#?}",
         p.jobs
     );
-    m.unset("seal-fails");
-    assert!(m.pass().task().contains("sealed-1-ok"));
+    fs::remove_dir(m.state("verdict.key")).unwrap();
+    let p = m.pass();
+    let made = fs::read_to_string(m.state("verdict.key")).unwrap();
+    let ok = conary_github::flow::SealKey::from_hex(&made).unwrap().seal(
+        REPO,
+        1,
+        "major-verdict",
+        "ok",
+        &sha(1),
+        "main",
+    );
+    assert!(
+        p.task().contains(&marker(1, "ok", "main", &ok)),
+        "{}",
+        p.task()
+    );
 }
 
 #[test]

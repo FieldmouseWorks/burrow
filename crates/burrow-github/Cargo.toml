@@ -16,6 +16,7 @@ serde_json.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+burrow-test = { path = "../burrow-test" }
 tempfile.workspace = true
 
 [lints]

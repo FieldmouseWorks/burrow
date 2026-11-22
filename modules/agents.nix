@@ -14,6 +14,10 @@
 # through tinyproxy on 127.0.0.1: an engine's proxyPort allows
 # burrow.agents.allowlist, extraAllow and that engine's hosts, 3129 (`agent
 # new --open`) allows anything. Nothing else leaves a VM.
+#
+# An engine's plugin (burrow.agents.engines.NAME.plugin) runs in a VM of the
+# same guest made narrower, one per call, with its grants and nothing else
+# (agents/plugins.nix).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -23,9 +27,9 @@ let
   account = config.users.users.${user};
   gid = config.users.groups.${account.group}.gid;
 
-  # An engine's image: the shared guest, its packages and modules, nobody
-  # else's.
-  runner = engine: (inputs.nixpkgs.lib.nixosSystem {
+  # An engine's guest: the shared one, its packages and modules, nobody
+  # else's. `extra` makes it its plugin's (agents/plugin-guest.nix).
+  guest = extra: engine: inputs.nixpkgs.lib.nixosSystem {
     modules = [
       (import ./agents/guest.nix inputs)
       {
@@ -40,8 +44,10 @@ let
         microvm.mem = cfg.memory;
         microvm.vcpu = cfg.vcpus;
       }
-    ] ++ engine.guestModules ++ cfg.guestModules;
-  }).config.microvm.declaredRunner;
+    ] ++ engine.guestModules ++ cfg.guestModules ++ extra;
+  };
+  runner = engine: (guest [ ] engine).config.microvm.declaredRunner;
+  plugins = import ./agents/plugins.nix { inherit inputs config lib pkgs guest; };
 
   # An engine's filter: the shared list and its own hosts, never another
   # engine's.
@@ -112,8 +118,9 @@ let
   # The binary with its config; it reads every field, and refuses one it
   # doesn't know.
   agentConfig = pkgs.writeText "agent.json" (builtins.toJSON {
-    engines = lib.mapAttrs (_: engine: {
+    engines = lib.mapAttrs (name: engine: {
       runner = runner engine;
+      plugin = plugins.engine name engine;
       forward = forward engine.proxyPort;
       inherit (engine) credentialFile capabilities mcpServers;
     }) cfg.engines;
@@ -130,6 +137,8 @@ let
     inherit (cfg) dataDataset dataset;
     inherit user;
     inherit (account) uid group home;
+    inherit gid;
+    plugins = plugins.host;
     sudo = "${config.security.wrapperDir}/sudo";
     path = lib.makeBinPath [
       zfs
@@ -139,6 +148,7 @@ let
       pkgs.openssh
       pkgs.socat
       pkgs.systemd
+      pkgs.bubblewrap
     ];
   });
   agent = pkgs.runCommand "agent" {
@@ -161,6 +171,18 @@ in
       readOnly = true;
       default = agent;
       description = "The configured `agent` wrapper, for modules that stop and start sandboxes.";
+    };
+
+    plugins = lib.mkOption {
+      type = lib.types.attrsOf lib.types.package;
+      readOnly = true;
+      default = plugins.executables agent;
+      defaultText = lib.literalMD "agent-plugin-NAME for each engine with a plugin";
+      description = ''
+        By engine, the executable to give a Conary plugin runner: it takes no
+        arguments and runs that engine's plugin in the sandbox, with its
+        grants (docs/engines.md, "A plugin's sandbox").
+      '';
     };
 
     dataDataset = lib.mkOption {
@@ -217,6 +239,12 @@ in
   {
     systemd.services = lib.mapAttrs' (name: engine: lib.nameValuePair "agent-proxy-${name}"
       (proxy { port = engine.proxyPort; what = "${name}'s allowlist"; filter = allow name engine; })) cfg.engines;
+  }
+  # Each engine's plugin: its socket, a service per call, and its executable.
+  {
+    systemd.sockets = plugins.sockets;
+    systemd.services = plugins.services agent;
+    environment.systemPackages = lib.attrValues cfg.plugins;
   }
   {
     assertions = [

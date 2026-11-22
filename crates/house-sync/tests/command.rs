@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 fn house() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../house")
+    burrow_test::manifest_dir!().join("../../house")
 }
 
 use burrow_test::executable as script;

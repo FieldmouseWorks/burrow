@@ -453,10 +453,14 @@ const NEW_CHECK_FAILS: &str = r#""newlib":"1\n""#;
 
 /// A check only the new tests define fails on the old code for its own
 /// sake beside a replaced test file it never reads, and beside a file made
-/// a directory: caught, as it is beside a plain deletion (#1434).
+/// a directory, and beside a directory made a file: caught, as it is beside
+/// a plain deletion (#1434).
 #[test]
 fn a_new_check_beside_a_replaced_file_it_doesnt_read_is_caught() {
     let r = checks_from_tests();
+    write(&r.origin.join("tests/d/x"), "x\n");
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s.git(&r.origin, &["commit", "-qm", "a test directory"]);
     let check = new_check("");
     let base = vec![
         ("lib.txt", Some("2\n")),
@@ -472,11 +476,14 @@ fn a_new_check_beside_a_replaced_file_it_doesnt_read_is_caught() {
         ("tests/unnamed.txt", None),
         ("tests/unnamed.txt/case", Some("unnamed\n")),
     ]);
+    let mut file = base.clone();
+    file.extend([("tests/d/x", None), ("tests/d", Some("d\n"))]);
     let mut deleting = base;
     deleting.push(("tests/unnamed.txt", None));
     for (name, files) in [
         ("new-split", split),
         ("new-directory", directory),
+        ("new-file", file),
         ("new-deleting", deleting),
     ] {
         let ran = r.run(&r.pr(name, &files), "", NEW_CHECK_FAILS);
@@ -502,4 +509,54 @@ fn a_new_check_reading_a_replaced_file_cant_tell() {
     assert_eq!(ran.code, 1, "{}", ran.out);
     assert!(ran.found.is_none(), "{}", ran.out);
     assert!(ran.out.contains("so it reads them"), "{}", ran.out);
+}
+
+/// A test directory the PR makes a file of its name (#1426), beside a new
+/// test that fails on the old code.
+fn directory_made_a_file() -> (Repo, Files<'static>) {
+    let r = repo();
+    write(&r.origin.join("tests/d/x"), "x\n");
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s.git(&r.origin, &["commit", "-qm", "a test directory"]);
+    let files = vec![
+        ("lib.txt", Some("2\n")),
+        ("tests/new.txt", Some("2\n")),
+        ("tests/d/x", None),
+        ("tests/d", Some("d\n")),
+    ];
+    (r, files)
+}
+
+/// The negative tree takes the directory's files away before it adds the
+/// file, so the test is caught.
+#[test]
+fn a_directory_made_a_file_is_still_caught() {
+    let (r, files) = directory_made_a_file();
+    caught(&r.run(&r.pr("file", &files), "", NEW_FAILS));
+}
+
+/// Where the old code reads a file in that directory, no tree holds it and
+/// the file both, so it can't tell.
+#[test]
+fn a_file_in_a_directory_made_a_file_isnt_put_back() {
+    let (r, files) = directory_made_a_file();
+    edit(
+        &r,
+        "inherit system want;",
+        r#"inherit system want; x = if builtins.pathExists ./tests/d/x then "x" else "gone";"#,
+    );
+    r.g.s.git(&r.origin, &["add", "-A"]);
+    r.g.s.git(
+        &r.origin,
+        &["commit", "-qm", "t reads the directory's file"],
+    );
+    let ran = r.run(&r.pr("file-read", &files), "", r#""x":"gone""#);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(
+        ran.out
+            .contains("nor with it beside what replaced it: a failure there can be the tree's"),
+        "{}",
+        ran.out
+    );
 }

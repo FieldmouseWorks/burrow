@@ -12,7 +12,7 @@ pub struct Config {
     pub name: String,
     /// Its own: what each PR was last handed over for (OWNER_REPO-N), its
     /// refresh requests taken back (OWNER_REPO-N.released), and the key
-    /// major-seal seals verdicts with.
+    /// it seals verdicts on majors with (verdict.key, seal.rs).
     pub state: PathBuf,
     /// Where the machine's projects are: each clone of a GitHub repo, a
     /// project its job runs in.
@@ -60,8 +60,6 @@ pub struct Tools {
     pub proj: PathBuf,
     /// HOST-notify, which tells the owner.
     pub notify: PathBuf,
-    /// major-seal, which seals the verdicts a job is handed, and checks one.
-    pub seal: PathBuf,
     /// lock-wait (modules/autoland/lock_wait.py): when a lock file refresh that
     /// lock-age refused for age only can go again, and how far the sweep
     /// goes asking.
