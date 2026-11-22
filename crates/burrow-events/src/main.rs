@@ -59,7 +59,7 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let mut threads = Vec::new();
 
     // GitHub's deliveries, where the machine takes them (a host and a secret).
-    if let Some(port) = cfg.port {
+    if cfg.deliveries {
         let file =
             PathBuf::from(env::var_os("CREDENTIALS_DIRECTORY").unwrap_or_default()).join("webhook");
         let secret = fs::read_to_string(&file)
@@ -67,11 +67,14 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
             .trim()
             .to_owned();
         let (h, l, o) = (handlers.clone(), lines.clone(), outbox.clone());
-        let (port, t) = http::listen(
-            port,
-            Arc::new(move |req| delivery(&h, &l, o.as_deref(), &secret, req)),
-        )
-        .map_err(|e| format!("deliveries: {e}"))?;
+        let (port, t) = http::handed()
+            .and_then(|listener| {
+                http::serve(
+                    listener,
+                    Arc::new(move |req| delivery(&h, &l, o.as_deref(), &secret, req)),
+                )
+            })
+            .map_err(|e| format!("deliveries: {e}"))?;
         eprintln!("deliveries on 127.0.0.1:{port}");
         threads.push(("deliveries".to_owned(), t));
     }

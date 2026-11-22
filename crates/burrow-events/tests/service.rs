@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -22,6 +23,14 @@ struct Service {
 
 impl Service {
     fn start(dir: &Path, config: Value, credentials: &Path) -> Service {
+        // As systemd hands it over: the socket is the holder's, non-blocking,
+        // and the service's stdin.
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Service::start_on(dir, config, credentials, &socket)
+    }
+
+    fn start_on(dir: &Path, config: Value, credentials: &Path, socket: &TcpListener) -> Service {
         let path = dir.join("events.json");
         fs::write(&path, config.to_string()).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-events"))
@@ -35,6 +44,7 @@ impl Service {
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .stdin(Stdio::from(OwnedFd::from(socket.try_clone().unwrap())))
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
@@ -122,7 +132,7 @@ fn no_handlers() {
     fs::write(creds.join("webhook"), "hook-secret\n").unwrap();
     let mut svc = Service::start(
         dir.path(),
-        json!({"port": 0, "kickPort": 0, "handlers": {}}),
+        json!({"deliveries": true, "kickPort": 0, "handlers": {}}),
         &creds,
     );
     svc.said("deliveries on 127.0.0.1:");
@@ -137,7 +147,7 @@ fn kicks_only() {
     let dir = tempfile::tempdir().unwrap();
     let mut svc = Service::start(
         dir.path(),
-        json!({"port": null, "kickPort": 0, "handlers": {}}),
+        json!({"deliveries": false, "kickPort": 0, "handlers": {}}),
         &dir.path().join("none"),
     );
     let line = svc.said("kicks on");
@@ -152,7 +162,7 @@ fn no_secret() {
     let dir = tempfile::tempdir().unwrap();
     let mut svc = Service::start(
         dir.path(),
-        json!({"port": 0, "kickPort": 0, "handlers": {}}),
+        json!({"deliveries": true, "kickPort": 0, "handlers": {}}),
         &dir.path().join("none"),
     );
     assert!(svc.said("burrow-events: ").contains("webhook"));
@@ -176,7 +186,7 @@ fn catches_up() {
     let creds = dir.path().join("creds");
     fs::create_dir(&creds).unwrap();
     fs::write(creds.join("webhook"), "hook-secret\n").unwrap();
-    let config = json!({"port": 0, "kickPort": 0, "handlers": {"probe": {"events": ["push"], "unit": "probe", "wake": null,
+    let config = json!({"deliveries": true, "kickPort": 0, "handlers": {"probe": {"events": ["push"], "unit": "probe", "wake": null,
         "ownStatuses": [], "perRepo": true, "repos": null, "pushes": "any", "branches": null, "issueTitles": null}}});
     let svc = Service::start(dir.path(), config, &creds);
     let hooks = svc.port("deliveries on 127.0.0.1:");
@@ -208,6 +218,45 @@ fn catches_up() {
         401
     );
     svc.said("a push delivery from hook 42, with a signature that isn't the hook secret's");
+}
+
+// A delivery sent with no service running waits on the socket for the next.
+#[test]
+fn a_delivery_waits_for_the_service_across_its_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, creds) = landing(dir.path(), 9);
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let hooks = socket.local_addr().unwrap().port();
+    let first = Service::start_on(dir.path(), config.clone(), &creds, &socket);
+    first.said("deliveries on 127.0.0.1:");
+    drop(first);
+    let sent = thread::spawn(move || deliver(hooks));
+    thread::sleep(Duration::from_millis(300));
+    assert!(!sent.is_finished(), "refused with no service running");
+    let next = Service::start_on(dir.path(), config, &creds, &socket);
+    assert_eq!(sent.join().unwrap(), 202);
+    drop(next);
+}
+
+// Deliveries with no socket handed over are a failure, said.
+#[test]
+fn no_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, creds) = landing(dir.path(), 9);
+    fs::write(dir.path().join("events.json"), config.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_burrow-events"))
+        .env("EVENTS_CONFIG", dir.path().join("events.json"))
+        .env("CREDENTIALS_DIRECTORY", creds)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("stdin isn't their listening socket"),
+        "{said}"
+    );
 }
 
 // A config it can't read is a failure, said.
@@ -284,7 +333,7 @@ fn landing(dir: &Path, port: u16) -> (Value, PathBuf) {
     fs::create_dir(&creds).unwrap();
     fs::write(creds.join("webhook"), format!("{}\n", secret())).unwrap();
     let outbox = dir.join("outbox");
-    let config = json!({"port": 0, "kickPort": 0, "handlers": {},
+    let config = json!({"deliveries": true, "kickPort": 0, "handlers": {},
         "landing": {"record": record, "forward": port, "outbox": outbox}});
     (config, creds)
 }

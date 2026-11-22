@@ -17,10 +17,14 @@ let
 
   # Deliveries come in only where GitHub can reach the machine.
   hooked = cfg.host != null;
+  # The socket they come in on is systemd's, so none is refused while the
+  # service restarts. Named by its port: a switch never restarts a socket
+  # that changed, but does replace one by another name.
+  socket = "burrow-events-deliveries-${toString cfg.port}";
   forwarding = cfg.landing.record != null && cfg.landing.forward != null;
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
-    port = if hooked then cfg.port else null;
+    deliveries = hooked;
     # Who lands each repo (Conary#313): the record burrow-landing keeps,
     # read again at every delivery, kick and pass.
     # Where deliveries wait for conaryd to take them (crates/burrow-events'
@@ -371,9 +375,24 @@ in
       group = "burrow-events";
     };
 
+    # Holds what GitHub sends while burrow-events is down for a switch, a
+    # new secret or a crash: GitHub never sends again one that was refused.
+    systemd.sockets.${socket} = lib.mkIf hooked {
+      description = "burrow-events: where GitHub's deliveries wait for it";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "127.0.0.1:${toString cfg.port}";
+        Service = "burrow-events.service";
+      };
+    };
+
     systemd.services.burrow-events = {
       description = "burrow-events: a pass on each GitHub event, kick or wake-up";
-      after = [ "network.target" ];
+      # A switch stops a changed service's socket along with it, unless the
+      # switch only restarts the service.
+      stopIfChanged = lib.mkIf hooked false;
+      requires = lib.optional hooked "${socket}.socket";
+      after = [ "network.target" ] ++ lib.optional hooked "${socket}.socket";
       wantedBy = [ "multi-user.target" ];
       path = [ config.systemd.package ];
       environment.EVENTS_CONFIG = "${configFile}";
@@ -394,6 +413,11 @@ in
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
       } // lib.optionalAttrs hooked {
         LoadCredential = "webhook:${cfg.secretFile}";
+        Sockets = "${socket}.socket";
+        StandardInput = "socket";
+        # Both follow stdin unless said.
+        StandardOutput = "journal";
+        StandardError = "journal";
       };
     };
 

@@ -4,6 +4,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -152,12 +153,34 @@ fn linger(stream: &mut TcpStream) {
 /// What answers a request: the status it gets.
 pub type Handle = Arc<dyn Fn(&Request) -> u16 + Send + Sync>;
 
-/// Serve each request on 127.0.0.1:PORT (0: any free port) with `handle`, a
-/// thread a connection, from a thread of its own. Returns the port it
-/// listens on, and that thread, which ends only in a panic: the service is
-/// no use without it (`supervise`).
+/// Serve each request on 127.0.0.1:PORT (0: any free port) with `handle`, as
+/// `serve` does.
 pub fn listen(port: u16, handle: Handle) -> io::Result<(u16, JoinHandle<()>)> {
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    serve(TcpListener::bind(("127.0.0.1", port))?, handle)
+}
+
+/// The listening socket systemd holds for this service, handed over as its
+/// stdin. It outlives the process: a connection that comes while there's
+/// none waits on it for the next, where a port the process bound itself
+/// refuses it.
+pub fn handed() -> io::Result<TcpListener> {
+    let listener = TcpListener::from(io::stdin().as_fd().try_clone_to_owned()?);
+    listener.local_addr().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("stdin isn't their listening socket ({e})"),
+        )
+    })?;
+    // systemd's is non-blocking, and `accept` waits.
+    listener.set_nonblocking(false)?;
+    Ok(listener)
+}
+
+/// Serve each request on `listener` with `handle`, a thread a connection,
+/// from a thread of its own. Returns the port it listens on, and that
+/// thread, which ends only in a panic: the service is no use without it
+/// (`supervise`).
+pub fn serve(listener: TcpListener, handle: Handle) -> io::Result<(u16, JoinHandle<()>)> {
     let port = listener.local_addr()?.port();
     let accepting = thread::Builder::new().spawn(move || {
         accept(&listener, &handle, |work| {

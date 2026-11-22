@@ -195,7 +195,7 @@ mod tests {
     fn setup_with(record: &Path, forward: Option<u16>, tune: impl FnOnce(&mut Outbox)) -> Ports {
         let outbox = record.with_file_name("outbox");
         let cfg: Config = serde_json::from_value(json!({
-            "port": null,
+            "deliveries": false,
             "kickPort": 0,
             "landing": {"record": record, "forward": forward, "outbox": outbox},
             "handlers": {
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn no_landing_config_is_the_steward_everywhere() {
         let cfg: Config = serde_json::from_value(json!({
-            "port": null, "kickPort": 0,
+            "deliveries": false, "kickPort": 0,
             "handlers": {"autoland": {"events": ["push"], "unit": "autoland", "landing": true}},
         }))
         .unwrap();

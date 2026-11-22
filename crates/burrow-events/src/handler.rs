@@ -14,8 +14,9 @@ use crate::line::Pass;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
-    /// Where deliveries come in from nginx; none without a host.
-    pub port: Option<u16>,
+    /// Whether deliveries come in from nginx (the machine has a host and a
+    /// secret), on the socket systemd holds for them (`http::handed`).
+    pub deliveries: bool,
     pub kick_port: u16,
     pub handlers: BTreeMap<String, Handler>,
     /// Who lands each repo's PRs (Conary#313): none, the steward lands
@@ -639,7 +640,7 @@ mod tests {
     #[test]
     fn config() {
         let cfg: super::Config = serde_json::from_value(json!({
-            "kickPort": 8788, "port": null,
+            "kickPort": 8788, "deliveries": false,
             "handlers": {"update": {"events": ["push"], "unit": "remi-update", "wake": null, "ownStatuses": [], "ownLabels": [],
                                     "perRepo": false, "repos": ["sam/r"], "pushes": "default", "branches": null,
                                     "issueTitles": null, "issueDir": null, "yieldTo": null}}
@@ -647,8 +648,8 @@ mod tests {
         .unwrap();
         let h = &cfg.handlers["update"];
         assert_eq!(
-            (cfg.port, cfg.kick_port, h.per_repo, h.pushes),
-            (None, 8788, false, Pushes::Default)
+            (cfg.deliveries, cfg.kick_port, h.per_repo, h.pushes),
+            (false, 8788, false, Pushes::Default)
         );
         assert!(
             serde_json::from_value::<super::Handler>(
