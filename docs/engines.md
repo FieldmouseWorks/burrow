@@ -54,7 +54,7 @@ engine, and says for each refusal which capability and why.
 Conary's `describe` declares capabilities in this way:
 
 - `network` declares `network`, `mcp` declares `mcp`, and the device `kvm`
-  declares `kvm`. Any other device is refused.
+  declares `kvm`. Any other device is refused, as `device:NAME`.
 - Serving the `job` kind declares the rest of the job contract, which
   `describe` has no field for: `workspace`, `job-state`, `git-metadata`,
   `toolchains`, `system`, `probe`, `units-clear`, `heavy` and `nix`.

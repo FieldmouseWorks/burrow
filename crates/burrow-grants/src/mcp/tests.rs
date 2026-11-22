@@ -16,11 +16,20 @@ fn registry() -> Registry {
 }
 
 fn plugin(declares_mcp: bool, capabilities: &[&str], servers: &[&str]) -> Grants {
+    with_devices(declares_mcp, &[], capabilities, servers)
+}
+
+fn with_devices(
+    declares_mcp: bool,
+    devices: &[&str],
+    capabilities: &[&str],
+    servers: &[&str],
+) -> Grants {
     let names = |list: &[&str]| list.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
     let offered = Capabilities {
         sandbox: Sandbox::Needs,
         network: false,
-        devices: vec![],
+        devices: names(devices),
         mcp: declares_mcp,
     };
     let approved = Approved {
@@ -89,6 +98,13 @@ fn a_name_outside_the_registry_is_refused() {
     let grants = plugin(true, &["mcp"], &["ledgr"]);
     assert!(reached(&grants).is_empty());
     assert_eq!(why(&grants, "ledgr"), Some(Why::UnknownServer));
+}
+
+#[test]
+fn a_refused_device_reads_as_no_granted_server() {
+    let grants = with_devices(true, &["mcp:ledger"], &["mcp"], &["ledger"]);
+    assert_eq!(reached(&grants), ["ledger"]);
+    assert_eq!(why(&grants, "ledger"), None);
 }
 
 #[test]
