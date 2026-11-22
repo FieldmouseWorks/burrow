@@ -779,7 +779,7 @@ fn class(pat: &[char]) -> Option<(Class, &[char])> {
 }
 
 #[cfg(test)]
-#[path = "branches_world.rs"]
+#[path = "branches_world_tests.rs"]
 mod world;
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 //! What's new upstream, brought into a real clone by nix's and curl's
-//! stand-ins (testing.rs).
+//! stand-ins (testing_tests.rs).
 
 use std::fs;
 

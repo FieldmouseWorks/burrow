@@ -222,7 +222,7 @@ unsaid = [f"{f}:{i}: {x.strip()}" for f in sorted(os.listdir(src)) if f.endswith
 # burrow-upkeep's own, each a look it books (`p.wake(`) or a job's
 # (`wake:`), say it on the line or the one above, as rustfmt leaves them.
 for f in sorted(os.listdir(harness.UPKEEP_SRC)):
-    if f.endswith(".rs") and not f.endswith("_tests.rs") and f != "testing.rs":
+    if f.endswith(".rs") and not f.endswith("_tests.rs"):
         lines = open(os.path.join(harness.UPKEEP_SRC, f)).read().splitlines()
         unsaid += [f"{f}:{i}: {x.strip()}" for i, x in enumerate(lines, 1)
                    if re.search(r"\bp\.wake\(|^\s*wake: ", x) and "// ends:" not in x

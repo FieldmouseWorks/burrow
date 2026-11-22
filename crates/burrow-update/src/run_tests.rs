@@ -1,4 +1,4 @@
-//! Whole runs, on a machine of stand-ins (testing.rs): real git, a bare repo
+//! Whole runs, on a machine of stand-ins (testing_tests.rs): real git, a bare repo
 //! for GitHub's copy, a nix whose systems are dirs stamped with their
 //! commit, and a switch that points the machine's current system at one.
 

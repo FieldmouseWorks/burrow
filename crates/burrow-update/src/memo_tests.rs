@@ -1,4 +1,4 @@
-//! What a run remembers, on a real clone (testing.rs).
+//! What a run remembers, on a real clone (testing_tests.rs).
 
 use std::fs;
 

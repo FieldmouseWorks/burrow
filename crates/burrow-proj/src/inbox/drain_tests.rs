@@ -953,7 +953,7 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     assert!(log.contains("issues/10/labels -f labels[]=claude"), "{log}");
 }
 
-mod admission;
+mod admission_tests;
 
 // A subscription turn retried after its usage limit keeps its place while
 // the plan's hold keeps it; the credit's room isn't held by it, as the line
