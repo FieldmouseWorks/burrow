@@ -27,7 +27,8 @@ impl Machine {
                 "claude": {
                     "runner": "/nix/store/x-runner",
                     "forward": "/nix/store/x-proxy-3128",
-                    "credentialFile": null
+                    "credentialFile": null,
+                    "capabilities": []
                 }
             },
             "defaultEngine": "claude",

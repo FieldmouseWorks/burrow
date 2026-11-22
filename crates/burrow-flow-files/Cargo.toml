@@ -13,8 +13,8 @@ serde.workspace = true
 serde_json.workspace = true
 # Conary's own types and loaders, never a copy of their keys. Pinned with the
 # kit's by Cargo.lock.
-conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "996dad39f8652d8cbf4a2276cc3c459de870705c" }
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "996dad39f8652d8cbf4a2276cc3c459de870705c" }
+conary-core.workspace = true
+conary-github.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

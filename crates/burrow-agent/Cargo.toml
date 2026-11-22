@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+burrow-grants = { path = "../burrow-grants" }
+# Conary owns what a plugin's describe declares. Pinned by Cargo.lock.
+conary-core.workspace = true
 jiff.workspace = true
 rustix = { version = "1.1.6", features = ["fs", "process", "system"] }
 serde.workspace = true

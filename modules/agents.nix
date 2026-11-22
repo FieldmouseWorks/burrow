@@ -115,7 +115,7 @@ let
     engines = lib.mapAttrs (_: engine: {
       runner = runner engine;
       forward = forward engine.proxyPort;
-      inherit (engine) credentialFile;
+      inherit (engine) credentialFile capabilities;
     }) cfg.engines;
     inherit (cfg) defaultEngine;
     forwardOpen = forward 3129;

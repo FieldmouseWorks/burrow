@@ -59,7 +59,7 @@ pkgs.testers.runNixOSTest {
         credentialEnv = "OTHER_ENGINE_TOKEN";
         hosts = [ "other-engine.example" ];
         proxyPort = 3130;
-        capabilities = [ "read" ];
+        capabilities = [ "workspace" ];
       };
       toolbox.enable = true;
       # Small sandboxes, so two fit (and not 2048: QEMU's microvm machine hangs).

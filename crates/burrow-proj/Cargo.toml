@@ -11,6 +11,7 @@ burrow-settings = { path = "../burrow-settings" }
 burrow-probe = { path = "../burrow-probe" }
 burrow-process = { path = "../burrow-process" }
 burrow-github = { path = "../burrow-github" }
+burrow-grants = { path = "../burrow-grants" }
 burrow-usage-reset = { path = "../burrow-usage-reset" }
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }

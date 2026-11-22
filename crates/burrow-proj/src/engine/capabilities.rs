@@ -5,6 +5,7 @@ use crate::{
     config::{Config, McpServer},
     job::Job,
 };
+pub use burrow_grants::Capability;
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -12,25 +13,6 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Capability {
-    Workspace,
-    JobState,
-    GitMetadata,
-    Toolchains,
-    System,
-    Probe,
-    UnitsClear,
-    Github,
-    Heavy,
-    Nix,
-    Kvm,
-    Mcp,
-    Network,
-    Environment,
-}
 
 /// A path's bool is write access; sockets are paths too. Environment and
 /// server configuration are carried alongside the paths they depend on.
@@ -295,6 +277,9 @@ mod tests {
         };
         let machine = machine::tests::machine_in(dir.path());
         let grants = resolve(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
+        // The host's contract has every item of the list a plugin is granted from.
+        let items: Vec<Capability> = grants.items.iter().map(|g| g.capability).collect();
+        assert_eq!(items, Capability::ALL);
         let claude = grants.claude_flags();
         let config: serde_json::Value = serde_json::from_str(claude.last().unwrap()).unwrap();
         assert_eq!(
