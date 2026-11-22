@@ -1,6 +1,6 @@
 //! The sources' watch files, and what's past its deadline in them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -39,7 +39,8 @@ pub struct Item {
     /// Its deadline is read from local state that moves without a pass (a
     /// run's log writes), so a deadline the source wrote before then may be
     /// stale: after a kick it's a stall only once the source has written its
-    /// file again ([`Overdue::at`]).
+    /// file again ([`Overdue::at`]). It's also a run at work on the item,
+    /// so no stall of the item's is over until it has ended ([`Watch`]).
     #[serde(default)]
     pub refresh: bool,
 }
@@ -125,14 +126,22 @@ pub fn sid(source: &str, key: &str, since: f64) -> String {
     format!("{source}\t{key}\t{since:.0}")
 }
 
-/// Every stall there is now, by sid, and when the next item falls due. A
-/// source with no watch file to read is noted in `missing`, since when.
-pub fn overdue(
-    cfg: &Config,
-    now: f64,
-    missing: &mut BTreeMap<String, f64>,
-) -> (BTreeMap<String, Overdue>, Option<f64>) {
+/// What the sources' files say, all read at once.
+pub struct Watch {
+    /// Every stall there is now, by sid.
+    pub found: BTreeMap<String, Overdue>,
+    /// When the next item falls due.
+    pub due: Option<f64>,
+    /// The (source, key) of each item a run is at work on (`refresh`),
+    /// overdue or not: a stall of one hasn't moved until that run has ended.
+    pub under_way: BTreeSet<(String, String)>,
+}
+
+/// What every source waits on now. A source with no watch file to read is
+/// noted in `missing`, since when.
+pub fn overdue(cfg: &Config, now: f64, missing: &mut BTreeMap<String, f64>) -> Watch {
     let mut found = BTreeMap::new();
+    let mut under_way = BTreeSet::new();
     let mut due: Vec<f64> = Vec::new();
     for (name, src) in &cfg.sources {
         let got = watched(src);
@@ -192,6 +201,9 @@ pub fn overdue(
             {
                 continue;
             }
+            if it.refresh {
+                under_way.insert((name.clone(), key.clone()));
+            }
             if it.due <= now {
                 found.insert(
                     sid(name, &key, it.since),
@@ -207,7 +219,11 @@ pub fn overdue(
             }
         }
     }
-    (found, due.into_iter().reduce(f64::min))
+    Watch {
+        found,
+        due: due.into_iter().reduce(f64::min),
+        under_way,
+    }
 }
 
 #[cfg(test)]

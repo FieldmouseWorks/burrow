@@ -20,7 +20,8 @@
 //! each stall a step further, and no further while that step has time left:
 //!
 //!   1. An item that names a kick is kicked: a delivery GitHub never made,
-//!      say, costs a pass, not a job. It's looked at again GRACE later.
+//!      say, costs a pass, not a job. Items that share a kick share one. It's
+//!      looked at again GRACE later.
 //!   2. Still stuck: one Claude job (proj, in the machine's own project,
 //!      ahead of the line) gets every stall that's ready, to find why and get
 //!      it moving. Not a turn only waiting for a slot (`line`), which that job
@@ -49,6 +50,8 @@
 //! source stale a while, say), it carries on from where it had got to, its
 //! notice still open. The hourly catch-up's pass is the latest a retry waits.
 //!
+//! A stall whose item a run has taken up (`refresh`) hasn't cleared: it
+//! waits as it was, its kick, job and issue entry kept, till the run ends.
 //! A stall that clears is otherwise forgotten, and so is all it escalated,
 //! its job withdrawn the same way if it never got a slot. A
 //! job that finds an item legitimately still under way (a long build, a busy

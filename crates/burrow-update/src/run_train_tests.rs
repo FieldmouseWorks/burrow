@@ -431,7 +431,7 @@ fn main_not_building_with_a_pr_open_never_falls_back_to_a_bump() {
     m.upstream("burrow", &sha('e'));
     fs::write(m.home("build-breaks"), sha('b')).unwrap();
     let mut gh = open_at(&head, &[false]);
-    assert_eq!(once(&m.cfg, &mut gh, false), 1);
+    assert_eq!(once(&m.cfg, &mut gh, false), VERDICT);
     assert_eq!(
         said(&m),
         ("failed".into(), "main itself doesn't build".into())

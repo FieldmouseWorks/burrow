@@ -750,6 +750,10 @@ in
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${updateTool}/bin/${update}";
+          # A tree that fails is a verdict (crates/burrow-update's VERDICT),
+          # kept as the unit's success: burrow-events would retry a failed
+          # unit on the same trees, and burrow-units hand it to a second job.
+          SuccessExitStatus = "3";
           TimeoutStartSec = "4h";
           Nice = 10;
         };

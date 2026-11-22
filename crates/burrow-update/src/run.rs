@@ -33,7 +33,7 @@ use crate::memo::Memo;
 use crate::running::{self, Already, Running};
 use crate::status::{Outcome, epoch, note};
 use crate::train::{self, Pr};
-use crate::{Broke, Config, is_name, push};
+use crate::{Broke, Config, VERDICT, is_name, push};
 
 /// How long a run holds off for a system that isn't main's before the
 /// owner hears of it.
@@ -226,6 +226,19 @@ impl Run<'_> {
     pub(crate) fn end(&self, outcome: Outcome, message: &str) -> End {
         note(self.cfg, outcome, message, self.behind, self.off_main);
         End::Exit(if outcome == Outcome::Failed { 1 } else { 0 })
+    }
+
+    /// Says the run failed on its trees' own word (one doesn't build, or
+    /// fails a VM test), which the memo keeps, and ends it with [`VERDICT`].
+    pub(crate) fn verdict(&self, message: &str) -> End {
+        note(
+            self.cfg,
+            Outcome::Failed,
+            message,
+            self.behind,
+            self.off_main,
+        );
+        End::Exit(VERDICT)
     }
 
     pub(crate) fn git(&self, args: &[&str]) -> Result<String, Broke> {
@@ -541,7 +554,7 @@ impl Run<'_> {
             // Best effort: a failure to remember only means a rebuild.
             let _ = self.memo.failed("build");
         }
-        let e = self.end(Outcome::Failed, "main itself doesn't build");
+        let e = self.verdict("main itself doesn't build");
         self.dispatch(
             "build-main",
             &format!(

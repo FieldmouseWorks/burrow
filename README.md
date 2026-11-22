@@ -124,7 +124,9 @@ Each has an entry below, and each can be imported on its own.
   Code, builds, runs your VM tests, switches with the dead man's switch,
   compares health checks before and after (`HOST-health`), confirms and pushes
   to main (as a PR the merge train lands, when the flake's repo has its train
-  on); anything that breaks reverts and goes to a Claude job. It deploys main
+  on); anything that breaks reverts and goes to a Claude job. A tree that won't
+  build or fails a VM test is a verdict, not a failed unit: the next run is
+  the next push's or the hour's, not a retry. It deploys main
   too, so a merged PR goes live the same way. It never tests or switches to a
   main that has moved on: it looks again before each VM test (and in its
   heavy slot) and before the switch, and starts over from the new head. The `proj-config` health check
@@ -382,7 +384,8 @@ Each has an entry below, and each can be imported on its own.
   hold), due at once when one of its steps has failed three times in a row;
   proj, every job's turn waiting in line (`proj.stallAfterMinutes`), running
   past its timeout, awaiting GitHub past `awaitHours`, or ended without
-  saying what comes next or in a failure (at once). Past a deadline it kicks that item's pass, then hands
+  saying what comes next or in a failure (at once). Past a deadline it kicks that item's pass (one kick for
+  all that share it, and no more while the runs it starts fail the same wait), then hands
   every stall that's ready to one Claude job ahead of proj's line, then puts
   what's still stuck on the steward's stuck issue, whose own `--unstick` job
   takes it from there. A job of its own that's still waiting for a slot once
