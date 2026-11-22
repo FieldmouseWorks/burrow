@@ -46,7 +46,7 @@ let
   # settings --events-config`), as the flow configurations are.
   # burrow-landing narrows `repos` and `flow_config` to the ones it gives.
   flowConfigs = lib.genAttrs cfg.conaryd autoland.flow.config;
-  flowBases = lib.genAttrs cfg.conaryd (r: autoland.flow.base.entries."${lib.toLower r}.json");
+  flowBases = lib.genAttrs cfg.conaryd autoland.flow.file;
   template = pkgs.runCommand "conaryd-events.json" {
     events = builtins.toJSON {
       listen = "127.0.0.1:${toString cfg.port}";

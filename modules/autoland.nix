@@ -686,7 +686,7 @@ in
         inherit credentials;
         token = "${steward}/bin/autoland-steward token";
         config = shadow.liveFile;
-        inherit (shadow) needs judgeKey render base;
+        inherit (shadow) needs judgeKey render base file;
       };
       description = ''
         What runs Conary's flow as the steward's App (autoland/landing.nix):
