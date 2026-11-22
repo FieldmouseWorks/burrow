@@ -67,7 +67,7 @@ impl TreeSource {
             "--ignore-submodules=untracked",
         ]))?;
         if !changed.is_empty() {
-            return Err(err(format!(
+            return Err(failed(format!(
                 "gate-reuse checks the committed tree, and this checkout has changes it doesn't hold; commit them, or check without gate-reuse:\n{changed}"
             )));
         }

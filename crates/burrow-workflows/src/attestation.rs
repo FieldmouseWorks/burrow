@@ -3,8 +3,8 @@
 //! token, whose audience names the digest of the statement it keeps beside
 //! the token (FieldmouseWorks/Conary, docs/ci-attestation.md), the only
 //! evidence Conary's train reads, a public repo's too, whose result
-//! actions/attest also bundles; a failed gate is attested as failed, and a
-//! run with no OIDC token attests nothing. With legs, no leg attests: the
+//! actions/attest also bundles; a gate a check failed is attested as failed,
+//! one that broke as an error, and a run with no OIDC token attests nothing. With legs, no leg attests: the
 //! gate job does, with the same steps, and passes only when every leg passed
 //! on its commit, each sharing out one plan, its log the legs' own, each as
 //! its leg wrote it.
@@ -123,6 +123,9 @@ impl Repo {
     fn run(&self, c: Case) -> Attested {
         let runner_temp = self.s.mkdtemp();
         write(&runner_temp.join("flake.log"), "checks passed\n");
+        if let Some(said) = c.said {
+            write(&runner_temp.join("gate-result"), said);
+        }
         let curl_log = runner_temp.join("curl.log");
         write(&curl_log, "");
         let sha = self.rev("HEAD");
@@ -185,6 +188,8 @@ impl Repo {
 /// it says otherwise. Public or private, a repo's run signs the same.
 struct Case<'a> {
     outcome: &'a str,
+    /// What the gate left in gate-result, if it left anything.
+    said: Option<&'a str>,
     event: &'a str,
     oidc: bool,
     token_fails: bool,
@@ -200,6 +205,7 @@ impl Default for Case<'_> {
     fn default() -> Self {
         Case {
             outcome: "success",
+            said: None,
             event: "push",
             oidc: true,
             token_fails: false,
@@ -284,17 +290,47 @@ fn a_push_attests_with_its_own_token() {
     assert_eq!(p["log"]["artifact"], a.outputs["log"].as_str());
 }
 
-/// A failed gate is attested too, as failed.
+/// A gate a check failed is attested too, as failed.
 #[test]
 fn a_failed_gate_attests_a_fail() {
     let r = Repo::new();
     let a = r.run(Case {
         outcome: "failure",
+        said: Some("fail\n"),
         ..Case::default()
     });
     assert_eq!(a.code, 0);
     let (statement, _) = statement_of(a.attested.as_deref().expect("an attestation"));
     assert_eq!(predicate(&statement, 2)["result"], "fail");
+}
+
+/// Any other gate that didn't pass is an error, with the reason it left or
+/// that it left none (#1400): only a whole `fail` is a fail.
+#[test]
+fn a_gate_that_didnt_say_fail_attests_an_error() {
+    const NONE: &str = "the gate ended without saying a check failed";
+    for (said, why) in [
+        (None, NONE),
+        (Some(""), NONE),
+        (Some("fai"), NONE),
+        (
+            Some("error couldn't write \"its\" log: 100% full\n"),
+            "couldn't write \"its\" log: 100% full",
+        ),
+    ] {
+        let r = Repo::new();
+        let a = r.run(Case {
+            outcome: "failure",
+            said,
+            ..Case::default()
+        });
+        assert_eq!(a.code, 0, "{}", a.said);
+        let (statement, _) = statement_of(a.attested.as_deref().expect("an attestation"));
+        let p = predicate(&statement, 2);
+        assert_eq!(p["result"], "error", "{said:?}");
+        let error = p["error"].as_str().unwrap_or_default();
+        assert!(error.starts_with(why), "{said:?}: {error}");
+    }
 }
 
 /// No OIDC token: nothing attested, and the job goes on.
@@ -539,12 +575,14 @@ struct Legs<'a> {
     other_plan: Option<usize>,
     /// Who stopped before it read the plan.
     no_plan: Option<usize>,
+    /// What legs' gates left in their gate-result.
+    said: &'a [(usize, &'a str)],
 }
 
 /// Each leg's step, then the gate job's, as GitHub gives it the legs'
 /// combined outputs and their artifacts: its exit code, what it said and the
 /// log it leaves to attest.
-fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
+fn legs(r: &Repo, l: Legs) -> (i32, String, String, String) {
     let wf = workflow(".github/workflows/flake-check.yml");
     let leg_step = step(&wf["jobs"]["check"], "leg");
     let verdict = step(&wf["jobs"]["gate"], "gate");
@@ -554,6 +592,9 @@ fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
     for k in 1..=LEGS {
         let leg_temp = r.s.mkdtemp();
         write(&leg_temp.join("flake.log"), LOGS[k - 1]);
+        if let Some((_, said)) = l.said.iter().find(|(j, _)| *j == k) {
+            write(&leg_temp.join("gate-result"), said);
+        }
         if l.no_plan != Some(k) {
             let plan = if l.other_plan == Some(k) {
                 r#"{"entries": []}"#
@@ -591,7 +632,7 @@ fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
             continue;
         }
         let value = said[mine.as_str()];
-        let [name_, sha, checked, plan] = value.split(' ').collect::<Vec<_>>()[..] else {
+        let [name_, _, checked, plan, ..] = value.split(' ').collect::<Vec<_>>()[..] else {
             panic!("{value}")
         };
         assert!(name_ == name && checked == commit, "{value}");
@@ -606,7 +647,7 @@ fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
         assert_eq!(plan, want_plan, "{value}");
         let mut value = value.to_owned();
         if l.wrong_commit == Some(k) {
-            value = format!("{name} {sha} {} {plan}", "0".repeat(40));
+            value = value.replace(checked, &"0".repeat(40));
         }
         if l.rename == Some(k) {
             value = value.replacen(&format!("leg-{k}-"), "leg-9-", 1);
@@ -637,7 +678,18 @@ fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
             ("OUTPUTS", &outputs),
         ],
     );
-    (ran.code, ran.said(), read(&runner_temp.join("flake.log")))
+    let result = runner_temp.join("gate-result");
+    let result = if result.exists() {
+        read(&result)
+    } else {
+        String::new()
+    };
+    (
+        ran.code,
+        ran.said(),
+        read(&runner_temp.join("flake.log")),
+        result,
+    )
 }
 
 /// The gate job's log when every leg's is its own: each, under its name.
@@ -652,7 +704,7 @@ fn all_logs() -> String {
 fn with_legs_the_gate_job_passes_when_every_leg_did() {
     let r = Repo::new();
     r.merge_a_pr();
-    let (code, said, log) = legs(&r, Legs::default());
+    let (code, said, log, _) = legs(&r, Legs::default());
     assert_eq!(code, 0, "{said}");
     assert_eq!(log, all_logs());
 }
@@ -730,10 +782,70 @@ fn a_leg_that_failed_or_cant_be_held_to_its_log_fails_the_gate_job() {
             true,
         ),
     ] {
-        let (code, said, log) = legs(&r, l);
+        let (code, said, log, _) = legs(&r, l);
         assert!(code != 0 && said.contains(why), "{why}: {code} {said}");
         if own_logs {
             assert_eq!(log, all_logs(), "{why}");
         }
     }
+}
+
+/// The gate job says `fail` only for a leg that said a check failed, in a log
+/// and on a commit it can hold it to; what else fails it is an error, named.
+#[test]
+fn with_legs_only_a_legs_failed_check_is_a_fail() {
+    const FULL: &str = "error couldn't write its log: No space left on device\n";
+    let r = Repo::new();
+    r.merge_a_pr();
+    let failed = |said| Legs {
+        result: Some("failure"),
+        said,
+        ..Legs::default()
+    };
+    for (l, want) in [
+        (failed(&[(2, "fail\n")]), "fail"),
+        (failed(&[(1, FULL), (3, "fail\n")]), "fail"),
+        (
+            Legs {
+                no_plan: Some(1),
+                ..failed(&[(1, "fail\n")])
+            },
+            "fail",
+        ),
+        (
+            failed(&[(2, FULL)]),
+            "error leg 2 of 3: couldn't write its log: No space left on device",
+        ),
+        (
+            failed(&[]),
+            "error the legs ended in failure, and none said a check failed",
+        ),
+        (
+            Legs {
+                missing: Some(2),
+                ..failed(&[])
+            },
+            "error leg 2 of 3 left no log",
+        ),
+        (
+            Legs {
+                tamper: Some(2),
+                ..failed(&[(2, "fail\n")])
+            },
+            "error leg 2 of 3: its log here isn't the one it wrote",
+        ),
+        (
+            Legs {
+                wrong_commit: Some(2),
+                ..failed(&[(2, "fail\n")])
+            },
+            "error leg 2 of 3 checked 0000",
+        ),
+    ] {
+        let (code, said, _, result) = legs(&r, l);
+        assert_ne!(code, 0, "{want}: {said}");
+        assert!(result.starts_with(want), "{want}: {result} {said}");
+    }
+    let (code, said, _, result) = legs(&r, Legs::default());
+    assert!(code == 0 && result.is_empty(), "{said} {result}");
 }
