@@ -315,8 +315,8 @@ fn copy_in(config: &Value) -> Result<Option<(f64, Reading)>, String> {
         return Ok(None);
     };
     let copy = &config["cachedUsageUtilization"];
-    let account = &config["oauthAccount"]["accountUuid"];
-    if !account.is_string() || copy["accountUuid"] != *account {
+    let logged_in = &config["oauthAccount"]["accountUuid"];
+    if !logged_in.is_string() || copy["accountUuid"] != *logged_in {
         return Ok(None);
     }
     reading(&copy["utilization"]).map(|r| Some((at, r)))

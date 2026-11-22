@@ -140,7 +140,7 @@ pub struct Outcome {
 /// good before the reset's yes is pressed, so a pass cut off after pressing
 /// it can't leave the next one free to press another.
 pub fn pass(
-    account: &mut impl Account,
+    meter: &mut impl Account,
     keep: &mut impl FnMut(&State) -> Result<(), String>,
     mut state: State,
     below: f64,
@@ -151,8 +151,8 @@ pub fn pass(
     // Other readers of the account share its endpoint's rate limit, so it
     // often refuses, or isn't asked for a minute after one read it: what
     // the last of them read stands in then, when it can.
-    let read = account.read().map(|r| (now, r, false)).or_else(|e| {
-        account
+    let read = meter.read().map(|r| (now, r, false)).or_else(|e| {
+        meter
             .copy()
             .filter(|(at, copy)| shows_room(&state, *at, copy, below, now))
             .map(|(at, copy)| (at, copy, true))
@@ -231,11 +231,11 @@ pub fn pass(
             unsettled: Some(then.clone()),
             ..state.clone()
         };
-        match account.reset(&mut || keep(&reserved)) {
+        match meter.reset(&mut || keep(&reserved)) {
             Reset::Pressed(said) => {
                 then.said = Some(said);
                 state.pressed = true;
-                match account.read() {
+                match meter.read() {
                     Ok(r) => {
                         settle(&mut state, &mut notices, &then, &r);
                         reading = r;

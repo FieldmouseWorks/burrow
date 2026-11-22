@@ -299,11 +299,11 @@ fn only_a_config_showing_no_copy_counts_as_none() {
     assert!(copied_in(&json!({"cachedUsageUtilization": {}})).is_err());
 }
 
-/// Claude Code's config as 2.1.330 keeps it, logged in to ACCOUNT, with a
+/// Claude Code's config as 2.1.330 keeps it, logged in to UUID, with a
 /// copy of its endpoint's answer for OWNER fetched at AT.
-fn config_with(account: &str, owner: &str, at: f64, used: f64) -> Value {
+fn config_with(uuid: &str, owner: &str, at: f64, used: f64) -> Value {
     json!({
-        "oauthAccount": {"accountUuid": account},
+        "oauthAccount": {"accountUuid": uuid},
         "cachedUsageUtilization": {
             "fetchedAtMs": at * 1000.0,
             "accountUuid": owner,
@@ -361,12 +361,12 @@ impl Account for Answers {
 }
 
 fn pass_over(answers: Vec<(Value, Option<f64>)>, state: State) -> (Outcome, usize) {
-    let mut account = Answers {
+    let mut answers = Answers {
         answers,
         pressed: 0,
     };
-    let o = pass(&mut account, &mut |_| Ok(()), state, 2.0, NOW, "now");
-    (o, account.pressed)
+    let o = pass(&mut answers, &mut |_| Ok(()), state, 2.0, NOW, "now");
+    (o, answers.pressed)
 }
 
 #[test]
