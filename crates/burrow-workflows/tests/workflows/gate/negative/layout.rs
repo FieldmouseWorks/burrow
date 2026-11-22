@@ -106,7 +106,7 @@ fn survey(root: &Path) -> Survey {
 /// so a change to them got no negative (#1406), and crates with code had
 /// test modules and helpers named for what they test (#1407). The other way
 /// round, burrow-update's VM tests' code was named as a test, so a fix to it
-/// went to the old code along with its tests (#1415).
+/// would have gone to the old code along with its tests (#1415).
 #[test]
 fn the_negative_tells_tests_from_code() {
     let Survey {

@@ -5,7 +5,7 @@
 //!
 //! - run.rs: the run, in order: a clean copy of main, whether the box runs
 //!   it, the bump, the build, then
-//! - vm_tests.rs: the VM tests, and the security fixes that can go live
+//! - vm_checks.rs: the VM tests, and the security fixes that can go live
 //!   without one main fails too
 //! - live.rs: live, with the dead man's switch, healthy and confirmed
 //! - bump.rs: what's new upstream, brought into the clone and committed
@@ -38,7 +38,7 @@ pub mod run;
 mod running;
 pub mod status;
 mod train;
-mod vm_tests;
+mod vm_checks;
 
 #[cfg(test)]
 #[path = "testing_tests.rs"]
