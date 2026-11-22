@@ -12,7 +12,7 @@ burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
 # Conary's seal: the MAC a major's verdict carries, which the steward and
 # conaryd check it with.
-conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "437b4f306ad48b6b76e2ddb3470c1e2a47c87a5e" }
+conary-github.workspace = true
 jiff.workspace = true
 md-5 = "0.11.0"
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl"] }
