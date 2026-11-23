@@ -245,19 +245,23 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     assert_eq!(hub.major(KEY), None);
     hub.say(BOT_REST, &ok);
     assert_eq!(hub.major(KEY), Some(Major::Cleared));
-    // The sweep reads it as conaryd does: an ok major no steward merges,
-    // listed for the owner, and not handed over again.
+    // The sweep reads it as conaryd does: an ok major that conaryd lands,
+    // which no notice lists for the owner, and isn't handed over again.
     m.comments(1, &[marked(BOT, &ok)]);
     let p = m.pass();
     assert!(p.jobs.is_empty(), "{:#?}", p.jobs);
+    assert_eq!(p.majors(), ("close", "No major updates waiting."));
+    // Held, posted after it (a generation on), holds it, and the owner
+    // hears of it.
+    hub.say(BOT_REST, &held);
+    assert_eq!(hub.major(KEY), Some(Major::Held));
+    m.comments(1, &[marked(BOT, &ok), marked(BOT, &held)]);
+    let p = m.pass();
     assert!(
         p.majors().1.contains("Update foo1 to v2"),
         "{:?}",
         p.majors()
     );
-    // Held, posted after it (a generation on), holds it.
-    hub.say(BOT_REST, &held);
-    assert_eq!(hub.major(KEY), Some(Major::Held));
     // Someone else's copy of a marker is no verdict at all.
     let other = Hub::new(1, body);
     other.say("mallory", &ok);
@@ -334,12 +338,13 @@ fn a_description_edit_or_a_change_of_hands_hands_it_over_again() {
     hub.say(BOT_REST, &ok2);
     assert_eq!(hub.major(KEY), Some(Major::Cleared));
     // A v1 verdict on its head doesn't count where conaryd lands: it reads
-    // none, and nor does the sweep.
-    m.comments(1, &[m.verdict(1, "ok", "main", BOT)]);
+    // none, and nor does the sweep, which lists no held one and hands it
+    // over once its description moves on.
+    m.comments(1, &[m.verdict(1, "held", "main", BOT)]);
     m.prs(&[described(1, "three")]);
     let p = m.pass();
     assert_eq!(p.jobs.len(), 1);
-    assert!(!p.majors().1.contains("Update foo1"), "{:?}", p.majors());
+    assert_eq!(p.majors(), ("close", "No major updates waiting."));
 }
 
 /// Where the steward lands (the record says so, or is handing the repo

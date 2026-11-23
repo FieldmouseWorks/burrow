@@ -29,7 +29,7 @@
 //! the PR's revision (its description too) and a generation, and the
 //! sweep reads them back as the flow does. The owner gets one
 //! notice listing the held ones, as waiting on a decision, and the ok ones
-//! no steward will merge.
+//! no steward or conaryd will merge.
 //!
 //! Security fixes (Renovate's `security` label) merge themselves even when
 //! they're majors: none is asked for a verdict or waits for one. A red one
@@ -550,6 +550,7 @@ impl Sweep<'_> {
             && verdict == "ok"
             && !on_hold
             && !self.info.covered
+            && !self.conaryd
             && red == 0
             && pending == 0
         {
