@@ -15,7 +15,7 @@ in
     environment.systemPackages = with pkgs; [
       # VCS. gh and git-lfs are github.nix's, which know an App's env, where
       # there is one.
-      (config.burrow.tools.gh or gh)
+      config.burrow.tools.gh
       (config.burrow.tools.git-lfs or git-lfs)
     ] ++ tools.system ++ tools.toolchains ++ [
       # VMs and backups

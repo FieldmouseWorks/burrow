@@ -142,72 +142,8 @@ fn status(cfg: &Config, inbox: &Inbox) {
     }
 }
 
-/// `proj plan done OWNER/REPO#N PR-URL`: one of the inbox's authors, on the
-/// host and never from a job, records the merged PR that landed a task
-/// list's child, and the list moves on at its repo's next pass. The author
-/// is the GitHub account the caller's own gh answers as.
-pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
-    let [done, child, pr] = args else {
-        return Err(Fail::new(2, plans::PLAN_USAGE));
-    };
-    if done != "done" {
-        return Err(Fail::new(2, plans::PLAN_USAGE));
-    }
-    if std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty()) {
-        return Err(Fail::new(
-            2,
-            "proj plan done is the host's, for an author: a job never records a landed PR",
-        ));
-    }
-    let inbox = cfg
-        .inbox
-        .as_ref()
-        .filter(|i| i.planning)
-        .ok_or_else(|| Fail::new(1, "proj plan done: inbox planning isn't on here"))?;
-    let caller = crate::github::reported(burrow_github::call_repeating(
-        &mut burrow_github::Gh::default(),
-        "GET",
-        "user",
-        None,
-    ))
-    .and_then(|r| r.json().ok())
-    .and_then(|v| v["id"].as_u64());
-    // Under the pass lock, as passes and `forget` are: the child's place on
-    // its list and the record land together, with no pass writing beside it.
-    let lock = PathBuf::from(format!("{}.lock", inbox.wake.display()));
-    let held = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&lock)
-        .map_err(|e| io_fail(&lock, e))?;
-    let Some(held) = Held::lock_within(held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? else {
-        return Err(Fail::new(
-            1,
-            "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
-        ));
-    };
-    let permit = resumption::Permit::pass(held);
-    let p = Pass {
-        cfg,
-        inbox,
-        project: projects(cfg),
-        wake: BTreeMap::new(),
-        unreached: Vec::new(),
-        looked: Vec::new(),
-        observe: false,
-        scope: None,
-        drain_at: None,
-        skipped: Vec::new(),
-    };
-    let repo = p.plan_done(child, pr, caller)?;
-    drop(permit);
-    crate::job::kick(cfg, [format!("proj-inbox/{repo}")]);
-    println!(
-        "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
-    );
-    Ok(())
-}
-
+mod plan_door;
+pub use plan_door::plan;
 mod dirs;
 use dirs::dirs;
 mod forget;
@@ -946,6 +882,7 @@ mod drain;
 pub(crate) mod enrollment;
 pub(crate) use drain::job_paused;
 mod jobs;
+mod maintained;
 mod plans;
 pub(crate) mod resumption;
 mod retirement;

@@ -83,7 +83,8 @@ on:
           Evaluate each check, package, dev shell, formatter and NixOS system
           in a nix process of its own (as many side by side as the runner has
           cores, while each has 2G of the memory free to the job, its
-          cgroups' limits counted), then build the checks, rather than the
+          cgroups' limits counted, and one stopped to run again alone
+          should a bigger one run it out), then build the checks, rather than the
           checks in one process and then everything in one
           `nix flake check`.
           For a flake whose evaluations don't fit in its runner's memory

@@ -207,6 +207,8 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs config.programs.git.package pkgs.acl pkgs.krb5 pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
+    # ann runs `gh auth setup-git` on a login of her own.
+    users.users.ann = { isNormalUser = true; };
     # carol becomes one of its users with a switch, while her user manager,
     # and so every unit under it, runs from before.
     users.users.carol = { isNormalUser = true; uid = 1002; linger = true; };
@@ -886,5 +888,16 @@ pkgs.testers.runNixOSTest {
           allowed(carol)
           switch(None)
           denied(carol)
+
+      with subtest("gh's git helper names a gh that outlives the store's collection"):
+          # `gh auth setup-git` cuts off the system's helpers with a blank one,
+          # so the gh it names is git's only way in (burrow#1464).
+          def ann(command):
+              return "su - ann -c " + shlex.quote(command)
+          machine.succeed(ann("mkdir -p ~/.config/gh && cp /etc/dev/hosts.yml ~/.config/gh/ && gh auth setup-git"))
+          helpers = machine.succeed(ann("git config --global --get-all credential.https://github.com.helper")).splitlines()
+          assert helpers == ["", "!/run/current-system/sw/bin/gh auth git-credential"], helpers
+          out = machine.succeed(ann("printf 'protocol=https\\nhost=github.com\\npath=sam/r.git\\n\\n' | git credential fill"))
+          assert "password=peter-token" in out, out
     '';
 }

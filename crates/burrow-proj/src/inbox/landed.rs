@@ -1,14 +1,17 @@
 //! When a task list's child is done: a merged PR is tied to it
-//! (docs/task-planning.md). Tied is a closing reference from any repo, a PR
-//! the child's own job awaited before it said `proj done`, the one its
-//! task names it to carry (`carries`, read from the parent's list), or one
-//! an author recorded with `proj plan done`. The host keeps the second and
-//! last in the child's plan folder, and only the host writes them: `awaited`, every PR
-//! or issue the job awaited, once the child is closed and the pass has
-//! accepted the job's completion ([`declared_done`] and the issue as it was
-//! handed it); `landed`, from `proj plan done` outside any job, under the
-//! inbox's pass lock. An awaited one counts once it has merged, whenever
-//! that is, and a reopened child drops what its earlier job awaited.
+//! (docs/task-planning.md), or an author recorded that its closure needed
+//! none. Tied is a closing reference from any repo, a PR the child's own
+//! job awaited before it said `proj done`, the one its task names it to
+//! carry (`carries`, read from the parent's list), or one an author
+//! recorded with `proj plan done`. The host keeps the second and the
+//! author's records in the child's plan folder, and only the host writes
+//! them: `awaited`, every PR or issue the job awaited, once the child is
+//! closed and the pass has accepted the job's completion ([`declared_done`]
+//! and the issue as it was handed it); `landed` and `no-pr`, from `proj
+//! plan done` outside any job, under the inbox's pass lock (plan_done.rs).
+//! An awaited one counts once it has merged, whenever that is, and a
+//! reopened child drops what its earlier job awaited, as it drops a
+//! `no-pr`: both count only on the closure they were kept on.
 //!
 //! A child closed as continued elsewhere (an author's comment on it with a
 //! line `Continued as OWNER/REPO#N`) hands its place to that issue: the list
@@ -19,7 +22,7 @@ use super::{CHANGED, List, Pass, key};
 use crate::inbox::record::files;
 use crate::planning::reference;
 use crate::record::TurnFile;
-use crate::{Fail, job::Job, read, swap};
+use crate::{job::Job, read, swap};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
 
@@ -29,6 +32,10 @@ const LANDED: &str = "landed";
 /// What the child's finished job awaited, newest first, kept once the child
 /// closed with that job's completion accepted.
 const AWAITED: &str = "awaited";
+
+/// Why a closed child needed no PR, as an author recorded it, bound to the
+/// closure it was recorded on.
+const NO_PR: &str = "no-pr";
 
 /// How long before a repo is looked at again while a closed child's awaited
 /// PR hasn't merged (a merge elsewhere sends no event here), or while a list
@@ -66,7 +73,7 @@ pub(super) enum Successor {
 /// What a list's child is now ([`Pass::child_now`]).
 #[derive(Debug, PartialEq)]
 pub(super) enum Now {
-    /// Done, by this merged PR.
+    /// Done, by this merged PR (or what an author recorded in its place).
     Landed(String),
     /// Open, with no landing recorded: its own work goes on.
     Open,
@@ -160,17 +167,11 @@ fn continued_as(repo: &str, body: &str) -> Option<(String, u64)> {
     })
 }
 
-/// `https://github.com/OWNER/REPO/pull/N` as `OWNER/REPO#N`.
-fn pull_url(s: &str) -> Option<(String, u64)> {
-    let path = s.trim().strip_prefix("https://github.com/")?;
-    let (repo, n) = path.trim_end_matches('/').rsplit_once("/pull/")?;
-    reference(&format!("{repo}#{n}"))
-}
-
 impl Pass<'_> {
-    /// The merged PR tied to child N: Some(Some(url)) when there is one,
-    /// Some(None) when there's none, None when there may be one GitHub
-    /// couldn't be asked about. A source that can't be read never vetoes
+    /// The merged PR tied to child N: Some(Some(url)) when there is one
+    /// (or, for a closed child an author recorded as needing none, what the
+    /// checklist says instead), Some(None) when there's none, None when
+    /// there may be one GitHub couldn't be asked about. A source that can't be read never vetoes
     /// another that proves it. What a finished job awaited counts only for
     /// the closure it was kept on: `closed` is the child as GitHub has it
     /// now, when closed.
@@ -194,6 +195,9 @@ impl Pass<'_> {
     ) -> Option<Option<String>> {
         if let Some(pr) = self.recorded_landing(repo, n) {
             return Some(Some(pr));
+        }
+        if let Some(done) = closed.and_then(|issue| self.done_without_pr(repo, n, issue)) {
+            return Some(Some(done));
         }
         // A child split again is done when its own list is, and only then.
         if let Ok(bytes) = fs::read(self.plan_dir(repo, &n.to_string()).join("tasks.json"))
@@ -496,9 +500,14 @@ impl Pass<'_> {
         read(&self.plan_dir(repo, &n.to_string()).join(LANDED)).filter(|pr| !pr.is_empty())
     }
 
-    fn record_landing(&self, repo: &str, n: u64, pr: &str) -> bool {
-        let d = self.plan_dir(repo, &n.to_string());
-        fs::create_dir_all(&d).is_ok() && swap(&d.join(LANDED), &format!("{pr}\n")).is_ok()
+    /// What the checklist says of closed child N, `closed` as GitHub has
+    /// it, when an author recorded that it needed no PR on that closure.
+    fn done_without_pr(&self, repo: &str, n: u64, closed: &Value) -> Option<String> {
+        let kept: Value =
+            serde_json::from_str(&read(&self.plan_dir(repo, &n.to_string()).join(NO_PR))?).ok()?;
+        (kept["closure"] == closure(closed)).then_some(())?;
+        let reason = kept["reason"].as_str().filter(|r| !r.trim().is_empty())?;
+        Some(format!("no PR needed: {}", reason.trim()))
     }
 
     /// Whether N is a child on any of the repo's task lists.
@@ -718,7 +727,7 @@ impl Pass<'_> {
                         child.to_string(),
                         format!("{repo}#{parent}'s task list waits on #{child}"),
                         format!(
-                            "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start.{} If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; if it went on elsewhere, an author comments `Continued as OWNER/REPO#N` on #{child}, naming an issue or PR that is neither {repo}#{parent} nor another child of its list; otherwise reopen it.",
+                            "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start.{} If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; if its record was the deliverable and no PR was needed, an author records why with `proj plan done {repo}#{child} --no-pr REASON`; if it went on elsewhere, an author comments `Continued as OWNER/REPO#N` on #{child}, naming an issue or PR that is neither {repo}#{parent} nor another child of its list; otherwise reopen it.",
                             named.map_or_else(String::new, |named| format!(
                                 " Its newest `Continued as` names {named}, which is on this task list itself, so it hands nothing on."
                             )),
@@ -728,7 +737,7 @@ impl Pass<'_> {
                         PAUSED.to_owned(),
                         format!("{repo}#{parent}'s task list is paused"),
                         format!(
-                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
+                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split; an author ends it without closing the parent with `proj plan end {repo}#{parent}` (docs/task-planning.md). The list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
                         ),
                     ),
                 };
@@ -758,61 +767,11 @@ impl Pass<'_> {
             None => {}
         }
     }
-
-    /// `proj plan done`'s work, under the inbox's pass lock: `caller` is the
-    /// GitHub account it runs as. Answers the repo as its clone spells it.
-    pub(crate) fn plan_done(
-        &self,
-        child: &str,
-        pr: &str,
-        caller: Option<u64>,
-    ) -> Result<String, Fail> {
-        let usage = || Fail::new(2, PLAN_USAGE);
-        let (asked, n) = reference(child).ok_or_else(usage)?;
-        // The plans are kept under the repo as its clone spells it.
-        let repo = self
-            .project
-            .keys()
-            .find(|r| r.eq_ignore_ascii_case(&asked))
-            .cloned()
-            .ok_or_else(|| {
-                Fail::new(
-                    1,
-                    format!("proj plan done: {asked} isn't one of this machine's projects"),
-                )
-            })?;
-        let (at, m) = pull_url(pr).ok_or_else(usage)?;
-        if !self.allowed(caller) {
-            return Err(Fail::new(
-                1,
-                "proj plan done: only one of the inbox's authors may record a child's landed PR, and the GitHub account this runs as isn't one",
-            ));
-        }
-        if !self.is_child(&repo, n) {
-            return Err(Fail::new(
-                1,
-                format!("proj plan done: {repo}#{n} isn't a child on any task list"),
-            ));
-        }
-        let issue =
-            crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}")).ok_or_else(|| {
-                Fail::new(1, format!("proj plan done: couldn't read {pr} from GitHub"))
-            })?;
-        let url = merged(&issue).ok_or_else(|| {
-            Fail::new(
-                1,
-                format!("proj plan done: {pr} hasn't merged, so nothing is recorded"),
-            )
-        })?;
-        if !self.record_landing(&repo, n, &url) {
-            return Err(Fail::new(
-                1,
-                format!("proj plan done: couldn't record {repo}#{n}'s landed PR"),
-            ));
-        }
-        Ok(repo)
-    }
 }
+
+#[path = "plan_done.rs"]
+mod door;
+pub(crate) use door::PLAN_USAGE;
 
 /// A merged PR's URL, from its issue as REST gives it.
 fn merged(issue: &Value) -> Option<String> {
@@ -824,21 +783,9 @@ fn merged(issue: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) const PLAN_USAGE: &str = "usage: proj plan done OWNER/REPO#N PR-URL (an author records the merged PR that landed a task list's child)";
-
 #[cfg(test)]
 mod parse_tests {
     use super::*;
-
-    #[test]
-    fn pull_urls() {
-        assert_eq!(
-            pull_url("https://github.com/sam/box/pull/10"),
-            Some(("sam/box".into(), 10))
-        );
-        assert_eq!(pull_url("https://github.com/sam/box/issues/10"), None);
-        assert_eq!(pull_url("https://example.com/sam/box/pull/10"), None);
-    }
 
     #[test]
     fn continuations() {

@@ -132,12 +132,15 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode, flaky: Option<&Flaky>)
     fs::create_dir(&evals)?;
     let side = memory::side();
     println!("{} outputs to evaluate, {side} side by side", mine.len());
-    let results = memory::parallel(&mine, side, |i| -> Result<Option<Check>> {
+    let results = memory::parallel(&mine, side, |i, slot| -> Result<Option<Check>> {
         let entry = jq(entries.as_bytes(), &format!(".[{i}]"))?;
         let what = jq(entry.as_bytes(), ".what")?;
         let mut log = format!("evaluating {what}\n");
         let result = (|| -> Result<Option<Check>> {
-            let o = output(evaluate(&flake, &system, &format!("entry = {i};"), mode))?;
+            let o = slot.output(
+                evaluate(&flake, &system, &format!("entry = {i};"), mode),
+                &format!("evaluating {what}"),
+            )?;
             log.push_str(&String::from_utf8_lossy(&o.stderr));
             if !verdict::passed("nix eval", o.status)? {
                 return Err(failed("evaluation failed"));

@@ -77,7 +77,15 @@ OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
 pass lock. It refuses inside a job, a GitHub account outside
 `inbox.authors`, a repo that isn't one of the machine's projects and a PR
 that hasn't merged; the next pass advances the list and closes the child
-if it's still open. A child whose work went on in another issue hands
+if it's still open. A child whose deliverable was a record or a judgment
+rather than a PR is done the same way once it's closed: an author runs
+`proj plan done OWNER/REPO#N --no-pr REASON` (`.plans/OWNER_REPO-N/no-pr`),
+with the same refusals, and one more for a child that's still open. The
+reason is kept bound to the closure it was recorded on (when it closed,
+and its title and body then), as a job's awaits are: a child reopened,
+edited or closed again before a pass ticks it drops it and waits as a hand
+close does. The checklist shows the child ticked with "no PR needed" and
+the reason. A child whose work went on in another issue hands
 its place to that issue: an author comments on the closed child with a
 line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
 newest comment with such a line counts, and only as `written` verifies it,
@@ -110,6 +118,18 @@ list as it goes, a status or an acceptance, never scope: it neither pauses
 the list nor has it replanned. No replan starts while a live job's brief
 names the parent (a child's always does), and `proj why` then names that
 job as what the parent waits on.
+
+A list can also end without closing its parent: its tasks and children are
+kept on disk as retained history, so none of its children starts again, its
+checklist says no task is left, and its pause and the owner's notice go. An
+author ends one from the host with `proj plan end OWNER/REPO#N` (one wrongly
+split, or whose parent is a tracker), under the same refusals as `proj plan
+done`; the parent's text as it reads then is what the list ended on. An
+issue whose body a bot maintains, Renovate's Dependency Dashboard opened by
+a bot account first among them, is never one piece of work: it is `tracker`
+by rule without a planner, never split, and a list split from one before
+that held ends at its repo's next pass instead of pausing for good on the
+bot's next edit.
 
 Each child creation has a durable receipt marker. A lost creation response
 is reconciled against all issues, including closed ones, before any further

@@ -75,7 +75,7 @@ in
         app = if machineApp == null then null else machineApp.name;
         timeout = "${toString autoland.jobTimeoutMinutes}m";
         idle = "${toString autoland.jobIdleMinutes}m";
-        gh = lib.getExe (config.burrow.tools.gh or pkgs.gh);
+        gh = lib.getExe config.burrow.tools.gh;
         state = "${stateDir}/fix";
       };
       description = "What the plugin and the broker read.";

@@ -99,7 +99,7 @@ let
 
   # gh as everyone runs it: the App's token when GH_TOKEN_SOCKET asks for
   # one, the user's own login otherwise (client.rs).
-  apiGh = pkgs.gh.overrideAttrs (old: {
+  apiGh = (import ./github/gh.nix pkgs).overrideAttrs (old: {
     patches = (old.patches or []) ++ [ ../patches/gh-quota-responses.patch ];
     postBuild = (old.postBuild or "") + ''
       go test ./api -run '^TestBurrowQuotaResponses$'
