@@ -24,13 +24,17 @@ impl Waiting {
         let Ok(mut file) = OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&path)
         else {
             return Waiting(None);
         };
-        if writeln!(file, "{what}").is_err()
-            || flock(&file, FlockOperation::NonBlockingLockExclusive).is_err()
+        // Locked before it says anything, and blocking: proj's reader takes
+        // the lock only for a moment, and a nonblocking attempt that lost
+        // to it would drop the registration while the run still waits.
+        if flock(&file, FlockOperation::LockExclusive).is_err()
+            || file.set_len(0).is_err()
+            || writeln!(file, "{what}").is_err()
         {
             let _ = fs::remove_file(&path);
             return Waiting(None);
