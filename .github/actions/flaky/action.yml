@@ -31,7 +31,10 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}/../../../crates
       env:
+        # Its intermediates too, which .cargo's build-dir would put in
+        # the checkout.
         CARGO_TARGET_DIR: ${{ runner.temp }}/flaky-build
+        CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/flaky-build
       run: cargo build --release --locked --quiet -p flaky
     - name: Run flaky's step
       shell: bash

@@ -53,7 +53,10 @@ jobs:
         shell: bash
         working-directory: .codeql-pick/crates
         env:
+          # Its intermediates too, which .cargo's build-dir would put in
+          # the checkout.
           CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-pick
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/codeql-pick
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
