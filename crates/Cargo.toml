@@ -32,6 +32,7 @@ members = [
     "burrow-keep",
     "burrow-ledger-access",
     "burrow-ledger-door",
+    "burrow-ledger-sync",
     "burrow-notify",
     "burrow-probe",
     "burrow-proj",
