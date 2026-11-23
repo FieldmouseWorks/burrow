@@ -8,7 +8,6 @@ use conary_core::plugin::{
     Model, Negotiated, Next, Offers, Provenance, Response, Sandbox,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn capabilities() -> Capabilities {
     Capabilities {
@@ -58,25 +57,16 @@ fn job_response() -> Response {
     }
 }
 
-/// A plugin that answers every request with `described`, installed by a
-/// child so no writable descriptor of it is ever open in this process.
+/// A plugin that answers every request with `described`, installed by the
+/// child installer so no writable descriptor of it is ever open in this process.
 fn plugin(dir: &Path, name: &str, described: &Response) -> PathBuf {
     let answer = dir.join(format!("{name}.json"));
     std::fs::write(&answer, serde_json::to_vec(described).unwrap()).unwrap();
-    let source = dir.join(format!("{name}.sh"));
-    std::fs::write(
-        &source,
-        format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", answer.display()),
-    )
-    .unwrap();
     let path = dir.join(name);
-    let installed = Command::new("install")
-        .args(["-m", "0755", "--"])
-        .arg(&source)
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(installed.success(), "install {}", path.display());
+    burrow_test::executable(
+        &path,
+        format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", answer.display()),
+    );
     path
 }
 
