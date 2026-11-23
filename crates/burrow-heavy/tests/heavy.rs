@@ -571,6 +571,65 @@ fn a_waiter_that_is_killed_or_gives_up_leaves_the_line() {
     assert_eq!(order(&s), "next\n");
 }
 
+/// The lines of the wait files in a turn's wait dir, and whether each is
+/// held locked (by a run still in line).
+fn waits_in(dir: &Path) -> Vec<(String, bool)> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let line = fs::read_to_string(&path).unwrap();
+            let file = File::open(&path).unwrap();
+            let held = flock(&file, FlockOperation::NonBlockingLockExclusive).is_err();
+            (line.trim_end().to_owned(), held)
+        })
+        .collect()
+}
+
+/// A run in line, under a proj turn, says so in the turn's wait dir while it
+/// waits (a locked file, which proj reads as a wait), and removes it once it
+/// has its slot: the turn's clock stops for the wait and no longer.
+#[test]
+fn a_run_in_line_says_so_in_its_turns_wait_dir() {
+    let s = Slots::new(1, 3);
+    let held = s.hold(1);
+    let turn = tempfile::tempdir().unwrap();
+    let mut waiter = s
+        .heavy(&["--", "true"])
+        .env("PROJ_WAIT_DIR", turn.path())
+        .spawn()
+        .unwrap();
+    until("waiting in the turn's wait dir", || {
+        waits_in(turn.path())
+            .iter()
+            .any(|(line, held)| *held && line.starts_with("heavy: a slot"))
+    });
+    drop(held);
+    assert!(exits(&mut waiter).success());
+    assert!(waits_in(turn.path()).is_empty());
+}
+
+/// The same for `--all`, which waits for the slots it doesn't have yet.
+#[test]
+fn an_all_run_in_line_says_so_in_its_turns_wait_dir() {
+    let s = Slots::new(2, 3);
+    let held = s.hold(2);
+    let turn = tempfile::tempdir().unwrap();
+    let mut waiter = s
+        .heavy(&["--all", "--", "true"])
+        .env("PROJ_WAIT_DIR", turn.path())
+        .spawn()
+        .unwrap();
+    until("waiting for every slot in the turn's wait dir", || {
+        waits_in(turn.path())
+            .iter()
+            .any(|(line, held)| *held && line.starts_with("heavy: all slots"))
+    });
+    drop(held);
+    assert!(exits(&mut waiter).success());
+    assert!(waits_in(turn.path()).is_empty());
+}
+
 /// A cancellable run, whose worker writes its pid to `worker` once its
 /// traps are set. Whatever is left of it when the test ends is killed.
 struct WorkerRun {
