@@ -93,6 +93,8 @@ FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 # and #1468, 2026-11-23): the deadline has to outlast a loaded box's eval.
 EVAL_TIMEOUT = 900
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
+# seconds a pass must have left for merged()'s eval, which takes as long as outputs'
+MERGED_MIN = 6 * 60
 LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 # The most a failed build's comment may take, in UTF-8 bytes: under GitHub's
 # 65,536 characters, and under the 128 KiB Linux takes for the one argument
@@ -142,8 +144,27 @@ def live(st):
     return moving
 
 
+class Cut(C.Unavailable):
+    """nix ran out of the pass's time before it answered: the eval wasn't
+    at fault, so nothing is recorded against the PR (no strike, no failed
+    eval to wait out)."""
+
+
 def nix(*args, timeout=60):
-    p = subprocess.run([f"{CFG['nix']}/{args[0]}", *args[1:]], capture_output=True, text=True, timeout=timeout)
+    """nix's stdout. Its deadline is the timeout, but never past the pass's
+    own (common.pass_left), so a pass's eval can't outlast the pass."""
+    left = C.pass_left()
+    cut = left is not None and left < timeout
+    if cut:
+        timeout = left
+    if timeout <= 0:
+        raise Cut("the pass's deadline is reached")
+    try:
+        p = subprocess.run([f"{CFG['nix']}/{args[0]}", *args[1:]], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if cut:
+            raise Cut(f"{args[0]} cut short by the pass's deadline") from None
+        raise
     if p.returncode != 0:
         raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
     return p.stdout
@@ -215,6 +236,8 @@ def outputs(repo, pr, checks, st):
         mirror = M.fetch(repo, pr=pr)
         drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
         paths = paths or None
+    except Cut:
+        raise  # the pass ran out of time: nothing recorded
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
     st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None, "at": C.NOW}
@@ -232,6 +255,9 @@ def merged(repo, pr, checks, st, tip):
     attrs = C.repo_cfg(repo)["proofBuilds"]
     if not tip or not evaluable(repo, checks):
         return None
+    left = C.pass_left()
+    if left is not None and left < MERGED_MIN:
+        return None  # optional: the pass has no time for its eval, the next one tries
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     key = [head, tip, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("mergedOutputs")
@@ -261,6 +287,8 @@ def merged(repo, pr, checks, st, tip):
             M.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
             paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
         failed = False
+    except Cut:
+        raise  # the pass ran out of time: nothing recorded
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds brought up to date with {base}: {e}")
     st["mergedOutputs"] = {"for": key, "paths": paths, "failed": failed, "at": C.NOW}
@@ -316,6 +344,8 @@ def unbuilt(paths):
         return set()
     try:
         return set(nix("nix-store", "--check-validity", "--print-invalid", *sorted(paths)).split())
+    except Cut:
+        raise  # the pass ran out of time: nothing recorded
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"can't tell which store paths are built: {e}")
         return set(paths)
@@ -398,6 +428,8 @@ def build(repo, pr, checks, st):
         # Each check's outputs, while its derivation is surely in the store
         # (just worked out): the build's verdicts are read from them alone.
         outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
+    except Cut:
+        raise  # the pass ran out of time: nothing recorded
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what the build of {', '.join(checks)} makes: {e}")
         return None
@@ -455,6 +487,8 @@ def prebuild(repo, pr, checks, st, stage):
         return building(repo, rec) if rec.get("job") and running(rec["job"]) else None
     try:
         ins, outs = inputs(drvs)
+    except Cut:
+        raise  # the pass ran out of time: nothing recorded
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what {', '.join(checks)} is built from: {e}")
         st["proofInputs"] = {"for": key, "job": None}

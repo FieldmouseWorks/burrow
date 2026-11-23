@@ -590,6 +590,41 @@ finally:
 assert eval_deadlines and min(eval_deadlines) >= 900, eval_deadlines
 print("proof eval deadline: ok")
 
+# The pass's own deadline bounds an eval, which is then counted against
+# nobody: a slow nix under a 2s pass deadline is cut at 2s, not run its 900s.
+slow_dir = f"{tmp}/slow-nix"
+os.makedirs(slow_dir)
+with open(f"{slow_dir}/nix", "w") as f:
+    f.write(f"#!{sys.executable}\nimport time\ntime.sleep(20)\n")
+os.chmod(f"{slow_dir}/nix", 0o755)
+kept_cfg_nix = S.CFG["nix"]
+S.CFG["nix"] = slow_dir
+try:
+    started = time.monotonic()
+    try:
+        with C.pass_deadline(2):
+            P.nix("nix", "eval", timeout=900)
+        raise AssertionError("the eval ran past the pass's deadline")
+    except C.Unavailable as e:
+        assert isinstance(e, P.Cut) and time.monotonic() - started < 10, (e, time.monotonic() - started)
+    # Outside a pass, the eval's own deadline still applies, and its expiry is a failure as before.
+    try:
+        P.nix("nix", timeout=2)
+        raise AssertionError("no timeout")
+    except subprocess.TimeoutExpired:
+        pass
+    # merged() is optional: with too little of the pass left, it isn't run at all.
+    real_nix_fn = P.nix
+    P.nix = lambda *a, **k: (_ for _ in ()).throw(AssertionError("merged ran its eval with too little pass left"))
+    try:
+        with C.pass_deadline(60):
+            assert P.merged("sam/r", {"number": 1, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], {}, "b" * 40) is None
+    finally:
+        P.nix = real_nix_fn
+finally:
+    S.CFG["nix"] = kept_cfg_nix
+print("proof evals bounded by the pass: ok")
+
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
 del S.CFG["repos"]["sam/r"]
 os.environ["PATH"], S.CFG["nix"], os.environ["AUTOLAND_CONFIG"] = kept_path, kept_nix, kept_config
