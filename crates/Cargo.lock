@@ -1143,7 +1143,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=cdde15ec2e4d4a03017e00b25e617d2d33a014fa#cdde15ec2e4d4a03017e00b25e617d2d33a014fa"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1160,7 +1160,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=cdde15ec2e4d4a03017e00b25e617d2d33a014fa#cdde15ec2e4d4a03017e00b25e617d2d33a014fa"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
@@ -1641,7 +1641,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3019,7 +3019,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3076,7 +3076,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3566,10 +3566,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4155,7 +4155,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
