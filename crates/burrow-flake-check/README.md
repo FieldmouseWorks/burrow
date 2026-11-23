@@ -8,8 +8,12 @@ it. `plan.rs` owns the Nix expression used to plan and evaluate outputs.
 The gate and negative runner have no Rust dependencies. It uses the workflow's existing `jq`
 for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
-builds start. A negative evaluation failure must repeat in a private local
-store without substituters, with the comparison tree evaluating afterwards.
+builds start. They run side by side, a core and 2G each, as long as the
+job's memory lasts: what one holds isn't known before it runs (`memory.rs`
+says what burrow's take), so it watches the room left, starts none while
+it's short and, should it run out, stops the biggest but the eldest, to
+evaluate again alone once the rest have (#1484). A negative evaluation
+failure must repeat in a private local store without substituters, with the comparison tree evaluating afterwards.
 That store gets each input that can be fetched, one by one, so an unrelated
 host's outage can't decide the PR (#1212); a second try that reaches for an
 input it wasn't given can't tell.

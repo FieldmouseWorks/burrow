@@ -1,5 +1,8 @@
 //! Bound concurrent evaluations by both the machine and every visible
 //! cgroup ancestor. An unreadable limit means one evaluation, never infinity.
+//! What one evaluation holds isn't known before it runs, so the room left
+//! is watched while they do: a new one starts only with [`RESERVE`] free,
+//! and below [`FLOOR`] the biggest but the eldest is stopped, to run again alone.
 use super::*;
 fn read(p: &Path) -> Result<String> {
     Ok(fs::read_to_string(p)?)
@@ -121,6 +124,18 @@ fn room() -> Result<i128> {
     }
     Ok(free)
 }
+/// What an evaluation needs free to start, and so what `side` gives each.
+/// Most of burrow's checks evaluate in under 1.2G; a few take 2-3G and
+/// `agents` (its sandboxes' VMs and each engine's conformance VM) 7.7G, all
+/// measured on 2026-11-23 (#1484). A reserve sized to the largest would
+/// evaluate one at a time on a hosted runner; the watch covers those.
+const RESERVE: i128 = 2 << 30;
+/// Below this much free the evaluations side by side hold more than the
+/// job has: two `agents` together ran a 16G hosted runner out (#1484).
+const FLOOR: i128 = 1 << 30;
+/// How often the watch reads the room left. An evaluation grows by tens of
+/// megabytes a second, well inside [`FLOOR`] between two reads.
+const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 pub fn side() -> usize {
     match room() {
         Ok(free) => {
@@ -128,7 +143,7 @@ pub fn side() -> usize {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1);
-            cores.min((free / 2147483648).max(1) as usize).max(1)
+            cores.min((free / RESERVE).max(1) as usize).max(1)
         }
         Err(e) => {
             println!("this job's memory limit is unknown ({e}): one evaluation at a time");
@@ -136,33 +151,284 @@ pub fn side() -> usize {
         }
     }
 }
+/// What the watch reads: the room left, and what a process holds.
+pub struct Gauge {
+    room: Box<dyn Fn() -> Result<i128> + Sync>,
+    held: Box<dyn Fn(u32) -> i128 + Sync>,
+}
+impl Gauge {
+    fn machine() -> Self {
+        Gauge {
+            room: Box::new(room),
+            held: Box::new(|pid| {
+                read(Path::new(&format!("/proc/{pid}/status")))
+                    .ok()
+                    .and_then(|t| field(&t, "VmRSS:").ok())
+                    .map_or(0, |kb| kb * 1024)
+            }),
+        }
+    }
+}
+/// A process a task runs under the watch.
+struct Running {
+    task: usize,
+    pid: u32,
+    child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
+    what: String,
+    stopped: bool,
+}
+#[derive(Default)]
+struct Watch {
+    running: std::sync::Mutex<Vec<Running>>,
+    /// Each task stopped, and what it was running.
+    stopped: std::sync::Mutex<Vec<(usize, String)>>,
+}
+/// Which of these to stop when the room runs out, by what each holds, in
+/// the order they started: the biggest but the eldest, which is the furthest
+/// on. None while there's one alone: nothing else of the job's to blame.
+fn victim(held: &[i128]) -> Option<usize> {
+    (1..held.len()).max_by_key(|&i| (held[i], i))
+}
+impl Watch {
+    /// One look at the room left: below [`FLOOR`], stop one. Not while one
+    /// stopped still holds its memory, or the next look would stop another
+    /// for what that one is already giving back.
+    fn look(&self, gauge: &Gauge) {
+        let Ok(room) = (gauge.room)() else {
+            return;
+        };
+        if room >= FLOOR {
+            return;
+        }
+        let mut running = self.running.lock().unwrap();
+        if running.iter().any(|r| r.stopped) {
+            return;
+        }
+        let held: Vec<_> = running.iter().map(|r| (gauge.held)(r.pid)).collect();
+        let Some(i) = victim(&held) else {
+            return;
+        };
+        let r = &mut running[i];
+        if r.child.lock().unwrap().kill().is_ok() {
+            r.stopped = true;
+            self.stopped.lock().unwrap().push((r.task, r.what.clone()));
+            println!(
+                "{}G free, under {}G, with {} side by side: stopped {} ({}G), to run again alone once the rest have",
+                room >> 30,
+                FLOOR >> 30,
+                held.len(),
+                r.what,
+                held[i] >> 30
+            );
+        }
+    }
+}
+/// The task one worker runs, for what it runs under the watch.
+pub struct Slot<'a> {
+    task: usize,
+    watch: Option<&'a Watch>,
+}
+impl Slot<'_> {
+    /// Outside [`parallel`]: nothing to share the room with, so no watch.
+    pub fn alone() -> Slot<'static> {
+        Slot {
+            task: 0,
+            watch: None,
+        }
+    }
+    /// The command's output, as [`Command::output`] gives it, `what` naming
+    /// it should the watch stop it, which makes it an error.
+    pub fn output(&self, mut c: Command, what: &str) -> Result<Output> {
+        let Some(watch) = self.watch else {
+            return output(c);
+        };
+        c.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = c.spawn()?;
+        let pid = child.id();
+        let (mut out, mut errs) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+        watch.running.lock().unwrap().push(Running {
+            task: self.task,
+            pid,
+            child: child.clone(),
+            what: what.to_string(),
+            stopped: false,
+        });
+        let read = |r: &mut dyn io::Read| {
+            let mut v = Vec::new();
+            r.read_to_end(&mut v).map(|_| v)
+        };
+        let (stdout, stderr) = std::thread::scope(|s| {
+            let e = s.spawn(|| read(&mut errs));
+            (read(&mut out), e.join().unwrap())
+        });
+        let status = loop {
+            if let Some(status) = child.lock().unwrap().try_wait()? {
+                break status;
+            }
+            std::thread::sleep(POLL);
+        };
+        let stopped = {
+            let mut running = watch.running.lock().unwrap();
+            let i = running.iter().position(|r| r.pid == pid).unwrap();
+            running.remove(i).stopped
+        };
+        if stopped {
+            return Err(err(format!(
+                "{what} was stopped: the job ran short of memory"
+            )));
+        }
+        Ok(Output {
+            status,
+            stdout: stdout?,
+            stderr: stderr?,
+        })
+    }
+}
 /// All workers finish before results are consumed; logs are printed in plan
 /// order. Each worker owns its evaluator and roots, never a shell job table.
-pub fn parallel<T: Sync, R: Send>(items: &[T], side: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+/// A task starts only while [`RESERVE`] is free (or nothing else runs), and
+/// one the watch stopped runs again, alone, once the rest have.
+pub fn parallel<T: Sync, R: Send>(
+    items: &[T],
+    side: usize,
+    f: impl Fn(&T, &Slot) -> R + Sync,
+) -> Vec<R> {
+    within(&Gauge::machine(), items, side, f)
+}
+fn within<T: Sync, R: Send>(
+    gauge: &Gauge,
+    items: &[T],
+    side: usize,
+    f: impl Fn(&T, &Slot) -> R + Sync,
+) -> Vec<R> {
     use std::sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     let next = AtomicUsize::new(0);
+    let busy = AtomicUsize::new(0);
+    let done = AtomicBool::new(false);
+    let watch = Watch::default();
     let results: Vec<_> = items.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
-        for _ in 0..side.min(items.len()) {
-            let f = &f;
-            let next = &next;
-            let results = &results;
-            scope.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= items.len() {
-                        break;
+        let workers: Vec<_> = (0..side.min(items.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    loop {
+                        while busy.load(Ordering::SeqCst) > 0
+                            && (gauge.room)().is_ok_and(|r| r < RESERVE)
+                        {
+                            std::thread::sleep(POLL);
+                        }
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        if i >= items.len() {
+                            break;
+                        }
+                        busy.fetch_add(1, Ordering::SeqCst);
+                        let slot = Slot {
+                            task: i,
+                            watch: Some(&watch),
+                        };
+                        let r = f(&items[i], &slot);
+                        busy.fetch_sub(1, Ordering::SeqCst);
+                        if !watch.stopped.lock().unwrap().iter().any(|(t, _)| *t == i) {
+                            *results[i].lock().unwrap() = Some(r);
+                        }
                     }
-                    *results[i].lock().unwrap() = Some(f(&items[i]));
-                }
-            });
+                })
+            })
+            .collect();
+        scope.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(POLL);
+                watch.look(gauge);
+            }
+        });
+        for w in workers {
+            w.join().unwrap();
         }
+        done.store(true, Ordering::SeqCst);
     });
+    for (i, what) in watch.stopped.into_inner().unwrap() {
+        println!("running {what} again, alone");
+        *results[i].lock().unwrap() = Some(f(&items[i], &Slot::alone()));
+    }
     results
         .into_iter()
         .map(|m| m.into_inner().unwrap().unwrap())
         .collect()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    const G: i128 = 1 << 30;
+    #[test]
+    fn the_biggest_but_the_eldest_is_stopped() {
+        assert_eq!(victim(&[]), None);
+        assert_eq!(victim(&[8 * G]), None);
+        assert_eq!(victim(&[8 * G, G, 7 * G, G]), Some(2));
+        assert_eq!(victim(&[G, 7 * G, 7 * G]), Some(2));
+    }
+    /// A job with 15G (a 16G hosted runner's) and four cores evaluating two
+    /// checks of 8G and three of 1G, the two big ones first, as the negative
+    /// put `agents`'s base and negative tree side by side (#1484). A task
+    /// holds its weight while its process runs, a big one for longer; the
+    /// gauge says what the job's tasks leave, and what a process holds by
+    /// how long it sleeps.
+    #[test]
+    fn two_big_evaluations_never_run_out_the_room_together() {
+        const BIG: &str = "1.5";
+        let weight = |secs: &str| if secs == BIG { 8 * G } else { G };
+        let tasks = [BIG, BIG, "0.3", "0.3", "0.3"];
+        let used = Arc::new(Mutex::new(0i128));
+        let u = used.clone();
+        let gauge = Gauge {
+            room: Box::new(move || Ok(15 * G - *u.lock().unwrap())),
+            held: Box::new(move |pid| {
+                let line = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let line = String::from_utf8_lossy(&line);
+                weight(line.split('\0').nth(1).unwrap_or_default())
+            }),
+        };
+        // Each task that ran to its end: its weight, and what the job held.
+        let ends = Mutex::new(Vec::new());
+        let results = within(&gauge, &tasks, 4, |secs, slot| {
+            let w = weight(secs);
+            *used.lock().unwrap() += w;
+            let o = slot.output(cmd("sleep", &[secs]), &format!("a {}G evaluation", w >> 30));
+            let held = {
+                let mut used = used.lock().unwrap();
+                *used -= w;
+                *used + w
+            };
+            if o.is_ok() {
+                ends.lock().unwrap().push((w >> 30, held >> 30));
+            }
+            o.is_ok_and(|o| o.status.success())
+        });
+        assert_eq!(results, vec![true; 5]);
+        let ends = ends.into_inner().unwrap();
+        assert_eq!(ends.len(), 5, "{ends:?}");
+        // A small one can end before the watch has looked; a big one can't.
+        assert!(
+            ends.iter().all(|&(w, held)| w < 8 || held <= 15),
+            "{ends:?}"
+        );
+        // The one stopped ran again alone.
+        assert!(ends.contains(&(8, 8)), "{ends:?}");
+    }
+    /// Without the watch, as one evaluation alone, a command runs as
+    /// [`Command::output`] would run it.
+    #[test]
+    fn alone_is_plain_output() {
+        let o = Slot::alone()
+            .output(cmd("sh", &["-c", "echo out; echo err >&2; exit 3"]), "it")
+            .unwrap();
+        assert_eq!((o.stdout, o.stderr), (b"out\n".to_vec(), b"err\n".to_vec()));
+        assert_eq!(o.status.code(), Some(3));
+    }
 }
