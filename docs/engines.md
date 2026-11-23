@@ -167,11 +167,13 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   `burrow_proj::engine::Engine`, `modules/proj.nix`'s inbox label enum, and
   `crates/burrow-proj/state.schema.json` enumerate a closed set of built-in
   engines (`claude`, `claude-api`).
-  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs),
-  [`engine/capabilities.rs`](../crates/burrow-proj/src/engine/capabilities.rs)
-  (`claude_flags`), and
-  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) hardcode
-  Claude Code's CLI flags, stream JSONL schema, and session extraction.
+  Claude Code's CLI flags, stream JSONL parsing, refusal classification and
+  `claude-api` admission now live in
+  [`crates/burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/lib.rs);
+  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs) and
+  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) still
+  dispatch through `burrow-proj`'s built-in `Engine` enum until `#745` replaces
+  it.
 - **Target:** Replace the closed enum and per-engine branches with the Conary
   `job` plugin contract: each engine is an executable plugin that answers
   `describe` (models, efforts, capabilities, meters), passes

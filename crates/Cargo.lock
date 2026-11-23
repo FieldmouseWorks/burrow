@@ -512,6 +512,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-engine-anthropic"
+version = "0.0.0"
+dependencies = [
+ "burrow-probe",
+ "burrow-process",
+ "burrow-settings",
+ "burrow-test",
+ "jiff 1.0.1",
+ "rustix",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-engines-door"
 version = "0.0.0"
 dependencies = [
@@ -827,6 +841,7 @@ name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
  "boon",
+ "burrow-engine-anthropic",
  "burrow-events",
  "burrow-github",
  "burrow-grants",

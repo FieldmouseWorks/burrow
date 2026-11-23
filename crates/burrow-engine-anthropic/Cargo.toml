@@ -1,0 +1,25 @@
+[package]
+name = "burrow-engine-anthropic"
+description = "Anthropic engine logic for Claude Code CLI and API modes: commands, streams, refusals and credit admission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-probe = { path = "../burrow-probe" }
+burrow-process = { path = "../burrow-process" }
+burrow-settings = { path = "../burrow-settings" }
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+# The zones a usage limit's reset is said in, for tests on a machine with no
+# tzdb (the Nix sandbox): a tzdb the system has still comes first.
+jiff = { version = "1.0.0", default-features = false, features = ["tzdb-bundle-always"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

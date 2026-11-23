@@ -18,6 +18,7 @@ use crate::question::Answer;
 use crate::record::{JobFile, Marker, TurnFile, TurnMarker, deadline};
 use crate::waits::{rewatch, rewatch_later};
 use crate::{Fail, filled, nanos, now, now_nanos, read, scratch, slot, systemd, usage};
+use burrow_engine_anthropic::api;
 use watch::Run;
 
 /// What a run killed for memory before it answered is told in the next.
@@ -30,8 +31,8 @@ fn answered(stream: &Path) -> Option<serde_json::Value> {
 }
 
 /// A turn the credit refused ends there, the refusal its result and outcome:
-/// no hold on any other turn, and no run again (engine/api.rs).
-fn api_refused(job: &Job, n: &str, refused: &engine::api::Refused, outcome: &dyn Fn(&str)) -> Fail {
+/// no hold on any other turn, and no run again (`burrow_engine_anthropic::api`).
+fn api_refused(job: &Job, n: &str, refused: &api::Refused, outcome: &dyn Fn(&str)) -> Fail {
     let text = refused.to_string();
     eprintln!("proj: {text}");
     let _ = crate::state_reads::write(job.turn_file(n, TurnFile::Result), format!("{text}\n"));
@@ -536,7 +537,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             Ok(c) => c,
             Err(e) => {
                 drop(bridge);
-                if let Some(refused) = engine::api::Refused::of(&e) {
+                if let Some(refused) = api::Refused::of(&e) {
                     // The credit had no room after all (another run took
                     // it first): the route takes the turn on, nothing run.
                     if let Some(next) = moved(&choice)? {
@@ -607,12 +608,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             return Ok(());
         }
         // Refused by the API (its key, its credit, its budget): the credit's
-        // own, which holds no other turn (engine/api.rs). The route may take
+        // own, which holds no other turn (`burrow_engine_anthropic::api`). The route may take
         // the turn on, in the same conversation, once it's short.
         if choice.engine == Engine::ClaudeApi
             && let Some(refused) = last
                 .as_ref()
-                .and_then(|l| engine::api::refusal_file(l, &stream, from))
+                .and_then(|l| api::refusal_file(l, &stream, from))
         {
             if let Some(next) = moved(&choice)? {
                 choice = next;

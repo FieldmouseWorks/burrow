@@ -256,6 +256,12 @@ fn sort_unlabelled() -> bool {
 }
 
 impl Config {
+    pub(crate) fn credit_file(&self) -> Option<PathBuf> {
+        self.settings
+            .as_ref()
+            .map(burrow_settings::Config::credit_file)
+    }
+
     pub fn paused(&self, repo: &str) -> bool {
         self.settings
             .as_ref()

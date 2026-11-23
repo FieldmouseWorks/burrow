@@ -1,5 +1,5 @@
 //! The hold's words when it's Claude Code's login that's gone, not its
-//! usage ([`crate::engine::claude::LOGGED_OUT`]): it resets at no time, only
+//! usage (`burrow_engine_anthropic::claude::LOGGED_OUT`): it resets at no time, only
 //! when someone logs in again, so the owner is told to, and the hold is a
 //! try at a time (usage.rs UNSAID) until a run answers.
 //!
@@ -22,7 +22,7 @@ use crate::config::Config;
 
 /// Whether the hold recorded as saying `said` is an expired login's.
 pub(crate) fn is(said: &str) -> bool {
-    said == crate::engine::claude::LOGGED_OUT
+    said == burrow_engine_anthropic::claude::LOGGED_OUT
 }
 
 /// A run a hold may hold: where it runs, and on which credential.
