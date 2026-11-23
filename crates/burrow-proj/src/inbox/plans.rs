@@ -9,8 +9,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod bound;
 mod place;
-pub(super) use place::Place;
+pub(super) use place::{CHANGED, Place};
 
 use std::{
     collections::BTreeSet,
@@ -402,27 +403,6 @@ impl Pass<'_> {
             self.miss(repo);
         }
         result
-    }
-    fn same_source(&self, repo: &str, issue: &Value) -> Option<bool> {
-        let n = raw(&issue["number"]);
-        let had = match files::input(&self.plan_dir(repo, &n)) {
-            Ok(had) => had,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
-            Err(_) => return None,
-        };
-        if !self.list_bound(repo, &n, &had)? {
-            return Some(false);
-        }
-        self.input(repo, issue).map(|input| input == had)
-    }
-    fn list_bound(&self, repo: &str, n: &str, input: &str) -> Option<bool> {
-        match fs::read(self.plan_dir(repo, n).join("tasks.json")) {
-            Ok(bytes) => serde_json::from_slice::<List>(&bytes)
-                .ok()
-                .map(|list| list.source.as_ref().is_none_or(|source| source == input)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(true),
-            Err(_) => None,
-        }
     }
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);

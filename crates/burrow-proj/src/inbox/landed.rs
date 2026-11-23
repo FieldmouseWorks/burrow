@@ -15,7 +15,7 @@
 //! waits on it, saying so, and is done when a merged PR closes it. One
 //! naming the parent or a child of its own list hands nothing on, and the
 //! owner's notice says that it doesn't count.
-use super::{List, Pass, key};
+use super::{CHANGED, List, Pass, key};
 use crate::inbox::record::files;
 use crate::planning::reference;
 use crate::record::TurnFile;
@@ -728,7 +728,7 @@ impl Pass<'_> {
                         PAUSED.to_owned(),
                         format!("{repo}#{parent}'s task list is paused"),
                         format!(
-                            "{repo}#{parent} changed after its split (its title, its body or an author's comment on it), so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. A `Continued as` or `proj plan done` on a child is read once it goes on."
+                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
                         ),
                     ),
                 };

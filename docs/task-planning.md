@@ -97,13 +97,19 @@ Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes
 `inbox.authors`. Comments and edit histories always require configured
 authors, including on generated children. Outside-text labels retain their
-existing protection. An edited parent (its title, its body or an author's
-comment on it) pauses its list: no child is read or admitted, the pause is
+existing protection. An edited parent (its title, its body, or an author's
+comment on it: one written since it was planned, or an edit to one it was
+planned with) pauses its list: no child is read or admitted, the pause is
 said once on the parent, `proj why` names it as what holds the list and its
 children, and the owner's notice says it while it lasts. The task list and
 completed work remain on disk for replanning rather than silently executing
 the old scope; the list goes on once the parent is replanned from its new
-text or its text goes back, and a later change pauses it again.
+text or its text goes back, and a later change pauses it again. An author's
+comment written since that opens with `Note:` (in any case) is a note on the
+list as it goes, a status or an acceptance, never scope: it neither pauses
+the list nor has it replanned. No replan starts while a live job's brief
+names the parent (a child's always does), and `proj why` then names that
+job as what the parent waits on.
 
 Each child creation has a durable receipt marker. A lost creation response
 is reconciled against all issues, including closed ones, before any further
