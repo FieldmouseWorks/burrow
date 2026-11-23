@@ -282,10 +282,12 @@ fn normalize_records(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             || record_type == "error"
-            || matches!(
-                record.get("status").and_then(Value::as_str),
-                Some("error" | "failed")
-            )
+            || record
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|s| {
+                    s.eq_ignore_ascii_case("error") || s.eq_ignore_ascii_case("failed")
+                })
             || record.get("error").is_some_and(|e| !e.is_null());
 
         if is_err {
@@ -802,10 +804,12 @@ fn looks_like_quota(lower: &str) -> bool {
 fn looks_like_login(lower: &str) -> bool {
     lower.contains("unauthenticated")
         || lower.contains("authentication failed")
+        || lower.contains("authentication required")
         || lower.contains("failed to authenticate")
         || lower.contains("not logged in")
         || lower.contains("login required")
         || lower.contains("please log in")
+        || lower.contains("please visit the url to log in")
         || lower.contains("sign in required")
         || lower.contains("oauth token expired")
         || lower.contains("session expired")

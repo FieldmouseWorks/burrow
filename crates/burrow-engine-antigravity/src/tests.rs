@@ -183,6 +183,7 @@ fn build_args_covers_verified_headless_flags() {
         output_format: OutputFormat::Json,
         input_format: Some(InputFormat::Text),
         print_timeout_secs: Some(120),
+        home_dir: None,
     };
     let args: Vec<String> = build_args(&inv)
         .into_iter()
