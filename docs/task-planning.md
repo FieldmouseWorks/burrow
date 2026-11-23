@@ -111,6 +111,18 @@ the list nor has it replanned. No replan starts while a live job's brief
 names the parent (a child's always does), and `proj why` then names that
 job as what the parent waits on.
 
+A list can also end without closing its parent: its tasks and children are
+kept on disk as retained history, so none of its children starts again, its
+checklist says no task is left, and its pause and the owner's notice go. An
+author ends one from the host with `proj plan end OWNER/REPO#N` (one wrongly
+split, or whose parent is a tracker), under the same refusals as `proj plan
+done`; the parent's text as it reads then is what the list ended on. An
+issue whose body a bot maintains, Renovate's Dependency Dashboard opened by
+a bot account first among them, is never one piece of work: it is `tracker`
+by rule without a planner, never split, and a list split from one before
+that held ends at its repo's next pass instead of pausing for good on the
+bot's next edit.
+
 Each child creation has a durable receipt marker. A lost creation response
 is reconciled against all issues, including closed ones, before any further
 creation. An ambiguous POST is not repeated when reconciliation cannot find
