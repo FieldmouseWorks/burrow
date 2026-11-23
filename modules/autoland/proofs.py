@@ -88,7 +88,10 @@ FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
 LOOKED = {}  # the PRs of each repo this pass has settled, waiting or not
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
-EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
+# seconds, its inputs fetched included. An eval of burrow's own checks took
+# 185-250s and ran past 300s on a busy machine (FieldmouseWorks/burrow#1451
+# and #1468, 2026-11-23): the deadline has to outlast a loaded box's eval.
+EVAL_TIMEOUT = 900
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
 LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 # The most a failed build's comment may take, in UTF-8 bytes: under GitHub's

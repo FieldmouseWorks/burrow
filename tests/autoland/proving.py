@@ -579,6 +579,17 @@ assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": 
                   "proofRuns": {}}).keys() == {"vm", "x"}
 print("proof builds' verdicts: ok")
 
+# An eval of a check takes minutes on a loaded machine, so the steward gives
+# it a deadline past that: the one it passes nix is what's asserted.
+eval_deadlines, real_nix = [], P.nix
+P.nix = lambda *a, timeout=60: (eval_deadlines.append(timeout) if a[0] == "nix" else None, "/nix/store/x.drv\n")[1]
+try:
+    P.derivations("sam/r", f"{tmp}/mirror", "refs/pr/1", "a" * 40, ["vm"])
+finally:
+    P.nix = real_nix
+assert eval_deadlines and min(eval_deadlines) >= 900, eval_deadlines
+print("proof eval deadline: ok")
+
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
 del S.CFG["repos"]["sam/r"]
 os.environ["PATH"], S.CFG["nix"], os.environ["AUTOLAND_CONFIG"] = kept_path, kept_nix, kept_config
