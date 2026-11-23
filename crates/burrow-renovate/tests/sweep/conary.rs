@@ -243,6 +243,9 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     assert!(ok.starts_with("<!-- major-verdict:v2 {"), "{ok}");
     let hub = Hub::new(1, body);
     assert_eq!(hub.major(KEY), None);
+    // The v1 marker, all the sweep sealed before, is none to conaryd.
+    hub.say(BOT_REST, &marker(1, "ok", "main", &mac(1, "ok", "main")));
+    assert_eq!(hub.major(KEY), None);
     hub.say(BOT_REST, &ok);
     assert_eq!(hub.major(KEY), Some(Major::Cleared));
     // The sweep reads it as conaryd does: an ok major that conaryd lands,

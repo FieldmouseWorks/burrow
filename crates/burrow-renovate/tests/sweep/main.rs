@@ -353,15 +353,18 @@ impl Machine {
         let app = self
             .app
             .map(|(name, bot)| json!({"name": name, "bot": bot}));
-        let config = json!({
+        let mut config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
-            "landing": self.landing,
             "renovate": self.renovate,
             "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "lockWait": b.join("lock-wait")},
         });
+        // burrow-landing's record, only where a test gives one.
+        if let Some(landing) = &self.landing {
+            config["landing"] = json!(landing);
+        }
         let path = self.path("config.json");
         fs::write(&path, config.to_string()).unwrap();
         path

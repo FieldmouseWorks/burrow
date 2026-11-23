@@ -141,9 +141,9 @@ pkgs.testers.runNixOSTest {
     with subtest("no store path of the machine holds the key"):
         # Its whole closure: the rendered configs and units included.
         # grep exits 1 finding nothing, and 2 on an error.
-        for k in keys:
-            held = machine.succeed(f"grep -rlsF -- {k} $(nix-store -qR /run/current-system) || [ $? = 1 ]", timeout=1800)
-            assert held.strip() == "", held
+        patterns = " ".join(f"-e {k}" for k in keys)
+        held = machine.succeed(f"grep -rlsF {patterns} $(nix-store -qR /run/current-system) || [ $? = 1 ]", timeout=1800)
+        assert held.strip() == "", held
         # As a check that grep finds the key where it is.
         machine.succeed(f"grep -qF -- {keys[-1]} ${key}")
   '';
