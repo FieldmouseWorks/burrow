@@ -21,7 +21,8 @@ pub mod schema;
 
 pub use cli::{Invocation, STRIPPED_ENV, build_args, run_invocation};
 pub use config::{
-    Config, CredentialMode, EFFORTS, ENGINE, Effort, InputFormat, Mode, ModelSpec, OutputFormat,
+    Config, CredentialMode, DEFAULT_CREDENTIAL_HOME_PATH, EFFORTS, ENGINE, Effort, InputFormat,
+    Mode, ModelSpec, OutputFormat, validate_credential_home_path,
 };
 pub use normalize::{Refusal, RunError, TurnOutput, Usage, classify_refusal, normalize_output};
 pub use plugin::{answer, answer_cancellable, describe, is_conformance_job};

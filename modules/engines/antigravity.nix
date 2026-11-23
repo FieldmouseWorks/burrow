@@ -6,54 +6,88 @@
 # and wires Antigravity into burrow.agents.engines.antigravity without touching
 # any other engine or burrow.proj.
 inputs:
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib)
+    mkEnableOption
+    mkIf
+    mkOption
+    types
+    ;
   cfg = config.burrow.engines.antigravity;
-  efforts = [ "low" "medium" "high" "xhigh" "max" ];
+  efforts = [
+    "low"
+    "medium"
+    "high"
+    "xhigh"
+    "max"
+  ];
 
   resolvedBinary =
-    if cfg.binary != null then cfg.binary
-    else if cfg.package != null then lib.getExe cfg.package
-    else null;
+    if cfg.binary != null then
+      cfg.binary
+    else if cfg.package != null then
+      lib.getExe cfg.package
+    else
+      null;
 
-  pluginConfig = pkgs.writeText "burrow-engine-antigravity.json" (builtins.toJSON ({
-    binary = resolvedBinary;
-    models = map (m: {
-      inherit (m) id efforts;
-      context_tokens = m.contextTokens;
-      max_output_tokens = m.maxOutputTokens;
-    }) cfg.models;
-    default_model = cfg.defaultModel;
-    default_effort = cfg.defaultEffort;
-    credential_env = cfg.credentialEnv;
-    target_credential_env = cfg.targetCredentialEnv;
-    credential_mode = cfg.credentialMode;
-    settings_file = cfg.settingsFile;
-    mode = cfg.mode;
-    dangerously_skip_permissions = cfg.dangerouslySkipPermissions;
-    sandbox = cfg.sandbox;
-    disable_slash_commands = true;
-    output_format = cfg.outputFormat;
-    add_dirs = cfg.addDirs;
-    print_timeout_secs = cfg.printTimeoutSeconds;
-    deadline_secs = cfg.deadlineSeconds;
-    network = lib.elem "network" cfg.capabilities;
-    devices = lib.optional (lib.elem "kvm" cfg.capabilities) "kvm";
-    meters = cfg.meters;
-  }));
+  validCredentialHomePath =
+    let
+      p = cfg.credentialHomePath;
+      parts = lib.splitString "/" p;
+    in
+    p != ""
+    && !(lib.hasPrefix "/" p)
+    && builtins.all (seg: seg != "" && seg != "." && seg != "..") parts;
+
+  pluginConfig = pkgs.writeText "burrow-engine-antigravity.json" (
+    builtins.toJSON ({
+      binary = resolvedBinary;
+      models = map (m: {
+        inherit (m) id efforts;
+        context_tokens = m.contextTokens;
+        max_output_tokens = m.maxOutputTokens;
+      }) cfg.models;
+      default_model = cfg.defaultModel;
+      default_effort = cfg.defaultEffort;
+      credential_env = cfg.credentialEnv;
+      target_credential_env = cfg.targetCredentialEnv;
+      credential_mode = cfg.credentialMode;
+      credential_home_path = cfg.credentialHomePath;
+      settings_file = cfg.settingsFile;
+      mode = cfg.mode;
+      dangerously_skip_permissions = cfg.dangerouslySkipPermissions;
+      sandbox = cfg.sandbox;
+      disable_slash_commands = true;
+      output_format = cfg.outputFormat;
+      add_dirs = cfg.addDirs;
+      print_timeout_secs = cfg.printTimeoutSeconds;
+      deadline_secs = cfg.deadlineSeconds;
+      network = lib.elem "network" cfg.capabilities;
+      devices = lib.optional (lib.elem "kvm" cfg.capabilities) "kvm";
+      meters = cfg.meters;
+    })
+  );
 
   pluginBin = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engine-antigravity;
 
-  wrappedPlugin = pkgs.runCommand "burrow-engine-antigravity-plugin" {
-    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
-    meta.mainProgram = "burrow-engine-antigravity";
-    passthru.config = pluginConfig;
-  } ''
-    makeBinaryWrapper ${lib.getExe' pluginBin "burrow-engine-antigravity"} \
-      $out/bin/burrow-engine-antigravity \
-      --set BURROW_ANTIGRAVITY_CONFIG ${pluginConfig}
-  '';
+  wrappedPlugin =
+    pkgs.runCommand "burrow-engine-antigravity-plugin"
+      {
+        nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+        meta.mainProgram = "burrow-engine-antigravity";
+        passthru.config = pluginConfig;
+      }
+      ''
+        makeBinaryWrapper ${lib.getExe' pluginBin "burrow-engine-antigravity"} \
+          $out/bin/burrow-engine-antigravity \
+          --set BURROW_ANTIGRAVITY_CONFIG ${pluginConfig}
+      '';
 in
 {
   imports = [ (import ../common.nix inputs) ];
@@ -113,19 +147,39 @@ in
     };
 
     credentialMode = mkOption {
-      type = types.enum [ "env" "file" ];
+      type = types.enum [
+        "env"
+        "file"
+        "home-file"
+      ];
       default = "env";
       description = ''
-        Whether to pass the isolated credential directly as an environment
-        variable (`env`) or materialize it into a private `0600` per-run file
-        and pass that path (`file`).
+        How to deliver the isolated credential to `antigravity`: directly as an
+        environment variable (`env`), as a path to a private `0600` per-run
+        file in an environment variable (`file`), or materialized at
+        `$HOME/<credentialHomePath>` (`0600`, writable for OAuth refreshes)
+        with credential environment variables stripped (`home-file`).
+      '';
+    };
+
+    credentialHomePath = mkOption {
+      type = types.str;
+      default = ".gemini/antigravity-cli/antigravity-oauth-token";
+      description = ''
+        Relative path under `$HOME` where `credentialMode = "home-file"`
+        materializes the isolated OAuth credential file (`0600`). Must be a
+        non-empty relative path with only normal path components so it cannot
+        escape `$HOME`.
       '';
     };
 
     hosts = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      example = [ "antigravity.example.com" "*.googleapis.com" ];
+      example = [
+        "antigravity.example.com"
+        "*.googleapis.com"
+      ];
       description = ''
         Egress host allowlist (tinyproxy fnmatch patterns) for Antigravity
         sandboxes alone, wired into `burrow.agents.engines.antigravity.hosts`.
@@ -148,29 +202,31 @@ in
         Runtime-configured models advertised by Conary `describe`. Burrow
         hardcodes no model IDs; the machine flake supplies its own list.
       '';
-      type = types.listOf (types.submodule {
-        options = {
-          id = mkOption {
-            type = types.str;
-            description = "Model identifier accepted by `antigravity --model`.";
+      type = types.listOf (
+        types.submodule {
+          options = {
+            id = mkOption {
+              type = types.str;
+              description = "Model identifier accepted by `antigravity --model`.";
+            };
+            efforts = mkOption {
+              type = types.listOf (types.enum efforts);
+              default = efforts;
+              description = "Effort levels accepted for this model.";
+            };
+            contextTokens = mkOption {
+              type = types.nullOr types.ints.positive;
+              default = null;
+              description = "Optional context window size in tokens.";
+            };
+            maxOutputTokens = mkOption {
+              type = types.nullOr types.ints.positive;
+              default = null;
+              description = "Optional maximum output size in tokens.";
+            };
           };
-          efforts = mkOption {
-            type = types.listOf (types.enum efforts);
-            default = efforts;
-            description = "Effort levels accepted for this model.";
-          };
-          contextTokens = mkOption {
-            type = types.nullOr types.ints.positive;
-            default = null;
-            description = "Optional context window size in tokens.";
-          };
-          maxOutputTokens = mkOption {
-            type = types.nullOr types.ints.positive;
-            default = null;
-            description = "Optional maximum output size in tokens.";
-          };
-        };
-      });
+        }
+      );
     };
 
     defaultModel = mkOption {
@@ -186,7 +242,13 @@ in
     };
 
     mode = mkOption {
-      type = types.nullOr (types.enum [ "accept-edits" "auto" "plan" ]);
+      type = types.nullOr (
+        types.enum [
+          "accept-edits"
+          "auto"
+          "plan"
+        ]
+      );
       default = "auto";
       description = "Execution mode passed via `antigravity --mode`.";
     };
@@ -207,7 +269,11 @@ in
     };
 
     outputFormat = mkOption {
-      type = types.enum [ "stream-json" "json" "text" ];
+      type = types.enum [
+        "stream-json"
+        "json"
+        "text"
+      ];
       default = "stream-json";
       description = "Output format passed via `antigravity --output-format`.";
     };
@@ -296,18 +362,32 @@ in
         message = "burrow.engines.antigravity.defaultModel (${toString cfg.defaultModel}) must appear in burrow.engines.antigravity.models.";
       }
       {
-        assertion = cfg.defaultModel == null || cfg.defaultEffort == null || builtins.any (m: m.id == cfg.defaultModel && lib.elem cfg.defaultEffort m.efforts) cfg.models;
+        assertion =
+          cfg.defaultModel == null
+          || cfg.defaultEffort == null
+          || builtins.any (m: m.id == cfg.defaultModel && lib.elem cfg.defaultEffort m.efforts) cfg.models;
         message = "burrow.engines.antigravity.defaultEffort (${toString cfg.defaultEffort}) must be offered by defaultModel (${toString cfg.defaultModel}).";
       }
       {
         assertion = !(lib.elem "mcp" cfg.capabilities);
         message = "burrow.engines.antigravity: `mcp` can't be in capabilities: the plugin doesn't hand the antigravity CLI the servers a sandbox approves.";
       }
+      {
+        assertion = validCredentialHomePath;
+        message = "burrow.engines.antigravity.credentialHomePath (${cfg.credentialHomePath}) must be a non-empty relative path with only normal components (no leading `/`, `.`, `..`, or empty segments).";
+      }
     ];
 
     burrow.agents.engines.antigravity = {
       packages = lib.optional (cfg.package != null) cfg.package ++ cfg.extraPackages;
-      inherit (cfg) guestModules credentialFile credentialEnv hosts proxyPort capabilities;
+      inherit (cfg)
+        guestModules
+        credentialFile
+        credentialEnv
+        hosts
+        proxyPort
+        capabilities
+        ;
       plugin = wrappedPlugin;
     };
   };

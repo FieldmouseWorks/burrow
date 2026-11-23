@@ -16,6 +16,12 @@ struct Hub {
     annotation_failure: bool,
     /// The check runs GitHub cancelled past their job's `timeout-minutes`.
     timed_out: Vec<u64>,
+    /// How a completed run ended: cancelled, unless set.
+    conclusion: &'static str,
+    /// The run_attempt every job (check run) reads: 1, unless set.
+    job_attempt: u64,
+    /// What every check run's annotations read: none, unless set.
+    annotations: Option<Value>,
     /// The runs' event: GitHub reruns no `dynamic` one, whoever asks.
     event: &'static str,
     /// What update-branch answers: 202, unless set.
@@ -64,9 +70,11 @@ impl Api for Hub {
                 if limit {
                     json!([{"message": "The job has exceeded the maximum execution time of 210m0s"}])
                 } else {
-                    json!([])
+                    self.annotations.clone().unwrap_or_else(|| json!([]))
                 },
             )
+        } else if path.contains("/actions/jobs/") {
+            (200, json!({"run_attempt": self.job_attempt.max(1)}))
         } else if method == "POST" {
             if self.status == 0 || self.status == 201 || self.lost {
                 self.attempt += 1;
@@ -86,7 +94,7 @@ impl Api for Hub {
             (
                 200,
                 json!({"run_attempt": self.attempt.max(1), "status": if self.going { "queued" } else { "completed" },
-                "conclusion": if self.going { Value::Null } else { json!("cancelled") }, "event": self.event}),
+                "conclusion": if self.going { Value::Null } else if self.conclusion.is_empty() { json!("cancelled") } else { json!(self.conclusion) }, "event": self.event}),
             )
         };
         Ok(Response {
@@ -354,6 +362,164 @@ fn separate_runs_keep_their_own_allowance() {
     ]);
     run(&mut h, &a, false).unwrap();
     assert_eq!(posts(&h), 2);
+}
+
+/// What GitHub writes on a job whose hosted runner was shut down under
+/// it (run 45213576258, both attempts): the exit, and nothing of its own.
+fn runner_gone() -> Value {
+    json!([{"path": ".github", "annotation_level": "failure", "title": "",
+        "message": "Process completed with exit code 143.", "raw_details": ""}])
+}
+
+#[test]
+fn a_lost_runner_is_run_again_whole_once_then_named_the_machines() {
+    let mut h = Hub {
+        attempt: 1,
+        annotations: Some(runner_gone()),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "pending");
+    assert_eq!(got.names, ["train / negative (runner lost, run again)"]);
+    // The whole run, so its called workflow is read afresh from its ref.
+    let reruns: Vec<_> = h.asked.iter().filter(|(m, _)| m == "POST").collect();
+    assert_eq!(reruns.len(), 1);
+    assert!(reruns[0].1.ends_with("/actions/runs/7/rerun"), "{reruns:?}");
+
+    // The rerun is over, whichever way, while this pass still holds the
+    // first attempt's job: that says nothing of the rerun's, so it waits
+    // for its own (never red as lost again, nor asked for again).
+    h.going = false;
+    for how in ["failure", "success"] {
+        h.conclusion = how;
+        let got = run(&mut h, &a, false).unwrap();
+        assert_eq!(got.state, "pending", "{how}");
+        assert_eq!(posts(&h), 1);
+    }
+
+    // The rerun's own job died the same way: red, and named the machine's.
+    h.conclusion = "failure";
+    h.job_attempt = 2;
+    let again = ask(vec![check_run("train / negative", 12, 7, "FAILURE")]);
+    let got = run(&mut h, &again, false).unwrap();
+    assert_eq!(got.state, "red");
+    assert_eq!(
+        got.names,
+        ["train / negative (the runner was lost again after a rerun)"]
+    );
+    assert_eq!(posts(&h), 1);
+}
+
+#[test]
+fn a_runner_that_lost_communication_is_run_again_too() {
+    // #1489's own `train / negative`, job 137975045560.
+    let mut h = Hub {
+        attempt: 1,
+        annotations: Some(json!([{"annotation_level": "failure", "message":
+            "The hosted runner lost communication with the server. Anything in your workflow \
+             that terminates the runner process, starves it for CPU/Memory, or blocks its \
+             network access can cause this error."}])),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.names, ["train / negative (runner lost, run again)"]);
+    assert!(
+        h.asked
+            .iter()
+            .any(|(m, p)| m == "POST" && p.ends_with("/actions/runs/7/rerun"))
+    );
+}
+
+#[test]
+fn a_lost_runner_already_rerun_is_red_without_another_ask() {
+    let mut h = Hub {
+        attempt: 2,
+        job_attempt: 2,
+        annotations: Some(runner_gone()),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(
+        (got.state, got.names),
+        (
+            "red",
+            vec!["train / negative (the runner was lost again after a rerun)".to_owned()]
+        )
+    );
+    assert_eq!(posts(&h), 0);
+}
+
+#[test]
+fn a_lost_runner_outside_a_called_workflow_reruns_only_failed_jobs() {
+    let mut h = Hub {
+        attempt: 1,
+        annotations: Some(runner_gone()),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    run(
+        &mut h,
+        &ask(vec![check_run("build", 11, 7, "FAILURE")]),
+        false,
+    )
+    .unwrap();
+    assert!(
+        h.asked
+            .iter()
+            .any(|(m, p)| m == "POST" && p.ends_with("/7/rerun-failed-jobs"))
+    );
+}
+
+#[test]
+fn an_exit_143_beside_the_steps_own_error_is_plain_red() {
+    let mut gone = runner_gone();
+    gone.as_array_mut()
+        .unwrap()
+        .push(json!({"annotation_level": "failure",
+        "message": "test negative::rejects_unsigned failed"}));
+    for annotations in [
+        gone,
+        json!([{"annotation_level": "failure", "message": "Process completed with exit code 1."}]),
+        json!([]),
+    ] {
+        let mut h = Hub {
+            attempt: 1,
+            annotations: Some(annotations),
+            ..Hub::default()
+        };
+        let got = run(
+            &mut h,
+            &ask(vec![check_run("train / negative", 11, 7, "FAILURE")]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (got.state, got.names),
+            ("red", vec!["train / negative".to_owned()])
+        );
+        assert_eq!(posts(&h), 0);
+    }
+}
+
+#[test]
+fn a_lost_runner_dry_or_only_classified_writes_nothing() {
+    let mut h = Hub {
+        attempt: 1,
+        annotations: Some(runner_gone()),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    let mut a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    assert_eq!(run(&mut h, &a, true).unwrap().state, "pending");
+    a.recover = false;
+    assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
+    assert_eq!(posts(&h), 0);
 }
 
 fn unstarted() -> Ask {
