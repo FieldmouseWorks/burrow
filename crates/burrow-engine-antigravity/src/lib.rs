@@ -17,6 +17,7 @@ pub mod cli;
 pub mod config;
 pub mod normalize;
 pub mod plugin;
+pub mod schema;
 
 pub use cli::{Invocation, STRIPPED_ENV, build_args, run_invocation};
 pub use config::{
@@ -24,6 +25,7 @@ pub use config::{
 };
 pub use normalize::{Refusal, RunError, TurnOutput, Usage, classify_refusal, normalize_output};
 pub use plugin::{answer, answer_cancellable, describe, is_conformance_job};
+pub use schema::Schema;
 
 #[cfg(test)]
 mod tests;

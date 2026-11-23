@@ -23,6 +23,13 @@ let
       };
     } ];
   };
+  # `mcp` in capabilities is refused: the plugin hands the CLI no servers.
+  withMcp = machine.extendModules {
+    modules = [ { burrow.engines.antigravity.capabilities = [ "workspace" "mcp" ]; } ];
+  };
+  mcpRefused = pkgs.lib.any
+    (a: !a.assertion && pkgs.lib.hasPrefix "burrow.engines.antigravity: `mcp` can't be in capabilities" a.message)
+    withMcp.config.assertions;
   agent = machine.config.burrow.agents.package;
   plugin = machine.config.burrow.engines.antigravity.pluginPackage;
   call = "${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-example-plugin}/bin/burrow-example-plugin-call";
@@ -39,7 +46,9 @@ pkgs.runCommand "engine-antigravity-config-check" { nativeBuildInputs = [ pkgs.j
 
   pluginCfg=${plugin.config}
   jq -e '.models == [{id: "test-model", efforts: ["low", "medium", "high", "xhigh", "max"], context_tokens: null, max_output_tokens: null}]' "$pluginCfg" >/dev/null
-  jq -e '.default_model == "test-model" and .default_effort == "high" and .network == true and .mcp == false and .devices == [] and .meters == ["quota"]' "$pluginCfg" >/dev/null
+  jq -e '.default_model == "test-model" and .default_effort == "high" and .network == true and (has("mcp") | not) and .devices == [] and .meters == ["quota"]' "$pluginCfg" >/dev/null
+
+  [ ${pkgs.lib.boolToString mcpRefused} = true ] || { echo "mcp in capabilities was not refused"; exit 1; }
 
   checked=$(${call} check ${pkgs.lib.getExe plugin})
   [ "$checked" = '["job"]' ] || { echo "unexpected checked kinds: $checked"; exit 1; }

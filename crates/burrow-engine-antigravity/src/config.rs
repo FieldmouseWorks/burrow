@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use conary_core::plugin::{Capabilities, Model, Offers, Sandbox};
 use serde::{Deserialize, Serialize};
 
+use crate::schema::Schema;
+
 /// Stable engine identity reported in Conary plugin `by.engine`.
 pub const ENGINE: &str = "antigravity";
 
@@ -205,8 +207,6 @@ pub struct Config {
     pub max_output_bytes: usize,
     /// Whether `describe` declares the `network` capability.
     pub network: bool,
-    /// Whether `describe` declares the `mcp` capability.
-    pub mcp: bool,
     /// Devices declared in `describe` (for example `["kvm"]`).
     pub devices: Vec<String>,
     /// Usage meter names declared in `describe`.
@@ -237,7 +237,6 @@ impl Default for Config {
             deadline_secs: DEFAULT_DEADLINE_SECS,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             network: true,
-            mcp: false,
             devices: Vec::new(),
             meters: Vec::new(),
         }
@@ -343,6 +342,9 @@ impl Config {
         }
         validate_unique_nonblank("devices", &self.devices)?;
         validate_unique_nonblank("meters", &self.meters)?;
+        if let Some(spec) = &self.json_schema {
+            Schema::compile(spec)?;
+        }
         Ok(())
     }
 
@@ -354,7 +356,10 @@ impl Config {
                 sandbox: Sandbox::Needs,
                 network: self.network,
                 devices: self.devices.clone(),
-                mcp: self.mcp,
+                // Nothing here hands the CLI the servers a sandbox approves
+                // (`PROJ_MCP_SERVERS`), so `mcp` is never declared, and a
+                // config naming it is refused as an unknown field.
+                mcp: false,
             },
             meters: self.meters.clone(),
         }

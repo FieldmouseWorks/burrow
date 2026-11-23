@@ -30,7 +30,6 @@ let
     default_model = "test-model";
     default_effort = "medium";
     network = true;
-    mcp = false;
     devices = [ ];
     meters = [ "quota" ];
   });

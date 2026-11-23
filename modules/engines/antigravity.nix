@@ -39,7 +39,6 @@ let
     print_timeout_secs = cfg.printTimeoutSeconds;
     deadline_secs = cfg.deadlineSeconds;
     network = lib.elem "network" cfg.capabilities;
-    mcp = lib.elem "mcp" cfg.capabilities;
     devices = lib.optional (lib.elem "kvm" cfg.capabilities) "kvm";
     meters = cfg.meters;
   }));
@@ -260,18 +259,9 @@ in
       ];
       description = ''
         Owner-approved job capabilities for `burrow.agents.engines.antigravity`.
-        Also controls whether the plugin's `describe` declares `network`, `mcp`,
-        and `kvm` so declared and approved sets match.
-      '';
-    };
-
-    mcpServers = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      example = [ "conary" ];
-      description = ''
-        Names of `burrow.mcpServers` approved for Antigravity sandboxes (never
-        servers with `actsAsOwner`).
+        Also controls whether the plugin's `describe` declares `network` and
+        `kvm` so declared and approved sets match. `mcp` is refused: the
+        plugin doesn't hand the CLI the servers a sandbox approves.
       '';
     };
 
@@ -310,14 +300,14 @@ in
         message = "burrow.engines.antigravity.defaultEffort (${toString cfg.defaultEffort}) must be offered by defaultModel (${toString cfg.defaultModel}).";
       }
       {
-        assertion = !(lib.elem "mcp" cfg.capabilities) || cfg.mcpServers != [ ];
-        message = "burrow.engines.antigravity: `mcp` is in capabilities, so list at least one approved server in `mcpServers`.";
+        assertion = !(lib.elem "mcp" cfg.capabilities);
+        message = "burrow.engines.antigravity: `mcp` can't be in capabilities: the plugin doesn't hand the antigravity CLI the servers a sandbox approves.";
       }
     ];
 
     burrow.agents.engines.antigravity = {
       packages = lib.optional (cfg.package != null) cfg.package ++ cfg.extraPackages;
-      inherit (cfg) guestModules credentialFile credentialEnv hosts proxyPort capabilities mcpServers;
+      inherit (cfg) guestModules credentialFile credentialEnv hosts proxyPort capabilities;
       plugin = wrappedPlugin;
     };
   };

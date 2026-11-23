@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 use crate::config::{Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat};
 use crate::normalize::{RunError, TurnOutput, normalize_output};
+use crate::schema::Schema;
 
 /// Environment variables that must NEVER leak into the `antigravity` child:
 /// GitHub tokens and other engines' credentials.
@@ -228,6 +229,26 @@ pub fn run_invocation(
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
 ) -> TurnOutput {
+    // A schema that can't be held to is refused before the child runs: never
+    // "any JSON will do".
+    let schema = match invocation
+        .json_schema
+        .as_deref()
+        .map(Schema::compile)
+        .transpose()
+    {
+        Ok(schema) => schema,
+        Err(why) => {
+            return TurnOutput {
+                error: Some(RunError::ProcessFailed {
+                    exit_code: None,
+                    signal: None,
+                    message: why,
+                }),
+                ..TurnOutput::default()
+            };
+        }
+    };
     let prepared = match prepare_credential(config) {
         Ok(p) => p,
         Err(why) => {
@@ -277,7 +298,7 @@ pub fn run_invocation(
             &output.stderr,
             output.status.code(),
             output.status.signal(),
-            invocation.json_schema.is_some(),
+            schema.as_ref(),
             &secrets,
         ),
         Err(why) if why == "command was stopped" => TurnOutput {

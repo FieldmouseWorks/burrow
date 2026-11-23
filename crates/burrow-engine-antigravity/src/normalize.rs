@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::OutputFormat;
+use crate::schema::Schema;
 
 /// Normalized token and cost usage extracted from an Antigravity turn.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -143,7 +144,7 @@ pub fn normalize_output(
     stderr: &[u8],
     exit_code: Option<i32>,
     signal: Option<i32>,
-    require_json_schema: bool,
+    schema: Option<&Schema>,
     secrets: &[&str],
 ) -> TurnOutput {
     let stdout_str = String::from_utf8_lossy(stdout);
@@ -158,7 +159,7 @@ pub fn normalize_output(
             succeeded,
             exit_code,
             signal,
-            require_json_schema,
+            schema,
             secrets,
         ),
         OutputFormat::Json => normalize_records(
@@ -168,7 +169,7 @@ pub fn normalize_output(
             succeeded,
             exit_code,
             signal,
-            require_json_schema,
+            schema,
             secrets,
         ),
         OutputFormat::Text => normalize_text(
@@ -177,7 +178,7 @@ pub fn normalize_output(
             succeeded,
             exit_code,
             signal,
-            require_json_schema,
+            schema,
             secrets,
         ),
     }
@@ -224,7 +225,7 @@ fn normalize_records(
     succeeded: bool,
     exit_code: Option<i32>,
     signal: Option<i32>,
-    require_json_schema: bool,
+    schema: Option<&Schema>,
     secrets: &[&str],
 ) -> TurnOutput {
     let records = match parsed {
@@ -342,8 +343,8 @@ fn normalize_records(
     let mut result =
         final_result.or_else(|| (!streamed_chunks.is_empty()).then(|| streamed_chunks.join("")));
 
-    if require_json_schema {
-        match finalize_structured(structured_output.take(), result.as_deref()) {
+    if let Some(schema) = schema {
+        match finalize_structured(schema, structured_output.take(), result.as_deref()) {
             Ok((value, rendered)) => {
                 structured_output = Some(value);
                 result = Some(rendered);
@@ -392,7 +393,7 @@ fn normalize_text(
     succeeded: bool,
     exit_code: Option<i32>,
     signal: Option<i32>,
-    require_json_schema: bool,
+    schema: Option<&Schema>,
     secrets: &[&str],
 ) -> TurnOutput {
     if !succeeded {
@@ -423,8 +424,8 @@ fn normalize_text(
         };
     }
 
-    if require_json_schema {
-        match finalize_structured(None, Some(trimmed)) {
+    if let Some(schema) = schema {
+        match finalize_structured(schema, None, Some(trimmed)) {
             Ok((value, rendered)) => TurnOutput {
                 result: Some(rendered),
                 structured_output: Some(value),
@@ -444,19 +445,24 @@ fn normalize_text(
     }
 }
 
+/// The structured value a schema-bound invocation produced, held to `schema`:
+/// the explicit `structured_output` when there is one, else the result text
+/// parsed as JSON.
 fn finalize_structured(
+    schema: &Schema,
     explicit: Option<Value>,
     result_text: Option<&str>,
 ) -> Result<(Value, String), String> {
-    if let Some(value) = explicit {
-        let rendered = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-        return Ok((value, rendered));
-    }
-    let Some(text) = result_text.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Err("missing structured JSON output".to_owned());
+    let value = match explicit {
+        Some(value) => value,
+        None => {
+            let Some(text) = result_text.map(str::trim).filter(|s| !s.is_empty()) else {
+                return Err("missing structured JSON output".to_owned());
+            };
+            serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?
+        }
     };
-    let value: Value =
-        serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?;
+    schema.validate(&value)?;
     let rendered = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     Ok((value, rendered))
 }

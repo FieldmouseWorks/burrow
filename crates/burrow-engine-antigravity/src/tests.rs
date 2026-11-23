@@ -15,6 +15,7 @@ use crate::cli::{Invocation, build_args, run_invocation};
 use crate::config::{Config, EFFORTS, ENGINE, Effort, InputFormat, Mode, ModelSpec, OutputFormat};
 use crate::normalize::{Refusal, RunError, normalize_output};
 use crate::plugin::{answer, answer_cancellable, describe};
+use crate::schema::Schema;
 
 fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
@@ -92,7 +93,6 @@ fn describe_reports_v5_runtime_offers_and_capabilities() {
         default_model: Some("test-model".to_owned()),
         default_effort: Some(Effort::High),
         network: true,
-        mcp: true,
         devices: vec!["kvm".to_owned()],
         meters: vec!["quota".to_owned()],
         ..Config::default()
@@ -124,7 +124,7 @@ fn describe_reports_v5_runtime_offers_and_capabilities() {
     let caps = capabilities.expect("capabilities");
     assert_eq!(caps.sandbox, Sandbox::Needs);
     assert!(caps.network);
-    assert!(caps.mcp);
+    assert!(!caps.mcp);
     assert_eq!(caps.devices, vec!["kvm"]);
     assert_eq!(meters, vec!["quota"]);
 }
@@ -545,7 +545,7 @@ exit 1
         b"",
         Some(0),
         None,
-        false,
+        None,
         &[],
     );
     assert!(matches!(bad_json.error, Some(RunError::InvalidOutput(_))));
@@ -600,4 +600,131 @@ wait
         "descendant process {} survived process-group cancellation",
         descendant_pid.trim()
     );
+}
+
+const VERDICT_SCHEMA: &str = r#"{"type":"object","required":["verdict","why"],"properties":{"verdict":{"type":"string"},"why":{"type":"string"}}}"#;
+
+fn normalize_with(format: OutputFormat, stdout: &str, schema: &Schema) -> crate::TurnOutput {
+    normalize_output(
+        format,
+        stdout.as_bytes(),
+        b"",
+        Some(0),
+        None,
+        Some(schema),
+        &["sekrit-value"],
+    )
+}
+
+#[test]
+fn structured_output_that_breaks_the_schema_is_refused() {
+    let schema = Schema::compile(VERDICT_SCHEMA).unwrap();
+    let cases = [
+        // An explicit structured_output missing every required field.
+        (
+            OutputFormat::StreamJson,
+            "{\"conversation_id\":\"c\",\"type\":\"result\",\"structured_output\":{}}\n",
+        ),
+        (OutputFormat::Json, r#"{"structured_output":{}}"#),
+        // Result text that is JSON but misses a required field.
+        (OutputFormat::Json, r#"{"result":"{\"verdict\":\"pass\"}"}"#),
+        // Result text with a wrongly typed field.
+        (
+            OutputFormat::StreamJson,
+            "{\"type\":\"result\",\"result\":\"{\\\"verdict\\\":1,\\\"why\\\":\\\"x\\\"}\"}\n",
+        ),
+        // Plain text output, valid JSON, wrong shape.
+        (
+            OutputFormat::Text,
+            r#"{"verdict":"pass","why":["sekrit-value"]}"#,
+        ),
+    ];
+    for (format, stdout) in cases {
+        let turn = normalize_with(format, stdout, &schema);
+        let Some(RunError::InvalidSchemaOutput(why)) = &turn.error else {
+            panic!("{format:?} {stdout}: expected a schema refusal, got {turn:?}");
+        };
+        assert!(!why.contains("sekrit-value"), "unscrubbed: {why}");
+        assert_eq!(turn.structured_output, None, "{format:?} {stdout}");
+    }
+}
+
+#[test]
+fn structured_output_that_follows_the_schema_passes() {
+    let schema = Schema::compile(VERDICT_SCHEMA).unwrap();
+    let want = serde_json::json!({"verdict": "pass", "why": "ok"});
+    for (format, stdout) in [
+        (
+            OutputFormat::StreamJson,
+            "{\"type\":\"result\",\"structured_output\":{\"verdict\":\"pass\",\"why\":\"ok\"}}\n",
+        ),
+        (
+            OutputFormat::Json,
+            r#"{"result":"{\"verdict\":\"pass\",\"why\":\"ok\"}"}"#,
+        ),
+        (OutputFormat::Text, r#"{"verdict":"pass","why":"ok"}"#),
+    ] {
+        let turn = normalize_with(format, stdout, &schema);
+        assert_eq!(turn.error, None, "{format:?} {stdout}");
+        assert_eq!(turn.structured_output.as_ref(), Some(&want));
+    }
+}
+
+#[test]
+fn a_schema_given_as_a_file_is_held_to() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("schema.json");
+    fs::write(&path, VERDICT_SCHEMA).unwrap();
+    let schema = Schema::compile(path.to_str().unwrap()).unwrap();
+    assert!(schema.validate(&serde_json::json!({})).is_err());
+    assert!(
+        schema
+            .validate(&serde_json::json!({"verdict": "pass", "why": "ok"}))
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_unusable_schema_is_refused_before_the_cli_runs() {
+    let dir = TempDir::new().unwrap();
+    let ran = dir.path().join("ran");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-never",
+        &format!(
+            "#!/bin/sh\ntouch \"{}\"\nprintf '{{\"structured_output\":{{}}}}\\n'\n",
+            ran.display()
+        ),
+    );
+    for bad in [
+        r#"{"type":"no-such-type"}"#,
+        "/no/such/schema.json",
+        "not json, not a path",
+    ] {
+        assert!(Schema::compile(bad).is_err(), "{bad}");
+        let mut cfg = base_config(fixture.clone());
+        cfg.json_schema = Some(bad.to_owned());
+        assert!(cfg.validate().is_err(), "config took {bad}");
+        let inv = Invocation::from_config(
+            &cfg,
+            dir.path().to_path_buf(),
+            "judge".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let turn = run_invocation(&cfg, &inv, &|| false);
+        assert!(
+            matches!(turn.error, Some(RunError::ProcessFailed { .. })),
+            "{bad}: {turn:?}"
+        );
+        assert!(!ran.exists(), "{bad}: the CLI ran");
+    }
+}
+
+#[test]
+fn a_config_never_declares_mcp() {
+    let cfg: Result<Config, _> = serde_json::from_str(r#"{"mcp":true}"#);
+    assert!(cfg.unwrap_err().to_string().contains("mcp"));
+    assert!(!Config::default().offers().capabilities.mcp);
 }
