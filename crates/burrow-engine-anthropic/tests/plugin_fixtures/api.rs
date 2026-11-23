@@ -491,3 +491,97 @@ fn claude_api_mode_against_local_fake_api_endpoint() {
         [DiagnosticEvent::Refusal { refusal, .. }] if refusal.kind == RefusalKind::CreditExhausted
     ));
 }
+
+/// A metered `claude-api` job is admitted with the credit's room as its
+/// budget and recorded in the ledger the credit's meter reads, so the next
+/// job is admitted with what's left; a job that never starts holds nothing.
+#[test]
+fn metered_jobs_are_recorded_in_the_credits_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("repo");
+    fs::create_dir_all(&workdir).unwrap();
+    let api_key = "stand-in-fixture-key-value";
+    let server = FakeApiServer::start(api_key);
+    let fake_cli = dir.path().join("fake-claude-api");
+    install_fake_claude_api_cli(&fake_cli);
+
+    // $20 renewing in two days, $5 in reserve: $10 a day may go.
+    let now = jiff::Timestamp::now();
+    let renews = now
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .checked_add(jiff::Span::new().days(2))
+        .unwrap();
+    let credit_file = dir.path().join("overlay.credit.json");
+    fs::write(
+        &credit_file,
+        json!({"credit": {"budgetUsd": 20, "renews": renews.to_string(), "monthlyUsd": 200,
+            "reserveUsd": 5, "since": now.as_second() - 60}})
+        .to_string(),
+    )
+    .unwrap();
+    let jobs_dir = dir.path().join("jobs");
+    fs::create_dir_all(&jobs_dir).unwrap();
+    let config = |name: &str, program: &Path| {
+        write_config(
+            dir.path(),
+            name,
+            &json!({
+                "mode": "claude-api",
+                "models": test_models(),
+                "defaultModel": TEST_MODEL_A,
+                "program": program,
+                "apiBaseUrl": server.url,
+                "credit": {"creditFile": credit_file, "jobsDir": jobs_dir},
+            }),
+        )
+    };
+    let metered = config("metered.json", &fake_cli);
+    let offers = burrow_engine_anthropic::plugin::PluginConfig::from_file(&metered)
+        .unwrap()
+        .offers();
+    let spent = || {
+        burrow_probe::credit::meter(
+            &credit_file,
+            Some(&jobs_dir),
+            jiff::Timestamp::now().as_second(),
+        )
+        .unwrap()
+        .spent
+    };
+    let job = |cfg: &Path| {
+        let req = make_v5_job_request(
+            "claude-api",
+            offers.clone(),
+            &workdir,
+            "metered work",
+            None,
+            Context::Fresh,
+        );
+        invoke_raw(cfg, &req, &[("ANTHROPIC_API_KEY", api_key)])
+    };
+
+    // A job that can't start gives its reservation back.
+    let missing = config("missing.json", &dir.path().join("no-such-claude"));
+    let out = job(&missing);
+    assert_eq!(out.status.code(), Some(i32::from(EXIT_FAILURE)));
+    assert_eq!(spent(), 0);
+
+    let out = job(&metered);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(spent(), 32_000, "charged the run's cost");
+    // The next is admitted with what's left.
+    let out = job(&metered);
+    assert_eq!(out.status.code(), Some(0));
+    let budgets: Vec<Value> = server
+        .hits()
+        .iter()
+        .map(|h| h.body["budget"].clone())
+        .collect();
+    assert_eq!(budgets, [json!("10.000000"), json!("9.968000")]);
+}

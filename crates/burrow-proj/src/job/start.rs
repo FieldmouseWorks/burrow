@@ -47,17 +47,11 @@ impl Job<'_> {
                 }
                 Err(e) => return Err(e),
             }
-            let engine = engine.name();
-            match budget {
-                Some(b) => writeln!(
-                    stream,
-                    "{{\"type\":\"burrow.run\",\"at\":{at},\"engine\":\"{engine}\",\"budget\":{b}}}"
-                )?,
-                None => writeln!(
-                    stream,
-                    "{{\"type\":\"burrow.run\",\"at\":{at},\"engine\":\"{engine}\"}}"
-                )?,
-            }
+            writeln!(
+                stream,
+                "{}",
+                burrow_probe::credit::marker(at, engine.name(), budget)
+            )?;
             start()
         })();
         if let Err(error) = result {

@@ -296,3 +296,96 @@ fn a_budget_is_given_to_the_micro_dollar() {
     assert_eq!(usd(1_234_567), "1.234567");
     assert_eq!(usd(5), "0.000005");
 }
+
+impl Rig {
+    /// The credit's meter as admission reads it.
+    fn meter(&self) -> burrow_settings::credit::Meter {
+        burrow_probe::credit::meter(&self.credit_file, Some(&self.jobs), self.now).unwrap()
+    }
+
+    fn reserve(&self, cap: Option<i64>) -> Reservation {
+        reserve(Some(&self.credit_file), &self.jobs, self.now, cap).unwrap()
+    }
+}
+
+/// What a run's stdout says of SESSION and its cumulative COST, with an
+/// assistant message the ledger doesn't need and a line cut short.
+fn ran(session: &str, cost: f64) -> Vec<u8> {
+    format!(
+        "{}\n{}\n{}\n{{\"type\":\"res",
+        json!({"type":"system","subtype":"init","session_id":session}),
+        json!({"type":"assistant","session_id":session,"message":{"id":"m","content":[]}}),
+        json!({"type":"result","session_id":session,"total_cost_usd":cost,"usage":{"input_tokens":1}}),
+    )
+    .into_bytes()
+}
+
+/// A run admitted outside proj's jobs holds its budget in the meter's ledger
+/// from its admission until its cost is recorded, so the next admission
+/// gets only what's left: before, every run got the same room again.
+#[test]
+fn a_reserved_run_is_held_at_its_budget_then_charged_its_cost() {
+    let r = rig();
+    let first = r.reserve(None);
+    assert_eq!(first.budget, 10 * M);
+    let m = r.meter();
+    assert_eq!((m.spent, m.headroom()), (10 * M, 0), "held at its budget");
+    // Another admission while it runs finds no room, and doesn't wait.
+    let refused = reserve(Some(&r.credit_file), &r.jobs, r.now, None).unwrap_err();
+    assert!(refused.0.contains("no room"), "{refused}");
+
+    first.finish(&ran("s1", 1.5)).unwrap();
+    assert_eq!(r.meter().spent, 1_500_000, "charged its cost alone");
+    let second = r.reserve(None);
+    assert_eq!(second.budget, 10 * M - 1_500_000);
+    // Its stream keeps the marker and what says its session and cost.
+    let kinds: Vec<String> = fs::read_to_string(r.jobs.join(".engine-runs/1.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap()["type"].to_string())
+        .collect();
+    assert_eq!(kinds, [r#""burrow.run""#, r#""system""#, r#""result""#]);
+}
+
+/// A run's budget is the least of the credit's room and its own cap.
+#[test]
+fn a_reservation_takes_its_cap_when_less() {
+    let r = rig();
+    assert_eq!(r.reserve(Some(M)).budget, M);
+    assert_eq!(r.meter().spent, M);
+    assert_eq!(r.reserve(Some(100 * M)).budget, 9 * M);
+}
+
+/// A run that never started gives its reservation back.
+#[test]
+fn an_abandoned_reservation_holds_nothing() {
+    let r = rig();
+    r.reserve(None).abandon().unwrap();
+    assert_eq!(r.meter().spent, 0);
+    assert_eq!(r.reserve(None).budget, 10 * M);
+}
+
+/// A run that resumes another's session is charged its own cost, not the
+/// session's whole; one stopped before its result stays held at its budget
+/// until a later run of its session accounts for it.
+#[test]
+fn runs_of_one_session_are_each_charged_once() {
+    let r = rig();
+    r.reserve(None).finish(&ran("s1", 1.0)).unwrap();
+    r.reserve(None).finish(&ran("s1", 1.5)).unwrap();
+    assert_eq!(r.meter().spent, 1_500_000);
+
+    // Stopped once its session was known, before its result.
+    let init = json!({"type":"system","subtype":"init","session_id":"s1"});
+    r.reserve(Some(2 * M))
+        .finish(format!("{init}\n").as_bytes())
+        .unwrap();
+    assert_eq!(r.meter().spent, 3_500_000, "held at its budget");
+    r.reserve(None).finish(&ran("s1", 2.25)).unwrap();
+    assert_eq!(r.meter().spent, 2_250_000, "the resume accounts for it");
+
+    // Stopped before it said its session: nothing can account for it, so
+    // it stays held at its budget, the side that never overspends.
+    r.reserve(Some(M)).finish(b"").unwrap();
+    assert_eq!(r.meter().spent, 3_250_000);
+}

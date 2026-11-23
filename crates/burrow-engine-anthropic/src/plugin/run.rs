@@ -40,7 +40,12 @@ pub struct JobSpec<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub context: &'a Context,
+    /// The most the run may spend, in micro-dollars, as the engine's
+    /// settings cap it: a `claude-api` run on a metered credit gets no more
+    /// than the credit has room for either.
     pub max_budget_usd: Option<i64>,
+    /// The credit that admits a `claude-api` run, when one is metered.
+    pub credit: Option<&'a super::CreditConfig>,
 }
 
 /// Run Claude Code for `spec`, returning a structured [`JobOutcome`].
@@ -65,17 +70,6 @@ pub fn execute(
         Context::Fork { session } => (Some(session.clone()), true),
     };
 
-    let mut extra_args = command::run_args(&command::RunArgs {
-        model: spec.model.map(str::to_owned),
-        effort: spec.effort.map(str::to_owned),
-        session: resume_session.clone(),
-        max_budget_usd: spec.max_budget_usd,
-        append_system_prompt: config.append_system_prompt.clone(),
-    });
-    if fork_session {
-        extra_args.push("--fork-session".to_owned());
-    }
-
     // Read login/API credential strictly from the engine's configured
     // `credentialEnv` (or `api_key_file` fallback for `claude-api`). Never
     // embed credentials in `grants.env` (which goes into `--settings` argv).
@@ -94,6 +88,46 @@ pub fn execute(
         };
     }
 
+    // Admitted by the credit, when one is metered, only now that nothing
+    // but starting it is left: its reservation, recorded in the meter's
+    // ledger, is taken back below if it never starts.
+    let reservation = match spec.credit {
+        Some(credit) if config.mode == Mode::ClaudeApi => match api::reserve(
+            Some(&credit.credit_file),
+            &credit.jobs_dir,
+            now,
+            spec.max_budget_usd,
+        ) {
+            Ok(r) => Some(r),
+            Err(refused) => {
+                return JobOutcome::Refused {
+                    session: None,
+                    refusal: Refusal {
+                        kind: RefusalKind::CreditExhausted,
+                        reason: refused.to_string(),
+                        resets_at: None,
+                    },
+                    usage: JobUsage::default(),
+                };
+            }
+        },
+        _ => None,
+    };
+    let budget = match &reservation {
+        Some(r) => Some(r.budget),
+        None => spec.max_budget_usd,
+    };
+    let mut extra_args = command::run_args(&command::RunArgs {
+        model: spec.model.map(str::to_owned),
+        effort: spec.effort.map(str::to_owned),
+        session: resume_session.clone(),
+        max_budget_usd: budget,
+        append_system_prompt: config.append_system_prompt.clone(),
+    });
+    if fork_session {
+        extra_args.push("--fork-session".to_owned());
+    }
+
     let (mut cmd, key_guard) = match command::build_command_for(
         config.program(),
         grants,
@@ -104,15 +138,18 @@ pub fn execute(
     ) {
         Ok(built) => built,
         Err(refused) => {
-            return JobOutcome::Refused {
-                session: None,
-                refusal: Refusal {
-                    kind: RefusalKind::ApiKeyRejected,
-                    reason: refused.to_string(),
-                    resets_at: None,
+            return unstarted(
+                reservation,
+                JobOutcome::Refused {
+                    session: None,
+                    refusal: Refusal {
+                        kind: RefusalKind::ApiKeyRejected,
+                        reason: refused.to_string(),
+                        resets_at: None,
+                    },
+                    usage: JobUsage::default(),
                 },
-                usage: JobUsage::default(),
-            };
+            );
         }
     };
 
@@ -131,11 +168,14 @@ pub fn execute(
     let mut signals = match Signals::new([SIGTERM, SIGINT, SIGHUP]) {
         Ok(s) => s,
         Err(e) => {
-            return JobOutcome::Failed {
-                session: None,
-                error: format!("failed to register signal handlers: {e}"),
-                usage: JobUsage::default(),
-            };
+            return unstarted(
+                reservation,
+                JobOutcome::Failed {
+                    session: None,
+                    error: format!("failed to register signal handlers: {e}"),
+                    usage: JobUsage::default(),
+                },
+            );
         }
     };
 
@@ -163,18 +203,28 @@ pub fn execute(
         Ok(c) => c,
         Err(e) => {
             drop(key_guard);
-            return JobOutcome::Failed {
-                session: None,
-                error: format!("failed to start {}: {e}", config.program().display()),
-                usage: JobUsage::default(),
-            };
+            return unstarted(
+                reservation,
+                JobOutcome::Failed {
+                    session: None,
+                    error: format!("failed to start {}: {e}", config.program().display()),
+                    usage: JobUsage::default(),
+                },
+            );
         }
     };
     // The child inherited the key descriptor across exec; drop our copy now.
     drop(key_guard);
 
-    let run_result = drive_child(&mut child, spec.prompt.as_bytes(), &mut signals);
+    let mut out = Vec::new();
+    let run_result = drive_child(&mut child, spec.prompt.as_bytes(), &mut signals, &mut out);
     kill_harness_group(&mut child, shared_group, self_pid);
+    // Its cost, as far as its stream got, into the ledger the credit's
+    // meter reads, however the run ended. One that can't be written stays
+    // held at its budget there, the side that never overspends.
+    if let Some(reservation) = reservation {
+        let _ = reservation.finish(&out);
+    }
 
     match run_result {
         Err(DriverError::Cancelled) => JobOutcome::Failed {
@@ -190,7 +240,7 @@ pub fn execute(
         Ok(finished) => classify_output(
             config.mode,
             spec.context,
-            &finished.stdout,
+            &out,
             &finished.stderr,
             finished.status,
             now,
@@ -198,9 +248,40 @@ pub fn execute(
     }
 }
 
+/// A run that never started gives its reservation back, and says so in its
+/// outcome when it can't.
+fn unstarted(reservation: Option<api::Reservation>, outcome: JobOutcome) -> JobOutcome {
+    let Some(Err(held)) = reservation.map(api::Reservation::abandon) else {
+        return outcome;
+    };
+    match outcome {
+        JobOutcome::Failed {
+            session,
+            error,
+            usage,
+        } => JobOutcome::Failed {
+            session,
+            error: format!("{error}; {held}"),
+            usage,
+        },
+        JobOutcome::Refused {
+            session,
+            mut refusal,
+            usage,
+        } => {
+            refusal.reason = format!("{}; {held}", refusal.reason);
+            JobOutcome::Refused {
+                session,
+                refusal,
+                usage,
+            }
+        }
+        ok @ JobOutcome::Ok { .. } => ok,
+    }
+}
+
 struct Finished {
     status: ExitStatus,
-    stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
@@ -248,6 +329,7 @@ fn drive_child(
     child: &mut Child,
     prompt: &[u8],
     signals: &mut Signals,
+    out: &mut Vec<u8>,
 ) -> Result<Finished, DriverError> {
     let mut stdin = child.stdin.take();
     if let Some(pipe) = &stdin {
@@ -265,7 +347,6 @@ fn drive_child(
     nonblocking(&stderr)?;
 
     let mut remaining = prompt;
-    let mut out = Vec::new();
     let mut err = Vec::new();
     let mut out_done = false;
     let mut err_done = false;
@@ -297,7 +378,7 @@ fn drive_child(
         }
 
         if !out_done {
-            out_done = read_chunk(&mut stdout, &mut out, MAX_STDOUT_BYTES, "stdout")?;
+            out_done = read_chunk(&mut stdout, out, MAX_STDOUT_BYTES, "stdout")?;
         }
         if !err_done {
             err_done = read_chunk(&mut stderr, &mut err, MAX_STDERR_BYTES, "stderr")?;
@@ -318,14 +399,13 @@ fn drive_child(
             && ((out_done && err_done) || exited_at.elapsed() >= Duration::from_millis(100))
         {
             if !out_done {
-                let _ = read_chunk(&mut stdout, &mut out, MAX_STDOUT_BYTES, "stdout")?;
+                let _ = read_chunk(&mut stdout, out, MAX_STDOUT_BYTES, "stdout")?;
             }
             if !err_done {
                 let _ = read_chunk(&mut stderr, &mut err, MAX_STDERR_BYTES, "stderr")?;
             }
             return Ok(Finished {
                 status: exited,
-                stdout: out,
                 stderr: err,
             });
         }
@@ -477,9 +557,9 @@ pub fn classify_output(
             Some(got) => {
                 return JobOutcome::Failed {
                     session: Some(got.clone()),
-                    error: format!(
-                        "continuation resumed session {got:?} instead of requested {expected:?}"
-                    ),
+                    // The session it did resume is the outcome's own; the
+                    // error names neither, as no error carries a session.
+                    error: "continuation resumed another session than the one requested".to_owned(),
                     usage,
                 };
             }

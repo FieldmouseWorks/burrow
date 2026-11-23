@@ -17,7 +17,7 @@ use conary_core::plugin::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Mode, api};
+use crate::Mode;
 
 /// Environment variable naming the JSON runtime configuration file.
 pub const CONFIG_ENV: &str = "BURROW_ANTHROPIC_CONFIG";
@@ -604,33 +604,11 @@ pub fn handle_request(
                 Err(why) => return PluginResult::error(engine, None, why, None),
             };
 
-            // Optional credit admission for `claude-api`.
-            let (budget, _admission) = match (config.mode, &config.credit) {
-                (Mode::ClaudeApi, Some(credit)) => {
-                    match api::admit(Some(&credit.credit_file), &credit.jobs_dir, now) {
-                        Ok(admitted) => {
-                            let cap = match config.max_budget_usd {
-                                Some(explicit) => admitted.budget.min(explicit),
-                                None => admitted.budget,
-                            };
-                            (Some(cap), Some(admitted))
-                        }
-                        Err(refused) => {
-                            return PluginResult::refused(
-                                engine,
-                                None,
-                                Refusal {
-                                    kind: RefusalKind::CreditExhausted,
-                                    reason: refused.to_string(),
-                                    resets_at: None,
-                                },
-                                JobUsage::default(),
-                            );
-                        }
-                    }
-                }
-                (Mode::ClaudeApi, None) => (config.max_budget_usd, None),
-                (Mode::Claude, _) => (None, None),
+            // A `claude-api` run's budget, as its settings cap it; a metered
+            // credit's admission caps it again, just before the run starts.
+            let budget = match config.mode {
+                Mode::ClaudeApi => config.max_budget_usd,
+                Mode::Claude => None,
             };
 
             let spec = run::JobSpec {
@@ -640,6 +618,7 @@ pub fn handle_request(
                 effort: chosen_effort.as_deref(),
                 context: &context,
                 max_budget_usd: budget,
+                credit: config.credit.as_ref(),
             };
 
             match run::execute(config, &grants, &spec, env, now) {

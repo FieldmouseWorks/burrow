@@ -24,6 +24,12 @@
 //! its spend can't be known, so there's no room until it is. The meter
 //! still says what it knows meanwhile. A turn whose stream holds no record
 //! hasn't started a run (proj writes the marker first), so it's nothing.
+//!
+//! Runs the credit admits outside proj's jobs (burrow-engine-anthropic's
+//! plugin, api.rs) are recorded the same way in one folder of their own,
+//! [`ENGINE_RUNS`] in jobs, each run a turn of it: hidden, so proj never
+//! takes it for a job, and one folder, so a run that resumes another's
+//! session is charged for its own cost alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Read};
@@ -35,6 +41,21 @@ use burrow_settings::credit::{self, Credit, Meter, Spend};
 use serde_json::Value;
 
 use crate::answer::usage::accounting::{Report, Session, decode};
+
+/// The folder in jobs where runs admitted outside proj's jobs are recorded.
+pub const ENGINE_RUNS: &str = ".engine-runs";
+
+/// A run's marker, the line its stream starts with: when it started, the
+/// engine it's on and, for a run on the credit, the most it may spend in
+/// micro-dollars (`--max-budget-usd`), which the meter holds until its cost
+/// is in.
+pub fn marker(at: i64, engine: &str, budget: Option<i64>) -> String {
+    let engine = Value::from(engine);
+    match budget {
+        Some(b) => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine},"budget":{b}}}"#),
+        None => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine}}}"#),
+    }
+}
 
 /// The engines whose turns stream Claude Code's records, and so share a
 /// job's sessions and their cumulative cost.
@@ -79,8 +100,9 @@ pub fn ledger(jobs: &Path, from: i64) -> Result<Ledger, String> {
     let mut ledger = Ledger::default();
     for name in root.names().map_err(fail)? {
         let label = name.to_string_lossy().into_owned();
-        // Hidden entries are proj's control state, not jobs.
-        if label.starts_with('.') {
+        // Hidden entries are proj's control state, not jobs, but for the
+        // runs admitted outside them.
+        if label.starts_with('.') && label != ENGINE_RUNS {
             continue;
         }
         let dir = match root.dir(Path::new(&name)) {
