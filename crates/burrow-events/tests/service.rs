@@ -480,12 +480,8 @@ fn a_slow_conaryd_takes_it_once() {
 #[test]
 fn a_delivery_waits_for_conaryd_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let (config, creds) = landing(dir.path(), port);
+    let closed = burrow_test::ClosedPort::new();
+    let (config, creds) = landing(dir.path(), closed.port());
     let svc = Service::start(dir.path(), config.clone(), &creds);
     let hooks = svc.port("deliveries on 127.0.0.1:");
     assert_eq!(deliver(hooks), 202);
@@ -493,10 +489,7 @@ fn a_delivery_waits_for_conaryd_across_a_restart() {
     drop(svc);
     assert_eq!(held(dir.path()), 1);
 
-    let got = conaryd(
-        TcpListener::bind(("127.0.0.1", port)).unwrap(),
-        Duration::ZERO,
-    );
+    let got = conaryd(closed.listen(), Duration::ZERO);
     let svc = Service::start(dir.path(), config, &creds);
     svc.said("deliveries on 127.0.0.1:");
     assert!(soon(|| held(dir.path()) == 0));

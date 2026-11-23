@@ -49,7 +49,6 @@ pub fn kick(url: &str, timeout: Duration) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -80,11 +79,8 @@ mod tests {
             Err("HTTP 404".into())
         );
         assert_eq!(*got.lock().unwrap(), ["/kick/autoland/sam/r", "/kick/nope"]);
-        let closed = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        assert!(kick(&format!("http://{closed}/kick/x"), t).is_err());
+        let closed = burrow_test::ClosedPort::new();
+        assert!(kick(&format!("http://{}/kick/x", closed.addr()), t).is_err());
         assert!(kick("https://127.0.0.1/kick/x", t).is_err());
     }
 }

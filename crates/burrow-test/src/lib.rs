@@ -10,6 +10,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 pub mod checkout;
+mod port;
+pub use port::ClosedPort;
 
 /// Install an executable without ever opening it for writing in this process.
 ///
