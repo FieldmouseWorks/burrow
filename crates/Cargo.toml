@@ -14,6 +14,7 @@ members = [
     "burrow-dispatch",
     "burrow-door",
     "burrow-engine-anthropic",
+    "burrow-engine-antigravity",
     "burrow-events",
     "burrow-engines-door",
     "burrow-example-plugin",

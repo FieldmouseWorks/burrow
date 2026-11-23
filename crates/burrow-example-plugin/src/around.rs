@@ -4,7 +4,7 @@
 //! the fixture what that plugin declares, in that plugin's engine, and the
 //! fixture tries every capability there.
 
-use conary_core::plugin::{Identity, Request, Response, Task};
+use conary_core::plugin::{Answer, Identity, Request, Response, Task};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -26,7 +26,7 @@ pub fn pass(plugin: &Path, input: &[u8]) -> Result<(), String> {
 
 /// `response`, as `plugin`'s engine gave it: Conary's runner holds every
 /// answer to the engine its describe named.
-pub fn as_plugin(plugin: &Path, mut response: Response) -> Result<Response, String> {
+pub fn as_plugin(plugin: &Path, response: Response) -> Result<Response, String> {
     let request = serde_json::to_vec(&Request::describe()).map_err(|e| e.to_string())?;
     let output = run(plugin, &request, Stdio::piped())?;
     if !output.status.success() {
@@ -38,11 +38,25 @@ pub fn as_plugin(plugin: &Path, mut response: Response) -> Result<Response, Stri
     }
     let described: Response = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("{}'s describe doesn't read: {e}", plugin.display()))?;
+    Ok(adopt(&described, response))
+}
+
+/// Apply `described`'s engine identity and, for a model-offering plugin, its
+/// first offered model so Conary's v3+ execution check accepts the fixture's
+/// answer when wrapping a real engine plugin.
+fn adopt(described: &Response, mut response: Response) -> Response {
     response.by = Identity {
-        engine: described.by.engine,
+        engine: described.by.engine.clone(),
         session: None,
     };
-    Ok(response)
+    if let (Some(executed), Answer::Describe { models, .. }) =
+        (&mut response.execution, &described.answer)
+        && executed.model.is_none()
+        && let Some(first) = models.first()
+    {
+        executed.model = Some(first.id.clone());
+    }
+    response
 }
 
 fn run(plugin: &Path, input: &[u8], stdout: Stdio) -> Result<Output, String> {

@@ -29,17 +29,21 @@
       # a key, so importing one twice (say, on its own and via default) is
       # harmless, and its file, so what it defines says where it came from
       # (in an error, and to update-origin) rather than nixpkgs' flake.nix.
-      module = name: {
-        _file = toString ./modules/${name}.nix;
+      moduleFiles = {
+        antigravity = "engines/antigravity.nix";
+      };
+      module = name: let file = moduleFiles.${name} or "${name}.nix"; in {
+        _file = toString ./modules/${file};
         key = "burrow/${name}";
-        imports = [ (import ./modules/${name}.nix inputs) ];
+        imports = [ (import ./modules/${file} inputs) ];
       };
       # The ledger's machines take Conary at the rev burrow's crates link
       # (packages.conary); burrow's checks build theirs with a stand-in for
       # its `cn`, which passes the files their build loads (`cn policy`, the
       # shadow's `cn flow settings`) and nothing else.
       cnStandIn = pkgs.writeShellScriptBin "cn" ''case "$1 $2" in "policy "*|"flow settings") exit 0;; esac; exit 1'';
-      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
+      antigravityStandIn = pkgs.writeShellScriptBin "antigravity" ''exit 0'';
+      names = [ "settings" "claude" "antigravity" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
       # Each module on its own, with only what it imports, in a check of its
       # own (standalone-NAME), so the gate's legs share the evaluations out:
       # evaluating is the check, so these build nothing. A service that says
@@ -85,8 +89,9 @@
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
             (nixpkgs.lib.optionalAttrs (name == "builds") { burrow.builds = { host = "example.org"; repos = [ "sam/homelab" ]; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; }; burrow.github = { machinery = "workers"; apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
+            (nixpkgs.lib.optionalAttrs (name == "antigravity") { burrow.engines.antigravity = { enable = true; package = antigravityStandIn; }; })
             # github has no switch: it's on with an App to serve.
-            (if name == "settings" then { }
+            (if name == "settings" || name == "antigravity" then { }
              else if name == "github" then { burrow.github.apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
              else { burrow.${{ rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
           ];

@@ -531,6 +531,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-engine-antigravity"
+version = "0.0.0"
+dependencies = [
+ "boon",
+ "burrow-process",
+ "burrow-test",
+ "conary-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-engines-door"
 version = "0.0.0"
 dependencies = [
@@ -565,6 +578,7 @@ name = "burrow-example-plugin"
 version = "0.0.0"
 dependencies = [
  "burrow-grants",
+ "burrow-test",
  "conary-core",
  "serde",
  "serde_json",
