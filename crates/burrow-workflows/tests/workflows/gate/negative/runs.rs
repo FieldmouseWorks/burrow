@@ -7,6 +7,7 @@
 //! gate that does to judge: skipped, which counts for nothing.
 
 use super::{Repo, WANTS_2};
+use crate::harness::{read, repo_file};
 
 /// The PR every case here makes: a code change, and a new version of the
 /// test t reads.
@@ -247,4 +248,77 @@ fn tests_no_check_reads_are_unrun() {
     assert_eq!(ran.result(), "skipped", "{}", ran.out);
     assert_eq!(ran.list("unrun"), ["docs/tests/x.txt"]);
     assert!(ran.builds().is_empty(), "{:?}", ran.calls);
+}
+
+/// lib/project.nix's rust-test reads the whole workspace but runs only its
+/// packages' tests, and says so (lib/rust-test-files.nix): t here is that
+/// check over a workspace in tests/ with one package, a, and fixtures
+/// beside it. A test in a crate the base doesn't have is unrun, though t
+/// reads it (#699); one that doesn't say would count it as passing.
+#[test]
+fn a_test_of_a_crate_the_base_lacks_is_unrun() {
+    let declared = r#"{ testFiles = import ./rust-test-files.nix { root = ./tests; prefix = "tests"; packages = [ "a" ]; include = [ ]; }; }"#;
+    for (t_extra, result) in [(declared, "skipped"), ("{ }", "pass")] {
+        let r = workspace(t_extra);
+        let head = r.pr(
+            "new-crate",
+            &[
+                ("lib.txt", Some("2\n")),
+                ("tests/b/Cargo.toml", Some("[package]\nname = \"b\"\n")),
+                ("tests/b/src/pass_tests.rs", Some("// b\n")),
+            ],
+        );
+        let ran = r.run(&head, "", "");
+        assert_eq!(ran.result(), result, "{t_extra}: {}", ran.out);
+        if result == "skipped" {
+            assert_eq!(ran.code, 0, "{}", ran.out);
+            assert_eq!(
+                ran.list("unrun"),
+                ["tests/b/Cargo.toml", "tests/b/src/pass_tests.rs"],
+                "{}",
+                ran.out
+            );
+        }
+    }
+}
+
+/// The same declaration still runs the tests of the packages the base
+/// has, a first tests/ directory included, and the fixtures beside them:
+/// new ones that pass on the old code are red.
+#[test]
+fn a_test_of_a_crate_the_base_has_still_runs() {
+    let r = workspace(
+        r#"{ testFiles = import ./rust-test-files.nix { root = ./tests; prefix = "tests"; packages = [ "a" ]; include = [ ]; }; }"#,
+    );
+    let head = r.pr(
+        "member",
+        &[
+            ("lib.txt", Some("2\n")),
+            ("tests/a/tests/more.rs", Some("// more\n")),
+            ("tests/a/src/more_tests.rs", Some("// more\n")),
+            ("tests/fixtures/new.txt", Some("new\n")),
+        ],
+    );
+    let ran = r.run(&head, "", "");
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert_eq!(ran.result(), "pass", "{}", ran.out);
+    assert!(ran.list("unrun").is_empty(), "{}", ran.out);
+}
+
+/// t over a workspace in tests/: package a and fixtures beside it, and
+/// lib/rust-test-files.nix where t can import it.
+fn workspace(t_extra: &str) -> Repo {
+    Repo::holding(
+        t_extra,
+        &[
+            (
+                "rust-test-files.nix",
+                &read(&repo_file("lib/rust-test-files.nix")),
+            ),
+            ("tests/Cargo.toml", "[workspace]\nmembers = [ \"a\" ]\n"),
+            ("tests/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("tests/a/src/lib.rs", "// a\n"),
+            ("tests/fixtures/data.txt", "data\n"),
+        ],
+    )
 }
