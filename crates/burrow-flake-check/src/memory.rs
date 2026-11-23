@@ -311,6 +311,7 @@ fn within<T: Sync, R: Send>(
     let next = AtomicUsize::new(0);
     let busy = AtomicUsize::new(0);
     let done = AtomicBool::new(false);
+    let admit = Mutex::new(());
     let watch = Watch::default();
     let results: Vec<_> = items.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
@@ -318,9 +319,15 @@ fn within<T: Sync, R: Send>(
             .map(|_| {
                 scope.spawn(|| {
                     loop {
-                        while busy.load(Ordering::SeqCst) > 0
-                            && (gauge.room)().is_ok_and(|r| r < RESERVE)
-                        {
+                        // One worker at a time looks and takes its place, so
+                        // only one takes the start an idle job allows.
+                        let turn = admit.lock().unwrap();
+                        loop {
+                            let idle = busy.load(Ordering::SeqCst) == 0;
+                            let short = (gauge.room)().is_ok_and(|r| r < RESERVE);
+                            if idle || !short {
+                                break;
+                            }
                             std::thread::sleep(POLL);
                         }
                         let i = next.fetch_add(1, Ordering::SeqCst);
@@ -328,6 +335,7 @@ fn within<T: Sync, R: Send>(
                             break;
                         }
                         busy.fetch_add(1, Ordering::SeqCst);
+                        drop(turn);
                         let slot = Slot {
                             task: i,
                             watch: Some(&watch),
@@ -420,6 +428,40 @@ mod tests {
         );
         // The one stopped ran again alone.
         assert!(ends.contains(&(8, 8)), "{ends:?}");
+    }
+    /// With less than [`RESERVE`] free (but more than [`FLOOR`], so the
+    /// watch stops nothing), only one task may take the start an idle job
+    /// allows, however many workers find it idle at once. The gauge holds
+    /// each worker that reads the room until all four are reading it, or
+    /// a while has passed: four that each saw the job idle would then all
+    /// start.
+    #[test]
+    fn one_task_at_a_time_while_the_room_is_short() {
+        use std::sync::Condvar;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const SIDE: usize = 4;
+        let reading = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let r = reading.clone();
+        let gauge = Gauge {
+            room: Box::new(move || {
+                let (n, all) = &*r;
+                let mut n = n.lock().unwrap();
+                *n += 1;
+                all.notify_all();
+                let wait = std::time::Duration::from_millis(100);
+                n = all.wait_timeout_while(n, wait, |n| *n < SIDE).unwrap().0;
+                *n -= 1;
+                Ok(RESERVE - G / 2)
+            }),
+            held: Box::new(|_| 0),
+        };
+        let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        within(&gauge, &[(); SIDE], SIDE, |_, _| {
+            most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            now.fetch_sub(1, Ordering::SeqCst);
+        });
+        assert_eq!(most.into_inner(), 1);
     }
     /// Without the watch, as one evaluation alone, a command runs as
     /// [`Command::output`] would run it.
