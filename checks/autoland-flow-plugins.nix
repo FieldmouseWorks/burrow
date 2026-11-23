@@ -33,7 +33,7 @@ let
   };
   machine = plugins: (self.nixosConfigurations.example.extendModules {
     modules = [{
-      burrow.updates.renovate.enable = false;
+      burrow.updates.renovate.enable = lib.mkForce false;
       burrow.autoland.shadow = [ "Sam/HomeLab" "sam/plain" "sam/bare" "sam/twin" ];
       # Evidence and proofs: its train off, as proofs need yet.
       burrow.autoland.repos."sam/homelab" = {
