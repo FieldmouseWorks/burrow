@@ -27,5 +27,5 @@ pkgs.runCommand "tool-configs-check" { } (
   + usage (tool "boot") "${p}-boot default SYSTEM | trial [--deadline | --force] | check | status"
   + usage systemd.services.firmware-check.serviceConfig.ExecStart "firmware-check [--review]"
   + usage systemd.services.renovate.serviceConfig.ExecStart "renovate-run [OWNER/REPO]"
-  + usage systemd.services.renovate-sweep.serviceConfig.ExecStart "renovate-sweep [OWNER/REPO]"
+  + usage systemd.services.renovate-sweep.serviceConfig.ExecStart "renovate-sweep [OWNER/REPO|--key]"
   + "touch $out\n")

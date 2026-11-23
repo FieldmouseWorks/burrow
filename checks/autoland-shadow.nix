@@ -65,12 +65,13 @@ let
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
     settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
-      "job_login" "job_timeout" "judge_engines" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
+      "job_login" "job_timeout" "judge_engines" "major_key_file" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
       "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
-  # Every key a config has: all of Settings' but the seal keys,
+  # Every key a config has: all of Settings' but the seal keys (the
+  # example runs renovate-sweep, whose key the config names by its file),
   # renovate_run and default_priority, left to Conary's defaults. Conary's defaults name no
   # machine (Conary#381), so the engines a judge is owed for and the bots'
   # addresses are the steward's own.
@@ -148,13 +149,23 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
     || fail "with a machinery App, not the steward's authors and bots: $(jq -c .trusted_authors ${withApp.plain})"
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]"] and .settings.people == ["sam"]' ${noApp.plain} >/dev/null \
     || fail "without one, not the steward's authors and bots: $(jq -c .trusted_authors ${noApp.plain})"
-  # Conary's own types: the configs rendered, and the class policy.
-  ${flowFiles} flow ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
+  # Conary's own types: the configs rendered, and the class policy. The
+  # loader reads the key each names by its file (renovate-sweep's, which
+  # the example runs), which only the machine has: here a stand-in's.
+  printf '%064d' 0 > major-seal
+  loadable=()
+  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
+    jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal"' $f >/dev/null \
+      || fail "$f doesn't name renovate-sweep's key by its file"
+    jq --arg k "$PWD/major-seal" '.settings.major_key_file = $k' $f > "loadable-''${#loadable[@]}.json"
+    loadable+=("loadable-''${#loadable[@]}.json")
+  done
+  ${flowFiles} flow "''${loadable[@]}" || fail "Conary's flow::Config refuses a rendered config"
   ${flowFiles} policy ${policy} || fail "Conary's Policy refuses the machine's class policy"
   # And they refuse what the machine's cn would: a key Conary doesn't know,
   # a value of the wrong type, a policy with a key it doesn't take.
-  jq '.settings.bogus = 1' ${withApp.homelab} > key.json
-  jq '.settings.rounds = "two"' ${withApp.homelab} > type.json
+  jq '.settings.bogus = 1' loadable-0.json > key.json
+  jq '.settings.rounds = "two"' loadable-0.json > type.json
   jq '. + {bogus: []}' ${policy} > policy.json
   ! ${flowFiles} flow key.json || fail "a flow config with a key Conary doesn't know was taken"
   ! ${flowFiles} flow type.json || fail "a flow config with a value of the wrong type was taken"

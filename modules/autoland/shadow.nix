@@ -294,33 +294,33 @@ in
       pathConfig.PathChanged = [ rolesFile ];
     }; };
   };
-  # The unit holding the flow's seal keys, null with none; with
+  # The unit holding the flow's seal keys, none with none; with
   # renovate-sweep's among them, the path unit that has it take them again
   # when the sweep's changes, and the unit that path starts.
-  keys = if seals == { } then null else {
-    name = keysUnit;
-    again = lib.optionalAttrs (seals ? major-seal) {
-      path = {
-        wantedBy = [ "multi-user.target" ];
-        pathConfig = { PathChanged = [ seals.major-seal ]; Unit = "${keysAgain}.service"; };
-      };
+  keys = let
+    again = seals ? major-seal;
+  in {
+    paths = lib.optionalAttrs again { ${keysAgain} = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = { PathChanged = [ seals.major-seal ]; Unit = "${keysAgain}.service"; };
+    }; };
+    services = lib.optionalAttrs again {
       # A restart of a unit running ones that require it restarts them too,
       # on the new key: conaryd's and the shadow's, which read it at each
       # pass anyway. Nothing when it isn't up: its start takes the key.
-      service = {
+      ${keysAgain} = {
         description = "autoland: the flow's seal keys, taken again for renovate-sweep's new one";
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${config.systemd.package}/bin/systemctl try-restart ${keysUnit}.service";
         };
       };
-    };
-    service = {
+    } // lib.optionalAttrs (seals != { }) { ${keysUnit} = {
       description = "autoland: the flow's seal keys, for its controller alone";
       wantedBy = [ "multi-user.target" ];
       # renovate-sweep's key made, if it has none, before it's taken.
-      requires = lib.optional (seals ? major-seal) sweepKey;
-      after = lib.optional (seals ? major-seal) sweepKey;
+      requires = lib.optional again sweepKey;
+      after = lib.optional again sweepKey;
       # One of the flow's own units (burrow.ledger keeps the controller to
       # those).
       environment = ledger.flow.env;
@@ -335,7 +335,7 @@ in
         # %d: its credentials' directory.
         ExecStart = map (name: "${pkgs.coreutils}/bin/install -m 0400 %d/${name} ${keyFile name}") (lib.attrNames seals);
       };
-    };
+    }; };
   };
   # What a successful pass starts: the shadow, which skips a repo with no
   # config.

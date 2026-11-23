@@ -923,11 +923,8 @@ in
       # Conary's flow beside a shadowed repo's pass, once it's done.
       unitConfig.OnSuccess = lib.optionals (lib.hasSuffix "@" name) shadow.onSuccess;
     }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; }
-      // lib.optionalAttrs (shadow.keys != null) ({ ${shadow.keys.name} = shadow.keys.service; }
-        // lib.optionalAttrs (shadow.keys.again ? service) { "${shadow.keys.name}-again" = shadow.keys.again.service; })
-      // shadow.renderer.services;
-    systemd.paths = shadow.renderer.paths
-      // lib.optionalAttrs (shadow.keys != null && shadow.keys.again ? path) { "${shadow.keys.name}-again" = shadow.keys.again.path; };
+      // shadow.keys.services // shadow.renderer.services;
+    systemd.paths = shadow.renderer.paths // shadow.keys.paths;
     users = shadow.renderer.users;
     # The steward's state, and its clones of the repos, which are its alone.
     # What the retired review service kept (its queue, answers, sessions and
