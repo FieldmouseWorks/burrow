@@ -7,9 +7,10 @@
 //! (manifest.rs): paths (`inert`) and, in a file, lines (`inert-lines`). A
 //! pass compares the upstream's tree at the pin with its head (changes.rs):
 //! when something else differs, it bumps every dependency on that URL to the
-//! head, lock file and all, from one branch, `follow/OWNER-NAME`, refreshed
-//! rather than stacked; when nothing does, it opens nothing and closes the
-//! PR it had open (pass.rs).
+//! head, lock file and all, from one branch for the manifest and upstream,
+//! `follow/OWNER/NAME/PATH`, refreshed rather than stacked; when nothing
+//! does, it opens nothing and closes the PR it had open, unless someone
+//! else's commit is on it (pass.rs).
 //!
 //! That bound is what keeps two repos that pin each other from chasing one
 //! another: an upstream commit that only moves its own pin on the follower

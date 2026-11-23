@@ -48,7 +48,7 @@ impl Local for FakeLocal {
 }
 
 /// sam/home follows sam/Up (PIN) in crates/Cargo.toml, and sam/Up's main
-/// is at HEAD. `open` is the PR from follow/sam-up, if any: its labels,
+/// is at HEAD. `open` is the PR from follow/sam/up/crates/Cargo.toml, if any: its labels,
 /// and the rev its manifest pins.
 fn github(open: Option<(&[&str], &str)>) -> Fake {
     let mut gh = Fake::default();
@@ -124,7 +124,7 @@ fn github(open: Option<(&[&str], &str)>) -> Fake {
     )
     .on(
         "PATCH",
-        "repos/sam/home/git/refs/heads/follow/sam-up",
+        "repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
         vec![ok(200, json!({}), &[])],
     )
     .on(
@@ -148,7 +148,7 @@ fn github(open: Option<(&[&str], &str)>) -> Fake {
     )
     .on(
         "DELETE",
-        "repos/sam/home/git/refs/heads/follow/sam-up",
+        "repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
         vec![ok(204, Value::Null, &[])],
     )
     .on(
@@ -221,7 +221,7 @@ fn a_change_that_counts_opens_one_pr_with_the_manifest_and_lock() {
             "POST repos/sam/home/git/trees",
             "POST repos/sam/home/git/commits",
             "POST repos/sam/home/git/refs",
-            "PATCH repos/sam/home/git/refs/heads/follow/sam-up",
+            "PATCH repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
             "POST repos/sam/home/pulls",
         ]
     );
@@ -243,7 +243,7 @@ fn a_change_that_counts_opens_one_pr_with_the_manifest_and_lock() {
         (&pr["title"], &pr["head"], &pr["base"]),
         (
             &json!("deps: follow sam/up to 2222222"),
-            &json!("follow/sam-up"),
+            &json!("follow/sam/up/crates/Cargo.toml"),
             &json!("main")
         )
     );
@@ -310,7 +310,7 @@ fn nothing_that_counts_opens_nothing_and_closes_what_was_open() {
         vec![
             "POST repos/sam/home/issues/7/comments",
             "PATCH repos/sam/home/pulls/7",
-            "DELETE repos/sam/home/git/refs/heads/follow/sam-up",
+            "DELETE repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
         ]
     );
 }
@@ -353,10 +353,9 @@ fn a_push_to_another_repo_moves_nothing() {
     }
 }
 
-#[test]
-fn a_pr_with_a_commit_a_pass_didnt_make_keeps_it() {
-    // The steward's fix job made the follower build against the PR's head.
-    let mut gh = github(Some((&[], PIN)));
+/// PR 7 with a commit on it a pass didn't make: the steward's fix job made
+/// the follower build against the PR's head.
+fn theirs(gh: &mut Fake) {
     gh.answers.insert(
         0,
         (
@@ -373,6 +372,12 @@ fn a_pr_with_a_commit_a_pass_didnt_make_keeps_it() {
             .into(),
         ),
     );
+}
+
+#[test]
+fn a_pr_with_a_commit_a_pass_didnt_make_keeps_it() {
+    let mut gh = github(Some((&[], PIN)));
+    theirs(&mut gh);
     let mut local = FakeLocal {
         counted: vec!["src/lib.rs".into()],
         ..Default::default()
@@ -385,6 +390,118 @@ fn a_pr_with_a_commit_a_pass_didnt_make_keeps_it() {
         out.contains("#7 has a commit a pass didn't make (\"judge: read the new snapshot\")"),
         "{out}"
     );
+}
+
+#[test]
+fn a_pr_with_a_commit_a_pass_didnt_make_isnt_closed_when_nothing_counts() {
+    // The upstream took back what counted, after the fix job's commit.
+    for dry in [false, true] {
+        let mut gh = github(Some((&[], HEAD)));
+        theirs(&mut gh);
+        let mut out = Vec::new();
+        let ran = run(
+            &cfg(),
+            &Ask { only: None, dry },
+            &mut gh,
+            &mut FakeLocal::default(),
+            &mut out,
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(ran.ok, "{out}");
+        assert_eq!(changed(&gh), Vec::<String>::new());
+        assert!(!out.contains("close"), "{out}");
+        assert!(
+            out.contains("#7 has a commit a pass didn't make (\"judge: read the new snapshot\"), so it's left open"),
+            "{out}"
+        );
+    }
+}
+
+/// sam/home follows sam/Up in crates/Cargo.toml (at PIN, PR 7 open, as
+/// `github` has it) and in tools/Cargo.toml too, at `tools`, with no PR.
+fn two_manifests(tools: &str) -> (Config, Fake) {
+    let mut config = cfg();
+    config.manifests.push(Manifest {
+        repo: "sam/home".into(),
+        path: "tools/Cargo.toml".into(),
+    });
+    let mut gh = github(Some((&[], PIN)));
+    let branch = "follow/sam/up/tools/Cargo.toml";
+    for (method, path, answer) in [
+        (
+            "GET",
+            format!("repos/sam/home/pulls?state=open&head=sam:{branch}"),
+            ok(200, json!([]), &[]),
+        ),
+        (
+            "GET",
+            format!("repos/sam/home/contents/tools/Cargo.toml?ref={BASE}"),
+            ok(200, contents(&manifest(tools)), &[]),
+        ),
+        (
+            "PATCH",
+            format!("repos/sam/home/git/refs/heads/{branch}"),
+            ok(200, json!({}), &[]),
+        ),
+    ] {
+        gh.answers
+            .insert(0, (method.into(), path, vec![answer].into()));
+    }
+    (config, gh)
+}
+
+#[test]
+fn two_manifests_following_one_upstream_keep_a_pr_each() {
+    // Both behind: neither PR's head replaces the other's.
+    let (config, mut gh) = two_manifests(PIN);
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let ask = Ask {
+        only: None,
+        dry: false,
+    };
+    let ran = run(&config, &ask, &mut gh, &mut local, &mut out);
+    let out = String::from_utf8(out).unwrap();
+    assert!(ran.ok, "{out}");
+    let c = changed(&gh);
+    assert_eq!(
+        c.iter()
+            .filter(|c| c.starts_with("PATCH repos/sam/home/git/refs/"))
+            .collect::<Vec<_>>(),
+        [
+            "PATCH repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
+            "PATCH repos/sam/home/git/refs/heads/follow/sam/up/tools/Cargo.toml",
+        ]
+    );
+    // crates' PR 7 is refreshed; tools gets one of its own.
+    assert!(
+        c.contains(&"PATCH repos/sam/home/pulls/7".to_string()),
+        "{c:?}"
+    );
+    let made = gh.asked("POST");
+    let made = made.iter().find(|a| a.1 == "repos/sam/home/pulls").unwrap();
+    assert_eq!(
+        made.2.as_ref().unwrap()["head"],
+        "follow/sam/up/tools/Cargo.toml"
+    );
+
+    // tools already at the head: crates' PR is still needed, and stays open.
+    let (config, mut gh) = two_manifests(HEAD);
+    let mut out = Vec::new();
+    let ran = run(&config, &ask, &mut gh, &mut local, &mut out);
+    let out = String::from_utf8(out).unwrap();
+    assert!(ran.ok, "{out}");
+    let c = changed(&gh);
+    assert!(!out.contains("closed"), "{out}");
+    assert!(
+        !c.iter()
+            .any(|c| c.starts_with("DELETE") || c.contains("comments")),
+        "{c:?}"
+    );
+    assert_eq!(c.last().unwrap(), "PATCH repos/sam/home/pulls/7");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! A pass: each manifest's follows brought to where they should be. A follow
 //! whose upstream has something that counts past the pin has one open PR,
-//! from `follow/OWNER-NAME`, moving it to the upstream's head; one with
-//! nothing that counts has none.
+//! from its own branch (`branch`), moving it to the upstream's head; one
+//! with nothing that counts has none.
 
 use std::io::Write;
 
@@ -27,6 +27,13 @@ const TITLE: &str = "deps: follow ";
 
 /// How many changed paths a PR lists.
 const LISTED: usize = 30;
+
+/// The branch a manifest's follow of an upstream keeps its PR on:
+/// `follow/OWNER/NAME/PATH`, one per pair, so two manifests in a repo that
+/// follow one upstream never share a PR.
+fn branch(upstream: &str, path: &str) -> String {
+    format!("follow/{}/{path}", upstream.to_ascii_lowercase())
+}
 
 fn short(rev: &str) -> &str {
     &rev[..7.min(rev.len())]
@@ -206,7 +213,7 @@ impl Pass<'_> {
 
     fn follow(&mut self, t: &Target, f: &Follow) -> Result<(), Error> {
         let (upstream, up_branch, head) = repo_head(self.api, &f.upstream)?;
-        let branch = format!("follow/{}", upstream.to_ascii_lowercase().replace('/', "-"));
+        let branch = branch(&upstream, t.path);
         let open = open_pr(self.api, t.repo, &branch)?;
         let counted = if head == f.pin {
             Vec::new()
@@ -231,7 +238,12 @@ impl Pass<'_> {
             );
             self.say(format!("{repo}: {why}"));
             if let Some(pr) = open {
-                if self.ask.dry {
+                if let Some(theirs) = self.others(repo, pr.number)? {
+                    self.say(format!(
+                        "{repo}: #{} has a commit a pass didn't make ({theirs:?}), so it's left open",
+                        pr.number
+                    ));
+                } else if self.ask.dry {
                     self.say(format!("{repo}: would close #{}", pr.number));
                 } else {
                     self.close(repo, &branch, pr.number, &why)?;

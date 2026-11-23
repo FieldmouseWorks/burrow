@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::changes;
-use crate::manifest::Follow;
+use crate::manifest::{self, Follow};
 
 /// git in one repo.
 pub struct Git {
@@ -119,8 +119,8 @@ impl Local for Work {
         let path = git.dir.join(manifest);
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        std::fs::write(&path, text.replace(&follow.pin, head))
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = manifest::moved(&text, follow, head).map_err(|e| format!("{manifest}: {e}"))?;
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         cargo_update(&git.dir, &path, &self.root.join("cargo-home"))?;
         let status = git.run(&["status", "--porcelain", "-z", "--untracked-files=no"])?;
         let mut changed = Vec::new();
