@@ -15,7 +15,7 @@
 //! which burrow.switch.flakeInputs writes.
 
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -152,9 +152,17 @@ fn switch(
         ));
         return Ok(2);
     };
-    let new = match system {
-        System::Toplevel(path) => fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
-        System::Flake(dir) => build(cfg, dir.as_deref().unwrap_or(&cfg.flake))?,
+    // A system it built stays rooted until this returns: live by then, the
+    // running system holds it.
+    let (new, _root) = match system {
+        System::Toplevel(path) => (
+            fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
+            None,
+        ),
+        System::Flake(dir) => {
+            let (new, root) = build(cfg, dir.as_deref().unwrap_or(&cfg.flake))?;
+            (new, Some(root))
+        }
     };
     if access(new.join("bin/switch-to-configuration"), Access::EXEC_OK).is_err() {
         complain(&format!("not a NixOS system: {}", new.display()));
@@ -372,12 +380,19 @@ fn microseconds(cfg: &Config, within: &str) -> Option<u64> {
 }
 
 /// The flake in `dir` built, as its checkout's owner (git refuses repos
-/// owned by someone else): the system it built.
-fn build(cfg: &Config, dir: &Path) -> Result<PathBuf, Broke> {
+/// owned by someone else): the system it built, and the root that holds it.
+///
+/// The system is a garbage collector's root from the moment nix makes it,
+/// not a path nothing holds: a switch waits for the lock and for any revert
+/// before it activates, and the store's daily collection, or one a build
+/// starts when the disk runs low, could take it away in between, leaving
+/// "not a NixOS system".
+fn build(cfg: &Config, dir: &Path) -> Result<(PathBuf, Root), Broke> {
     let flake = canonical(dir)?;
     let owner = fs::metadata(&flake)
         .map_err(|e| crate::at(&flake, e))?
         .uid();
+    let root = Root::new(cfg, owner)?;
     // runuser, not sudo: under systemd-run there are no setuid wrappers.
     let mut c = if owner == rustix::process::geteuid().as_raw() {
         Command::new(&cfg.tools.nix)
@@ -386,7 +401,8 @@ fn build(cfg: &Config, dir: &Path) -> Result<PathBuf, Broke> {
         c.args(["-u", &user_name(owner)?, "--"]).arg(&cfg.tools.nix);
         c
     };
-    c.args(["build", "--no-link", "--print-out-paths"])
+    c.args(["build", "--print-out-paths", "--out-link"])
+        .arg(root.dir.join("system"))
         .arg(format!(
             "{}#nixosConfigurations.{}.config.system.build.toplevel",
             flake.display(),
@@ -400,7 +416,52 @@ fn build(cfg: &Config, dir: &Path) -> Result<PathBuf, Broke> {
     if !out.status.success() {
         return Err(Broke(format!("{}: {}", crate::shown(&c), out.status)));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().into())
+    Ok((String::from_utf8_lossy(&out.stdout).trim().into(), root))
+}
+
+/// Where one switch's build roots its system: STATE/built/PID, a dir of
+/// its own (a switch's build runs before it takes the lock, so two may
+/// build at once), the checkout owner's, as nix makes the root as them.
+/// It goes when the switch is done; one a killed switch left goes as the
+/// next switch builds, as no process has its PID any more (or with the
+/// state dir, in /run, at the next boot).
+struct Root {
+    dir: PathBuf,
+}
+
+impl Root {
+    fn new(cfg: &Config, owner: u32) -> Result<Root, Broke> {
+        let built = cfg.state.join("built");
+        let pid = std::process::id().to_string();
+        for entry in fs::read_dir(&built).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if name == pid.as_str() || !Path::new("/proc").join(&name).exists() {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+        let dir = built.join(pid);
+        fs::create_dir_all(&dir).map_err(|e| crate::at(&dir, e))?;
+        // The owner goes through both to their own dir.
+        for d in [&cfg.state, &built] {
+            fs::set_permissions(d, fs::Permissions::from_mode(0o755))
+                .map_err(|e| crate::at(d, e))?;
+        }
+        let root = Root { dir };
+        // Only root hands a dir to someone else: a switch sudo didn't make
+        // root (the tests') builds as itself or not at all.
+        let me = rustix::process::geteuid();
+        if me.is_root() && owner != me.as_raw() {
+            rustix::fs::chown(&root.dir, Some(rustix::fs::Uid::from_raw(owner)), None)
+                .map_err(|e| crate::at(&root.dir, e.into()))?;
+        }
+        Ok(root)
+    }
+}
+
+impl Drop for Root {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// The name of the user `uid`, from /etc/passwd.
