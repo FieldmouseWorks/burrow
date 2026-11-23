@@ -56,6 +56,7 @@ members = [
     "burrow-usage-reset",
     "burrow-watchdog",
     "burrow-workflows",
+    "cargo-follow",
     "flaky",
     "gh-token",
     "house-sync",
@@ -73,7 +74,8 @@ publish = false
 [workspace.dependencies]
 base64 = "0.23.1"
 # Conary's own types: one rev for every crate, so a bump moves them all, a
-# crate a branch adds meanwhile too.
+# crate a branch adds meanwhile too. cargo-follow moves it to Conary's main
+# (metadata.follow below), not Renovate (renovate.json).
 conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "cdde15ec2e4d4a03017e00b25e617d2d33a014fa" }
 conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "cdde15ec2e4d4a03017e00b25e617d2d33a014fa" }
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
@@ -82,6 +84,16 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }
+
+# What cargo-follow (modules/updates/follow.nix) leaves the Conary pin at
+# when Conary's main changes only these: burrow takes Conary's crates, and
+# the machine builds its flake.nix's outputs with burrow's own inputs, so
+# Conary's lock, its workflows and the line pinning its burrow change
+# nothing either builds. Without that, every Conary merge of a burrow pin
+# would make the next burrow pin PR, and back.
+[workspace.metadata.follow."https://github.com/FieldmouseWorks/Conary"]
+inert = [".github/", "flake.lock"]
+inert-lines = { "flake.nix" = ["inputs.burrow.url ="] }
 
 # The name of the whole workspace's builds: its checks (burrow-test and the like).
 [workspace.metadata.crane]
