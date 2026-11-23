@@ -249,7 +249,10 @@ Each has an entry below, and each can be imported on its own.
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and
-  the network and login/App environment. An engine plugin is granted only
+  the network and login/App environment. Anthropic-specific CLI flags, stream
+  JSONL parsing, usage/login refusal classification and `claude-api` credit
+  admission live in
+  [crates/burrow-engine-anthropic](crates/burrow-engine-anthropic). An engine plugin is granted only
   [part of that contract](docs/engines.md#a-plugins-grants). A turn whose conversation is lost
   receives the preceding turns' questions and answers.
   Local jobs inspect and recover other host jobs with the ordinary

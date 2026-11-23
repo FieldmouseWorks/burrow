@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use super::{Frame, MOST_TEXT, PORT, SERVICE_IP, SERVICE_PORT, Spec, receive, send};
 
-const WAIT: Duration = Duration::from_secs(60);
 const LOOK: Duration = Duration::from_millis(50);
 
 /// What the image says: who the plugin runs as, what it runs, and the
@@ -29,14 +28,13 @@ pub struct Image {
     pub credential_env: Option<String>,
 }
 
-fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> Result<T, String> {
-    let end = Instant::now() + WAIT;
+/// Waits for what `look` finds, or for it to say it never will. No clock
+/// of its own: a loaded machine boots a VM ten times slower, and the call's
+/// deadline already bounds the wait, as the host ends the VM with the call.
+fn until<T>(mut look: impl FnMut() -> Result<Option<T>, String>) -> Result<T, String> {
     loop {
-        if let Some(found) = look() {
+        if let Some(found) = look()? {
             return Ok(found);
-        }
-        if Instant::now() >= end {
-            return Err(format!("gave up waiting for {what}"));
         }
         thread::sleep(LOOK);
     }
@@ -44,9 +42,7 @@ fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> Result<T, String
 
 pub fn plugin(image: &Image) -> Result<(), String> {
     let at = Path::new("/dev/virtio-ports").join(PORT);
-    let port = until("the host's port", || {
-        File::options().read(true).write(true).open(&at).ok()
-    })?;
+    let port = until(|| Ok(File::options().read(true).write(true).open(&at).ok()))?;
     let mut to = port.try_clone().map_err(|e| e.to_string())?;
     send(&mut to, &Frame::Ready)?;
     let spec: Spec = receive(&mut BufReader::new(port))?.ok_or("the host sent nothing")?;
@@ -78,9 +74,10 @@ fn run(image: &Image, spec: &Spec, to: &Arc<Mutex<File>>) -> Result<String, Stri
     }
     if spec.nic {
         // A route is all it needs: connect sends nothing.
-        until("the network", || {
-            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-            socket.connect((SERVICE_IP, SERVICE_PORT)).ok()
+        until(|| {
+            Ok(UdpSocket::bind("0.0.0.0:0")
+                .ok()
+                .and_then(|socket| socket.connect((SERVICE_IP, SERVICE_PORT)).ok()))
         })?;
     }
     let mut bridges: Vec<Child> = Vec::new();
@@ -88,15 +85,27 @@ fn run(image: &Image, spec: &Spec, to: &Arc<Mutex<File>>) -> Result<String, Stri
         if let Some(dir) = socket.parent() {
             fs::create_dir_all(dir).map_err(io)?;
         }
-        let bridge = Command::new("socat")
+        let mut bridge = Command::new("socat")
             .args(["-t", "300"])
             .arg(format!("UNIX-LISTEN:{},fork,mode=666", socket.display()))
             .arg(format!("TCP:{SERVICE_IP}:{port}"))
             .stdin(Stdio::null())
             .spawn()
             .map_err(io)?;
+        let listened = until(|| {
+            if socket.exists() {
+                return Ok(Some(()));
+            }
+            match bridge.try_wait() {
+                Ok(None) => Ok(None),
+                Ok(Some(status)) => {
+                    Err(format!("{}: its bridge ended ({status})", socket.display()))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        });
         bridges.push(bridge);
-        until("a service's socket", || socket.exists().then_some(()))?;
+        listened?;
     }
 
     // Files, as Conary's runner gives a plugin: a child that never reads,

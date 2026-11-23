@@ -53,7 +53,7 @@ esac
     )
     .unwrap();
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_burrow-degradations"))
+        Command::new(burrow_test::program!("burrow-degradations"))
             .env("PATH", &path)
             .env("FIXTURES", d)
             .env("DEGRADATIONS_CONFIG", &cfg)
@@ -150,7 +150,7 @@ esac
     )
     .unwrap();
     let run = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_burrow-degradations"))
+        let out = Command::new(burrow_test::program!("burrow-degradations"))
             .env("PATH", &path)
             .env("FIXTURES", d)
             .env("DEGRADATIONS_CONFIG", &cfg)

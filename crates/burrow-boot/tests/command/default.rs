@@ -2,12 +2,12 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
-use crate::machine::{BIN, Machine, USAGE, ok, said};
+use crate::machine::{Machine, USAGE, ok, program, said};
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new();
-    let out = Command::new(BIN).output().unwrap();
+    let out = Command::new(program()).output().unwrap();
     assert_eq!(
         said(&out),
         (
@@ -16,7 +16,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
             "usage: burrow-boot CONFIG WORD\n".into()
         )
     );
-    let out = Command::new(BIN)
+    let out = Command::new(program())
         .arg(m.path("none.json"))
         .arg("status")
         .output()

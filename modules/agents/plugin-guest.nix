@@ -49,6 +49,9 @@ in
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" "systemd-udevd.service" ];
     path = [ pkgs.util-linux pkgs.socat ];
+    # Its waits have no clock (the call's deadline is theirs), so a guest
+    # that fails ends the VM, and the host hears it at once.
+    unitConfig.FailureAction = "poweroff-force";
     serviceConfig = {
       ExecStart = lib.escapeShellArgs ([ bin "plugin" program (toString guest.uid) (toString guest.gid) ]
         ++ lib.optional (guest.credentialEnv != null) guest.credentialEnv);

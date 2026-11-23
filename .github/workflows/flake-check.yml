@@ -802,7 +802,10 @@ jobs:
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
+          # Its intermediates too, which .cargo's build-dir would put in
+          # the checkout.
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/keep-build
           GATE: ${{ steps.gate.outcome }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep
@@ -906,7 +909,10 @@ jobs:
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
+          # Its intermediates too, which .cargo's build-dir would put in
+          # the checkout.
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/keep-build
           BUILDS: ${{ vars.BURROW_BUILDS_URL }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep --bin burrow-keep-upload

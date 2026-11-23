@@ -169,7 +169,7 @@ fn rig() -> Rig {
         &plugin,
         format!(
             "#!/bin/sh\nexec {} job {} 2>>{}\n",
-            env!("CARGO_BIN_EXE_burrow-fix"),
+            burrow_test::program!("burrow-fix"),
             file.display(),
             dir.path().join("stderr").display()
         ),

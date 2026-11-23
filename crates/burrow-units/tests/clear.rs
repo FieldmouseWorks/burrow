@@ -11,7 +11,9 @@ use std::{
     time::Duration,
 };
 
-const BIN: &str = env!("CARGO_BIN_EXE_burrow-units");
+fn program() -> &'static str {
+    burrow_test::program!("burrow-units")
+}
 
 fn config(path: &Path, state: &Path, socket: &Path, own: &str) {
     fs::write(
@@ -69,7 +71,7 @@ fn isolated_caller_acknowledges_on_host_and_reports_a_failed_pass_request() {
             let (mut stream, _) = listener.accept().unwrap();
             let mut bytes = Vec::new();
             stream.read_to_end(&mut bytes).unwrap();
-            let mut handler = Command::new(BIN)
+            let mut handler = Command::new(program())
                 .arg("serve-clear")
                 .env("UNITS_CONFIG", &host_config)
                 .stdin(Stdio::piped())
@@ -84,7 +86,7 @@ fn isolated_caller_acknowledges_on_host_and_reports_a_failed_pass_request() {
     });
     let exe = "/bin/program with spaces; $(never-run)";
     let clear = || {
-        Command::new(BIN)
+        Command::new(program())
             .args(["clear", exe])
             .env("UNITS_CONFIG", &caller_config)
             .output()
@@ -102,7 +104,7 @@ fn isolated_caller_acknowledges_on_host_and_reports_a_failed_pass_request() {
     let caller = caller_config.clone();
     let pending = thread::spawn(move || {
         tx.send(
-            Command::new(BIN)
+            Command::new(program())
                 .args(["clear", exe])
                 .env("UNITS_CONFIG", caller)
                 .output()

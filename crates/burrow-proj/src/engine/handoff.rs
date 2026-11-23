@@ -10,8 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::Engine;
-use super::stream::{answer, resume, stream_names_session};
+use super::stream::resume;
+use super::{Engine, answer, stream_names_session};
 use crate::record::TurnFile;
 use crate::{job::Job, read};
 

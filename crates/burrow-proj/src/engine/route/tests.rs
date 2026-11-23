@@ -529,7 +529,14 @@ fn a_turn_that_has_been_on_the_credit_stays_in_its_ledger() {
         ),
     )
     .unwrap();
-    let charged = || api::short(&r.cfg, 10.0, crate::now());
+    let charged = || {
+        api::short(
+            r.cfg.credit_file().as_deref(),
+            &r.cfg.jobs,
+            10.0,
+            crate::now(),
+        )
+    };
     assert!(charged(), "$3 of $20 is past 10%");
     // Back on the subscription, in the same conversation.
     crate::retry::Identity::reroute(&job, "1", &started).unwrap();

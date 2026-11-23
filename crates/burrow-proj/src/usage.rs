@@ -310,7 +310,7 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                         return Ok(owner);
                     }
                 }
-                s.said = crate::engine::claude::normalize_refusal(&s.said);
+                s.said = burrow_engine_anthropic::claude::normalize_refusal(&s.said);
                 Ok(s)
             })
             .map_err(|e| format!("proj: {}: {e}", path.display()))?
@@ -563,7 +563,7 @@ fn put(
         // after a limit, or the other way round, is told as itself.
         Some(w) => {
             let said = if lapsed || until > w.until {
-                crate::engine::claude::normalize_refusal(said)
+                burrow_engine_anthropic::claude::normalize_refusal(said)
             } else {
                 w.said.clone()
             };
@@ -579,7 +579,7 @@ fn put(
         None => Spent {
             owner: false,
             until,
-            said: crate::engine::claude::normalize_refusal(said),
+            said: burrow_engine_anthropic::claude::normalize_refusal(said),
             job: id.to_owned(),
             at,
             back: None,

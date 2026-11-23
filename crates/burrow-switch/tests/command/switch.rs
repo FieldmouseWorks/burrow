@@ -4,19 +4,19 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
+use crate::machine::{Machine, chown, confirm, ok, refused, root, said, switch, unit_path};
 
 const USAGE: &str = "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort [SYSTEM]] [--allow-downgrade] [--unless-pending]\n";
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new(false);
-    let out = std::process::Command::new(SWITCH).output().unwrap();
+    let out = std::process::Command::new(switch()).output().unwrap();
     assert_eq!(
         said(&out),
         refused(2, "usage: burrow-switch CONFIG [WORDS]\n")
     );
-    let out = std::process::Command::new(SWITCH)
+    let out = std::process::Command::new(switch())
         .arg(m.path("none.json"))
         .output()
         .unwrap();
@@ -34,7 +34,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     assert_eq!(m.fake("sudo"), "");
     // A window systemd can't read refuses before anything.
     let out = m
-        .command(SWITCH, &["--toplevel", &m.sys("two")])
+        .command(switch(), &["--toplevel", &m.sys("two")])
         .env("BURROW_CONFIRM_WITHIN", "soon")
         .output()
         .unwrap();
@@ -97,7 +97,7 @@ fn its_window_comes_from_burrow_confirm_within_through_sudo() {
     let m = Machine::new(false);
     let two = m.sys("two");
     let out = m
-        .command(SWITCH, &["--toplevel", &two])
+        .command(switch(), &["--toplevel", &two])
         .env("BURROW_CONFIRM_WITHIN", "100s")
         .output()
         .unwrap();
@@ -116,7 +116,7 @@ fn its_window_comes_from_burrow_confirm_within_through_sudo() {
     // Set but empty: the config's.
     let m = Machine::new(false);
     let out = m
-        .command(SWITCH, &["--toplevel", &two])
+        .command(switch(), &["--toplevel", &two])
         .env("BURROW_CONFIRM_WITHIN", "")
         .output()
         .unwrap();
@@ -129,7 +129,7 @@ fn its_units_run_it_with_its_config_wherever_that_was_named() {
     let (one, two, me) = (m.sys("one"), m.sys("two"), m.me());
     symlink(m.path("config.json"), m.path("link.json")).unwrap();
     let out = m
-        .command_with(&m.path("link.json"), SWITCH, &["--toplevel", &two])
+        .command_with(&m.path("link.json"), switch(), &["--toplevel", &two])
         .output()
         .unwrap();
     assert_eq!(said(&out).0, Some(0), "{:?}", said(&out));
@@ -542,9 +542,9 @@ fn one_switch_abort_or_confirm_at_a_time() {
     let m = Machine::switched(false);
     let three = m.system("three", Some(300));
     let runs: [(&str, &[&str]); 3] = [
-        (SWITCH, &["--toplevel", &three]),
-        (SWITCH, &["--abort"]),
-        (CONFIRM, &[]),
+        (switch(), &["--toplevel", &three]),
+        (switch(), &["--abort"]),
+        (confirm(), &[]),
     ];
     for (bin, words) in runs {
         // Someone else's switch or confirm holds the state lock.
@@ -649,7 +649,7 @@ fn the_revert_waits_out_switch_to_configurations_lock() {
         chown(&m.path("s2c.lock"));
     }
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
-    let mut revert = m.command(SWITCH, &["--revert-to", &one]).spawn().unwrap();
+    let mut revert = m.command(switch(), &["--revert-to", &one]).spawn().unwrap();
     thread::sleep(Duration::from_millis(500));
     assert!(revert.try_wait().unwrap().is_none(), "it didn't wait");
     assert_eq!(m.running(), m.sys("two"));
@@ -717,7 +717,7 @@ fn an_activation_killed_at_its_deadline_starts_the_revert_at_once() {
     // NixOS has no coreutils.
     let stopped = |result: &str, system: &str| {
         let out = m
-            .command(SWITCH, &["--activation-stopped", system])
+            .command(switch(), &["--activation-stopped", system])
             .env("SERVICE_RESULT", result)
             .env("PATH", "/var/empty")
             .output()

@@ -18,7 +18,7 @@ fn config(root: &Path) -> Config {
         "timeout":"4h", "maxWait":1800, "stallAfterMinutes":120, "awaitHours":24,
         "kick":"", "wake":p("wake.json"), "waits":null, "inboxMark":"test",
         "pipelineRepos":[], "leadRepos":[], "flake":p("projects/machine"),
-        "deployed":env!("CARGO_BIN_EXE_burrow-proj"), "apps":{}, "notify":null,
+        "deployed":burrow_test::program!("burrow-proj"), "apps":{}, "notify":null,
         "meters":null,
         "inbox":null,
         "tools":{"bash":"sh", "flock":"flock",
@@ -34,7 +34,7 @@ fn config(root: &Path) -> Config {
     fs::write(p("sandbox.json"), sandbox.to_string()).unwrap();
     let mut cfg: Config = serde_json::from_value(value).unwrap();
     cfg.path = path;
-    cfg.me = env!("CARGO_BIN_EXE_burrow-proj").into();
+    cfg.me = burrow_test::program!("burrow-proj").into();
     fs::create_dir_all(&cfg.jobs).unwrap();
     fs::create_dir_all(&cfg.projects).unwrap();
     burrow_test::executable(

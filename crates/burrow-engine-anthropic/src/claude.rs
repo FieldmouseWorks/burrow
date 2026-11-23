@@ -1,15 +1,17 @@
-//! Claude stream and usage contracts, including empty resume results.
+//! Claude subscription usage and login refusal classification.
 
-use super::{claude_limit, is_error};
+use std::path::Path;
+
 use serde_json::Value;
+
+use crate::{limit, stream};
 
 /// Whether a run ended refused for usage, and if so when Claude Code says
 /// the limit resets (None when it doesn't) and a normalized limit name; or
 /// refused because its login expired ([`LOGGED_OUT`]), which resets at no
-/// time it can say. `last` is the
-/// run's result; `stream` its lines, where the reset time is as a
-/// timestamp; failing that, its words say it ([`crate::limit`]), read at
-/// `now`.
+/// time it can say. `last` is the run's result; `stream` its lines, where the
+/// reset time is as a timestamp; failing that, its words say it
+/// ([`crate::limit`]), read at `now`.
 pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, String)> {
     refused_records(
         last,
@@ -20,12 +22,26 @@ pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, Str
     )
 }
 
-pub(super) fn refused_records(
+/// Refusal metadata parsed a record at a time from `path`, starting at `from`.
+pub fn refused_file(
+    last: &Value,
+    path: &Path,
+    from: u64,
+    now: i64,
+) -> Option<(Option<i64>, String)> {
+    let records = stream::lines(path, from)
+        .ok()?
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok());
+    refused_records(last, records, now)
+}
+
+pub fn refused_records(
     last: &Value,
     records: impl Iterator<Item = Value>,
     now: i64,
 ) -> Option<(Option<i64>, String)> {
-    if !is_error(last) {
+    if !stream::is_error(last) {
         return None;
     }
     let said = last["result"].as_str().unwrap_or_default().trim();
@@ -63,7 +79,7 @@ pub(super) fn refused_records(
         until = t.trim().parse().ok();
     }
     Some((
-        until.or_else(|| claude_limit::resets(said, now)),
+        until.or_else(|| limit::resets(said, now)),
         format!(
             "Claude reached its {}",
             named.unwrap_or_else(|| limit_name(said))
@@ -76,7 +92,7 @@ pub(super) fn refused_records(
 /// someone logs in again: on 2026-11-16, 21 turns in 70 minutes, each ended
 /// as an error and none resumed. Held like a spent plan (usage.rs), with
 /// words of its own for the owner (usage/login.rs).
-pub(crate) const LOGGED_OUT: &str = "Claude Code couldn't authenticate: its login here expired";
+pub const LOGGED_OUT: &str = "Claude Code couldn't authenticate: its login here expired";
 
 /// Whether a run that ended in an error on `said` ended there because Claude
 /// Code couldn't authenticate: by its words for it ("Failed to authenticate:
@@ -101,9 +117,6 @@ fn limit_words(said: &str) -> bool {
             && s.contains("limit"))
 }
 
-#[cfg(test)]
-mod tests;
-
 /// Older streams have only words; never pass their billing instructions on.
 fn limit_name(said: &str) -> &'static str {
     let s = said.to_lowercase();
@@ -120,10 +133,13 @@ fn limit_name(said: &str) -> &'static str {
 
 /// Old holds contain the refusal verbatim. Preserve unrelated migration
 /// descriptions, but remove billing instructions from recognized refusals.
-pub(crate) fn normalize_refusal(said: &str) -> String {
+pub fn normalize_refusal(said: &str) -> String {
     if limit_words(said) {
         format!("Claude reached its {}", limit_name(said))
     } else {
         said.to_owned()
     }
 }
+
+#[cfg(test)]
+mod tests;

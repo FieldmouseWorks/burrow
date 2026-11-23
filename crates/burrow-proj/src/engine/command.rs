@@ -1,7 +1,10 @@
 //! Engine argv and environment, inside the turn's timeout and login shell.
 
+use burrow_engine_anthropic::{api, command as anthropic};
+
+use super::capabilities::Capabilities;
 use super::machine;
-use super::{Choice, Engine, api, stream::resume};
+use super::{Choice, Engine, stream::resume};
 use crate::record::{JobFile, TurnFile};
 use crate::{config::Config, job::Job, scratch};
 
@@ -17,28 +20,30 @@ pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiti
 pub const FACTS: &str = "Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.";
 const SPLIT: &str = " An inbox task is one self-contained PR. If it is too big, publish progress and write 2 to 16 smaller self-contained tasks as a JSON array with title, body and check (and carries, OWNER/REPO#N, for a task that carries an open PR to landing: it is done once that PR merges), run `proj split FILE`, then end the session. Preserve the original authorization boundaries, outstanding work and PR links in those tasks; never carry a lane indefinitely.";
 
-/// Claude's flags for the turn: its stream, the effort, the session it
-/// resumes and the model.
-fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--disable-slash-commands",
-    ]
-    .map(String::from)
-    .to_vec();
-    if let Some(e) = &choice.effort {
-        args.extend(["--effort".into(), e.clone()]);
+pub(super) fn anthropic_grants(caps: &Capabilities) -> anthropic::Grants {
+    anthropic::Grants {
+        env: caps.environment(),
+        inherit_environment: caps.inherits_environment(),
+        paths: caps
+            .items
+            .iter()
+            .flat_map(|g| g.paths.iter().cloned())
+            .collect(),
+        servers: caps
+            .servers()
+            .into_iter()
+            .map(|(name, server)| {
+                (
+                    name,
+                    anthropic::McpServer {
+                        command: server.command,
+                        args: server.args,
+                        env: server.env,
+                    },
+                )
+            })
+            .collect(),
     }
-    if let Some(s) = session {
-        args.extend(["--resume".into(), s]);
-    }
-    if let Some(m) = &choice.model {
-        args.extend(["--model".into(), m.clone()]);
-    }
-    args
 }
 
 /// One run of Claude, its output appended to the turn's stream. It goes
@@ -57,20 +62,21 @@ pub fn spawn(
     app_env: &str,
     choice: &Choice,
 ) -> std::io::Result<Child> {
-    let mut args = args(choice, resume(job, choice.engine));
     if choice.engine == Engine::ClaudeApi && agent.is_some() {
         return Err(
             api::Refused::new("a sandbox is given no API key, so it doesn't run there").io(),
         );
     }
+    let session = resume(job, choice.engine);
     let out = crate::state_reads::append(&job.turn_file(n, TurnFile::Jsonl))?;
     let mut c = Command::new(&cfg.tools.timeout);
     // No claude.ai connectors (mail, calendar, drive, design tools): one of
     // 2,188 jobs in 14 days called one, and their tools were a ninth of
     // every job's context. The machine's own MCP servers stay.
-    c.args(["-k", "1m", "0"])
-        .stdout(out)
-        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+    c.args(["-k", "1m", "0"]).stdout(out).env(
+        anthropic::DISABLE_CLAUDEAI_MCP_ENV.0,
+        anthropic::DISABLE_CLAUDEAI_MCP_ENV.1,
+    );
     if let Some(agent) = agent {
         let next = if must {
             format!("Before answering, run {NEXT}.")
@@ -78,15 +84,24 @@ pub fn spawn(
             "If you are waiting on GitHub, run `proj await URL` for each target before answering."
                 .into()
         };
-        args.extend(["--append-system-prompt".into(), format!(
-            "This is a sandboxed proj job, running headless. {next} The sandbox's proj records your declaration locally; the host registers GitHub waits when your run ends. Anything left running is stopped with the VM at the end of the turn. {LONG} {FACTS}"
-        )]);
+        let args = anthropic::run_args(&anthropic::RunArgs {
+            model: choice.model.clone(),
+            effort: choice.effort.clone(),
+            session,
+            max_budget_usd: None,
+            append_system_prompt: Some(format!(
+                "This is a sandboxed proj job, running headless. {next} The sandbox's proj records your declaration locally; the host registers GitHub waits when your run ends. Anything left running is stopped with the VM at the end of the turn. {LONG} {FACTS}"
+            )),
+        });
         c.args(["agent", "sh", agent, "env"])
             .arg(format!("PROJ_VM_NEXT={}", crate::guest::path(job, n)))
             .args([
                 "sh",
                 "-c",
-                "rm -f -- \"$PROJ_VM_NEXT\"; exec claude \"$@\"",
+                &format!(
+                    "rm -f -- \"$PROJ_VM_NEXT\"; exec {} \"$@\"",
+                    anthropic::PROGRAM
+                ),
                 "sh",
             ])
             .args(&args)
@@ -94,16 +109,17 @@ pub fn spawn(
         return job.start_run(n, crate::now(), || c.spawn());
     }
     // Every run on the credit, its first and each retry, only once it's
-    // admitted, with what it has room for as its budget (engine/api.rs).
+    // admitted, with what it has room for as its budget (burrow-engine-anthropic).
     let admission = match choice.engine {
         Engine::Claude => None,
         Engine::ClaudeApi => {
-            api::key(cfg).map_err(api::Refused::io)?;
-            let admitted = api::admit(cfg, crate::now()).map_err(api::Refused::io)?;
-            args.extend(admitted.flag());
+            api::key(cfg.claude_api_key_file.as_deref()).map_err(api::Refused::io)?;
+            let admitted = api::admit(cfg.credit_file().as_deref(), &cfg.jobs, crate::now())
+                .map_err(api::Refused::io)?;
             Some(admitted)
         }
     };
+    let budget = admission.as_ref().map(|a| a.budget);
     let id = job.id;
     let scratch = scratch::dir(cfg, id);
     // Where its own worktrees go, and how long they last.
@@ -128,7 +144,13 @@ pub fn spawn(
         ""
     };
     let instructions = format!("{instructions} {FACTS}{split}");
-    args.extend(["--append-system-prompt".into(), instructions]);
+    let args = anthropic::run_args(&anthropic::RunArgs {
+        model: choice.model.clone(),
+        effort: choice.effort.clone(),
+        session,
+        max_budget_usd: budget,
+        append_system_prompt: Some(instructions),
+    });
     // A login shell, so the job sees the same PATH and env as an SSH login,
     // and then its App's env, which nothing the login sets can undo; Claude
     // starts only once that has.
@@ -166,14 +188,13 @@ pub fn spawn(
         .env("PROJ_APP_ENV", app_env);
     // The marker, with the budget, is written before the admission's lock
     // goes: the next admission's meter counts this run at it.
-    let budget = admission.as_ref().map(|a| a.budget);
     let child = job.start_budgeted_run(n, crate::now(), choice.engine, budget, || c.spawn());
     drop(admission);
     child
 }
 
 /// Resolve the same job contract in Claude's final login/App environment,
-/// with `engine`'s credentials and no other's (engine/api.rs).
+/// with `engine`'s credentials and no other's (`burrow_engine_anthropic::api`).
 pub fn exec_claude(cfg: &Config, engine: Engine, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let id = std::env::var("PROJ_JOB").map_err(|e| crate::Fail::new(1, e.to_string()))?;
@@ -185,22 +206,23 @@ pub fn exec_claude(cfg: &Config, engine: Engine, args: &[String]) -> Result<(), 
         &machine::Machine::real(),
     )
     .map_err(|e| crate::Fail::new(1, e.to_string()))?;
-    let mut command = Command::new("claude");
-    if !capabilities.inherits_environment() {
-        command.env_clear();
-    }
-    command
-        .args(capabilities.claude_flags())
-        .args(args)
-        .envs(capabilities.environment());
-    let _key = api::credentials(&mut command, engine, cfg)
-        .map_err(|e| crate::Fail::new(1, e.to_string()))?;
+    let grants = anthropic_grants(&capabilities);
+    let (mut command, _key) = anthropic::build_command(
+        &grants,
+        args,
+        engine.anthropic_mode(),
+        cfg.claude_api_key_file.as_deref(),
+    )
+    .map_err(|e| crate::Fail::new(1, e.to_string()))?;
     let error = command.exec();
     Err(crate::Fail::new(
         1,
         format!("couldn't start claude: {error}"),
     ))
 }
+
+#[cfg(test)]
+mod api_tests;
 
 #[cfg(test)]
 mod tests {
@@ -276,23 +298,5 @@ mod tests {
             assert!(!job.turn("1", "started").exists());
             assert_eq!(fs::read_to_string(&stream).unwrap(), "");
         }
-    }
-
-    #[test]
-    fn a_claude_turn_takes_its_model_and_effort() {
-        let c = Choice::default();
-        let plain = args(&c, None);
-        assert!(!plain.contains(&"--model".into()) && !plain.contains(&"--effort".into()));
-        let c = Choice {
-            model: Some("chosen".into()),
-            effort: Some("medium".into()),
-            ..c
-        };
-        let given = args(&c, Some("session".into())).join(" ");
-        assert!(
-            given.contains("--effort medium") && given.contains("--model chosen"),
-            "{given}"
-        );
-        assert!(given.contains("--resume session"), "{given}");
     }
 }

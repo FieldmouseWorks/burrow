@@ -11,17 +11,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::render::{Attach, Does};
 use super::{Frame, PORT, SERVICE_IP, SERVICE_PORT, Spec, receive, send};
-use crate::ssh::BOOT;
 use crate::{Agent, Engine, Plugin, as_account, stderr};
 
 /// Connections one service has open at once, at most.
 const CONNECTIONS: usize = 16;
-/// How long a virtiofsd may take to listen.
-const LISTEN: Duration = Duration::from_secs(30);
 
 /// Processes that go when the run does, however it ends.
 struct Running(Vec<Child>);
@@ -98,20 +95,15 @@ impl Vm<'_> {
         running
             .0
             .push(qemu.spawn().map_err(|e| format!("the VM: {e}"))?);
-        let until = Instant::now() + BOOT;
-        let mut host = connected(&rpc, &mut running, until)?;
-        host.set_read_timeout(Some(
-            until
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_secs(1)),
-        ))
-        .map_err(|e| e.to_string())?;
+        // However slow its boot, the call's deadline bounds these waits:
+        // the caller going ends the call and the VM with it. A VM that ends
+        // first closes its port, which ends the wait for Ready.
+        let mut host = connected(&rpc, &mut running)?;
         let mut from = BufReader::new(host.try_clone().map_err(|e| e.to_string())?);
         match receive(&mut from) {
             Ok(Some(Frame::Ready)) => {}
             _ => return Err("the plugin's VM didn't come up".to_owned()),
         }
-        host.set_read_timeout(None).map_err(|e| e.to_string())?;
         let spec = Spec {
             request,
             env: a.env.clone(),
@@ -317,22 +309,14 @@ fn ended(running: &mut Running) -> Result<(), String> {
 }
 
 fn listening(sockets: &[PathBuf], running: &mut Running) -> Result<(), String> {
-    let until = Instant::now() + LISTEN;
     while !sockets.iter().all(|s| s.exists()) {
         ended(running)?;
-        if Instant::now() >= until {
-            return Err("a share of the plugin's VM never listened".to_owned());
-        }
         thread::sleep(Duration::from_millis(20));
     }
     Ok(())
 }
 
-fn connected(
-    rpc: &UnixListener,
-    running: &mut Running,
-    until: Instant,
-) -> Result<UnixStream, String> {
+fn connected(rpc: &UnixListener, running: &mut Running) -> Result<UnixStream, String> {
     rpc.set_nonblocking(true).map_err(|e| e.to_string())?;
     loop {
         match rpc.accept() {
@@ -344,9 +328,6 @@ fn connected(
             Err(e) => return Err(e.to_string()),
         }
         ended(running)?;
-        if Instant::now() >= until {
-            return Err("the plugin's VM didn't start".to_owned());
-        }
         thread::sleep(Duration::from_millis(20));
     }
 }

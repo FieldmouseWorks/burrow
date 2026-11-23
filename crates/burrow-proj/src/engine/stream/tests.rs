@@ -38,7 +38,7 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
     let stream = job.turn("1", "jsonl");
-    let mut file = std::io::BufWriter::new(File::create(&stream).unwrap());
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&stream).unwrap());
     let record = format!(
         "{{\"type\":\"progress\",\"text\":\"{}\"}}\n",
         "x".repeat(4096)

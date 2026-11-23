@@ -64,7 +64,7 @@ fn it_takes_three_arguments() {
         &["policy.json", "release-ages"],
         &["a", "b", "c", "d"],
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_lock-age"))
+        let out = Command::new(burrow_test::program!("lock-age"))
             .args(args)
             .output()
             .unwrap();

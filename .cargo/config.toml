@@ -1,14 +1,15 @@
-# Each checkout builds the workspace's crates for itself, whatever target
-# directory it's given. Cargo names a member's artifacts by its path from the
+# Each checkout builds in a directory of its own, whatever target directory
+# it's given. Cargo names a member's artifacts by its path from the
 # workspace's root, the same in every worktree, and takes one as fresh by
 # mtimes: with one CARGO_TARGET_DIR, a worktree whose files were older than
-# another's build ran that one's tests, files and programs. Cargo also names
-# them by the workspace wrapper's path, and this one's is the checkout's own.
-# Dependencies from the registry stay shared.
+# another's build ran that one's tests, files and programs, and `cargo clippy`
+# passed on that one's results. Here every intermediate (dependencies, checks,
+# test executables, programs) goes in the workspace's own target/, and only
+# the final artifacts in the one given. Without CARGO_TARGET_DIR the two are
+# the same directory.
 #
-# Cargo reads this from where it runs, not from --manifest-path: run it in the
-# checkout it builds. A test that reads the repo refuses when it wasn't
-# (crates/burrow-test/src/checkout.rs). `cargo clippy` puts its own driver in
-# the wrapper's place, so its results are still shared.
+# Cargo reads this from where it runs, not from --manifest-path: run it inside
+# a checkout. Where it can't see this, a test that reads the repo or runs its
+# programs refuses another checkout's build (crates/burrow-test/src/checkout.rs).
 [build]
-rustc-workspace-wrapper = ".cargo/this-checkout"
+build-dir = "{workspace-root}/target"

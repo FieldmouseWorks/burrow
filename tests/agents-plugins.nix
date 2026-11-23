@@ -47,6 +47,17 @@ pkgs.testers.runNixOSTest {
       };
       agents.engines.full = engine "full" 3131 (grantable ++ withheld) // {
         mcpServers = [ "notes" "signed-in" ];
+        # Its VM's network comes up a minute and a half late, as a nested
+        # boot's did on a loaded machine (#1444): the call still answers,
+        # since only its deadline bounds the guest's waits.
+        guestModules = [
+          ({ pkgs, ... }: {
+            systemd.services.systemd-networkd.serviceConfig = {
+              ExecStartPre = [ "${pkgs.coreutils}/bin/sleep 90" ];
+              TimeoutStartSec = "infinity";
+            };
+          })
+        ];
       };
       agents.engines.files = engine "files" 3132 [ "workspace" ];
       agents.engines.bare = engine "bare" 3133 [ ];

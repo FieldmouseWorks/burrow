@@ -43,7 +43,7 @@ impl Slots {
     }
 
     fn heavy(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-heavy"));
+        let mut cmd = Command::new(burrow_test::program!("burrow-heavy"));
         cmd.arg(&self.config)
             .args(args)
             .current_dir(self.path())
@@ -323,7 +323,7 @@ fn all_takes_every_slot_and_all_the_threads() {
     let s = Slots::new(3, 3);
     let status = format!(
         "{} {}",
-        env!("CARGO_BIN_EXE_burrow-heavy"),
+        burrow_test::program!("burrow-heavy"),
         s.config.display()
     );
     let out = s.run(&[

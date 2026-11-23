@@ -58,7 +58,7 @@ fn house(d: &Path, args: &[&str], model_names: &str) -> Output {
         d.join("bin").display(),
         std::env::var("PATH").unwrap()
     );
-    Command::new(env!("CARGO_BIN_EXE_burrow-house"))
+    Command::new(burrow_test::program!("burrow-house"))
         .args(args)
         .env_clear()
         .env("PATH", path)

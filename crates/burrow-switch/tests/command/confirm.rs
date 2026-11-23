@@ -1,12 +1,12 @@
 use std::fs;
 
-use crate::machine::{CONFIRM, Machine, ok, refused, said};
+use crate::machine::{Machine, confirm, ok, refused, said};
 
 #[test]
 fn a_usage_or_nothing_pending_does_nothing() {
     let m = Machine::new(false);
     for words in [&["now"][..], &["/a", "/b"], &[""]] {
-        let out = m.command(CONFIRM, words).output().unwrap();
+        let out = m.command(confirm(), words).output().unwrap();
         assert_eq!(said(&out), refused(2, "usage: box-confirm [SYSTEM]\n"));
     }
     assert_eq!(m.fake("sudo"), "");

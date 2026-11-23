@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-pub const BIN: &str = env!("CARGO_BIN_EXE_burrow-boot");
+pub fn program() -> &'static str {
+    burrow_test::program!("burrow-boot")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 pub fn bin() -> &'static Path {
@@ -169,7 +171,7 @@ impl Machine {
             // and the stand-ins' logs.
             chown(&self.root);
         }
-        let mut c = Command::new(BIN);
+        let mut c = Command::new(program());
         c.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"));

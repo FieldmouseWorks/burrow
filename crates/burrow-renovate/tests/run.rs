@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-const RENOVATE_RUN: &str = env!("CARGO_BIN_EXE_burrow-renovate");
+fn renovate_run() -> &'static str {
+    burrow_test::program!("burrow-renovate")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
@@ -211,7 +213,7 @@ impl Machine {
 
     /// A run started in a checkout of `repo`'s, GH_REPO naming it.
     fn run_in(&self, words: &[&str], repo: Option<&str>) -> Said {
-        let mut run = Command::new(RENOVATE_RUN);
+        let mut run = Command::new(renovate_run());
         run.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"))

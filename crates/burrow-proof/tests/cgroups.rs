@@ -19,7 +19,9 @@ use burrow_proof::fence::{Cgroups, clear_all};
 use burrow_proof::run::run;
 use world::{World, read};
 
-const EXE: &str = env!("CARGO_BIN_EXE_burrow-proof");
+fn program() -> &'static str {
+    burrow_test::program!("burrow-proof")
+}
 
 /// A cgroup of this test's own, NAME, under BURROW_PROOF_CGROUP.
 fn cgroup(name: &str) -> PathBuf {
@@ -59,7 +61,7 @@ fn enter_runs_the_program_inside_its_fence() {
     let dir = cgroup("enter");
     let fence = dir.join("check-0");
     fs::create_dir(&fence).unwrap();
-    let out = Command::new(EXE)
+    let out = Command::new(program())
         .args([
             "enter",
             fence.to_str().unwrap(),
@@ -83,7 +85,7 @@ fn enter_runs_the_program_inside_its_fence() {
         fence.display()
     );
     // One it can't enter runs nothing, and says so as a shell would.
-    let out = Command::new(EXE)
+    let out = Command::new(program())
         .args([
             "enter",
             "/no/such/cgroup",
@@ -116,7 +118,7 @@ fn what_a_command_leaves_is_ended_before_its_worktree_goes() {
     let dir = w.made("proof-sam-r-5-1", &w.record(&[("gate", &cmd)]));
     let mut fences = Cgroups {
         dir: dir_cg.clone(),
-        exe: EXE.into(),
+        exe: program().into(),
     };
     run(&dir, &mut fences).unwrap();
     let (a, b) = (pid(&out.join("a")), pid(&out.join("b")));
@@ -137,7 +139,7 @@ fn clear_all_ends_every_fence_left() {
         let fence = dir.join(format!("check-{i}"));
         fs::create_dir(&fence).unwrap();
         kids.push(
-            Command::new(EXE)
+            Command::new(program())
                 .args([
                     "enter",
                     fence.to_str().unwrap(),

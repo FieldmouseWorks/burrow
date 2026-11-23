@@ -2,7 +2,7 @@ use std::process::Command;
 
 #[test]
 fn the_reference_command_documents_every_option_and_its_read_door() {
-    let output = Command::new(env!("CARGO_BIN_EXE_burrow-settings"))
+    let output = Command::new(burrow_test::program!("burrow-settings"))
         .arg("reference")
         .output()
         .unwrap();

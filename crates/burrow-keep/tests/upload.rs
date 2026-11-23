@@ -14,7 +14,7 @@ fn upload(dir: &std::path::Path, url: &str, token: Option<&str>) -> Output {
         "experimental-features = nix-command\nstore = local?root={}\nsubstituters =",
         dir.join("root").display()
     );
-    let mut c = Command::new(env!("CARGO_BIN_EXE_burrow-keep-upload"));
+    let mut c = Command::new(burrow_test::program!("burrow-keep-upload"));
     c.arg(url)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap())
