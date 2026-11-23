@@ -118,7 +118,20 @@ pub fn build_command(
     mode: Mode,
     key_file: Option<&Path>,
 ) -> Result<(Command, Option<File>), api::Refused> {
-    let mut command = Command::new(PROGRAM);
+    build_command_for(Path::new(PROGRAM), grants, extra_args, mode, None, key_file)
+}
+
+/// Like [`build_command`], with an explicit executable path and optional
+/// in-memory API key value (from `credentialEnv`) for [`Mode::ClaudeApi`].
+pub fn build_command_for(
+    program: &Path,
+    grants: &Grants,
+    extra_args: &[String],
+    mode: Mode,
+    key_value: Option<&str>,
+    key_file: Option<&Path>,
+) -> Result<(Command, Option<File>), api::Refused> {
+    let mut command = Command::new(program);
     if !grants.inherit_environment {
         command.env_clear();
     }
@@ -126,7 +139,7 @@ pub fn build_command(
         .args(claude_flags(grants))
         .args(extra_args)
         .envs(&grants.env);
-    let key = api::credentials(&mut command, mode, key_file)?;
+    let key = api::credentials_from_source(&mut command, mode, key_value, key_file)?;
     Ok((command, key))
 }
 

@@ -23,6 +23,9 @@
 //! twice. Claude Code stops a run past its budget after the call that took
 //! it there, so a run can go one call over: the setting's reserve is what
 //! absorbs that, and the Console's spend limit is the backstop past it.
+//! A run outside proj's jobs (the plugin's) is admitted through
+//! [`reserve`], which writes its marker in the meter's own folder for such
+//! runs, and its cost there once it ends.
 //!
 //! Refusals. Nothing about the credit is the plan's: no refusal here
 //! records the plan's usage hold, and none of the plan's holds stops this
@@ -32,11 +35,13 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::Command;
 
+use burrow_probe::credit::{ENGINE, ENGINE_RUNS};
+use burrow_process::state_reads::{self, Dir};
 use serde_json::Value;
 
 use crate::{Mode, stream};
@@ -110,6 +115,24 @@ pub fn key(key_file: Option<&Path>) -> Result<File, Refused> {
     Ok(file)
 }
 
+/// An unlinked temporary file holding an in-memory API key value (e.g. received
+/// via `credentialEnv` inside a sandbox), rewound and ready to hand to Claude
+/// Code on `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`. The key itself never appears
+/// in an error, argument, or child environment variable.
+pub fn key_from_value(value: Option<&str>) -> Result<File, Refused> {
+    let raw = value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Refused::new("no API key is available in its credential"))?;
+    let mut file = tempfile::tempfile()
+        .map_err(|e| Refused::new(format!("its API key file can't be created: {}", e.kind())))?;
+    file.write_all(raw.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.rewind())
+        .map_err(|e| Refused::new(format!("its API key can't be prepared: {}", e.kind())))?;
+    Ok(file)
+}
+
 /// The credentials `mode`'s Claude Code starts with, set on `c` after
 /// everything else it inherits: for `claude`, no API credential; for
 /// `claude-api`, no login and the key on a descriptor, open in the file
@@ -118,6 +141,30 @@ pub fn credentials(
     c: &mut Command,
     mode: Mode,
     key_file: Option<&Path>,
+) -> Result<Option<File>, Refused> {
+    prepare_credentials(c, mode, || key(key_file))
+}
+
+/// Like [`credentials`], but for `claude-api` takes the key value directly
+/// (from `credentialEnv`, or falling back to `key_file` when no env value is
+/// present) and passes it to Claude Code solely via an unlinked file descriptor.
+pub fn credentials_from_source(
+    c: &mut Command,
+    mode: Mode,
+    key_value: Option<&str>,
+    key_file: Option<&Path>,
+) -> Result<Option<File>, Refused> {
+    prepare_credentials(c, mode, || match key_value {
+        Some(v) if !v.trim().is_empty() => key_from_value(Some(v)),
+        _ if key_file.is_some() => key(key_file),
+        _ => key_from_value(key_value),
+    })
+}
+
+fn prepare_credentials(
+    c: &mut Command,
+    mode: Mode,
+    open_key: impl FnOnce() -> Result<File, Refused>,
 ) -> Result<Option<File>, Refused> {
     for name in API_CREDENTIALS {
         c.env_remove(name);
@@ -128,7 +175,7 @@ pub fn credentials(
             for name in LOGIN_CREDENTIALS {
                 c.env_remove(name);
             }
-            let file = key(key_file)?;
+            let file = open_key()?;
             // Opened close-on-exec, as Rust opens every file: this one
             // alone is kept open across the exec, for Claude Code to read.
             rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
@@ -173,10 +220,7 @@ const LOCK: &str = ".credit.lock";
 /// once the run's marker, with its budget, is written.
 pub fn admit(credit_file: Option<&Path>, jobs: &Path, now: i64) -> Result<Admission, Refused> {
     let credit = credit_file.ok_or_else(|| Refused::new("no settings to read its credit from"))?;
-    let path = jobs.join(LOCK);
-    let lock = File::create(&path)
-        .and_then(|f| f.lock().map(|()| f))
-        .map_err(|e| Refused::new(format!("{}: {e}", path.display())))?;
+    let lock = lock(jobs)?;
     let meter = meter(credit, jobs, now)?;
     let budget = meter.headroom();
     if budget <= 0 {
@@ -189,6 +233,120 @@ pub fn admit(credit_file: Option<&Path>, jobs: &Path, now: i64) -> Result<Admiss
         budget,
         _lock: lock,
     })
+}
+
+/// The machine's admission lock, held until the file is dropped.
+fn lock(jobs: &Path) -> Result<File, Refused> {
+    let path = jobs.join(LOCK);
+    File::create(&path)
+        .and_then(|f| f.lock().map(|()| f))
+        .map_err(|e| Refused::new(format!("{}: {e}", path.display())))
+}
+
+/// A run the credit admitted outside proj's jobs, recorded in the meter's
+/// ledger ([`ENGINE_RUNS`]) as a turn of its own: its
+/// marker, with its budget, is written before the admission lock goes, so
+/// the meter holds that budget until [`Reservation::finish`] records its
+/// cost, and [`Reservation::abandon`] takes it back for a run that never
+/// started.
+#[derive(Debug)]
+pub struct Reservation {
+    /// What the run may spend, in micro-dollars: its `--max-budget-usd`.
+    pub budget: i64,
+    jobs: std::path::PathBuf,
+    turn: u64,
+}
+
+/// Admit a run now, at no more than `cap` when it has one, and record it in
+/// the ledger before the lock goes: a run whose marker can't be written is
+/// refused, never run unrecorded.
+pub fn reserve(
+    credit_file: Option<&Path>,
+    jobs: &Path,
+    now: i64,
+    cap: Option<i64>,
+) -> Result<Reservation, Refused> {
+    let admitted = admit(credit_file, jobs, now)?;
+    let budget = cap.map_or(admitted.budget, |cap| admitted.budget.min(cap));
+    let fail = |e: io::Error| Refused::new(format!("its run can't be recorded: {e}"));
+    let runs = state_reads::directory(&jobs.join(ENGINE_RUNS)).map_err(fail)?;
+    let turn = runs
+        .names()
+        .map_err(fail)?
+        .iter()
+        .filter_map(|name| name.to_str()?.strip_suffix(".jsonl")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let recorded = (|| {
+        runs.create(&format!("{turn}.engine"), format!("{ENGINE}\n").as_bytes())?;
+        let mut stream = runs.create_new(&format!("{turn}.jsonl"))?;
+        writeln!(
+            stream,
+            "{}",
+            burrow_probe::credit::marker(now, ENGINE, Some(budget))
+        )
+    })();
+    if let Err(e) = recorded {
+        let _ = remove_turn(&runs, turn);
+        return Err(fail(e));
+    }
+    drop(admitted);
+    Ok(Reservation {
+        budget,
+        jobs: jobs.to_owned(),
+        turn,
+    })
+}
+
+fn remove_turn(runs: &Dir, turn: u64) -> io::Result<()> {
+    for name in [format!("{turn}.jsonl"), format!("{turn}.engine")] {
+        match runs.remove(&name) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+impl Reservation {
+    fn runs(&self) -> io::Result<Dir> {
+        Dir::open(&self.jobs.join(ENGINE_RUNS))
+    }
+
+    /// Take back the reservation of a run that never started, under the
+    /// lock, so no admission reads the turn half gone.
+    pub fn abandon(self) -> Result<(), Refused> {
+        let _lock = lock(&self.jobs)?;
+        self.runs()
+            .and_then(|runs| remove_turn(&runs, self.turn))
+            .map_err(|e| Refused::new(format!("its run's reservation can't be taken back: {e}")))
+    }
+
+    /// Record what the run's stream (`stdout`, all of it that was read) says
+    /// of its session and cost: its `init` and `result` records, each whole
+    /// line that parses. A run with no result stays held at its budget, as
+    /// one stopped before its result is, until a later run of its session
+    /// accounts for it.
+    pub fn finish(self, stdout: &[u8]) -> io::Result<()> {
+        let mut lines = String::new();
+        for line in stdout.split(|b| *b == b'\n') {
+            let Ok(v) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            let kept = v["type"] == "result" || (v["type"] == "system" && v["subtype"] == "init");
+            if kept {
+                lines.push_str(&v.to_string());
+                lines.push('\n');
+            }
+        }
+        if lines.is_empty() {
+            return Ok(());
+        }
+        self.runs()?
+            .append_file(&format!("{}.jsonl", self.turn))?
+            .write_all(lines.as_bytes())
+    }
 }
 
 fn meter(credit: &Path, jobs: &Path, now: i64) -> Result<burrow_settings::credit::Meter, Refused> {
