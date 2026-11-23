@@ -69,7 +69,7 @@
           ]
         },
         {
-          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login ([`api`]).",
+          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login (`burrow_engine_anthropic::api`).",
           "type": "string",
           "const": "claude-api"
         }

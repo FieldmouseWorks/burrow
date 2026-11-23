@@ -11,9 +11,10 @@
 //! malformed, future or stale reading proves neither: the first engine runs
 //! as it stands, and no turn is moved onto an engine it can't vouch for.
 
-use super::{Engine, api};
+use super::Engine;
 use crate::config::Config;
 use crate::usage::login::Run;
+use burrow_engine_anthropic::api;
 use burrow_settings::roles::Route;
 
 /// What a route asks of each engine.
@@ -78,7 +79,7 @@ impl Live<'_> {
     /// A key the credit's runs can launch with: none in a sandbox, and
     /// none missing, unreadable or empty ([`api::key`]).
     fn keyed(&self) -> bool {
-        !self.sandboxed && api::key(self.cfg).is_ok()
+        !self.sandboxed && api::key(self.cfg.claude_api_key_file.as_deref()).is_ok()
     }
 
     fn reading(&self, engine: Engine) -> Option<burrow_usage_reset::meter::Snapshot> {
@@ -99,7 +100,15 @@ impl Meters<Engine> for Live<'_> {
             Engine::Claude => self.reading(engine).is_some_and(|m| m.short(pct)),
             // No usable key (a sandbox is given none), or missing or
             // unreadable credit state: launch or admission would refuse it.
-            Engine::ClaudeApi => !self.keyed() || api::short(self.cfg, pct, self.now),
+            Engine::ClaudeApi => {
+                !self.keyed()
+                    || api::short(
+                        self.cfg.credit_file().as_deref(),
+                        &self.cfg.jobs,
+                        pct,
+                        self.now,
+                    )
+            }
         }
     }
 
@@ -109,7 +118,10 @@ impl Meters<Engine> for Live<'_> {
         }
         match engine {
             Engine::Claude => self.reading(engine).is_some_and(|m| m.room()),
-            Engine::ClaudeApi => self.keyed() && api::room(self.cfg),
+            Engine::ClaudeApi => {
+                self.keyed()
+                    && api::room(self.cfg.credit_file().as_deref(), &self.cfg.jobs, self.now)
+            }
         }
     }
 }

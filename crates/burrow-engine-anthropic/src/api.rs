@@ -7,16 +7,16 @@
 //! every `claude` run is started with no API credential at all, and a
 //! `claude-api` run with no login token and the key on a descriptor
 //! (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`), opened from its file
-//! (burrow.proj.claudeApi.keyFile) only for that run: the key is in no
+//! (`burrow.proj.claudeApi.keyFile`) only for that run: the key is in no
 //! variable, argument or settings file, and the commands Claude Code runs
 //! inherit neither it nor the descriptor ([`credentials`]). The login's
-//! file stays where it is, for the sessions both engines share
-//! ([`super::Engine::conversation`]); Claude Code reads no login when it has
-//! a key. A sandbox is given no key, so the engine never runs in one.
+//! file stays where it is, for the sessions both modes share; Claude Code
+//! reads no login when it has a key. A sandbox is given no key, so the engine
+//! never runs in one.
 //!
 //! Admission. Every run of a `claude-api` turn, its first and each retry,
 //! starts only through [`admit`]: under one lock for the machine, the
-//! credit's meter (burrow_probe::credit) is read, and the run is given what
+//! credit's meter (`burrow_probe::credit`) is read, and the run is given what
 //! it has room for as its `--max-budget-usd`, which its marker records
 //! before the lock goes. The meter counts a run whose cost isn't recorded
 //! yet at that budget, so runs going at once never spend the same room
@@ -26,9 +26,9 @@
 //!
 //! Refusals. Nothing about the credit is the plan's: no refusal here
 //! records the plan's usage hold, and none of the plan's holds stops this
-//! engine (usage/login.rs). A launch the credit can't admit, or a run the
-//! API refused (its key, its credit, its budget), ends its turn with words
-//! of its own ([`Refused`]).
+//! engine. A launch the credit can't admit, or a run the API refused (its
+//! key, its credit, its budget), ends its turn with words of its own
+//! ([`Refused`]).
 
 use std::fmt;
 use std::fs::File;
@@ -39,8 +39,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{Engine, is_error};
-use crate::config::Config;
+use crate::{Mode, stream};
 
 /// What the turn records when its engine is refused: the credit's own
 /// refusal, never the plan's hold.
@@ -49,14 +48,14 @@ pub struct Refused(pub String);
 
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} refused: {}", Engine::ClaudeApi.name(), self.0)
+        write!(f, "{} refused: {}", Mode::ClaudeApi.name(), self.0)
     }
 }
 
 impl std::error::Error for Refused {}
 
 impl Refused {
-    pub(crate) fn new(why: impl Into<String>) -> Self {
+    pub fn new(why: impl Into<String>) -> Self {
         Self(why.into())
     }
     /// As the error a launch returns.
@@ -88,10 +87,8 @@ const KEY_FD: &str = "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR";
 
 /// The key's file, opened and checked: refused when none is configured, or
 /// it can't be read, or holds nothing. The key itself is never in an error.
-pub fn key(cfg: &Config) -> Result<File, Refused> {
-    let path = cfg
-        .claude_api_key_file
-        .as_deref()
+pub fn key(key_file: Option<&Path>) -> Result<File, Refused> {
+    let path = key_file
         .ok_or_else(|| Refused::new("no API key is configured (burrow.proj.claudeApi.keyFile)"))?;
     let unreadable = |e: io::Error| {
         Refused::new(format!(
@@ -113,21 +110,25 @@ pub fn key(cfg: &Config) -> Result<File, Refused> {
     Ok(file)
 }
 
-/// The credentials `engine`'s Claude Code starts with, set on `c` after
+/// The credentials `mode`'s Claude Code starts with, set on `c` after
 /// everything else it inherits: for `claude`, no API credential; for
 /// `claude-api`, no login and the key on a descriptor, open in the file
 /// returned, which must outlive the start.
-pub fn credentials(c: &mut Command, engine: Engine, cfg: &Config) -> Result<Option<File>, Refused> {
+pub fn credentials(
+    c: &mut Command,
+    mode: Mode,
+    key_file: Option<&Path>,
+) -> Result<Option<File>, Refused> {
     for name in API_CREDENTIALS {
         c.env_remove(name);
     }
-    match engine {
-        Engine::Claude => Ok(None),
-        Engine::ClaudeApi => {
+    match mode {
+        Mode::Claude => Ok(None),
+        Mode::ClaudeApi => {
             for name in LOGIN_CREDENTIALS {
                 c.env_remove(name);
             }
-            let file = key(cfg)?;
+            let file = key(key_file)?;
             // Opened close-on-exec, as Rust opens every file: this one
             // alone is kept open across the exec, for Claude Code to read.
             rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
@@ -149,8 +150,13 @@ pub struct Admission {
 impl Admission {
     /// Its budget as `--max-budget-usd` takes it.
     pub fn flag(&self) -> [String; 2] {
-        ["--max-budget-usd".into(), usd(self.budget)]
+        budget_flag(self.budget)
     }
+}
+
+/// A budget in micro-dollars as `--max-budget-usd` takes it.
+pub fn budget_flag(micros: i64) -> [String; 2] {
+    ["--max-budget-usd".into(), usd(micros)]
 }
 
 /// Dollars to the micro-dollar, as Claude Code takes them.
@@ -165,16 +171,13 @@ const LOCK: &str = ".credit.lock";
 /// read, or no room in it (runs still going count at their budgets). The
 /// lock is held until the [`Admission`] is dropped, which the caller does
 /// once the run's marker, with its budget, is written.
-pub fn admit(cfg: &Config, now: i64) -> Result<Admission, Refused> {
-    let settings = cfg
-        .settings
-        .as_ref()
-        .ok_or_else(|| Refused::new("no settings to read its credit from"))?;
-    let path = cfg.jobs.join(LOCK);
+pub fn admit(credit_file: Option<&Path>, jobs: &Path, now: i64) -> Result<Admission, Refused> {
+    let credit = credit_file.ok_or_else(|| Refused::new("no settings to read its credit from"))?;
+    let path = jobs.join(LOCK);
     let lock = File::create(&path)
         .and_then(|f| f.lock().map(|()| f))
         .map_err(|e| Refused::new(format!("{}: {e}", path.display())))?;
-    let meter = meter(cfg, &settings.credit_file(), now)?;
+    let meter = meter(credit, jobs, now)?;
     let budget = meter.headroom();
     if budget <= 0 {
         return Err(Refused::new(format!(
@@ -188,28 +191,25 @@ pub fn admit(cfg: &Config, now: i64) -> Result<Admission, Refused> {
     })
 }
 
-fn meter(cfg: &Config, credit: &Path, now: i64) -> Result<burrow_settings::credit::Meter, Refused> {
-    burrow_probe::credit::meter(credit, Some(&cfg.jobs), now)
+fn meter(credit: &Path, jobs: &Path, now: i64) -> Result<burrow_settings::credit::Meter, Refused> {
+    burrow_probe::credit::meter(credit, Some(jobs), now)
         .map_err(|e| Refused::new(format!("its credit can't be metered: {e}")))
 }
 
 /// Whether the credit has room now, as an observer reads it (the drain's
 /// look): no lock, nothing admitted.
-pub fn room(cfg: &Config) -> bool {
-    cfg.settings
-        .as_ref()
-        .is_some_and(|s| meter(cfg, &s.credit_file(), crate::now()).is_ok_and(|m| m.room()))
+pub fn room(credit_file: Option<&Path>, jobs: &Path, now: i64) -> bool {
+    credit_file.is_some_and(|credit| meter(credit, jobs, now).is_ok_and(|m| m.room()))
 }
 
-/// Whether the credit is short at `pct` now, as a route reads it
-/// ([`super::route`]): no room (none set, a meter that can't be read, the
-/// reserve or today's allowance reached), or `pct` percent of its cycle's
-/// budget spent.
-pub fn short(cfg: &Config, pct: f64, now: i64) -> bool {
-    let Some(settings) = cfg.settings.as_ref() else {
+/// Whether the credit is short at `pct` now, as a route reads it: no room
+/// (none set, a meter that can't be read, the reserve or today's allowance
+/// reached), or `pct` percent of its cycle's budget spent.
+pub fn short(credit_file: Option<&Path>, jobs: &Path, pct: f64, now: i64) -> bool {
+    let Some(credit) = credit_file else {
         return true;
     };
-    meter(cfg, &settings.credit_file(), now).map_or(true, |m| {
+    meter(credit, jobs, now).map_or(true, |m| {
         !m.room() || m.spent as f64 * 100.0 >= pct * m.cycle.budget as f64
     })
 }
@@ -219,18 +219,16 @@ pub fn short(cfg: &Config, pct: f64, now: i64) -> bool {
 /// a pass for when it has none. None with no credit set or a meter that
 /// can't be read (fixing either is an event of its own), or while only a
 /// run going holds it (its turn's end kicks the drain).
-pub fn opens(cfg: &Config) -> Option<i64> {
-    let settings = cfg.settings.as_ref()?;
-    meter(cfg, &settings.credit_file(), crate::now())
-        .ok()?
-        .opens()
+pub fn opens(credit_file: Option<&Path>, jobs: &Path, now: i64) -> Option<i64> {
+    let credit = credit_file?;
+    meter(credit, jobs, now).ok()?.opens()
 }
 
 /// Why a finished run was refused, when the API refused it (its key, its
 /// credit or its budget): `last` is its result, `records` its stream. Any
 /// other error is the turn's own, ended like any other.
 pub fn refusal(last: &Value, records: impl Iterator<Item = Value>) -> Option<Refused> {
-    if !is_error(last) {
+    if !stream::is_error(last) {
         return None;
     }
     if last["subtype"] == "error_max_budget_usd" {
@@ -270,7 +268,7 @@ pub fn refusal(last: &Value, records: impl Iterator<Item = Value>) -> Option<Ref
 
 /// [`refusal`], from the run's records in `path` past `from`.
 pub fn refusal_file(last: &Value, path: &Path, from: u64) -> Option<Refused> {
-    let records = super::stream::lines(path, from)
+    let records = stream::lines(path, from)
         .ok()?
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok());

@@ -57,28 +57,6 @@ impl Capabilities {
     pub fn servers(&self) -> BTreeMap<String, McpServer> {
         self.items.iter().flat_map(|g| g.servers.clone()).collect()
     }
-    pub fn claude_flags(&self) -> Vec<String> {
-        let mut flags = vec![
-            "--settings".into(),
-            serde_json::json!({"env":self.environment()}).to_string(),
-        ];
-        for grant in &self.items {
-            for (path, write) in &grant.paths {
-                if *write && path.is_dir() {
-                    flags.extend(["--add-dir".into(), path.to_string_lossy().into_owned()]);
-                }
-            }
-        }
-        let servers: BTreeMap<_, _> = self.servers().into_iter().map(|(name, server)| {
-            (name, serde_json::json!({"type":"stdio", "command":server.command, "args":server.args, "env":server.env}))
-        }).collect();
-        flags.extend([
-            "--strict-mcp-config".into(),
-            "--mcp-config".into(),
-            serde_json::json!({"mcpServers":servers}).to_string(),
-        ]);
-        flags
-    }
 }
 fn var(env: Env, name: &str) -> Option<PathBuf> {
     env(name).filter(|v| !v.is_empty()).map(PathBuf::from)
@@ -280,7 +258,9 @@ mod tests {
         // The host's contract has every item of the list a plugin is granted from.
         let items: Vec<Capability> = grants.items.iter().map(|g| g.capability).collect();
         assert_eq!(items, Capability::ALL);
-        let claude = grants.claude_flags();
+        let claude = burrow_engine_anthropic::command::claude_flags(
+            &super::super::command::anthropic_grants(&grants),
+        );
         let config: serde_json::Value = serde_json::from_str(claude.last().unwrap()).unwrap();
         assert_eq!(
             config["mcpServers"]["machine.ledger"]["command"],

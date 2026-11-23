@@ -9,7 +9,7 @@
 //! charged for its credit runs alone; proj keeps such a turn's engine
 //! [`ENGINE`] once it has been on the credit, which is how its job is found. The probe's `usage` answer shows it,
 //! and proj's admission of every [`ENGINE`] run reads the same [`meter`]
-//! (burrow-proj's engine/api.rs).
+//! (burrow-engine-anthropic's api.rs).
 //!
 //! Strict where the usage answer is tolerant: anything about a job with an
 //! [`ENGINE`] turn that can't be read (its folder, a turn's engine, start

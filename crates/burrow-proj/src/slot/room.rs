@@ -3,9 +3,11 @@
 
 use std::fs;
 
+use burrow_engine_anthropic::api;
+
 use super::{Lock, line, lock};
 use crate::config::Config;
-use crate::engine::{Engine, api};
+use crate::engine::Engine;
 use crate::usage::{self, login::Run};
 
 /// Whether a turn on this engine started now would get a slot, as far as a
@@ -37,7 +39,7 @@ pub fn seen_room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
             .count()
     };
     let api = engine == Engine::ClaudeApi;
-    if api && (sandboxed || !api::room(cfg)) {
+    if api && (sandboxed || !api::room(cfg.credit_file().as_deref(), &cfg.jobs, crate::now())) {
         return false;
     }
     // What the drain's `metered` would leave, released by nothing here.

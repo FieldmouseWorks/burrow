@@ -1,10 +1,10 @@
 // The machine's state from a run Claude Code couldn't authenticate, as on
 // 2026-11-16: held like a spent plan, and the owner told to log in.
 
-use crate::engine::claude::LOGGED_OUT;
 use crate::usage::login::{holds_machine, moved, resumed};
 use crate::usage::tests::{rig, told};
 use crate::usage::*;
+use burrow_engine_anthropic::claude::LOGGED_OUT;
 
 const LIMIT: &str = "You've hit your monthly spend limit";
 
