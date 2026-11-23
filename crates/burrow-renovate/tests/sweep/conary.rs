@@ -386,3 +386,36 @@ fn an_unreadable_record_hands_nothing_over() {
         p.jobs
     );
 }
+
+/// `--key` makes the key the flow takes, as a seal would, before any major
+/// is sealed: one where there's none, a new one for one that isn't a key,
+/// and a good one left as it is. It sweeps nothing.
+#[test]
+fn its_key_is_there_for_the_flow_before_any_seal() {
+    use std::os::unix::fs::PermissionsExt;
+    let m = Machine::new();
+    m.prs(&[pr(1)]);
+    let key = || fs::read_to_string(m.state("verdict.key")).unwrap();
+    let made = |p: Pass| {
+        assert_eq!(p.code, Some(0), "{}", p.err);
+        assert!(p.log.is_empty() && p.jobs.is_empty(), "{:?}", p.log);
+        assert!(SealKey::from_hex(&key()).is_ok(), "{}", key());
+    };
+    made(m.sweep(&["--key"]));
+    assert_eq!(key(), KEY);
+    fs::remove_file(m.state("verdict.key")).unwrap();
+    made(m.sweep(&["--key"]));
+    let mode = fs::metadata(m.state("verdict.key"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let first = key();
+    made(m.sweep(&["--key"]));
+    assert_eq!(key(), first);
+    fs::write(m.state("verdict.key"), "short").unwrap();
+    made(m.sweep(&["--key"]));
+    assert_ne!(key(), first);
+    // Only alone.
+    assert_eq!(m.sweep(&["--key", "sam/r"]).code, Some(2));
+}

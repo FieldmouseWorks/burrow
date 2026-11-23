@@ -23,7 +23,11 @@
 //! so a job still finishing on an older head, a push since, a PR retargeted
 //! since, someone else's comment or another job quoting a marker can't
 //! clear a PR. The autoland steward merges an ok one once its CI is green
-//! (the same rule) in the repos it covers (steward.rs). The owner gets one
+//! (the same rule) in the repos it covers (steward.rs). In a repo
+//! burrow-landing's record gives conaryd, the markers are Conary's v2
+//! issuances instead (seal/v2.rs), the only form its flow reads: sealed on
+//! the PR's revision (its description too) and a generation, and the
+//! sweep reads them back as the flow does. The owner gets one
 //! notice listing the held ones, as waiting on a decision, and the ok ones
 //! no steward will merge.
 //!
@@ -43,8 +47,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use burrow_settings::landing::{Owner, Record};
 use conary_github::flow::Revision;
+use major::{Major, V2};
 use rustix::fs::{FlockOperation, flock};
 use serde_json::Value;
 
@@ -52,6 +56,7 @@ use crate::{complain, say, trimmed};
 
 mod config;
 mod job;
+mod major;
 mod pr;
 mod request;
 mod scan;
@@ -256,44 +261,6 @@ impl Config {
         }
     }
 
-    /// The markers that seal major `m`'s ok and held verdicts, in `repo`:
-    /// as conaryd reads them where it lands, else as the steward does.
-    fn seal(&self, repo: &str, m: &Major) -> Result<[String; 2], Broke> {
-        let broke = |why| Broke(format!("{repo}: sealing #{}: {why}", m.n));
-        if let Some(v2) = &m.v2 {
-            let n =
-                m.n.parse()
-                    .map_err(|_| broke(format!("{:?} isn't a number", m.n)))?;
-            let issuance = seal::Issuance {
-                repo,
-                n,
-                revision: &v2.revision,
-            };
-            return issuance.markers(&self.state, v2.posted).map_err(broke);
-        }
-        let [ok, held] = ["ok", "held"].map(|v| {
-            seal::Verdict {
-                repo,
-                n: &m.n,
-                verdict: v,
-                head: &m.sha,
-                base: &m.base,
-            }
-            .marker(&self.state)
-        });
-        Ok([ok.map_err(broke)?, held.map_err(broke)?])
-    }
-
-    /// Whether burrow-landing's record gives `repo` to conaryd, or is
-    /// handing it over to it: never with no record to read.
-    fn conaryd(&self, repo: &str) -> Result<bool, Broke> {
-        let Some(path) = &self.landing else {
-            return Ok(false);
-        };
-        let holding = Record::read(path).map_err(Broke)?.holding(repo);
-        Ok(holding.to.unwrap_or(holding.owner) == Owner::Conaryd)
-    }
-
     /// The majors waiting on the owner, in one notice: the held ones apart
     /// from the ok ones in repos no steward merges in. And the security
     /// fixes stuck a day.
@@ -476,22 +443,6 @@ struct Handed {
     major: Option<Major>,
     key: PathBuf,
     want: String,
-}
-
-/// A major as it's handed over: its number, head and base, and in a repo
-/// conaryd lands, what its v2 verdicts seal.
-struct Major {
-    n: String,
-    sha: String,
-    base: String,
-    v2: Option<V2>,
-}
-
-/// What a major's v2 verdicts seal, and the highest generation already
-/// sealed on it.
-struct V2 {
-    revision: Revision,
-    posted: u64,
 }
 
 /// Something it needed broke.
@@ -849,45 +800,6 @@ impl Sweep<'_> {
             key,
             want,
         }))
-    }
-
-    /// What PR `n`'s v2 `payloads` say of `revision`, under the sweep's key.
-    fn issued(&self, n: &str, revision: &Revision, payloads: &[String]) -> seal::Read {
-        let Ok(n_) = n.parse() else {
-            return seal::Read::default();
-        };
-        let issuance = seal::Issuance {
-            repo: self.repo,
-            n: n_,
-            revision,
-        };
-        issuance
-            .read(&self.cfg.state, payloads)
-            .unwrap_or_else(|why| {
-                complain(&format!(
-                    "{}: {}: checking #{n}'s seal: {why}",
-                    self.cfg.name, self.repo
-                ));
-                seal::Read::default()
-            })
-    }
-
-    /// Whether `mac` seals verdict `v` on PR `n`'s `sha` for `base`.
-    fn sealed(&self, n: &str, v: &str, sha: &str, base: &str, mac: &str) -> bool {
-        let verdict = seal::Verdict {
-            repo: self.repo,
-            n,
-            verdict: v,
-            head: sha,
-            base,
-        };
-        verdict.sealed(&self.cfg.state, mac).unwrap_or_else(|why| {
-            complain(&format!(
-                "{}: {}: checking #{n}'s seal: {why}",
-                self.cfg.name, self.repo
-            ));
-            false
-        })
     }
 
     /// When a lock file refresh lock-age refused for age only can go

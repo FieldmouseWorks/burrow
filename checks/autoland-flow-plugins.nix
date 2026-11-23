@@ -16,6 +16,14 @@
 # as every train does yet) is left out of it, and the machine builds; one
 # trusted for no check, put in a rendered producers file, fails its build
 # on Conary's loader.
+#
+# The plugins' machines run no renovate-sweep, so their configs and units
+# are the flow's and the plugins' alone. The plain one runs it, as the
+# example does: its configs name the sweep's key by its file
+# (`major_key_file`), which a unit of the controller's holds, taken from
+# the sweep's verdict.key once the sweep has made it, and again each time
+# it changes (tests/autoland-major-key.nix runs it). With no shadowed repo
+# there's no flow to read it, and no such unit.
 { self, pkgs, nixpkgs, system, ... }:
 let
   lib = nixpkgs.lib;
@@ -25,6 +33,7 @@ let
   };
   machine = plugins: (self.nixosConfigurations.example.extendModules {
     modules = [{
+      burrow.updates.renovate.enable = false;
       burrow.autoland.shadow = [ "Sam/HomeLab" "sam/plain" "sam/bare" "sam/twin" ];
       # Evidence and proofs: its train off, as proofs need yet.
       burrow.autoland.repos."sam/homelab" = {
@@ -112,8 +121,24 @@ let
     # (tests/autoland-flow-keys.nix runs it). Either way they require the
     # flow's state, carried to its user (tests/ledger-flow-data.nix).
     offNoKeys = lib.all (m: !(m.systemd.services ? autoland-flow-keys)
+      && !(m.systemd.paths ? autoland-flow-keys-again)
       && m.systemd.services."autoland-shadow@".requires == [ "burrow-flow-data.service" ]
-      && m.burrow.autoland.flow.needs == [ "burrow-flow-data.service" ]) [ off on plain ];
+      && m.burrow.autoland.flow.needs == [ "burrow-flow-data.service" ]) [ off on ];
+    # renovate-sweep's key: made first, by the sweep as the user, taken as
+    # the controller's credential, and taken again when it changes.
+    sweptKeys = let
+      s = plain.systemd;
+      k = s.services.autoland-flow-keys;
+      verdictKey = "/var/lib/burrow/renovate-sweep/verdict.key";
+    in k.serviceConfig.User == plain.burrow.ledger.flow.user
+      && k.serviceConfig.LoadCredential == [ "major-seal:${verdictKey}" ]
+      && k.requires == [ "renovate-sweep-key.service" ] && k.after == [ "renovate-sweep-key.service" ]
+      && s.services.renovate-sweep-key.serviceConfig.User == plain.burrow.user
+      && !(s.services.renovate-sweep-key.serviceConfig ? RemainAfterExit)
+      && lib.hasSuffix "/bin/renovate-sweep --key" s.services.renovate-sweep-key.serviceConfig.ExecStart
+      && s.paths.autoland-flow-keys-again.pathConfig == { PathChanged = [ verdictKey ]; Unit = "autoland-flow-keys-again.service"; }
+      && lib.hasSuffix "systemctl try-restart autoland-flow-keys.service" s.services.autoland-flow-keys-again.serviceConfig.ExecStart
+      && s.services."autoland-shadow@".requires == [ "burrow-flow-data.service" "autoland-flow-keys.service" ];
     judgedKeys = let k = judged.systemd.services.autoland-flow-keys; in
       k.serviceConfig.User == "conary-flow"
       && k.serviceConfig.LoadCredential == [ "judge-seal:/run/secrets/judge-seal" ]
@@ -141,6 +166,7 @@ let
     # With no shadowed repo, nothing to render and no one to read it.
     noRenderWithoutShadow = let bare = self.nixosConfigurations.example.config; in
       bare.burrow.autoland.shadow == [ ] && !(bare.systemd.services ? autoland-flow-configs)
+      && !(bare.systemd.services ? autoland-flow-keys) && !(bare.systemd.paths ? autoland-flow-keys-again)
       && !(bare.systemd.paths ? autoland-flow-configs) && bare.burrow.autoland.flow.render == [ ];
     judgedProducers = builtins.fromJSON (producers judged "sam/homelab").producers == [
       { name = "sam/judge"; key = keys.judge; checks = [ "conary/judgment" ]; }
@@ -163,6 +189,13 @@ in pkgs.runCommand "autoland-flow-plugins-check" { nativeBuildInputs = [ pkgs.jq
   for f in ${file off "sam/homelab"} ${file off "sam/plain"}; do
     jq -e '.plugins == {} and (has("execution") | not) and (.evidence == null or (.evidence | has("producers") | not))' $f >/dev/null \
       || fail "$f names a plugin, a choice or a producer with every plugin off"
+  done
+  # The sweep's key by its file where it runs, and nowhere else.
+  jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal" and (.settings | has("major_key") | not)' ${file plain "sam/homelab"} >/dev/null \
+    || fail "with renovate-sweep on, homelab's flow config doesn't name its key's file alone"
+  for f in ${file off "sam/homelab"} ${file on "sam/homelab"}; do
+    jq -e '.settings | (has("major_key_file") or has("major_key")) | not' $f >/dev/null \
+      || fail "$f names a major key with renovate-sweep off"
   done
 
   homelab=${file on "sam/homelab"}

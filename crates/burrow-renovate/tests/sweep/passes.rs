@@ -245,14 +245,14 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     ] {
         let p = m.sweep(words);
         assert_eq!(p.code, Some(2), "{words:?}");
-        assert_eq!(p.err, "usage: renovate-sweep [OWNER/REPO]\n");
+        assert_eq!(p.err, "usage: renovate-sweep [OWNER/REPO|--key]\n");
         assert!(p.jobs.is_empty() && p.notices.is_empty() && p.log.is_empty());
     }
     let none = Command::new(SWEEP).output().unwrap();
     assert_eq!(none.status.code(), Some(2));
     assert_eq!(
         String::from_utf8_lossy(&none.stderr),
-        "usage: burrow-renovate-sweep CONFIG [OWNER/REPO]\n"
+        "usage: burrow-renovate-sweep CONFIG [OWNER/REPO|--key]\n"
     );
     let path = m.path("bad.json");
     fs::write(&path, r#"{"name": "renovate-sweep"}"#).unwrap();

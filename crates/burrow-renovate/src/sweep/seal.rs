@@ -107,6 +107,14 @@ impl Verdict<'_> {
     }
 }
 
+/// The key in `state`, made if there's none or it isn't one.
+pub(crate) fn ensure(state: &Path) -> Result<(), String> {
+    let path = state.join(KEY);
+    key(&path, true)
+        .map(drop)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The key at `path`; with `create`, a new one if it's missing or isn't one
 /// (else None). An empty or short key (a crash or a full disk as it was
 /// made) is one anyone could seal with, so a new one, whole or not at all:

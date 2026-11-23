@@ -14,10 +14,11 @@
 //! with each role-run plugin's choice (`execution`) as the settings say now
 //! ([`render`]).
 //!
-//! `burrow-flow-files judge-key CONFIG SEAL` loads CONFIG as the flow does
-//! (`flow::Config::load`, which reads a key its `judge_key_file` names) and
-//! succeeds only if its `judge_key` is the key the file SEAL holds (the
-//! judge's seal key), printing neither.
+//! `burrow-flow-files key judge|major CONFIG SEAL` loads CONFIG as the flow
+//! does (`flow::Config::load`, which reads a key its `judge_key_file` or
+//! `major_key_file` names) and succeeds only if its `judge_key` (the
+//! judge's seal key) or `major_key` (renovate-sweep's) is the key the file
+//! SEAL holds, printing neither.
 use conary_core::Policy;
 use conary_github::attest::service::Producers;
 use conary_github::events::Runtime;
@@ -42,7 +43,7 @@ fn main() -> ExitCode {
         },
         Some("producers") => |p| Producers::load(p).map(drop),
         Some("render") => return render(&files),
-        Some("judge-key") => return judge_key(&files),
+        Some("key") => return key(&files),
         _ => return usage(),
     };
     if files.is_empty() {
@@ -85,22 +86,27 @@ fn render(args: &[String]) -> ExitCode {
     }
 }
 
-fn judge_key(args: &[String]) -> ExitCode {
-    let [config, seal] = args else {
+fn key(args: &[String]) -> ExitCode {
+    let [which, config, seal] = args else {
         return usage();
     };
+    let (name, pick): (&str, fn(Config) -> Option<SealKey>) = match which.as_str() {
+        "judge" => ("judge_key", |c| c.settings.judge_key),
+        "major" => ("major_key", |c| c.settings.major_key),
+        _ => return usage(),
+    };
     let loaded = Config::load(Path::new(config))
-        .map(|c| c.settings.judge_key)
+        .map(pick)
         .map_err(|e| format!("{config}: {e}"));
     let sealed = SealKey::read(Path::new(seal));
     match (loaded, sealed) {
         (Ok(Some(loaded)), Ok(sealed)) if loaded == sealed => ExitCode::SUCCESS,
         (Ok(Some(_)), Ok(_)) => {
-            eprintln!("{config}: its judge_key isn't the one {seal} holds");
+            eprintln!("{config}: its {name} isn't the one {seal} holds");
             ExitCode::FAILURE
         }
         (Ok(None), _) => {
-            eprintln!("{config}: it has no judge_key");
+            eprintln!("{config}: it has no {name}");
             ExitCode::FAILURE
         }
         (Err(e), _) | (_, Err(e)) => {
@@ -112,7 +118,7 @@ fn judge_key(args: &[String]) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files render MANIFEST | burrow-flow-files judge-key CONFIG SEAL"
+        "usage: burrow-flow-files flow|policy|events|producers FILE... | burrow-flow-files render MANIFEST | burrow-flow-files key judge|major CONFIG SEAL"
     );
     ExitCode::from(2)
 }
