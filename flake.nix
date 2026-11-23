@@ -170,8 +170,9 @@
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: builtins.removeAttrs p [ "default" ]) crates.packages)
         { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
-        # Conary at that pin: burrow.ledger.package's default.
-        { ${system}.conary = (self.lib.conary.flake self { inherit rust-overlay; }).packages.${system}.default; }
+        # Conary at that pin: burrow.ledger.package's default, for every
+        # platform the crates are built for.
+        (nixpkgs.lib.mapAttrs (sys: _: { conary = (self.lib.conary.flake self { inherit rust-overlay; }).packages.${sys}.default; }) crates.packages)
       ];
 
       # A bare machine with every module on, for the checks and as an example.
