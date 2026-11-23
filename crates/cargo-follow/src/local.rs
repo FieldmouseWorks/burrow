@@ -47,9 +47,10 @@ impl Git {
 
 /// What a pass asks of the machine, apart so its tests can answer.
 pub trait Local {
-    /// The upstream's changes from the follow's pin to `head` that count
+    /// The upstream's changes from `from` (the follow's pin, or the rev an
+    /// open PR moves it to) to `head` that count, by the follow's rules
     /// (changes.rs).
-    fn changes(&mut self, follow: &Follow, head: &str) -> Result<Vec<String>, String>;
+    fn changes(&mut self, follow: &Follow, from: &str, head: &str) -> Result<Vec<String>, String>;
     /// The follower at `base`, with every dependency on the follow's URL
     /// moved to `head` and its lock file to match: each file that changed,
     /// and its new bytes.
@@ -91,17 +92,17 @@ impl Work {
 }
 
 impl Local for Work {
-    fn changes(&mut self, follow: &Follow, head: &str) -> Result<Vec<String>, String> {
+    fn changes(&mut self, follow: &Follow, from: &str, head: &str) -> Result<Vec<String>, String> {
         let git = self.clone("upstream", &follow.upstream, true)?;
         git.run(&[
             "fetch",
             "-q",
             "--no-tags",
             &url(&follow.upstream),
-            &follow.pin,
+            from,
             head,
         ])?;
-        changes::changes(&git, &follow.rules, &follow.pin, head)
+        changes::changes(&git, &follow.rules, from, head)
     }
 
     fn bump(

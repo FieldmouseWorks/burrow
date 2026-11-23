@@ -5,6 +5,8 @@ const PIN: &str = "1111111111111111111111111111111111111111";
 const HEAD: &str = "2222222222222222222222222222222222222222";
 const BASE: &str = "3333333333333333333333333333333333333333";
 const PR_HEAD: &str = "4444444444444444444444444444444444444444";
+/// A rev between the pin and the head: where an open PR moved it.
+const MID: &str = "5555555555555555555555555555555555555555";
 
 fn manifest(rev: &str) -> String {
     format!(
@@ -20,15 +22,22 @@ fn contents(text: &str) -> Value {
 /// What a pass asks of the machine, answered from a script.
 #[derive(Default)]
 struct FakeLocal {
+    /// What counts from the pin to the head.
     counted: Vec<String>,
+    /// What counts from any other rev to the head.
+    past: Vec<String>,
     asked: Vec<String>,
 }
 
 impl Local for FakeLocal {
-    fn changes(&mut self, f: &Follow, head: &str) -> Result<Vec<String>, String> {
+    fn changes(&mut self, f: &Follow, from: &str, head: &str) -> Result<Vec<String>, String> {
         self.asked
-            .push(format!("changes {} {}..{head}", f.upstream, f.pin));
-        Ok(self.counted.clone())
+            .push(format!("changes {} {from}..{head}", f.upstream));
+        Ok(if from == f.pin {
+            self.counted.clone()
+        } else {
+            self.past.clone()
+        })
     }
     fn bump(
         &mut self,
@@ -284,6 +293,44 @@ fn an_open_pr_already_at_the_head_is_left_alone() {
     assert!(ok, "{out}");
     assert_eq!(changed(&gh), Vec::<String>::new());
     assert!(out.contains("#7 already moves sam/up to 2222222"), "{out}");
+}
+
+#[test]
+fn an_inert_commit_past_what_the_open_pr_takes_doesnt_refresh_it() {
+    // PR 7 moved the pin to MID for a real change; the upstream's head is
+    // MID with only inert commits on top.
+    let mut gh = github(Some((&[], MID)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ok, out) = pass(&mut gh, &mut local, None);
+    assert!(ok, "{out}");
+    assert_eq!(changed(&gh), Vec::<String>::new());
+    assert_eq!(
+        local.asked,
+        [
+            format!("changes sam/Up {PIN}..{HEAD}"),
+            format!("changes sam/Up {MID}..{HEAD}"),
+        ]
+    );
+    assert!(
+        out.contains(
+            "#7 already moves sam/up to 5555555, and 2222222 changes nothing past it that counts"
+        ),
+        "{out}"
+    );
+
+    // Something past MID that counts: the PR moves on to the head.
+    let mut gh = github(Some((&[], MID)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        past: vec!["src/main.rs".into()],
+        ..Default::default()
+    };
+    let (ok, out) = pass(&mut gh, &mut local, None);
+    assert!(ok, "{out}");
+    assert_eq!(changed(&gh).last().unwrap(), "PATCH repos/sam/home/pulls/7");
 }
 
 #[test]

@@ -218,7 +218,7 @@ impl Pass<'_> {
         let counted = if head == f.pin {
             Vec::new()
         } else {
-            self.local.changes(f, &head)?
+            self.local.changes(f, &f.pin, &head)?
         };
         let (repo, path) = (t.repo, t.path);
         if let Some(pr) = &open
@@ -252,16 +252,24 @@ impl Pass<'_> {
             }
             return Ok(());
         }
-        // Already at the head, and GitHub doesn't say it conflicts: a moved
-        // base alone is no reason for a new head (its gate would start over).
+        // Already at the head, or at a rev the head changes nothing past
+        // that counts (an inert commit on top of what the PR takes), and
+        // GitHub doesn't say it conflicts: a moved base or an inert commit
+        // alone is no reason for a new head (its gate would start over).
         if let Some(pr) = &open
-            && self.moves_to(repo, path, &pr.head, &f.url)?.as_deref() == Some(head.as_str())
+            && let Some(at) = self.moves_to(repo, path, &pr.head, &f.url)?
+            && (at == head || (at != f.pin && self.local.changes(f, &at, &head)?.is_empty()))
             && !self.conflicted(repo, pr.number)?
         {
+            let past = if at == head {
+                String::new()
+            } else {
+                format!(", and {} changes nothing past it that counts", short(&head))
+            };
             self.say(format!(
-                "{repo}: #{} already moves {upstream} to {}",
+                "{repo}: #{} already moves {upstream} to {}{past}",
                 pr.number,
-                short(&head)
+                short(&at)
             ));
             return Ok(());
         }
