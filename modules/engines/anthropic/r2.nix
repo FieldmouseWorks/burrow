@@ -1,4 +1,4 @@
-# One-way commands, in Claude Bash-pattern syntax. Both engines read this list.
+# One-way commands, in Claude Bash-pattern syntax.
 [
     # Storage: destroys data with no undo.
     "zfs destroy *"

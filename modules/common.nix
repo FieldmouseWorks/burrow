@@ -115,7 +115,7 @@ inputs:
 
           claude.package = mkOption {
             type = types.package;
-            default = import ./claude/package.nix {
+            default = import ./engines/anthropic/package.nix {
               inherit inputs;
               inherit (config.burrow.claude) manifest;
               system = pkgs.stdenv.hostPlatform.system;
@@ -171,11 +171,11 @@ inputs:
 
         # Marks folders trusted in the user's Claude Code config, for the
         # Claudes that start in one with nobody at their terminal to answer
-        # its question about it (claude/trust.sh).
+        # its question about it (engines/anthropic/trust.sh).
         config.burrow.tools.claude-trust = pkgs.writeShellApplication {
           name = "claude-trust";
           runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
-          text = builtins.readFile ./claude/trust.sh;
+          text = builtins.readFile ./engines/anthropic/trust.sh;
         };
 
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)

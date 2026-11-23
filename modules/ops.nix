@@ -3,7 +3,7 @@
 # reboots into its last good generation, and systemd-oomd so a box running
 # out of memory loses the job that ate it rather than drowning, with the
 # ways in keeping memory back so you can still reach it. Firmware updates
-# are on offer; installing one is an R2 (claude.nix).
+# are on offer; installing one is an R2 (engines/anthropic.nix).
 inputs:
 { config, lib, pkgs, ... }:
 let

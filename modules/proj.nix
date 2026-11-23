@@ -186,7 +186,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
     (lib.mkRemovedOptionModule [ "burrow" "proj" "paused" ] "Use burrow.settings.allowed and settings pause OWNER/REPO; runtime pauses need no deploy.")
-    { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
+    { key = "burrow/anthropic"; imports = [ (import ./engines/anthropic.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }

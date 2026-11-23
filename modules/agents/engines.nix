@@ -1,7 +1,7 @@
 # burrow.agents.engines: what each engine brings to a sandbox. Declared
-# apart from ../agents.nix so the module that owns an engine (Claude's is
-# ../claude.nix) can add its entry on a machine without sandboxes, or when
-# evaluated alone. ../agents.nix builds one guest image and one filtered
+# apart from ../agents.nix so the module that owns an engine (Anthropic's is
+# ../engines/anthropic.nix) can add its entries on a machine without sandboxes,
+# or when evaluated alone. ../agents.nix builds one guest image and one filtered
 # proxy per entry: a VM started for an engine gets that engine's packages,
 # its credential and its hosts, and none of another engine's.
 { lib, config, ... }:

@@ -41,6 +41,35 @@ let
       $out/bin/burrow-engine-antigravity \
       --set BURROW_ANTIGRAVITY_CONFIG ${antigravityConfig}
   '';
+  # Placeholder runtime model/effort configuration for conformance (no real
+  # model IDs in tracked files).
+  anthropicModels = [
+    {
+      id = "conformance-model-a";
+      efforts = [ "low" "medium" "high" ];
+      contextTokens = 200000;
+      maxOutputTokens = 16384;
+    }
+    {
+      id = "conformance-model-b";
+      efforts = [ "low" "high" ];
+    }
+  ];
+  anthropicPlugin =
+    mode: credentialEnv:
+    import ../modules/engines/anthropic/plugin.nix {
+      inherit
+        self
+        pkgs
+        mode
+        credentialEnv
+        ;
+      models = anthropicModels;
+      defaultModel = "conformance-model-a";
+      defaultEffort = "medium";
+    };
+  # burrow-engine-anthropic declares network and mcp, and no devices (no kvm).
+  anthropicCapabilities = pkgs.lib.subtractLists [ "kvm" ] grantable;
 in
 pkgs.linkFarm "agents" {
   sandboxes = import ../tests/agents.nix { inherit self pkgs; };
@@ -60,5 +89,19 @@ pkgs.linkFarm "agents" {
       packages = [ antigravityStandIn ];
       credentialEnv = "BURROW_ANTIGRAVITY_CREDENTIAL";
     };
+  };
+  conformance-claude = self.lib.engineConformance {
+    inherit pkgs;
+    name = "claude";
+    plugin = anthropicPlugin "claude" "CLAUDE_CODE_OAUTH_TOKEN";
+    capabilities = anthropicCapabilities;
+    engine.credentialEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+  };
+  conformance-claude-api = self.lib.engineConformance {
+    inherit pkgs;
+    name = "claude-api";
+    plugin = anthropicPlugin "claude-api" "ANTHROPIC_API_KEY";
+    capabilities = anthropicCapabilities;
+    engine.credentialEnv = "ANTHROPIC_API_KEY";
   };
 }

@@ -1,4 +1,4 @@
-//! The guard's config, as modules/claude.nix writes it: the hook passes its
+//! The guard's config, as modules/engines/anthropic/guard.nix writes it: the hook passes its
 //! path as the one argument.
 
 use std::path::{Path, PathBuf};
