@@ -481,3 +481,123 @@ fn normalized_turn_usage_round_trips_multi_turn_claude_cost_recovery_without_str
         "{got}"
     );
 }
+
+#[test]
+fn usage_groups_normalized_failover_runs_by_invocation_engine_keeping_turn_counts_separate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jobs = tmp.path().join("jobs");
+    let job = jobs.join("failover");
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("role"), "repair").unwrap();
+    fs::write(job.join("project"), "/src/web").unwrap();
+    fs::write(job.join("1.started"), "100").unwrap();
+    // After a refusal triggers failover from claude to claude-api, N.engine records the final engine.
+    fs::write(job.join("1.engine"), "claude-api").unwrap();
+    let norm = crate::usage_record::TurnUsage {
+        version: crate::usage_record::VERSION,
+        engine: "claude-api".into(),
+        model: Some("model-a".into()),
+        runs: vec![
+            crate::usage_record::RunUsage {
+                engine: "claude".into(),
+                started_at: 100,
+                model: Some("model-a".into()),
+                session: Some("sess-1".into()),
+                budget_micros: None,
+                input_tokens: 120,
+                output_tokens: 30,
+                cache_read_tokens: 10,
+                cache_write_tokens: 5,
+                cost_usd: Some(0.40),
+                cumulative_cost_usd: Some(0.40),
+                tokens_partial: true,
+                cost_partial: false,
+                prior_gap: false,
+                missing: Vec::new(),
+                recovered: Vec::new(),
+            },
+            crate::usage_record::RunUsage {
+                engine: "claude-api".into(),
+                started_at: 120,
+                model: Some("model-a".into()),
+                session: Some("sess-1".into()),
+                budget_micros: Some(5_000_000),
+                input_tokens: 340,
+                output_tokens: 70,
+                cache_read_tokens: 20,
+                cache_write_tokens: 15,
+                cost_usd: Some(1.10),
+                cumulative_cost_usd: Some(1.50),
+                tokens_partial: true,
+                cost_partial: false,
+                prior_gap: false,
+                missing: Vec::new(),
+                recovered: Vec::new(),
+            },
+        ],
+    };
+    fs::write(
+        job.join("1.usage.json"),
+        serde_json::to_string(&norm).unwrap(),
+    )
+    .unwrap();
+
+    let mut cfg = config(&tmp.path().join("state"));
+    cfg.jobs = Some(jobs);
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 200,
+        uid: 1,
+        run: &fake,
+    };
+    let got = m
+        .answer(&Query::parse("usage @0 --totals").unwrap())
+        .unwrap();
+    assert!(got.contains("claude: 0 turns\n"), "{got}");
+    assert!(got.contains("claude-api: 1 turns\n"), "{got}");
+    assert!(
+        got.contains("Cost: $1.50 recorded over 1 turns; 0 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside"),
+        "{got}"
+    );
+    assert!(
+        got.contains("Tokens: 1 turns with partial counts (output counts completed runs only)."),
+        "{got}"
+    );
+    let by_engine = got
+        .split("By engine:\n")
+        .nth(1)
+        .and_then(|s| s.split("By engine and role:\n").next())
+        .unwrap_or("");
+    let rows: Vec<Vec<&str>> = by_engine
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                "claude", "all", "all", "0", "120", "30", "10", "5", "$0.40", "0", "0", "0", "0",
+                "1"
+            ],
+            vec![
+                "claude-api",
+                "all",
+                "all",
+                "1",
+                "340",
+                "70",
+                "20",
+                "15",
+                "$1.10",
+                "0",
+                "0",
+                "0",
+                "0",
+                "1"
+            ],
+        ],
+        "{got}"
+    );
+}

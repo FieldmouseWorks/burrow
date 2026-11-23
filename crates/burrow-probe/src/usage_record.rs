@@ -104,6 +104,9 @@ impl TurnUsage {
         if record.engine.trim().is_empty() {
             return Err("usage record engine cannot be empty".into());
         }
+        if record.runs.iter().any(|r| r.engine.trim().is_empty()) {
+            return Err("usage record run engine cannot be empty".into());
+        }
         Ok(record)
     }
 
