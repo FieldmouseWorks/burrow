@@ -209,6 +209,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     concurrency:
       group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
@@ -314,6 +315,7 @@ jobs:
   reuse:
     if: ${{ inputs.gate-reuse && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     concurrency:
       group: ${{ format('flake-check {0} reuse {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] run-{12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, github.run_id) }}
       cancel-in-progress: true
@@ -403,6 +405,11 @@ jobs:
         # 1 to legs: an expression has no arithmetic, so a list of each.
         leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
+    # Its gate's run (RUN_SECONDS in burrow-flake-check) and builds-write's
+    # 30, with half an hour for the rest: restores, the wait, signing and
+    # keeping.
+    # burrow-workflows' timeouts test holds every job here to its limit.
+    timeout-minutes: 240
     concurrency:
       group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] leg {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
@@ -948,6 +955,7 @@ jobs:
     if: ${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure' || needs.reuse.outputs.hit == 'true') }}
     name: ${{ inputs.legs > 1 && 'check' || 'gate' }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
     concurrency:
       group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
@@ -1047,6 +1055,7 @@ jobs:
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
     concurrency:
       group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
@@ -1081,6 +1090,9 @@ jobs:
   negative:
     if: github.event_name == 'pull_request' && inputs.negative
     runs-on: ${{ inputs.negative-runner || inputs.runner }}
+    # Its run (RUN_SECONDS in burrow-flake-check), with half an hour for
+    # the rest: restores, installing Nix, signing and the log's upload.
+    timeout-minutes: 210
     concurrency:
       group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
@@ -1337,6 +1349,7 @@ jobs:
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     concurrency:
       group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true

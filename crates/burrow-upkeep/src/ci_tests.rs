@@ -14,6 +14,8 @@ struct Hub {
     status: u16,
     lost: bool,
     annotation_failure: bool,
+    /// The check runs GitHub cancelled past their job's `timeout-minutes`.
+    timed_out: Vec<u64>,
     /// The runs' event: GitHub reruns no `dynamic` one, whoever asks.
     event: &'static str,
     /// What update-branch answers: 202, unless set.
@@ -53,7 +55,18 @@ impl Api for Hub {
                     transient: true,
                 });
             }
-            (200, json!([]))
+            let limit = self
+                .timed_out
+                .iter()
+                .any(|id| path.contains(&format!("/check-runs/{id}/")));
+            (
+                200,
+                if limit {
+                    json!([{"message": "The job has exceeded the maximum execution time of 210m0s"}])
+                } else {
+                    json!([])
+                },
+            )
         } else if method == "POST" {
             if self.status == 0 || self.status == 201 || self.lost {
                 self.attempt += 1;
@@ -305,6 +318,27 @@ fn genuine_failures_and_unfinished_suites_never_rerun() {
     let mut c = check_run("build", 11, 7, "CANCELLED");
     c["checkSuite"]["status"] = json!("IN_PROGRESS");
     assert_eq!(run(&mut h, &ask(vec![c]), false).unwrap().state, "pending");
+    assert_eq!(posts(&h), 0);
+}
+
+/// A job past its `timeout-minutes` (every job of flake-check.yml has one,
+/// #1488) is red, and neither it nor a sibling cancelled with it is run
+/// again: the limit is its verdict, as a failure's is.
+#[test]
+fn a_job_past_its_limit_is_red_and_never_run_again() {
+    let mut h = Hub {
+        timed_out: vec![11],
+        ..Hub::default()
+    };
+    let a = ask(vec![
+        check_run("negative", 11, 7, "CANCELLED"),
+        check_run("leg 1 of 4", 12, 7, "CANCELLED"),
+    ]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(
+        (got.state, got.names),
+        ("red", vec!["negative (timed out)".into()])
+    );
     assert_eq!(posts(&h), 0);
 }
 

@@ -27,4 +27,5 @@ mod lane;
 mod pr_base;
 mod reuse;
 mod test_executables;
+mod timeouts;
 mod train;

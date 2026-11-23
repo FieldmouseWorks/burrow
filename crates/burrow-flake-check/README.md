@@ -137,10 +137,21 @@ flake-check.yml's builds-write step uploads what the leg built
 The gate and negative runs give every build Nix's `max-silent-time` of an
 hour (`SILENT_SECONDS` in `src/main.rs`), after the caller's own
 `NIX_CONFIG`: a build that prints nothing for that long is killed and the
-leg fails, rather than hold its runner until the job's 6 hours run out.
+leg fails, rather than hold its runner until the run's own limit runs out.
 The other builds go on (`--keep-going`), and a push's leg keeps what they
 built. The longest quiet stretch in a burrow build that went on to pass was
 14 to 16 minutes (codex linking, on a hosted runner).
+
+A run, its evaluations and builds together, has a limit of its own
+(`RUN_SECONDS` in `src/main.rs`, which says why that figure): past it
+`timeout` stops the worker and everything it started, and the run can't
+tell, saying so: a gate signs `error` with why, and a
+negative leaves no result to attest. Each job of flake-check.yml has a
+`timeout-minutes` of its own: one that runs the gate or the negative gets
+its run's limit, the limits of its other steps and half an hour more, which
+burrow-workflows' `timeouts` test holds it to (#1488). A job with none
+took GitHub's six hours, and one still going holds every failed job of
+its run from being run again.
 
 The negative builds each check it judges on its own, once what the check is
 built from has built under that hour, with Nix's shorter `timeout`
