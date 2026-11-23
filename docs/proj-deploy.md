@@ -1,9 +1,10 @@
 # Usage records and turns across a deploy
 
-The shared usage record (`proj.usageHold`'s file, named in the
-[settings reference](settings-reference.md)) and immutable `.usage-owner-*` metadata retain the
-strict pre-trickle `Spent` schema. Readers accept the short-lived generation
-that added `admission`, but writers never serialize that field.
+The shared usage record (`proj.usageHolds`'s file, named in the
+[settings reference](settings-reference.md)) now stores per-engine holds in v2
+JSON (`{"version": 2, "holds": {...}}`) while retaining backward-compatible
+reading of legacy single-hold records, `.usage-owner-*` metadata, and
+`ADMISSION_REF` references during cutover.
 
 A release first stages its nanosecond cutoff in `.usage.admission`. The
 compatible record's `job` reference encodes the precise cutoff and commits it

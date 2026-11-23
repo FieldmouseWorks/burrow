@@ -189,18 +189,19 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 2. Per-engine usage holds, meters and accounting
 
-- **Today:** [`burrow-proj/src/usage.rs`](../crates/burrow-proj/src/usage.rs),
+- **Done (#1386):** [`burrow-proj/src/usage.rs`](../crates/burrow-proj/src/usage.rs),
   [`slot/room.rs`](../crates/burrow-proj/src/slot/room.rs), and
-  [`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs) model one global
-  Claude subscription hold (`proj.usageHold`, see the [settings reference](settings-reference.md)) plus a special-case `api: bool`
-  split for `claude-api`.
-  [`burrow-probe/src/answer/usage.rs`](../crates/burrow-probe/src/answer/usage.rs)
-  parses Claude's stream records directly for token and cost totals.
-- **Target:** Key holds, expired-login notices, and meter snapshots by engine
-  name so a quota or login refusal on one engine never blocks another engine
-  from draining work. Record normalized per-run usage/cost metadata at turn
-  end (or from the plugin response) so `burrow-probe` and `burrow-dashboard`
-  read one engine-agnostic format.
+  [`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs) key usage holds
+  (`proj.usageHolds`, see the [settings reference](settings-reference.md)),
+  expired-login notices (`proj-usage-<engine>`), and meter snapshots by engine
+  name (`*` for an owner pause over all engines), so a quota or login refusal
+  on one engine never blocks another engine from draining work or taking
+  failover routes. Each completed turn writes a normalized per-run usage record
+  ([`burrow-probe/src/usage_record.rs`](../crates/burrow-probe/src/usage_record.rs))
+  that [`burrow-probe/src/answer/usage.rs`](../crates/burrow-probe/src/answer/usage.rs)
+  and [`burrow-probe/src/credit.rs`](../crates/burrow-probe/src/credit.rs)
+  aggregate across engines without parsing provider-specific stream files
+  (retaining read compatibility for historical Claude stream logs).
 
 ### 3. Judge producer (`burrow-judge`)
 

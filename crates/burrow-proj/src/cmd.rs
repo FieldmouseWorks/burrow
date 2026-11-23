@@ -184,74 +184,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
                 .collect::<String>());
             Ok(())
         }
-        Some("usage") => match args.get(1).map(String::as_str) {
-            None => {
-                // What can't be taken now is left where it is, for the next
-                // pass: what's held already is still said.
-                if let Err(e) = usage::adopt(cfg) {
-                    eprintln!("{e}");
-                }
-                let mut value = usage::out(cfg)
-                    .and_then(|s| serde_json::to_value(s).ok())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let meters = crate::github_quota::meters(cfg);
-                if !meters.is_empty() {
-                    value["github"] = serde_json::json!(meters);
-                }
-                if value.as_object().is_some_and(|v| !v.is_empty()) {
-                    put(&format!("{value}\n"));
-                }
-                Ok(())
-            }
-            Some("back") => {
-                if let Some(settings) = &cfg.settings {
-                    settings
-                        .command(&["back".into()], "proj usage back")
-                        .map_err(|e| Fail::new(1, e))?;
-                }
-                usage::back(cfg, None);
-                Ok(())
-            }
-            Some("hold") => {
-                let help = "usage: proj usage hold UNTIL [--only pipeline | --reason TEXT]";
-                if args.get(3).is_some_and(|s| s == "--only") {
-                    if args.len() != 5 || args[4] != "pipeline" {
-                        return Err(Fail::new(2, help));
-                    }
-                    let settings = cfg
-                        .settings
-                        .as_ref()
-                        .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
-                    put(&settings
-                        .command(&["pipeline".into(), args[2].clone()], "proj usage hold")
-                        .map_err(|e| Fail::new(1, e))?);
-                    return Ok(());
-                }
-                let until = arg(args, 2, help)?
-                    .parse::<i64>()
-                    .map_err(|_| Fail::new(2, help))?;
-                let reason = match &args[3..] {
-                    [] => "Claude work paused by the owner",
-                    [flag, reason] if flag == "--reason" && !reason.trim().is_empty() => reason,
-                    _ => return Err(Fail::new(2, help)),
-                };
-                usage::hold(cfg, until, reason).map_err(|e| Fail::new(1, e))
-            }
-            // Import the old watchdog's undated limit without reviving a released hold.
-            Some("adopt") => {
-                if args.len() != 3 {
-                    return Err(Fail::new(2, "usage: proj usage adopt UNTIL"));
-                }
-                let until = arg(args, 2, "usage: proj usage adopt UNTIL")?
-                    .parse::<i64>()
-                    .map_err(|_| Fail::new(2, "usage: proj usage adopt UNTIL (seconds)"))?;
-                usage::earlier(cfg, "the stall watchdog", until, None).map_err(|e| Fail::new(1, e))
-            }
-            Some(_) => Err(Fail::new(
-                2,
-                "usage: proj usage [back | hold UNTIL [--reason TEXT] | adopt UNTIL]",
-            )),
-        },
+        Some("usage") => usage::cmd(cfg, args, &mut put),
         Some("await") => wait_on(cfg, &args[1..]),
         Some("split") => {
             let id = this_job("PROJ_JOB", "proj split is for the inbox job being split")?;

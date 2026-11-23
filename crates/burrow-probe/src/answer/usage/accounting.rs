@@ -9,8 +9,8 @@ pub const FIELDS: [&str; 4] = [
 ];
 #[derive(Default)]
 pub struct Session {
-    cost: f64,
-    gaps: BTreeSet<String>,
+    pub(crate) cost: f64,
+    pub(crate) gaps: BTreeSet<String>,
 }
 #[derive(Default)]
 pub struct Report {
@@ -24,7 +24,7 @@ pub struct Report {
     pub recovered: BTreeSet<String>,
     /// The same, per host-marked invocation, in stream order.
     pub invocations: Vec<Invocation>,
-    identity: String,
+    pub(crate) identity: String,
 }
 /// What a turn's stream added from one host `burrow.run` marker to the next.
 /// Records before any marker (older streams have none) are one unmarked.
@@ -39,7 +39,13 @@ pub struct Invocation {
     /// The engine the run was on, when its marker says (an older one
     /// doesn't: its turn's engine is its own).
     pub engine: Option<String>,
+    pub session: Option<String>,
+    pub tokens: [u64; 4],
+    pub tokens_partial: bool,
+    pub cost_partial: bool,
+    pub prior_gap: bool,
     pub cost: f64,
+    pub cumulative_cost: Option<f64>,
     pub missing: BTreeSet<String>,
     pub recovered: BTreeSet<String>,
 }
@@ -90,22 +96,32 @@ fn partial(
     report: &mut Report,
 ) {
     report.cost_partial = true;
+    report.invocation().cost_partial = true;
     missing(session, sessions, report);
     partial_tokens(run, report);
     *run = Run::default();
 }
 fn missing(session: &str, sessions: &mut BTreeMap<String, Session>, report: &mut Report) {
     let id = format!("{}:{}", report.identity, report.missing.len());
+    let has_session = session != report.identity;
     report.missing.insert(id.clone());
-    report.invocation().missing.insert(id.clone());
+    let inv = report.invocation();
+    inv.missing.insert(id.clone());
+    if inv.session.is_none() && has_session {
+        inv.session = Some(session.to_owned());
+    }
     sessions.entry(session.into()).or_default().gaps.insert(id);
 }
 fn partial_tokens(run: &mut Run, report: &mut Report) {
     report.tokens_partial = true;
+    report.invocation().tokens_partial = true;
     for mut tokens in std::mem::take(&mut run.messages).into_values() {
         // Assistant output usage is a placeholder until the result arrives.
         tokens[1] = 0;
         report.add(tokens);
+        for (sum, value) in report.invocation().tokens.iter_mut().zip(tokens) {
+            *sum += value;
+        }
     }
 }
 pub fn decode(
@@ -168,8 +184,14 @@ pub fn decode(
             let execution_crash = v["subtype"] == "error_during_execution";
             if v["usage"].is_object() && !(execution_crash && tokens == [0; 4]) {
                 report.add(tokens);
+                for (sum, value) in report.invocation().tokens.iter_mut().zip(tokens) {
+                    *sum += value;
+                }
             } else {
                 partial_tokens(&mut run, &mut report);
+            }
+            if session != report.identity {
+                report.invocation().session = Some(session.clone());
             }
             let previous = sessions.entry(session.clone()).or_default();
             if let Some(total) = cost
@@ -177,18 +199,22 @@ pub fn decode(
                 && !(execution_crash && total == 0.0)
             {
                 let cost = (total - previous.cost).max(0.0);
-                report.prior_gap |= !previous.gaps.is_empty();
+                let had_gap = !previous.gaps.is_empty();
+                report.prior_gap |= had_gap;
                 let gaps = std::mem::take(&mut previous.gaps);
                 previous.cost = total;
                 report.cost += cost;
                 report.recovered.extend(gaps.iter().cloned());
                 let invocation = report.invocation();
                 invocation.cost += cost;
+                invocation.cumulative_cost = Some(total);
+                invocation.prior_gap |= had_gap;
                 invocation.recovered.extend(gaps);
             } else {
                 // Missing or zeroed crash fields and regressed counters never
                 // erase the last trustworthy cumulative total.
                 report.cost_partial = true;
+                report.invocation().cost_partial = true;
                 missing(&session, sessions, &mut report);
             }
             run = Run::default();

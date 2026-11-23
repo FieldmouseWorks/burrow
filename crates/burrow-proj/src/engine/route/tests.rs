@@ -441,6 +441,100 @@ fn a_route_of_one_engine_never_moves() {
     assert_eq!(r.engine(), Engine::Claude);
 }
 
+#[test]
+fn ordered_failover_across_arbitrary_engines_and_cross_engine_handoff() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = tmp.path().join("jobs");
+    cfg.meters = Some(tmp.path().join("meters"));
+    fs::create_dir_all(&cfg.jobs).unwrap();
+    fs::create_dir_all(cfg.meters.as_ref().unwrap()).unwrap();
+    let now = crate::now();
+
+    let write_meter = |engine: &str, used: f64| {
+        fs::write(
+            cfg.meters.as_ref().unwrap().join(format!("{engine}.json")),
+            json!({
+                "windows": {"daily": {"used": used, "resets_at": now + 3600}},
+                "credits": false,
+                "read_at": now - 10,
+                "requested_at": now - 10,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write_meter("engine-a", 30.0);
+    write_meter("engine-b", 10.0);
+    write_meter("engine-c", 5.0);
+
+    let route = Route {
+        engine: "engine-a".into(),
+        over: vec![
+            burrow_settings::roles::Hop {
+                pct: 80.0,
+                engine: "engine-b".into(),
+            },
+            burrow_settings::roles::Hop {
+                pct: 90.0,
+                engine: "engine-c".into(),
+            },
+        ],
+    };
+    let live = || Live {
+        cfg: &cfg,
+        sandboxed: false,
+        now,
+    };
+
+    // Under threshold: stays on engine-a.
+    assert_eq!(pick_names(&route, None, &live()), "engine-a");
+
+    // Threshold reached on engine-a: fails over to engine-b.
+    write_meter("engine-a", 85.0);
+    assert_eq!(pick_names(&route, None, &live()), "engine-b");
+
+    // Login expiry on engine-a fails over to engine-b even when engine-a's meter is low.
+    write_meter("engine-a", 10.0);
+    crate::usage::record_login(&cfg, "engine-a", "job-1", "token expired", now).unwrap();
+    assert_eq!(pick_names(&route, None, &live()), "engine-b");
+
+    // Usage hold on engine-b as well: continues along the chain to engine-c.
+    crate::usage::record_for(&cfg, "engine-b", "job-1", Some(now + 3600), "quota b", now).unwrap();
+    assert_eq!(pick_names(&route, None, &live()), "engine-c");
+
+    // Cross-engine handoff: Turn 1 ran on engine-a; Turn 2 routes to engine-c
+    // and receives a handoff prompt carrying Turn 1's brief and answer.
+    let job = crate::job::Job::new(&cfg, "failover-job");
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("prompt.1"), "implement feature X\n").unwrap();
+    fs::write(job.turn("1", "engine"), "engine-a").unwrap();
+    fs::write(job.turn("1", "result"), "wrote initial patch on branch\n").unwrap();
+    fs::write(job.turn("1", "jsonl"), "").unwrap();
+    fs::write(job.path("session.engine-a"), "sess-a\n").unwrap();
+    fs::write(job.path("prompt.2"), "finish tests and open PR\n").unwrap();
+
+    let next_engine = pick_names(&route, None, &live());
+    assert_eq!(next_engine, "engine-c");
+    let prompt_path = crate::engine::first_prompt_for(&job, "2", next_engine).unwrap();
+    assert_eq!(prompt_path, job.turn("2", "handoff"));
+    let handoff = fs::read_to_string(prompt_path).unwrap();
+    assert!(handoff.contains("## Turn 1 (engine-a), asked"), "{handoff}");
+    assert!(handoff.contains("implement feature X"), "{handoff}");
+    assert!(
+        handoff.contains("wrote initial patch on branch"),
+        "{handoff}"
+    );
+    assert!(
+        handoff.contains("## This turn, asked\n\nfinish tests and open PR"),
+        "{handoff}"
+    );
+
+    // Release engine-a: next turn routes straight back to engine-a.
+    crate::usage::back_for(&cfg, Some("engine-a"), None);
+    assert_eq!(pick_names(&route, None, &live()), "engine-a");
+}
+
 /// A job whose protected request names no role or engine (or a sandbox),
 /// at turn 1, its identity captured as it started.
 fn job_at<'a>(r: &'a Rig, agent: Option<&str>) -> crate::job::Job<'a> {

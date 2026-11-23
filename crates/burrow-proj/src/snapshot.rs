@@ -211,14 +211,14 @@ pub struct GitHubMeter {
     pub held: bool,
 }
 
-/// One engine's meter and hold.
+/// One engine's meter and hold (`engine` is an engine name, or `*` for a global owner pause).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EngineMeter {
-    pub engine: Engine,
+    pub engine: String,
     /// Its latest reading, none when there's none to read.
     pub reading: Option<Reading>,
-    /// Work held back on it: Claude's usage hold.
+    /// Work held back on this engine (or `*` for a global owner pause).
     pub hold: Option<UsageHold>,
 }
 
@@ -349,21 +349,17 @@ impl Snapshot {
         })
     }
 
-    /// `proj status`: Claude's hold, jobs, drain occupancy and the next five ready.
+    /// `proj status`: active engine holds, jobs, drain occupancy and the next five ready.
     pub fn status(&self) -> String {
         let mut out = String::new();
-        if let Some(h) = self
-            .meters
-            .iter()
-            .filter_map(|m| match m {
-                Meter::Engine(m) => Some(m),
-                Meter::GitHub(_) => None,
-            })
-            .find(|m| m.engine == Engine::Claude)
-            .and_then(|m| m.hold.as_ref())
-        {
-            out += &usage::hold_line(h.owner, h.until, &h.reason);
-            out.push('\n');
+        for m in self.meters.iter().filter_map(|m| match m {
+            Meter::Engine(m) => Some(m),
+            Meter::GitHub(_) => None,
+        }) {
+            if let Some(h) = &m.hold {
+                out += &usage::hold_line_for(&m.engine, h.owner, h.until, &h.reason);
+                out.push('\n');
+            }
         }
         for j in &self.jobs {
             out += &j.line();
@@ -611,42 +607,61 @@ pub(crate) fn held(
 /// Latest engine and installation readings and their holds.
 fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
     use burrow_usage_reset::meter::{FRESH, Snapshot as Read, Span};
-    [Engine::Claude]
+    use std::collections::BTreeSet;
+    let holds = usage::all_out(cfg);
+    let mut engines = BTreeSet::new();
+    engines.insert(usage::DEFAULT_ENGINE.to_owned());
+    engines.extend(holds.keys().cloned());
+    if let Some(dir) = cfg.meters.as_deref()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(file) = name.to_str() else { continue };
+            if !file.starts_with('.')
+                && let Some(engine) = file.strip_suffix(".json")
+                && !engine.is_empty()
+            {
+                engines.insert(engine.to_owned());
+            }
+        }
+    }
+    engines
         .into_iter()
         .map(|engine| {
-            let reading = cfg
-                .meters
-                .as_deref()
-                .and_then(|dir| Read::load(dir, engine.name()))
-                .map(|r| {
-                    let window = |span: Span| {
-                        r.windows
-                            .iter()
-                            .find(|(name, _)| Span::of(name) == Some(span))
-                            .map(|(_, w)| Window {
-                                used: w.used,
-                                resets_at: w.resets_at as i64,
-                            })
-                    };
-                    let age = at as f64 - r.read_at;
-                    Reading {
-                        five_hour: window(Span::FiveHour),
-                        weekly: window(Span::Week),
-                        credits: r.credits,
-                        read_at: r.read_at as i64,
-                        age: age.max(0.0) as i64,
-                        fresh: (0.0..FRESH).contains(&age),
-                    }
-                });
-            let hold = (engine == Engine::Claude)
-                .then(|| usage::out(cfg))
-                .flatten()
-                .map(|s| UsageHold {
-                    owner: s.owner,
-                    since: s.at,
-                    until: s.until,
-                    reason: s.said,
-                });
+            let reading = (engine != usage::ALL_ENGINES)
+                .then(|| {
+                    cfg.meters
+                        .as_deref()
+                        .and_then(|dir| Read::load(dir, &engine))
+                        .map(|r| {
+                            let window = |span: Span| {
+                                r.windows
+                                    .iter()
+                                    .find(|(name, _)| Span::of(name) == Some(span))
+                                    .map(|(_, w)| Window {
+                                        used: w.used,
+                                        resets_at: w.resets_at as i64,
+                                    })
+                            };
+                            let age = at as f64 - r.read_at;
+                            Reading {
+                                five_hour: window(Span::FiveHour),
+                                weekly: window(Span::Week),
+                                credits: r.credits,
+                                read_at: r.read_at as i64,
+                                age: age.max(0.0) as i64,
+                                fresh: (0.0..FRESH).contains(&age),
+                            }
+                        })
+                })
+                .flatten();
+            let hold = holds.get(&engine).map(|s| UsageHold {
+                owner: s.owner,
+                since: s.at,
+                until: s.until,
+                reason: s.said.clone(),
+            });
             Meter::Engine(EngineMeter {
                 engine,
                 reading,

@@ -60,7 +60,7 @@ fn fresh_meter_runs_the_held_turn_and_closes_its_notice() {
     assert!(
         fs::read_to_string(notices)
             .unwrap()
-            .contains("close proj-usage")
+            .contains("close proj-usage-claude")
     );
 }
 

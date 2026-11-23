@@ -22,13 +22,13 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x queued", timeout=60)
       machine.fail("pgrep -f proj-spent-stray")
       machine.succeed("rm /tmp/spent-stray")
-      out = json.loads(proj("usage"))
+      out = json.loads(proj("usage"))["engines"]["claude"]
       assert out["job"] == a and out["said"] == "Claude reached its weekly allowance", out
       assert out["until"] > out["at"] + 20, out
       status = proj("status")
       assert any(l.startswith("Claude is out of usage until ") for l in status.splitlines()), status
       notices = machine.succeed("cat /tmp/notices").splitlines()
-      assert len(notices) == 1 and notices[0].startswith("open proj-usage Claude is out of usage until "), notices
+      assert len(notices) == 1 and notices[0].startswith("open proj-usage-claude Claude is out of usage until "), notices
       # The refused turn gave up its slot, and one started now takes none.
       machine.succeed("rm /tmp/spent")
       b = proj("run web hello")
@@ -54,8 +54,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       assert proj("usage") == "", proj("usage")
       assert not any(l.startswith("Claude is out of usage") for l in proj("status").splitlines()), proj("status")
       notices = machine.succeed("cat /tmp/notices").splitlines()
-      assert notices[-1].startswith("close proj-usage "), notices
-      assert sum(n.startswith("open proj-usage") for n in notices) == 1, notices
+      assert notices[-1].startswith("close proj-usage-claude "), notices
+      assert sum(n.startswith("open proj-usage-claude") for n in notices) == 1, notices
 
   with subtest("proj usage back lets the line go before the reset: usage became available sooner"):
       machine.succeed("echo 3600 >/tmp/spent")
@@ -75,7 +75,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       reset = since + 20
       machine.succeed(f"su - dev -c \"printf 'usage-limit\\t{since}\\t{reset}\\n' >/data/dev/jobs/{j}/await\"")
       proj("_watch")
-      assert json.loads(proj("usage"))["until"] == reset, proj("usage")
+      assert json.loads(proj("usage"))["engines"]["claude"]["until"] == reset, proj("usage")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x queued", timeout=60)
       machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
       prompt = machine.succeed(f"cat /data/dev/jobs/{j}/prompt.2")

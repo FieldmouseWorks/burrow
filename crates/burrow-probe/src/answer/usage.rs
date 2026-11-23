@@ -108,25 +108,37 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                 .names()
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .filter_map(|name| name.to_str()?.strip_suffix(".jsonl")?.parse().ok())
+                .filter_map(|name| {
+                    let s = name.to_str()?;
+                    s.strip_suffix(crate::usage_record::SUFFIX)
+                        .or_else(|| s.strip_suffix(".jsonl"))?
+                        .parse()
+                        .ok()
+                })
                 .collect();
             turns.sort_unstable();
+            turns.dedup();
             for n in &turns {
                 if turn_time(&dir, *n).is_none() {
-                    let engine = read(&dir, &format!("{n}.engine"));
-                    let empty = dir
-                        .file(Path::new(&format!("{n}.jsonl")))
+                    let normalized = crate::usage_record::TurnUsage::load(&dir, *n)
                         .ok()
-                        .and_then(|f| f.metadata().ok())
-                        .is_some_and(|m| m.len() == 0);
+                        .flatten();
+                    let engine = read(&dir, &format!("{n}.engine"));
+                    let engine = if !engine.is_empty() {
+                        engine
+                    } else if let Some(u) = &normalized {
+                        u.engine.clone()
+                    } else {
+                        "claude".into()
+                    };
+                    let empty = normalized.is_none()
+                        && dir
+                            .file(Path::new(&format!("{n}.jsonl")))
+                            .ok()
+                            .and_then(|f| f.metadata().ok())
+                            .is_some_and(|m| m.len() == 0);
                     let counts = if empty { &mut unstarted } else { &mut unknown };
-                    *counts
-                        .entry(if engine.is_empty() {
-                            "claude".into()
-                        } else {
-                            engine
-                        })
-                        .or_default() += 1;
+                    *counts.entry(engine).or_default() += 1;
                 }
             }
             if !turns
@@ -138,13 +150,23 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
             let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
             for n in turns {
                 let at = turn_time(&dir, n);
-                let engine = read(&dir, &format!("{n}.engine"));
-                let engine = if engine.is_empty() { "claude" } else { &engine };
-                let report = if crate::credit::claude_stream(engine) {
+                let normalized = crate::usage_record::TurnUsage::load(&dir, n).ok().flatten();
+                let engine_file = read(&dir, &format!("{n}.engine"));
+                let engine = if !engine_file.is_empty() {
+                    engine_file
+                } else if let Some(u) = &normalized {
+                    u.engine.clone()
+                } else {
+                    "claude".into()
+                };
+                let fallback = format!("{}/{n}", name.to_string_lossy());
+                let report = if let Some(u) = normalized {
+                    Some(u.to_report(&mut sessions, &fallback))
+                } else if crate::credit::claude_stream(&engine) {
                     Some(decode(
                         records(dir.file(Path::new(&format!("{n}.jsonl"))).ok()),
                         &mut sessions,
-                        &format!("{}/{n}", name.to_string_lossy()),
+                        &fallback,
                     ))
                 } else {
                     None
@@ -155,11 +177,11 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                 if at < since || at > m.now {
                     continue;
                 }
-                *counts.entry(engine.into()).or_default() += 1;
-                table.add(engine, &role_key, &project, report.as_ref());
+                *counts.entry(engine.clone()).or_default() += 1;
+                table.add(&engine, &role_key, &project, report.as_ref());
                 let detail = report.map(|r| r.show()).unwrap_or_default();
                 groups
-                    .entry((engine.into(), kind.clone()))
+                    .entry((engine, kind.clone()))
                     .or_default()
                     .push(format!(
                         "  {}{reference} turn {n} {} {detail}\n",
@@ -212,16 +234,23 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
         if at < since as f64 || at > m.now as f64 {
             continue;
         }
-        let Some(engine @ "claude") = v["engine"].as_str() else {
+        let Some(engine) = v["engine"].as_str().filter(|e| {
+            !e.is_empty()
+                && *e != "codex"
+                && e.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        }) else {
             continue;
         };
         if let Some(ws) = v["windows"].as_object() {
             for (name, w) in ws {
-                let name = match name.as_str() {
-                    "five_hour" => "five_hour",
-                    "seven_day" => "seven_day",
-                    _ => continue,
-                };
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    continue;
+                }
                 if let Some(used) = w["used"].as_f64() {
                     out += &format!(
                         "{} {engine} {name}: {used}%{}\n",

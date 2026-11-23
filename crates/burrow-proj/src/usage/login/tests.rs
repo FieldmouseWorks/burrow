@@ -1,7 +1,7 @@
 // The machine's state from a run Claude Code couldn't authenticate, as on
 // 2026-11-16: held like a spent plan, and the owner told to log in.
 
-use crate::usage::login::{holds_machine, moved, resumed};
+use crate::usage::login::{holds_machine, moved_to, resumed};
 use crate::usage::tests::{rig, told};
 use crate::usage::*;
 use burrow_engine_anthropic::claude::LOGGED_OUT;
@@ -21,7 +21,7 @@ fn an_expired_login_holds_the_machine_and_tells_the_owner_to_log_in() {
     assert_eq!(out(&cfg), Some(s.clone()));
     assert_eq!(
         told(&d),
-        ["open proj-usage Claude Code's login expired: log in again on this machine"]
+        ["open proj-usage-claude Claude Code's login expired: log in again on this machine"]
     );
     for words in [line(&s), body(&cfg, &s)] {
         assert!(words.contains("/login"), "{words}");
@@ -39,7 +39,7 @@ fn an_expired_login_holds_the_machine_and_tells_the_owner_to_log_in() {
     assert_eq!(out(&cfg), None);
     assert_eq!(
         told(&d)[1..],
-        ["close proj-usage Claude Code is logged in again, and proj's jobs are running."]
+        ["close proj-usage-claude Claude Code is logged in again, and proj's jobs are running."]
     );
 }
 
@@ -70,8 +70,9 @@ fn the_refused_turn_is_told_its_login_was_gone() {
 #[test]
 fn the_moved_turn_is_told_where_it_went() {
     let (_d, cfg) = rig();
-    let said = moved(
-        crate::engine::Engine::ClaudeApi,
+    let said = moved_to(
+        crate::engine::Engine::ClaudeApi.name(),
+        true,
         "Claude reached its weekly allowance",
     );
     let told = resumed(&cfg, &said);
@@ -85,12 +86,23 @@ fn the_moved_turn_is_told_where_it_went() {
     );
     let back = resumed(
         &cfg,
-        &moved(
-            crate::engine::Engine::Claude,
+        &moved_to(
+            crate::engine::Engine::Claude.name(),
+            true,
             "claude-api refused: its credit has no room: today's allowance spent",
         ),
     );
     assert!(back.contains("(claude-api refused: its credit has no room: today's allowance spent), so this turn carries on on claude, "), "{back}");
+    let cross = resumed(
+        &cfg,
+        &moved_to("engine-b", false, "claude reached its allowance"),
+    );
+    assert!(
+        cross.contains(
+            "(claude reached its allowance), so this turn carries on on engine-b in a fresh conversation."
+        ),
+        "{cross}"
+    );
 }
 
 /// A hold says what its reset is from: a login gone once a limit's hold
@@ -106,7 +118,7 @@ fn the_hold_is_told_as_the_refusal_its_reset_is_from() {
     keep(&cfg, &lapsed).unwrap();
     let s = record(&cfg, "web-2", None, LOGGED_OUT, t).unwrap();
     assert_eq!((s.until, s.said.as_str()), (t + UNSAID, LOGGED_OUT));
-    assert!(told(&d)[1].starts_with("open proj-usage Claude Code's login expired"));
+    assert!(told(&d)[1].starts_with("open proj-usage-claude Claude Code's login expired"));
     // One refused sooner changes nothing of it.
     let s = record(&cfg, "web-3", Some(t + 60), LIMIT, t + 1).unwrap();
     assert_eq!((s.until, s.said.as_str()), (t + UNSAID, LOGGED_OUT));
@@ -116,7 +128,7 @@ fn the_hold_is_told_as_the_refusal_its_reset_is_from() {
         (t + 2 * UNSAID, "Claude reached its extra-usage cap")
     );
     assert_eq!(told(&d).len(), 3);
-    assert!(told(&d)[2].starts_with("open proj-usage Claude is out of usage until"));
+    assert!(told(&d)[2].starts_with("open proj-usage-claude Claude is out of usage until"));
 }
 
 /// While a hold stands, the owner's notice follows what it's for at once,
@@ -129,13 +141,13 @@ fn a_standing_holds_notice_follows_its_cause_each_way() {
     let (d, cfg) = rig();
     let t = now();
     record(&cfg, "web-1", Some(t + 60), LIMIT, t).unwrap();
-    assert!(told(&d)[0].starts_with("open proj-usage Claude is out of usage until"));
+    assert!(told(&d)[0].starts_with("open proj-usage-claude Claude is out of usage until"));
     // Refused for the login in the same second: the hold is the login's now.
     let s = record(&cfg, "web-2", None, LOGGED_OUT, t).unwrap();
     assert_eq!((s.until, s.said.as_str()), (t + UNSAID, LOGGED_OUT));
     assert_eq!(
         told(&d)[1..],
-        ["open proj-usage Claude Code's login expired: log in again on this machine"]
+        ["open proj-usage-claude Claude Code's login expired: log in again on this machine"]
     );
     assert!(body(&cfg, &s).contains("/login"));
     // The same cause again: deduplicated, as before.
@@ -145,7 +157,7 @@ fn a_standing_holds_notice_follows_its_cause_each_way() {
     let s = record(&cfg, "web-4", Some(t + 2 * UNSAID), LIMIT, t + 6).unwrap();
     assert_eq!(s.until, t + 2 * UNSAID);
     assert_eq!(told(&d).len(), 3);
-    assert!(told(&d)[2].starts_with("open proj-usage Claude is out of usage until"));
+    assert!(told(&d)[2].starts_with("open proj-usage-claude Claude is out of usage until"));
     // And another limit refusal changes nothing told.
     record(&cfg, "web-5", Some(t + 2 * UNSAID + 60), LIMIT, t + 7).unwrap();
     assert_eq!(told(&d).len(), 3);
@@ -174,19 +186,19 @@ fn this_machines_login_hold_lets_a_sandboxs_turn_by() {
     let (_d, cfg) = rig();
     let t = now();
     let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
-    assert_eq!(out_for(&cfg, Run::plan(false)), Some(s.clone()));
-    assert_eq!(out_for(&cfg, Run::plan(true)), None);
+    assert_eq!(out_for(&cfg, &Run::plan(false)), Some(s.clone()));
+    assert_eq!(out_for(&cfg, &Run::plan(true)), None);
     // The owner's pause holds every turn, whatever it says.
     assert!(
         Spent {
             owner: true,
             ..s.clone()
         }
-        .holds_run(Run::plan(true))
+        .holds_run(&Run::plan(true))
     );
     // A limit met meanwhile is what holds now: the sandbox's turn too.
     record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
-    assert!(out_for(&cfg, Run::plan(true)).is_some());
+    assert!(out_for(&cfg, &Run::plan(true)).is_some());
 }
 
 /// A sandbox's answer proves its own token, not this machine's login: it
@@ -217,16 +229,20 @@ fn no_plan_hold_holds_an_api_run() {
     use crate::usage::login::{Run, out_for, run_of};
     let (_d, cfg) = rig();
     let t = now();
-    let api = Run {
-        sandboxed: false,
-        api: true,
-    };
+    let api = Run::new("claude-api", false);
     let s = record(&cfg, "web-1", None, LOGGED_OUT, t).unwrap();
-    assert_eq!(out_for(&cfg, api), None);
+    assert_eq!(out_for(&cfg, &api), None);
     record(&cfg, "web-2", Some(t + 2 * UNSAID), LIMIT, t + 1).unwrap();
-    assert_eq!(out_for(&cfg, api), None);
-    assert!(out_for(&cfg, Run::plan(false)).is_some());
-    assert!(Spent { owner: true, ..s }.holds_run(api));
+    assert_eq!(out_for(&cfg, &api), None);
+    assert!(out_for(&cfg, &Run::plan(false)).is_some());
+    assert!(
+        Spent {
+            engine: ALL_ENGINES.into(),
+            owner: true,
+            ..s
+        }
+        .holds_run(&api)
+    );
     let job = crate::job::Job::new(&cfg, "api-1");
     std::fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();

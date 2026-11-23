@@ -361,3 +361,42 @@ fn github_meters_alone_hold_nothing() {
     let (_, stalls) = m.run(T);
     assert_eq!(stalls.len(), 1, "{stalls:?}");
 }
+
+#[test]
+fn per_engine_usage_holds_only_hold_claude_when_claude_or_global_is_held() {
+    let back = T + 2.0 * H;
+    // A hold on another engine alone does NOT hold Claude waits.
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"pr-sam_r-7": on_claude(T - 3.0 * H, T - H)}),
+        T,
+    );
+    *m.world.usage.borrow_mut() = json!({
+        "engines": {
+            "antigravity": {"until": back, "said": "antigravity quota", "job": "ag-1", "at": T - H}
+        }
+    })
+    .to_string();
+    let (_, stalls) = m.run(T);
+    assert_eq!(stalls.len(), 1, "{stalls:?}");
+
+    // A hold on `claude` or `*` in the per-engine map DOES hold Claude waits.
+    for key in ["claude", "*"] {
+        let m = Machine::new();
+        m.write(
+            &m.steward,
+            json!({"pr-sam_r-7": on_claude(T - 3.0 * H, T - H)}),
+            T,
+        );
+        *m.world.usage.borrow_mut() = json!({
+            "engines": {
+                key: {"until": back, "said": "held", "job": "j1", "at": T - H}
+            }
+        })
+        .to_string();
+        let (wake, stalls) = m.run(T);
+        assert!(stalls.is_empty(), "{key}: {stalls:?}");
+        assert_eq!(wake, Some(back), "{key}");
+    }
+}

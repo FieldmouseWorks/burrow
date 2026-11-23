@@ -80,7 +80,7 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.roles"].file' "\"$live/settings/overlay.roles.json\""
   want '.options["proj.engineSetups"].value.active' '"usual"'
   want '.options["proj.engineOffers"].origin' '"default"'
-  want '.options["proj.usageHold"].origin' '"live"'
+  want '.options["proj.usageHolds"].origin' '"live"'
   want '.options["proj.apiCredit"].value.budgetUsd' '214.37'
   want '.options["proj.apiCredit"].file' "\"$live/settings/overlay.credit.json\""
   want '.options | length' "$(jq '.properties.options.required | length' schema.json)"

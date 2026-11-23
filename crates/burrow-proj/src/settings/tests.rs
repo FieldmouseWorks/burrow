@@ -90,7 +90,7 @@ fn every_option_shown_comes_from_the_schema() {
         options["proj.engineOffers"]["value"]["claude"]["models"],
         json!([])
     );
-    assert_eq!(options["proj.usageHold"]["value"], Value::Null);
+    assert_eq!(options["proj.usageHolds"]["value"], json!({}));
     assert_eq!(options["proj.apiCredit"]["value"], Value::Null);
     assert_eq!(options["proj.apiCredit"]["origin"], "default");
 
@@ -154,10 +154,10 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(credit["file"], json!(policy.credit_file()));
     assert_eq!(credit["value"]["budgetUsd"], json!(214.37));
     assert_eq!(credit["value"]["renews"], json!(renews));
-    let hold = &options["proj.usageHold"];
+    let hold = &options["proj.usageHolds"];
     assert_eq!(hold["origin"], "live");
-    assert_eq!(hold["value"]["owner"], true);
-    assert_eq!(hold["value"]["reason"], "save usage");
+    assert_eq!(hold["value"]["*"]["owner"], true);
+    assert_eq!(hold["value"]["*"]["reason"], "save usage");
     let text = command(&cfg, &[]).unwrap();
     assert_eq!(text.lines().count(), SETTINGS.len());
     assert!(

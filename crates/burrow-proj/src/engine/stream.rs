@@ -40,17 +40,23 @@ pub fn stream_tail(stream: &Path, view: View) -> String {
     tail.into_iter().collect()
 }
 
-/// Session storage is per conversation ([`Engine::conversation`]); `session` remains the active session for job state.
-/// A Claude session made before engine routing has no engine marker.
-pub fn resume(job: &Job, engine: Engine) -> Option<String> {
-    let engine = engine.conversation();
-    read(&job.file(JobFile::SessionOf(engine)))
+/// Session storage is per conversation (`claude` and `claude-api` share `claude`;
+/// any other engine keeps its own `session.<engine>`).
+pub fn resume_for(job: &Job, engine: &str) -> Option<String> {
+    let conv = super::conversation_of(engine);
+    read(&job.dir.join(format!("session.{conv}")))
         .or_else(|| {
-            (engine == Engine::Claude && !job.file(JobFile::SessionEngine).exists())
+            (conv == "claude" && !job.file(JobFile::SessionEngine).exists())
                 .then(|| read(&job.file(JobFile::Session)))
                 .flatten()
         })
         .filter(|s| !s.is_empty())
+}
+
+/// Session storage is per conversation ([`Engine::conversation`]); `session` remains the active session for job state.
+/// A Claude session made before engine routing has no engine marker.
+pub fn resume(job: &Job, engine: Engine) -> Option<String> {
+    resume_for(job, engine.name())
 }
 
 pub struct Said<'a> {

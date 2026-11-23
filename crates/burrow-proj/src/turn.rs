@@ -422,8 +422,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         crate::state_reads::append(&stream).map_err(|e| Fail::new(1, e.to_string()))?;
     }
     // What it's asked, after what its engine's conversation missed of the
-    // job, if it moved here from the other engine (engine/handoff.rs).
-    let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+    // job, if it moved here from another engine (engine/handoff.rs).
+    let mut first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
         Fail::new(
             1,
             format!(
@@ -454,45 +454,43 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // the next. A sandbox's work is in its VM, past the unit's reach: the VM
     // is stopped, which ends all of it, and the next run's `agent sh` starts
     // it again, its clone and home as they were.
-    let mut wait_again = |said: &str, engine: Engine| -> Result<Option<PathBuf>, Fail> {
-        if !(reap() && agent.as_deref().is_none_or(|a| stopped("agent", a))) {
-            return Ok(None);
-        }
-        // Waiting, as `proj state` and the watchdog read it: under the job's
-        // lock, as its slot was said (slot.rs took_slot).
-        {
-            let _lock = job.lock();
-            let _ = crate::record::mark_turn(&job, &n, TurnMarker::Slot).remove();
-        }
-        drop(held.take());
-        rewatch(cfg, &[id]);
-        let waited = now_nanos();
-        crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, said)
-            .map_err(|e| Fail::new(1, e.to_string()))?;
-        crate::snapshot::stream::notify(cfg);
-        let _ = held.insert(take(true, engine)?);
-        kick(cfg, lines(&job.file(JobFile::Kick)));
-        let state = crate::retry::Checkpoint::load(&job, &n)
-            .map_err(|e| Fail::new(1, e.to_string()))?
-            .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
-        let prompt = state
-            .resume(&job, &n, &first)
-            .map_err(|e| Fail::new(1, e.to_string()))?;
-        crate::snapshot::stream::notify(cfg);
-        rewatch_later(cfg, id);
-        Ok(Some(prompt))
-    };
+    let mut wait_again =
+        |said: &str, engine: Engine, base_prompt: &Path| -> Result<Option<PathBuf>, Fail> {
+            if !(reap() && agent.as_deref().is_none_or(|a| stopped("agent", a))) {
+                return Ok(None);
+            }
+            // Waiting, as `proj state` and the watchdog read it: under the job's
+            // lock, as its slot was said (slot.rs took_slot).
+            {
+                let _lock = job.lock();
+                let _ = crate::record::mark_turn(&job, &n, TurnMarker::Slot).remove();
+            }
+            drop(held.take());
+            rewatch(cfg, &[id]);
+            let waited = now_nanos();
+            crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, said)
+                .map_err(|e| Fail::new(1, e.to_string()))?;
+            crate::snapshot::stream::notify(cfg);
+            let _ = held.insert(take(true, engine)?);
+            kick(cfg, lines(&job.file(JobFile::Kick)));
+            let state = crate::retry::Checkpoint::load(&job, &n)
+                .map_err(|e| Fail::new(1, e.to_string()))?
+                .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
+            let prompt = state
+                .resume(&job, &n, base_prompt)
+                .map_err(|e| Fail::new(1, e.to_string()))?;
+            crate::snapshot::stream::notify(cfg);
+            rewatch_later(cfg, id);
+            Ok(Some(prompt))
+        };
     // Where the role's route runs the turn now, when a refusal moves it to
-    // another engine of its conversation (engine/route.rs): kept as the
-    // turn's identity, which its next run and a retained retry start on.
-    // Its record (N.engine) names the credit once the turn has been on it
-    // (Job::record_engine), which is how the credit's ledger finds the turn;
-    // the ledger charges each run by the engine its marker names
-    // (job/start.rs).
-    let moved = |from: &engine::Choice| -> Result<Option<engine::Choice>, Fail> {
+    // another engine with room (engine/route.rs): kept as the turn's identity,
+    // which its next run and a retained retry start on.
+    let moved = |from: &engine::Choice| -> Result<Option<(engine::Choice, bool)>, Fail> {
         let Some(next) = engine::reroute(cfg, &job, from).map_err(|e| Fail::new(1, e))? else {
             return Ok(None);
         };
+        let same_conv = next.engine.conversation() == from.engine.conversation();
         crate::retry::Identity::reroute(&job, &n, &next).map_err(|e| Fail::new(1, e))?;
         job.record_choice(&n, &next)
             .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
@@ -501,7 +499,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             from.engine.name(),
             next.engine.name()
         );
-        Ok(Some(next))
+        Ok(Some((next, same_conv)))
     };
     let (last, mut rc) = loop {
         // Where this run's stream starts: an earlier run's answer isn't its.
@@ -540,18 +538,27 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 if let Some(refused) = api::Refused::of(&e) {
                     // The credit had no room after all (another run took
                     // it first): the route takes the turn on, nothing run.
-                    if let Some(next) = moved(&choice)? {
+                    if let Some((next, same_conv)) = moved(&choice)? {
                         choice = next;
-                        let run = usage::login::Run {
-                            sandboxed: agent.is_some(),
-                            api: choice.engine == Engine::ClaudeApi,
-                        };
+                        if !same_conv {
+                            first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+                                Fail::new(
+                                    1,
+                                    format!(
+                                        "proj: {}: {e}",
+                                        job.turn_file(&n, TurnFile::Handoff).display()
+                                    ),
+                                )
+                            })?;
+                            prompt = first.clone();
+                        }
+                        let run = usage::login::Run::new(choice.engine.name(), agent.is_some());
                         // Back on an engine that's held: it waits for it,
                         // as a run refused there would.
-                        let Some(spent) = usage::login::out_for(cfg, run) else {
+                        let Some(spent) = usage::login::out_for(cfg, &run) else {
                             continue;
                         };
-                        match wait_again(&spent.said, choice.engine)? {
+                        match wait_again(&spent.said, choice.engine, &first)? {
                             Some(p) => {
                                 prompt = p;
                                 continue;
@@ -565,6 +572,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         eprintln!("proj: {refused}: the turn ends with its last answer");
                         break (Some(answered), 0);
                     }
+                    record_turn_usage(&job, &n, &choice, started);
                     return Err(api_refused(&job, &n, refused, &outcome));
                 }
                 eprintln!("proj: couldn't start {}: {e}", choice.engine.name());
@@ -609,34 +617,46 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         // Refused by the API (its key, its credit, its budget): the credit's
         // own, which holds no other turn (`burrow_engine_anthropic::api`). The route may take
-        // the turn on, in the same conversation, once it's short.
+        // the turn on once it's short.
         if choice.engine == Engine::ClaudeApi
             && let Some(refused) = last
                 .as_ref()
                 .and_then(|l| api::refusal_file(l, &stream, from))
         {
-            if let Some(next) = moved(&choice)? {
+            if let Some((next, same_conv)) = moved(&choice)? {
                 choice = next;
-                let said = usage::login::moved(choice.engine, &refused.to_string());
-                if let Some(p) = wait_again(&said, choice.engine)? {
+                if !same_conv {
+                    first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+                        Fail::new(
+                            1,
+                            format!(
+                                "proj: {}: {e}",
+                                job.turn_file(&n, TurnFile::Handoff).display()
+                            ),
+                        )
+                    })?;
+                }
+                let said =
+                    usage::login::moved_to(choice.engine.name(), same_conv, &refused.to_string());
+                if let Some(p) = wait_again(&said, choice.engine, &first)? {
                     prompt = p;
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
+            record_turn_usage(&job, &n, &choice, started);
             return Err(api_refused(&job, &n, &refused, &outcome));
         }
-        // Refused because the plan's usage is spent: so is every other
-        // turn's, until the limit resets (usage.rs). This one gives up its
-        // slot and waits in line again, where none is handed out till then,
-        // and runs once more in its own conversation, its clock stood still
-        // meanwhile. Any other answer says usage is there.
+        // Refused because this engine's usage or login is spent: hold only this
+        // engine until reset (usage.rs), leaving other engines free, and follow
+        // the role's route to any next engine with room.
         let refusal = last
             .as_ref()
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if let Some((_, said)) = &refusal
             && !usage::login::holds_machine(said, agent.is_some())
         {
+            record_turn_usage(&job, &n, &choice, started);
             let _ = crate::state_reads::write(
                 job.turn_file(&n, TurnFile::Result),
                 format!("{}\n", usage::login::SANDBOX),
@@ -646,32 +666,39 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         match refusal {
             Some((until, said)) => {
-                // A hold that can't be written holds nothing: this turn
-                // ends refused, as one did before the hold.
-                let spent = match usage::record(cfg, id, until, &said, now()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("{e}: so the turn ends here, refused");
-                        break (last, rc);
-                    }
-                };
+                let spent =
+                    match usage::record_for(cfg, choice.engine.name(), id, until, &said, now()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("{e}: so the turn ends here, refused");
+                            break (last, rc);
+                        }
+                    };
                 eprintln!("proj: {}", usage::line(&spent));
-                // Out of usage, whatever its meter last said: the route may
-                // take the turn on to an engine with room, in the same
-                // conversation, which the line lets by.
                 let mut said = said;
-                if let Some(next) = moved(&choice)? {
+                if let Some((next, same_conv)) = moved(&choice)? {
                     choice = next;
-                    said = usage::login::moved(choice.engine, &said);
+                    if !same_conv {
+                        first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+                            Fail::new(
+                                1,
+                                format!(
+                                    "proj: {}: {e}",
+                                    job.turn_file(&n, TurnFile::Handoff).display()
+                                ),
+                            )
+                        })?;
+                    }
+                    said = usage::login::moved_to(choice.engine.name(), same_conv, &said);
                 }
-                if let Some(p) = wait_again(&said, choice.engine)? {
+                if let Some(p) = wait_again(&said, choice.engine, &first)? {
                     prompt = p;
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
-            None if last.is_some() && choice.engine == Engine::Claude => {
-                usage::answered(cfg, started, agent.is_some())
+            None if last.is_some() => {
+                usage::answered_for(cfg, choice.engine.name(), started, agent.is_some())
             }
             None => {}
         }
@@ -736,6 +763,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         break (last, rc);
     };
+    // Record normalized per-run usage/cost metadata at turn end so
+    // `burrow-probe` and `burrow-dashboard` read one engine-agnostic format.
+    record_turn_usage(&job, &n, &choice, now());
     // The turn ends as its last run did; its answer is every run's.
     let text = answer(&stream);
     if !text.is_empty() {
@@ -791,6 +821,36 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     match rc {
         0 => Ok(()),
         rc => Err(Fail::quiet(u8::try_from(rc).unwrap_or(1))),
+    }
+}
+
+/// Write normalized per-run usage/cost metadata (`<N>.usage.json`) for this turn.
+fn record_turn_usage(job: &Job, n: &str, choice: &engine::Choice, fallback_started: i64) {
+    let Ok(turn_num) = n.parse::<u64>() else {
+        return;
+    };
+    let stream = job.turn_file(n, TurnFile::Jsonl);
+    if fs::metadata(&stream).map_or(true, |m| m.len() == 0) {
+        return;
+    }
+    match burrow_probe::usage_record::TurnUsage::from_job_turn(
+        &job.dir,
+        job.id,
+        turn_num,
+        choice.engine.name(),
+        choice.model.clone(),
+        fallback_started,
+    ) {
+        Ok(record) if !record.runs.is_empty() => {
+            if let Ok(json) = serde_json::to_string(&record) {
+                let _ = crate::state_reads::write(
+                    job.turn_file(n, TurnFile::Usage),
+                    format!("{json}\n"),
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("proj: couldn't record turn {n} normalized usage: {e}"),
     }
 }
 
