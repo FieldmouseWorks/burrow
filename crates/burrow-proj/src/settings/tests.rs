@@ -186,7 +186,7 @@ fn every_option_shown_comes_from_the_schema() {
     set(&mut cfg, tracked());
     fs::write(cfg.jobs.join(crate::usage::FILE), "{not json").unwrap();
     let err = command(&cfg, &["show".into()]).unwrap_err();
-    assert!(err.contains(".usage.json"), "{err}");
+    assert!(err.contains(crate::usage::FILE), "{err}");
     fs::remove_file(cfg.jobs.join(crate::usage::FILE)).unwrap();
     // And an overlay a turn would refuse.
     set(&mut cfg, tracked());

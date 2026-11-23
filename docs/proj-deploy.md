@@ -2,9 +2,15 @@
 
 The shared usage record (`proj.usageHolds`'s file, named in the
 [settings reference](settings-reference.md)) now stores per-engine holds in v2
-JSON (`{"version": 2, "holds": {...}}`) while retaining backward-compatible
-reading of legacy single-hold records, `.usage-owner-*` metadata, and
-`ADMISSION_REF` references during cutover.
+JSON (`{"version": 2, "holds": {...}}`) alongside per-engine `.usage-holds.released`
+and `.usage-holds.admission` maps. Under the shared `jobs/.usage.lock`, writes
+mirror any `claude` or global `*` hold into the legacy `.usage.json`,
+`.usage.released`, and `.usage.admission` files in strict pre-change formats so
+retained pre-change `proj` turns running across a deploy keep parsing them
+cleanly, observe newly set Claude or global holds, cannot clear active owner
+pauses early, and persist any later refusal for the new binary to merge. Reads
+also accept pre-deploy `.usage-owner-*` metadata and `ADMISSION_REF` references
+during cutover.
 
 A release first stages its nanosecond cutoff in `.usage.admission`. The
 compatible record's `job` reference encodes the precise cutoff and commits it

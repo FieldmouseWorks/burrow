@@ -58,7 +58,7 @@ fn early_admission_cutoff_has_subsecond_order_and_never_expands() {
 
 #[test]
 fn failed_release_writes_leave_the_natural_cohort_intact_and_retry_precisely() {
-    for boundary in [".usage.released.new", ".usage.json.new"] {
+    for boundary in [format!("{RELEASED}.new"), format!("{FILE}.new")] {
         let (_d, cfg) = rig();
         let t = now();
         record(&cfg, "web", Some(t + 3600), SAID, t - 100).unwrap();
@@ -128,7 +128,7 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
     let cutoff = admission_cutoff(&cfg).unwrap();
     let old = kept(&cfg).unwrap();
     // A failed settlement cannot remove the only committed precise boundary.
-    let block = cfg.jobs.join(".usage.admission.new");
+    let block = cfg.jobs.join(format!("{ADMISSION}.new"));
     fs::create_dir(&block).unwrap();
     settle(&cfg, old.clone(), old.release() + cfg.stall_queued() + 1);
     assert_eq!(kept(&cfg), Some(old.clone()));

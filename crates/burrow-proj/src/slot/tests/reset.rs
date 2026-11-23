@@ -11,7 +11,7 @@ fn usage_reset_trickles_real_waiters_under_the_admission_lock() {
         format!("1:2\t{}", crate::now_nanos()),
     )
     .unwrap();
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    clear_usage(&jobs);
     until("two reset turns take slots", || {
         took(&jobs, "w0").is_some() && took(&jobs, "w1").is_some()
     });
@@ -287,7 +287,7 @@ fn queue_to_unstick_and_usage_retry_escape_a_blocked_census() {
         || in_queue(&jobs) == 0,
     );
     assert_eq!(took(&jobs, "escape"), None);
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    clear_usage(&jobs);
     until("emergency retry starts despite blocked census", || {
         took(&jobs, "escape").is_some()
     });
@@ -441,7 +441,8 @@ fn usage_contention_yields_to_emergency_promotion() {
             let usage = crate::usage::lock(&cfg).unwrap();
             if released_hold {
                 // A committed release whose notification still owns the lock.
-                let path = jobs.join(crate::usage::FILE);
+                let _ = fs::remove_file(jobs.join(crate::usage::FILE));
+                let path = jobs.join(crate::usage::LEGACY_FILE);
                 let mut state: serde_json::Value =
                     serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
                 state["back"] = now().into();

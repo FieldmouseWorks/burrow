@@ -304,10 +304,10 @@ mod tests {
             .is_err()
         );
         // A live file that isn't there leaves the default, and says which file.
-        let r = Reading::live("proj.usageHolds", "/jobs/.usage.json".into(), None);
+        let r = Reading::live("proj.usageHolds", "/jobs/.usage-holds.json".into(), None);
         assert_eq!((r.origin, &r.value), (Origin::Default, &json!({})));
         let doc = with("proj.usageHolds", r).unwrap();
-        assert!(doc.json().contains("/jobs/.usage.json"));
+        assert!(doc.json().contains("/jobs/.usage-holds.json"));
     }
 
     #[test]

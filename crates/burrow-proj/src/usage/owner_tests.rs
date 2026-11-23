@@ -86,7 +86,7 @@ fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only()
     let t = now();
     // 1. Legacy flat single-hold `.usage.json` reads as a `claude` hold.
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         json!({
             "until": t + 3600,
             "said": "You've hit your monthly spend limit",
@@ -122,7 +122,7 @@ fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only()
     )
     .unwrap();
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         json!({
             "until": t + 7200,
             "said": "legacy owner pause",
@@ -140,7 +140,7 @@ fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only()
     assert_eq!(loaded_owner.engine, ALL_ENGINES);
     assert_eq!(loaded_owner.said, "legacy owner pause");
 
-    // 3. New writes always use v2 per-engine JSON and create no `.usage-owner-*` sidecars.
+    // 3. New writes always use v2 per-engine JSON in `.usage-holds.json` and create no `.usage-owner-*` sidecars.
     hold(&cfg, t + 1200, "v2 pause").unwrap();
     fs::remove_file(cfg.jobs.join(owner_ref)).unwrap();
     let raw: serde_json::Value =
@@ -286,6 +286,7 @@ fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
         assert_eq!(out(&cfg), expected, "{first}");
         if first != "hold" {
             fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+            let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
             earlier(&cfg, "stale", reset + 1000, Some(deadline - 1)).unwrap();
             assert!(out(&cfg).is_none(), "{first}");
             earlier(&cfg, "boundary", reset + 2000, Some(deadline)).unwrap();
@@ -388,7 +389,7 @@ fn owner_expiry_retains_natural_admission_boundary() {
 #[test]
 fn failed_release_journal_or_record_never_poisons_active_holds() {
     for owner in [false, true] {
-        for boundary in [".usage.admission.new", ".usage.json.new"] {
+        for boundary in [format!("{ADMISSION}.new"), format!("{FILE}.new")] {
             let (_d, cfg) = rig();
             let t = now();
             if owner {
@@ -396,11 +397,11 @@ fn failed_release_journal_or_record_never_poisons_active_holds() {
             } else {
                 record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
             }
-            fs::create_dir(cfg.jobs.join(boundary)).unwrap();
+            fs::create_dir(cfg.jobs.join(&boundary)).unwrap();
             back(&cfg, None);
             assert!(out(&cfg).is_some(), "{boundary}");
             assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            fs::remove_dir(cfg.jobs.join(boundary)).unwrap();
+            fs::remove_dir(cfg.jobs.join(&boundary)).unwrap();
             back(&cfg, None);
             let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
             assert_eq!(kept(&cfg).unwrap().admission, Some(cutoff));
@@ -414,7 +415,7 @@ fn legacy_releases_and_committed_cutoffs_read_cleanly() {
     let t = now();
     // Legacy release without admission field includes the whole release second.
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         json!({
             "until": t + 3600,
             "said": "refused",
@@ -434,7 +435,7 @@ fn legacy_releases_and_committed_cutoffs_read_cleanly() {
     // Legacy release with ADMISSION_REF preserves exact nanosecond precision.
     let exact = t * 1_000_000_000 + 123_456_789;
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         json!({
             "until": t + 3600,
             "said": "refused",
@@ -463,7 +464,8 @@ fn committed_v2_record_recovers_precision_without_the_retention_journal() {
         }
         back(&cfg, None);
         let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        fs::remove_file(cfg.jobs.join(".usage.admission")).unwrap();
+        fs::remove_file(cfg.jobs.join(ADMISSION)).unwrap();
+        let _ = fs::remove_file(cfg.jobs.join(LEGACY_ADMISSION));
         let s = kept(&cfg).unwrap();
         assert_eq!(s.owner, owner);
         assert_eq!(s.admission, Some(cutoff));

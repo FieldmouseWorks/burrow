@@ -282,6 +282,7 @@ fn the_subscription_takes_the_next_turn_back_once_its_hold_is_gone() {
     assert_eq!(r.engine(), Engine::ClaudeApi);
     // The hold over, the reading fresh and under the threshold.
     fs::remove_file(r.cfg.jobs.join(crate::usage::FILE)).unwrap();
+    let _ = fs::remove_file(r.cfg.jobs.join(crate::usage::LEGACY_FILE));
     r.claude(20.0, 10);
     assert_eq!(r.engine(), Engine::Claude);
     // The same for a route set over a chain that started on the credit.
@@ -579,6 +580,7 @@ fn a_refused_run_moves_its_turn_and_the_move_is_its_identity() {
     assert_eq!(reroute(&r.cfg, &job, &next).unwrap(), None, "already there");
     // The credit spent while the subscription is back: the turn goes back.
     fs::remove_file(r.cfg.jobs.join(crate::usage::FILE)).unwrap();
+    let _ = fs::remove_file(r.cfg.jobs.join(crate::usage::LEGACY_FILE));
     r.spent(15);
     let back = reroute(&r.cfg, &job, &next).unwrap().unwrap();
     assert_eq!(back.engine, Engine::Claude);

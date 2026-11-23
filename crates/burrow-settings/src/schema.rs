@@ -578,7 +578,7 @@ pub static SETTINGS: &[Setting] = &[
         "proj.usageHolds",
         &HOLDS,
         "{}",
-        ".usage.json",
+        ".usage-holds.json",
         "Active usage and login holds keyed by engine name (* for an owner pause over every engine): no turn on a held engine takes a slot until its hold ends. Empty object for none.",
     ),
 ];

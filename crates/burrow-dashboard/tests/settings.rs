@@ -88,7 +88,7 @@ fn settings_show_values_sources_and_help_without_inventing_readings() {
         assert!(rendered.contains(text), "{text}");
     }
     // A live-capable setting at its default must not claim its file was read.
-    assert!(!rendered.contains("/jobs/.usage.json"));
+    assert!(!rendered.contains("/jobs/.usage-holds.json"));
     fixture["document"]["options"]
         .as_object_mut()
         .unwrap()

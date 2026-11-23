@@ -1,11 +1,13 @@
 //! Per-engine usage holds, expired-login notices, and meter recovery.
 //!
-//! Each engine owns its own hold entry in `jobs/.usage.json` and its own
+//! Each engine owns its own hold entry in `jobs/.usage-holds.json` and its own
 //! `HOST-notify` notice key (`proj-usage-<engine>`), while `*` represents an
-//! explicit owner pause over every engine (`proj-usage`). A quota or login
-//! refusal on engine A holds only engine A, leaving engine B free to drain
-//! slots and allowing ordered failover routes (`over PCT ENGINE`) to move turns
-//! to the next engine with room.
+//! explicit owner pause over every engine (`proj-usage`). Any `claude` or `*`
+//! hold is mirrored to `jobs/.usage.json` in strict pre-change format during
+//! deploy overlap so retained pre-change turns stay fenced and never lose a
+//! refusal. A quota or login refusal on engine A holds only engine A, leaving
+//! engine B free to drain slots and allowing ordered failover routes
+//! (`over PCT ENGINE`) to move turns to the next engine with room.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,6 +23,10 @@ mod notice;
 mod store;
 
 pub use notice::{hold_line, hold_line_for, line, policy, when};
+#[cfg(test)]
+pub(crate) use store::LEGACY_FILE;
+#[cfg(test)]
+use store::{ADMISSION, LEGACY_ADMISSION, LEGACY_RELEASED};
 pub use store::{ALL_ENGINES, DEFAULT_ENGINE, Spent, Store};
 pub(crate) use store::{FILE, lock, try_lock};
 

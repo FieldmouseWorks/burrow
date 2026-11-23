@@ -163,7 +163,7 @@ fn legacy_files_read_cleanly_and_upgrade_to_v2_on_write() {
 
     // Seed legacy flat `.usage.json`, legacy scalar `.usage.released`, and legacy tab `.usage.admission`.
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         json!({
             "until": t + 3600,
             "said": "You've hit your monthly spend limit",
@@ -174,9 +174,9 @@ fn legacy_files_read_cleanly_and_upgrade_to_v2_on_write() {
         .to_string(),
     )
     .unwrap();
-    fs::write(cfg.jobs.join(RELEASED), format!("{}\n", t - 100)).unwrap();
+    fs::write(cfg.jobs.join(LEGACY_RELEASED), format!("{}\n", t - 100)).unwrap();
     fs::write(
-        cfg.jobs.join(".usage.admission"),
+        cfg.jobs.join(LEGACY_ADMISSION),
         format!(
             "{{\"until\":{},\"cutoff\":{},\"committed\":true}}\t{}\n",
             t - 50,
@@ -193,16 +193,20 @@ fn legacy_files_read_cleanly_and_upgrade_to_v2_on_write() {
     assert!(out_for(&cfg, &Run::new("engine-b", false)).is_none());
     assert_eq!(last_release_for(&cfg, "claude"), Some(t - 100));
 
-    // Writing a new hold on engine-b preserves claude's hold and writes ONLY v2 format.
+    // Writing a new hold on engine-b preserves claude's hold and writes v2 to `.usage-holds.json`
+    // while keeping `.usage.json` in strict legacy format for retained deploy turns.
     record_for(&cfg, "engine-b", "job-b", Some(t + 1800), "quota b", t).unwrap();
     let disk: Value = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
     assert_eq!(disk["version"], 2);
     assert!(
         disk.get("until").is_none(),
-        "flat legacy hold must not be written"
+        "v2 store must hold per-engine map"
     );
     assert!(disk["holds"]["claude"]["until"].as_i64() == Some(t + 3600));
     assert!(disk["holds"]["engine-b"]["until"].as_i64() == Some(t + 1800));
+    let legacy: PreChangeSpent =
+        serde_json::from_slice(&fs::read(cfg.jobs.join(LEGACY_FILE)).unwrap()).unwrap();
+    assert_eq!(legacy.until, t + 3600);
 }
 
 #[test]
@@ -266,4 +270,102 @@ fn snapshot_exposes_all_engines_meters_and_holds() {
         "{status}"
     );
     assert!(!status.contains("Claude is out of usage"), "{status}");
+}
+
+/// Exact strict on-disk schema parsed by retained pre-change `proj` turns during a deploy.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreChangeSpent {
+    until: i64,
+    said: String,
+    job: String,
+    at: i64,
+    #[serde(default)]
+    back: Option<i64>,
+    #[serde(default)]
+    told: i64,
+    #[serde(default)]
+    last: Option<i64>,
+}
+
+#[test]
+fn retained_legacy_process_sees_holds_and_persists_refusals_during_deploy() {
+    let (_d, cfg) = rig();
+    let t = now();
+    let legacy_path = cfg.jobs.join(".usage.json");
+    let legacy_released = cfg.jobs.join(".usage.released");
+
+    // 1. New binary sets a hold on `claude` and a separate hold on `engine-b`.
+    record_for(&cfg, "claude", "new-cl", Some(t + 1800), SAID, t).unwrap();
+    record_for(&cfg, "engine-b", "new-b", Some(t + 2400), "quota b", t).unwrap();
+
+    // A retained pre-change `proj` binary reading `.usage.json` must parse it
+    // cleanly with strict `PreChangeSpent` and observe the active Claude hold.
+    let old: PreChangeSpent = serde_json::from_slice(&fs::read(&legacy_path).unwrap())
+        .expect("retained pre-change binary must parse .usage.json without error");
+    assert!(old.back.is_none() && old.until == t + 1800);
+
+    // 2. The retained pre-change binary hits a later refusal and updates `.usage.json`.
+    let mut updated = old;
+    updated.until = t + 3600;
+    updated.last = Some(t + 5);
+    updated.job = "old-turn".into();
+    updated.said = "Claude reached its weekly allowance".into();
+    fs::write(&legacy_path, serde_json::to_string(&updated).unwrap()).unwrap();
+
+    // New binary must see the old binary's extended refusal without losing `engine-b`.
+    let cl = out_for(&cfg, &Run::new("claude", false)).unwrap();
+    assert_eq!(cl.until, t + 3600);
+    assert_eq!(cl.last, Some(t + 5));
+    assert_eq!(
+        out_for(&cfg, &Run::new("engine-b", false)).unwrap().until,
+        t + 2400
+    );
+
+    // 3. New binary releases `claude` (leaving only `engine-b` held).
+    back_for(&cfg, Some("claude"), None);
+    assert!(out_for(&cfg, &Run::new("claude", false)).is_none());
+    assert!(out_for(&cfg, &Run::new("engine-b", false)).is_some());
+    // `.usage.released` must remain a plain integer so retained old binaries parse it.
+    let released_ts: i64 = fs::read_to_string(&legacy_released)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("retained pre-change binary must parse .usage.released as i64");
+    assert!(released_ts >= t);
+    // `.usage.json` reflects the released Claude hold (never blocking old turns).
+    let after_release: PreChangeSpent = serde_json::from_slice(&fs::read(&legacy_path).unwrap())
+        .expect("released .usage.json must stay valid for old binary");
+    assert!(after_release.back.is_some());
+
+    // 4. Retained old binary hits a brand-new refusal after release while `engine-b` is still held.
+    let fresh = PreChangeSpent {
+        until: t + 5400,
+        said: "Claude reached its weekly allowance".into(),
+        job: "old-after-release".into(),
+        at: t + 10,
+        back: None,
+        told: t + 10,
+        last: Some(t + 10),
+    };
+    fs::write(&legacy_path, serde_json::to_string(&fresh).unwrap()).unwrap();
+    let cl2 = out_for(&cfg, &Run::new("claude", false)).unwrap();
+    assert_eq!(cl2.until, t + 5400);
+    assert_eq!(cl2.job, "old-after-release");
+    assert_eq!(
+        out_for(&cfg, &Run::new("engine-b", false)).unwrap().until,
+        t + 2400
+    );
+
+    // 5. New binary sets a global `*` owner pause: old binary sees it held and its
+    // `last` fence prevents a pre-deadline successful old turn from releasing it.
+    hold_for(&cfg, ALL_ENGINES, t + 7200, "deploy maintenance").unwrap();
+    let owner_legacy: PreChangeSpent = serde_json::from_slice(&fs::read(&legacy_path).unwrap())
+        .expect("owner pause must be readable by retained old binary");
+    assert!(owner_legacy.back.is_none());
+    assert_eq!(owner_legacy.until, t + 7200);
+    assert!(
+        owner_legacy.last.unwrap_or(owner_legacy.at) >= t + 7199,
+        "owner pause mirror must fence early back() from retained old turns"
+    );
 }

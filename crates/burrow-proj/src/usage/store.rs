@@ -1,10 +1,13 @@
-//! On-disk persistence and locking for per-engine usage holds (`jobs/.usage.json`),
-//! release watermarks (`jobs/.usage.released`), and trickle admission cutoffs
-//! (`jobs/.usage.admission`).
+//! On-disk persistence and locking for per-engine usage holds (`jobs/.usage-holds.json`),
+//! release watermarks (`jobs/.usage-holds.released`), and trickle admission cutoffs
+//! (`jobs/.usage-holds.admission`).
 //!
-//! Writes use only the v2 per-engine JSON schema; reads also accept the legacy
-//! single-hold `.usage.json`, `.usage-owner-*`, `ADMISSION_REF`, scalar
-//! `.usage.released`, and tab-separated `.usage.admission` formats during cutover.
+//! Writes keep the authoritative v2 per-engine store in `.usage-holds.*` and mirror
+//! any `claude` or global `*` state into the legacy `.usage.json` / `.usage.released` /
+//! `.usage.admission` files in strict pre-change formats under the shared `jobs/.usage.lock`.
+//! Retained pre-change `proj` turns running across a deploy therefore keep parsing
+//! `.usage.json` cleanly, honor newly set Claude/global holds, cannot clear active owner
+//! pauses early, and persist any later refusal so the new binary merges it on next read.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -18,13 +21,19 @@ use crate::{now, swap};
 
 use super::login;
 
-/// Where per-engine usage holds are kept, in `jobs`.
-pub(crate) const FILE: &str = ".usage.json";
+/// Authoritative v2 per-engine usage hold store, in `jobs`.
+pub(crate) const FILE: &str = ".usage-holds.json";
+/// Legacy single-hold file mirrored in strict pre-change format for retained deploy turns.
+pub(crate) const LEGACY_FILE: &str = ".usage.json";
 /// Per-engine last release timestamps (seconds), kept past hold settlement so
 /// stale pre-release imports never re-hold an engine.
-pub(crate) const RELEASED: &str = ".usage.released";
+pub(crate) const RELEASED: &str = ".usage-holds.released";
+/// Legacy scalar release watermark mirrored for retained pre-change turns.
+pub(crate) const LEGACY_RELEASED: &str = ".usage.released";
 /// Per-engine trickle admission cutoffs (nanoseconds), kept past hold settlement.
-pub(crate) const ADMISSION: &str = ".usage.admission";
+pub(crate) const ADMISSION: &str = ".usage-holds.admission";
+/// Legacy tab-separated admission cutoff mirrored for retained pre-change turns.
+pub(crate) const LEGACY_ADMISSION: &str = ".usage.admission";
 /// Key representing an owner pause over every engine.
 pub const ALL_ENGINES: &str = "*";
 /// Default engine key used when reading legacy single-hold files.
@@ -160,8 +169,8 @@ impl Store {
     }
 }
 
-/// Legacy single-hold `.usage.json` record (read-only compatibility during cutover).
-#[derive(Deserialize)]
+/// Strict pre-change single-hold `.usage.json` schema parsed by retained deploy turns.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LegacySpent {
     until: i64,
@@ -170,7 +179,7 @@ struct LegacySpent {
     at: i64,
     #[serde(default)]
     back: Option<i64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     admission: Option<i64>,
     #[serde(default)]
     told: i64,
@@ -223,33 +232,35 @@ fn normalize_loaded(engine: &str, s: &mut Spent) {
     }
 }
 
-/// Read the per-engine hold store from `jobs/.usage.json` (accepting legacy single-hold files).
-pub(crate) fn read_store(cfg: &Config) -> Result<Store, String> {
-    let path = cfg.jobs.join(FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Store::empty()),
-        Err(e) => return Err(format!("proj: {}: {e}", path.display())),
+/// Pure, time-independent projection of `store`'s `claude`/global hold into the
+/// strict 7-field `LegacySpent` format read by retained pre-change `proj` turns.
+/// Active owner pauses set `last = until - 1` so an early successful old turn
+/// cannot clear them while a post-deadline refusal at `>= until` still registers.
+fn project_legacy(store: &Store) -> Option<LegacySpent> {
+    let pick = store
+        .holds
+        .get(ALL_ENGINES)
+        .filter(|s| s.back.is_none())
+        .or_else(|| store.holds.get(DEFAULT_ENGINE))
+        .or_else(|| store.holds.get(ALL_ENGINES))?;
+    let last = if pick.owner && pick.back.is_none() {
+        Some(pick.until.saturating_sub(1).max(pick.at))
+    } else {
+        pick.last
     };
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("proj: {}: {e}", path.display()))?;
-    if value.get("holds").is_some() || value.get("version").is_some() {
-        let mut store: Store =
-            serde_json::from_value(value).map_err(|e| format!("proj: {}: {e}", path.display()))?;
-        if store.version != VERSION {
-            return Err(format!(
-                "proj: {}: unsupported usage store version {} (expected {VERSION})",
-                path.display(),
-                store.version
-            ));
-        }
-        for (engine, spent) in &mut store.holds {
-            normalize_loaded(engine, spent);
-        }
-        return Ok(store);
-    }
-    let legacy: LegacySpent =
-        serde_json::from_value(value).map_err(|e| format!("proj: {}: {e}", path.display()))?;
+    Some(LegacySpent {
+        until: pick.until,
+        said: pick.said.clone(),
+        job: pick.job.clone(),
+        at: pick.at,
+        back: pick.back,
+        admission: None,
+        told: pick.told,
+        last,
+    })
+}
+
+fn decode_legacy(cfg: &Config, legacy: LegacySpent) -> Result<(String, Spent), String> {
     let mut s = Spent {
         engine: DEFAULT_ENGINE.to_owned(),
         owner: false,
@@ -278,65 +289,217 @@ pub(crate) fn read_store(cfg: &Config) -> Result<Store, String> {
     {
         s.admission = Some(((back + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
     }
-    let mut store = Store::empty();
     if let Some(mut owner) = legacy_owner_metadata(cfg, &s.job)? {
         if s.refused() >= owner.until {
             s.said = super::EARLIER.into();
             normalize_loaded(DEFAULT_ENGINE, &mut s);
-            store.holds.insert(DEFAULT_ENGINE.to_owned(), s);
-        } else {
-            owner.owner = true;
-            owner.engine = ALL_ENGINES.to_owned();
-            owner.told = s.told;
-            owner.back = s.back;
-            owner.admission = s.admission;
-            store.holds.insert(ALL_ENGINES.to_owned(), owner);
+            return Ok((DEFAULT_ENGINE.to_owned(), s));
         }
-        return Ok(store);
+        owner.owner = true;
+        owner.engine = ALL_ENGINES.to_owned();
+        owner.told = s.told;
+        owner.back = s.back;
+        owner.admission = s.admission;
+        return Ok((ALL_ENGINES.to_owned(), owner));
     }
     normalize_loaded(DEFAULT_ENGINE, &mut s);
-    store.holds.insert(DEFAULT_ENGINE.to_owned(), s);
-    Ok(store)
+    Ok((DEFAULT_ENGINE.to_owned(), s))
 }
 
-/// Write the per-engine store in v2 format atomically, or remove `.usage.json` when empty.
+/// Merge an update written to legacy `.usage.json` by a retained pre-change `proj`
+/// turn into the authoritative v2 `store` without losing other engines' holds or
+/// weakening an active owner pause.
+fn merge_legacy(store: &mut Store, legacy_engine: String, legacy: Spent) {
+    if legacy_engine == ALL_ENGINES {
+        match store.holds.get(ALL_ENGINES) {
+            None => {
+                store.holds.insert(ALL_ENGINES.to_owned(), legacy);
+            }
+            Some(cur) if legacy.until > cur.until || legacy.at > cur.at => {
+                store.holds.insert(ALL_ENGINES.to_owned(), legacy);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Active global `*` owner pause: retained old turns before its deadline cannot
+    // clear or replace it; only a genuine post-deadline refusal (`refused >= until`)
+    // creates a `claude` refusal hold.
+    if let Some(global) = store.holds.get_mut(ALL_ENGINES)
+        && global.owner
+        && global.back.is_none()
+        && legacy.refused() < global.until
+    {
+        global.told = global.told.max(legacy.told);
+        return;
+    }
+
+    match store.holds.get_mut(DEFAULT_ENGINE) {
+        None => {
+            store.holds.insert(DEFAULT_ENGINE.to_owned(), legacy);
+        }
+        Some(cur) if cur.owner && cur.back.is_none() => {
+            if legacy.refused() >= cur.until && legacy.back.is_none() {
+                *cur = legacy;
+            } else {
+                cur.told = cur.told.max(legacy.told);
+            }
+        }
+        Some(cur) if cur.back.is_none() => {
+            if legacy.back.is_some() {
+                if legacy.at == cur.at || legacy.back.is_some_and(|b| b >= cur.refused()) {
+                    cur.back = legacy.back;
+                    cur.admission = legacy.admission;
+                    cur.told = cur.told.max(legacy.told);
+                }
+            } else if legacy.until > cur.until || legacy.refused() > cur.refused() {
+                cur.until = cur.until.max(legacy.until);
+                cur.last = Some(cur.refused().max(legacy.refused()));
+                cur.said = legacy.said;
+                cur.job = legacy.job;
+                cur.login = legacy.login;
+                cur.told = cur.told.max(legacy.told);
+            } else {
+                cur.told = cur.told.max(legacy.told);
+            }
+        }
+        Some(cur) => {
+            // `cur` is already released (`cur.back.is_some()`). Accept a fresh active
+            // refusal written by a retained pre-change binary after release.
+            if legacy.back.is_none()
+                && (legacy.at >= cur.back.unwrap_or(0)
+                    || legacy.refused() > cur.release_cutoff().unwrap_or(0)
+                    || legacy.until != cur.until)
+            {
+                *cur = legacy;
+            } else {
+                cur.told = cur.told.max(legacy.told);
+            }
+        }
+    }
+}
+
+/// Read the per-engine hold store from `jobs/.usage-holds.json`, merging any
+/// legacy single-hold `.usage.json` state written before deploy or by retained
+/// pre-change `proj` turns.
+pub(crate) fn read_store(cfg: &Config) -> Result<Store, String> {
+    let v2_path = cfg.jobs.join(FILE);
+    let mut store = match fs::read_to_string(&v2_path) {
+        Ok(text) => {
+            let mut s: Store = serde_json::from_str(&text)
+                .map_err(|e| format!("proj: {}: {e}", v2_path.display()))?;
+            if s.version != VERSION {
+                return Err(format!(
+                    "proj: {}: unsupported usage store version {} (expected {VERSION})",
+                    v2_path.display(),
+                    s.version
+                ));
+            }
+            for (engine, spent) in &mut s.holds {
+                normalize_loaded(engine, spent);
+            }
+            Some(s)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("proj: {}: {e}", v2_path.display())),
+    };
+
+    let legacy_path = cfg.jobs.join(LEGACY_FILE);
+    let legacy_text = match fs::read_to_string(&legacy_path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("proj: {}: {e}", legacy_path.display())),
+    };
+
+    let Some(legacy_text) = legacy_text else {
+        return Ok(store.unwrap_or_default());
+    };
+
+    let legacy_raw: LegacySpent = serde_json::from_str(&legacy_text)
+        .map_err(|e| format!("proj: {}: {e}", legacy_path.display()))?;
+
+    if let Some(ref s) = store
+        && project_legacy(s).as_ref() == Some(&legacy_raw)
+    {
+        return Ok(s.clone());
+    }
+
+    let (legacy_engine, legacy_spent) = decode_legacy(cfg, legacy_raw)?;
+    let Some(ref mut s) = store else {
+        let mut s = Store::empty();
+        s.holds.insert(legacy_engine, legacy_spent);
+        return Ok(s);
+    };
+    merge_legacy(s, legacy_engine, legacy_spent);
+    Ok(store.unwrap())
+}
+
+fn remove_if_present(path: &std::path::Path, label: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("proj: {label}: {e}")),
+    }
+}
+
+/// Write the per-engine store atomically to `jobs/.usage-holds.json` (or remove it
+/// when empty), then mirror any `claude` or `*` state to `jobs/.usage.json` in
+/// strict pre-change `LegacySpent` format for retained deploy turns.
 pub(crate) fn write_store(cfg: &Config, store: &Store) -> Result<(), String> {
     let path = cfg.jobs.join(FILE);
     if store.holds.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(format!("proj: {FILE}: {e}")),
+        remove_if_present(&path, FILE)?;
+    } else {
+        let text = serde_json::to_string(&Store {
+            version: VERSION,
+            holds: store.holds.clone(),
+        })
+        .map_err(|e| format!("proj: {FILE}: {e}"))?;
+        swap(&path, &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))?;
+    }
+
+    let legacy_path = cfg.jobs.join(LEGACY_FILE);
+    match project_legacy(store) {
+        None => remove_if_present(&legacy_path, LEGACY_FILE),
+        Some(legacy) => {
+            let text =
+                serde_json::to_string(&legacy).map_err(|e| format!("proj: {LEGACY_FILE}: {e}"))?;
+            swap(&legacy_path, &format!("{text}\n"))
+                .map_err(|e| format!("proj: {LEGACY_FILE}: {e}"))
         }
     }
-    let text = serde_json::to_string(&Store {
-        version: VERSION,
-        holds: store.holds.clone(),
-    })
-    .map_err(|e| format!("proj: {FILE}: {e}"))?;
-    swap(&path, &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
 }
 
-/// Per-engine last release timestamps (`jobs/.usage.released`), reading legacy scalar files too.
+/// Per-engine last release timestamps (`jobs/.usage-holds.released`), merging
+/// legacy scalar `jobs/.usage.released` timestamps too.
 pub(crate) fn released_map(cfg: &Config) -> Result<BTreeMap<String, i64>, String> {
-    let path = cfg.jobs.join(RELEASED);
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("proj: {}: {e}", path.display())),
-    };
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') {
-        serde_json::from_str::<BTreeMap<String, i64>>(trimmed)
-            .map_err(|e| format!("proj: {}: {e}", path.display()))
-    } else {
-        let ts = trimmed
-            .parse::<i64>()
-            .map_err(|e| format!("proj: {}: {e}", path.display()))?;
-        let mut map = BTreeMap::new();
-        map.insert(DEFAULT_ENGINE.to_owned(), ts);
-        Ok(map)
+    let mut map = BTreeMap::new();
+    let v2_path = cfg.jobs.join(RELEASED);
+    match fs::read_to_string(&v2_path) {
+        Ok(text) => {
+            let parsed: BTreeMap<String, i64> = serde_json::from_str(text.trim())
+                .map_err(|e| format!("proj: {}: {e}", v2_path.display()))?;
+            map.extend(parsed);
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("proj: {}: {e}", v2_path.display())),
     }
+
+    let legacy_path = cfg.jobs.join(LEGACY_RELEASED);
+    match fs::read_to_string(&legacy_path) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            let ts = trimmed
+                .parse::<i64>()
+                .map_err(|e| format!("proj: {}: {e}", legacy_path.display()))?;
+            let entry = map.entry(DEFAULT_ENGINE.to_owned()).or_insert(0);
+            *entry = (*entry).max(ts);
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("proj: {}: {e}", legacy_path.display())),
+    }
+    Ok(map)
 }
 
 /// Latest release timestamp for `engine` (accounting for global `*` releases too).
@@ -347,7 +510,8 @@ pub(crate) fn released_for(cfg: &Config, engine: &str) -> Result<i64, String> {
     Ok(eng.max(global))
 }
 
-/// Record release timestamp `at` for every key in `keys`, writing the v2 JSON map format.
+/// Record release timestamp `at` for every key in `keys`, writing the v2 map and
+/// keeping legacy `jobs/.usage.released` as a plain integer for retained deploy turns.
 pub(crate) fn mark_released(cfg: &Config, keys: &[&str], at: i64) -> Result<(), String> {
     let mut map = released_map(cfg)?;
     for &key in keys {
@@ -356,34 +520,41 @@ pub(crate) fn mark_released(cfg: &Config, keys: &[&str], at: i64) -> Result<(), 
     }
     let text = serde_json::to_string(&map).map_err(|e| format!("proj: {RELEASED}: {e}"))?;
     swap(&cfg.jobs.join(RELEASED), &format!("{text}\n"))
-        .map_err(|e| format!("proj: {RELEASED}: {e}"))
+        .map_err(|e| format!("proj: {RELEASED}: {e}"))?;
+    if keys.contains(&DEFAULT_ENGINE) || keys.contains(&ALL_ENGINES) {
+        let claude = map.get(DEFAULT_ENGINE).copied().unwrap_or(0);
+        let global = map.get(ALL_ENGINES).copied().unwrap_or(0);
+        swap(
+            &cfg.jobs.join(LEGACY_RELEASED),
+            &format!("{}\n", claude.max(global)),
+        )
+        .map_err(|e| format!("proj: {LEGACY_RELEASED}: {e}"))?;
+    }
+    Ok(())
 }
 
 fn read_admissions(cfg: &Config) -> BTreeMap<String, Admission> {
-    let Some(text) = crate::read(&cfg.jobs.join(ADMISSION)) else {
-        return BTreeMap::new();
-    };
-    let trimmed = text.trim();
-    if trimmed.starts_with('{')
-        && !trimmed.contains('\t')
-        && let Ok(map) = serde_json::from_str::<BTreeMap<String, Admission>>(trimmed)
+    let mut map: BTreeMap<String, Admission> = crate::read(&cfg.jobs.join(ADMISSION))
+        .and_then(|text| serde_json::from_str::<BTreeMap<String, Admission>>(text.trim()).ok())
+        .unwrap_or_default();
+
+    // Merge legacy single-line `<json-or-key>\t<cutoff>` format (`claude`).
+    if let Some(text) = crate::read(&cfg.jobs.join(LEGACY_ADMISSION))
+        && let Some((key, cutoff)) = text.trim().split_once('\t')
     {
-        return map;
-    }
-    // Legacy single-line `<json-or-key>\t<cutoff>` format belongs to `claude`.
-    let mut map = BTreeMap::new();
-    if let Some((key, cutoff)) = trimmed.split_once('\t') {
-        if let Ok(a) = serde_json::from_str::<Admission>(key) {
-            map.insert(DEFAULT_ENGINE.to_owned(), a);
-        } else if let Ok(c) = cutoff.trim().parse::<i64>() {
-            map.insert(
-                DEFAULT_ENGINE.to_owned(),
-                Admission {
-                    until: c / 1_000_000_000,
-                    cutoff: c,
-                    committed: true,
-                },
-            );
+        let legacy = serde_json::from_str::<Admission>(key).ok().or_else(|| {
+            cutoff.trim().parse::<i64>().ok().map(|c| Admission {
+                until: c / 1_000_000_000,
+                cutoff: c,
+                committed: true,
+            })
+        });
+        if let Some(a) = legacy {
+            let covered_by_v2 = map.get(ALL_ENGINES).is_some_and(|g| g.until >= a.until)
+                || map.get(DEFAULT_ENGINE).is_some_and(|c| c.until >= a.until);
+            if !covered_by_v2 {
+                map.insert(DEFAULT_ENGINE.to_owned(), a);
+            }
         }
     }
     map
@@ -396,17 +567,23 @@ pub(crate) fn write_admission(
     committed: bool,
 ) -> Result<i64, String> {
     let cutoff = s.admission_cutoff();
+    let entry = Admission {
+        until: s.until,
+        cutoff,
+        committed,
+    };
     let mut map = read_admissions(cfg);
-    map.insert(
-        engine.to_owned(),
-        Admission {
-            until: s.until,
-            cutoff,
-            committed,
-        },
-    );
+    map.insert(engine.to_owned(), entry.clone());
     let text = serde_json::to_string(&map).map_err(|e| e.to_string())?;
     swap(&cfg.jobs.join(ADMISSION), &format!("{text}\n")).map_err(|e| e.to_string())?;
+    if engine == DEFAULT_ENGINE || engine == ALL_ENGINES {
+        let legacy_key = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        swap(
+            &cfg.jobs.join(LEGACY_ADMISSION),
+            &format!("{legacy_key}\t{cutoff}\n"),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(cutoff)
 }
 
