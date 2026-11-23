@@ -125,9 +125,9 @@ fn room() -> Result<i128> {
     Ok(free)
 }
 /// What an evaluation needs free to start, and so what `side` gives each.
-/// Most of burrow's checks evaluate in under 1.2G; a few take 2-3G and
-/// `agents` (its sandboxes' VMs and each engine's conformance VM) 7.7G, all
-/// measured on 2026-11-23 (#1484). A reserve sized to the largest would
+/// Half of burrow's 163 checks evaluate in under 0.7G and nine take 2-4.8G;
+/// `agents` (its sandboxes' VMs and each engine's conformance VM) took 7.7G,
+/// and 9.8G with #1476's, all measured on 2026-11-23 (#1484). A reserve sized to the largest would
 /// evaluate one at a time on a hosted runner; the watch covers those.
 const RESERVE: i128 = 2 << 30;
 /// Below this much free the evaluations side by side hold more than the
