@@ -168,9 +168,10 @@ fn continued_as(repo: &str, body: &str) -> Option<(String, u64)> {
 }
 
 impl Pass<'_> {
-    /// The merged PR tied to child N: Some(Some(url)) when there is one,
-    /// Some(None) when there's none, None when there may be one GitHub
-    /// couldn't be asked about. A source that can't be read never vetoes
+    /// The merged PR tied to child N: Some(Some(url)) when there is one
+    /// (or, for a closed child an author recorded as needing none, what the
+    /// checklist says instead), Some(None) when there's none, None when
+    /// there may be one GitHub couldn't be asked about. A source that can't be read never vetoes
     /// another that proves it. What a finished job awaited counts only for
     /// the closure it was kept on: `closed` is the child as GitHub has it
     /// now, when closed.
