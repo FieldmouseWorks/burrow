@@ -619,6 +619,13 @@ try:
     try:
         with C.pass_deadline(60):
             assert P.merged("sam/r", {"number": 1, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], {}, "b" * 40) is None
+            # The deadline only stops a fresh eval: outputs already worked out
+            # for this head on this tip are served, with any time left.
+            cached = ["/nix/store/merged-out"]
+            key = ["a" * 40, "b" * 40, {"vm": C.repo_cfg("sam/r")["proofBuilds"]["vm"]}]
+            st = {"mergedOutputs": {"for": key, "paths": cached, "failed": False, "at": C.NOW}}
+            got = P.merged("sam/r", {"number": 1, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], st, "b" * 40)
+            assert got == cached, got
     finally:
         P.nix = real_nix_fn
 finally:
