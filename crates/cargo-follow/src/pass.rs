@@ -7,7 +7,7 @@ use std::io::Write;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use burrow_github::{Api, call, call_allowing};
+use burrow_github::{Api, Error, call, call_allowing};
 use serde_json::{Value, json};
 
 use crate::config::{Config, Manifest};
@@ -32,26 +32,22 @@ fn short(rev: &str) -> &str {
     &rev[..7.min(rev.len())]
 }
 
-fn get(api: &mut dyn Api, path: &str) -> Result<Value, String> {
-    call(api, "GET", path, None, None)
-        .and_then(|r| r.json())
-        .map_err(|e| e.to_string())
+fn get(api: &mut dyn Api, path: &str) -> Result<Value, Error> {
+    call(api, "GET", path, None, None).and_then(|r| r.json())
 }
 
-fn send(api: &mut dyn Api, method: &str, path: &str, body: &Value) -> Result<Value, String> {
-    call(api, method, path, Some(body), None)
-        .and_then(|r| r.json())
-        .map_err(|e| e.to_string())
+fn send(api: &mut dyn Api, method: &str, path: &str, body: &Value) -> Result<Value, Error> {
+    call(api, method, path, Some(body), None).and_then(|r| r.json())
 }
 
-fn field<'a>(v: &'a Value, path: &str, name: &str) -> Result<&'a str, String> {
+fn field<'a>(v: &'a Value, path: &str, name: &str) -> Result<&'a str, Error> {
     v.pointer(name)
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{path}: GitHub's answer has no {name}"))
+        .ok_or_else(|| Error::said(format!("{path}: GitHub's answer has no {name}")))
 }
 
 /// A repo's name as GitHub spells it, and its default branch's head.
-fn repo_head(api: &mut dyn Api, repo: &str) -> Result<(String, String, String), String> {
+fn repo_head(api: &mut dyn Api, repo: &str) -> Result<(String, String, String), Error> {
     let path = format!("repos/{repo}");
     let r = get(api, &path)?;
     let name = field(&r, &path, "/full_name")?.to_string();
@@ -62,23 +58,23 @@ fn repo_head(api: &mut dyn Api, repo: &str) -> Result<(String, String, String), 
 }
 
 /// A file at a commit, or None when it has none there.
-fn file(api: &mut dyn Api, repo: &str, name: &str, at: &str) -> Result<Option<String>, String> {
+fn file(api: &mut dyn Api, repo: &str, name: &str, at: &str) -> Result<Option<String>, Error> {
     let path = format!("repos/{repo}/contents/{name}?ref={at}");
-    let r = call_allowing(api, "GET", &path, None, None, &[404]).map_err(|e| e.to_string())?;
+    let r = call_allowing(api, "GET", &path, None, None, &[404])?;
     if r.status == 404 {
         return Ok(None);
     }
-    let v = r.json().map_err(|e| e.to_string())?;
+    let v = r.json()?;
     let content: String = field(&v, &path, "/content")?
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
     let bytes = STANDARD
         .decode(content)
-        .map_err(|e| format!("{path}: its content isn't base64: {e}"))?;
+        .map_err(|e| Error::said(format!("{path}: its content isn't base64: {e}")))?;
     String::from_utf8(bytes)
         .map(Some)
-        .map_err(|_| format!("{path}: not UTF-8"))
+        .map_err(|_| Error::said(format!("{path}: not UTF-8")))
 }
 
 /// The open PR from the follow's branch.
@@ -88,7 +84,7 @@ struct Open {
     labels: Vec<String>,
 }
 
-fn open_pr(api: &mut dyn Api, repo: &str, branch: &str) -> Result<Option<Open>, String> {
+fn open_pr(api: &mut dyn Api, repo: &str, branch: &str) -> Result<Option<Open>, Error> {
     let owner = repo.split('/').next().unwrap_or_default();
     let path = format!("repos/{repo}/pulls?state=open&head={owner}:{branch}");
     let r = get(api, &path)?;
@@ -98,7 +94,7 @@ fn open_pr(api: &mut dyn Api, repo: &str, branch: &str) -> Result<Option<Open>, 
     Ok(Some(Open {
         number: pr["number"]
             .as_u64()
-            .ok_or_else(|| format!("{path}: GitHub's answer has no number"))?,
+            .ok_or_else(|| Error::said(format!("{path}: GitHub's answer has no number")))?,
         head: field(pr, &path, "/head/sha")?.to_string(),
         labels: pr["labels"]
             .as_array()
@@ -109,16 +105,29 @@ fn open_pr(api: &mut dyn Api, repo: &str, branch: &str) -> Result<Option<Open>, 
     }))
 }
 
-/// Every manifest, or the ones the ask is about. False when one failed: each
-/// failure is said, and the rest go on.
+/// How a pass went.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ran {
+    /// Every manifest it reached went through.
+    pub ok: bool,
+    /// When GitHub's rate limit, which held off some manifest and nothing
+    /// worse, lifts first: the pass is due again then, not failed.
+    pub held: Option<u64>,
+}
+
+/// Every manifest, or the ones the ask is about. Each failure is said, and
+/// the rest go on.
 pub fn run(
     cfg: &Config,
     ask: &Ask,
     api: &mut dyn Api,
     local: &mut dyn Local,
     out: &mut dyn Write,
-) -> bool {
-    let mut ok = true;
+) -> Ran {
+    let mut ran = Ran {
+        ok: true,
+        held: None,
+    };
     for m in &cfg.manifests {
         let mut p = Pass {
             cfg,
@@ -127,12 +136,23 @@ pub fn run(
             local: &mut *local,
             out: &mut *out,
         };
-        if let Err(e) = p.manifest(m) {
-            let _ = writeln!(out, "{}:{}: {e}", m.repo, m.path);
-            ok = false;
+        match p.manifest(m) {
+            Ok(()) => {}
+            Err(Error {
+                retry_at: Some(at),
+                why,
+                ..
+            }) => {
+                let _ = writeln!(out, "{}:{}: held off until {at}: {why}", m.repo, m.path);
+                ran.held = Some(ran.held.map_or(at, |h| h.min(at)));
+            }
+            Err(e) => {
+                let _ = writeln!(out, "{}:{}: {e}", m.repo, m.path);
+                ran.ok = false;
+            }
         }
     }
-    ok
+    ran
 }
 
 struct Pass<'a> {
@@ -156,10 +176,10 @@ impl Pass<'_> {
         let _ = writeln!(self.out, "{line}");
     }
 
-    fn manifest(&mut self, m: &Manifest) -> Result<(), String> {
+    fn manifest(&mut self, m: &Manifest) -> Result<(), Error> {
         let (repo, branch, base) = repo_head(self.api, &m.repo)?;
         let text = file(self.api, &repo, &m.path, &base)?
-            .ok_or_else(|| format!("{repo} has no {} at {}", m.path, short(&base)))?;
+            .ok_or_else(|| Error::said(format!("{repo} has no {} at {}", m.path, short(&base))))?;
         let target = Target {
             repo: &repo,
             branch: &branch,
@@ -174,17 +194,17 @@ impl Pass<'_> {
                 continue;
             }
             if let Err(e) = self.follow(&target, &f) {
-                failed.push(format!("{}: {e}", f.upstream));
+                failed.push(e.context(&f.upstream));
             }
         }
         if failed.is_empty() {
             Ok(())
         } else {
-            Err(failed.join("; "))
+            Err(Error::aggregate(failed))
         }
     }
 
-    fn follow(&mut self, t: &Target, f: &Follow) -> Result<(), String> {
+    fn follow(&mut self, t: &Target, f: &Follow) -> Result<(), Error> {
         let (upstream, up_branch, head) = repo_head(self.api, &f.upstream)?;
         let branch = format!("follow/{}", upstream.to_ascii_lowercase().replace('/', "-"));
         let open = open_pr(self.api, t.repo, &branch)?;
@@ -256,7 +276,10 @@ impl Pass<'_> {
         }
         let files = self.local.bump(repo, t.base, path, f, &head)?;
         if files.is_empty() {
-            return Err(format!("moving {path} to {} changed no file", short(&head)));
+            return Err(Error::said(format!(
+                "moving {path} to {} changed no file",
+                short(&head)
+            )));
         }
         let title = format!("{TITLE}{upstream} to {}", short(&head));
         let sha = self.commit(repo, t.base, &files, &title)?;
@@ -300,7 +323,7 @@ impl Pass<'_> {
         path: &str,
         at: &str,
         url: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, Error> {
         let Some(text) = file(self.api, repo, path, at)? else {
             return Ok(None);
         };
@@ -309,12 +332,12 @@ impl Pass<'_> {
     }
 
     /// The first line of the first commit on the PR that a pass didn't make.
-    fn others(&mut self, repo: &str, number: u64) -> Result<Option<String>, String> {
+    fn others(&mut self, repo: &str, number: u64) -> Result<Option<String>, Error> {
         let path = format!("repos/{repo}/pulls/{number}/commits?per_page=100");
         let commits = get(self.api, &path)?;
-        let commits = commits
-            .as_array()
-            .ok_or_else(|| format!("{path}: GitHub's answer isn't a list of commits"))?;
+        let commits = commits.as_array().ok_or_else(|| {
+            Error::said(format!("{path}: GitHub's answer isn't a list of commits"))
+        })?;
         Ok(commits.iter().find_map(|c| {
             let message = c["commit"]["message"].as_str().unwrap_or_default();
             (!message.starts_with(TITLE))
@@ -323,7 +346,7 @@ impl Pass<'_> {
     }
 
     /// Whether GitHub says the PR can't merge as it is.
-    fn conflicted(&mut self, repo: &str, number: u64) -> Result<bool, String> {
+    fn conflicted(&mut self, repo: &str, number: u64) -> Result<bool, Error> {
         let pr = get(self.api, &format!("repos/{repo}/pulls/{number}"))?;
         Ok(pr["mergeable"] == json!(false))
     }
@@ -336,12 +359,13 @@ impl Pass<'_> {
         base: &str,
         files: &[(String, Vec<u8>)],
         message: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let path = format!("repos/{repo}/git/commits/{base}");
         let tree = field(&get(self.api, &path)?, &path, "/tree/sha")?.to_string();
         let mut entries = Vec::new();
         for (name, bytes) in files {
-            let content = std::str::from_utf8(bytes).map_err(|_| format!("{name}: not UTF-8"))?;
+            let content = std::str::from_utf8(bytes)
+                .map_err(|_| Error::said(format!("{name}: not UTF-8")))?;
             entries.push(
                 json!({ "path": name, "mode": "100644", "type": "blob", "content": content }),
             );
@@ -365,11 +389,10 @@ impl Pass<'_> {
     }
 
     /// The branch at the commit, made or moved.
-    fn point(&mut self, repo: &str, branch: &str, sha: &str) -> Result<(), String> {
+    fn point(&mut self, repo: &str, branch: &str, sha: &str) -> Result<(), Error> {
         let made = json!({ "ref": format!("refs/heads/{branch}"), "sha": sha });
         let path = format!("repos/{repo}/git/refs");
-        let r = call_allowing(self.api, "POST", &path, Some(&made), None, &[422])
-            .map_err(|e| e.to_string())?;
+        let r = call_allowing(self.api, "POST", &path, Some(&made), None, &[422])?;
         if r.status == 422 {
             let moved = json!({ "sha": sha, "force": true });
             send(
@@ -383,7 +406,7 @@ impl Pass<'_> {
     }
 
     /// The PR closed with why, and its branch deleted.
-    fn close(&mut self, repo: &str, branch: &str, number: u64, why: &str) -> Result<(), String> {
+    fn close(&mut self, repo: &str, branch: &str, number: u64, why: &str) -> Result<(), Error> {
         send(
             self.api,
             "POST",
@@ -397,8 +420,7 @@ impl Pass<'_> {
             &json!({ "state": "closed" }),
         )?;
         let path = format!("repos/{repo}/git/refs/heads/{branch}");
-        call_allowing(self.api, "DELETE", &path, None, None, &[404, 422])
-            .map_err(|e| e.to_string())?;
+        call_allowing(self.api, "DELETE", &path, None, None, &[404, 422])?;
         Ok(())
     }
 }

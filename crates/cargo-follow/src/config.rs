@@ -11,6 +11,10 @@ pub struct Config {
     pub manifests: Vec<Manifest>,
     /// Its clones, cargo's home and the lock every pass holds.
     pub work: PathBuf,
+    /// The handler's wake file (burrow-events), {repo: epoch} with "" for
+    /// the full pass: a pass GitHub's rate limit held off is booked there
+    /// for when it lifts.
+    pub wake: PathBuf,
     /// Labels on an open PR that keep a pass from pushing to it: the
     /// train's, whose candidate a new head would throw away.
     pub frozen: Vec<String>,
@@ -41,7 +45,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let mut config = serde_json::json!({
             "manifests": [{"repo": "sam/home", "path": "crates/Cargo.toml"}],
-            "work": "/w", "frozen": ["waiting: train"],
+            "work": "/w", "wake": "/w/wake.json", "frozen": ["waiting: train"],
         });
         std::fs::write(&path, config.to_string()).unwrap();
         let read = Config::read(&path).unwrap();

@@ -13,10 +13,14 @@ let
   inherit (config.burrow.github) machineApp machineGh;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
   stateDir = "${config.burrow.stateDir}/cargo-follow";
+  # A pass GitHub's rate limit held off books itself here for when it lifts
+  # (burrow-events' wake file for the handler).
+  wake = "${stateDir}/wake.json";
 
   followConfig = pkgs.writeText "cargo-follow.json" (builtins.toJSON {
     inherit (cfg) manifests;
     work = stateDir;
+    inherit wake;
     # A PR the train carries keeps its head: a new one would throw away the
     # candidate it rides in, gate and all.
     frozen = lib.optional (autoland.enable or false) autoland.labels.waiting.train.name;
@@ -76,6 +80,7 @@ in
       events = [ "push" ];
       unit = "cargo-follow";
       pushes = "default";
+      inherit wake;
     };
     systemd.tmpfiles.rules = [ "d ${stateDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
     systemd.services = lib.genAttrs [ "cargo-follow" "cargo-follow@" ] (name: {

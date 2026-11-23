@@ -179,14 +179,16 @@ fn cfg() -> Config {
             path: "crates/Cargo.toml".into(),
         }],
         work: "/w".into(),
+        wake: "/w/wake.json".into(),
         frozen: vec!["waiting: train".into()],
     }
 }
 
 fn pass(gh: &mut Fake, local: &mut FakeLocal, only: Option<&str>) -> (bool, String) {
     let mut out = Vec::new();
-    let ok = run(&cfg(), &Ask { only, dry: false }, gh, local, &mut out);
-    (ok, String::from_utf8(out).unwrap())
+    let ran = run(&cfg(), &Ask { only, dry: false }, gh, local, &mut out);
+    assert_eq!(ran.held, None);
+    (ran.ok, String::from_utf8(out).unwrap())
 }
 
 fn changed(gh: &Fake) -> Vec<String> {
@@ -383,4 +385,46 @@ fn a_pr_with_a_commit_a_pass_didnt_make_keeps_it() {
         out.contains("#7 has a commit a pass didn't make (\"judge: read the new snapshot\")"),
         "{out}"
     );
+}
+
+#[test]
+fn a_rate_limit_is_a_wait_not_a_failure() {
+    let mut gh = github(None);
+    gh.answers.insert(
+        0,
+        (
+            "GET".into(),
+            "repos/sam/Up".into(),
+            vec![ok(
+                403,
+                json!({"message": "API rate limit exceeded"}),
+                &[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "2000000000"),
+                ],
+            )]
+            .into(),
+        ),
+    );
+    let mut out = Vec::new();
+    let ran = run(
+        &cfg(),
+        &Ask {
+            only: None,
+            dry: false,
+        },
+        &mut gh,
+        &mut FakeLocal::default(),
+        &mut out,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: Some(2_000_000_000)
+        },
+        "{out}"
+    );
+    assert!(out.contains("held off until 2000000000"), "{out}");
 }

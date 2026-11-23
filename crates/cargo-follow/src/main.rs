@@ -8,7 +8,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use burrow_github::Gh;
+use burrow_github::{Gh, deferred};
 use cargo_follow::config::Config;
 use cargo_follow::local::{Git, Work};
 use cargo_follow::pass::{self, Ask};
@@ -62,10 +62,14 @@ fn pass(config: &str, dry: bool, only: Option<&str>) -> Result<bool, String> {
         .open(&lock)
         .and_then(|f| f.lock().map(|()| f))
         .map_err(|e| format!("{}: {e}", lock.display()))?;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
     let mut work = Work {
         root: cfg.work.clone(),
     };
-    let ok = pass::run(
+    let ran = pass::run(
         &cfg,
         &Ask { only, dry },
         &mut Gh::default(),
@@ -73,7 +77,20 @@ fn pass(config: &str, dry: bool, only: Option<&str>) -> Result<bool, String> {
         &mut std::io::stdout(),
     );
     drop(held);
-    Ok(ok)
+    if dry {
+        return Ok(ran.ok);
+    }
+    // What this pass is booked as in the wake file: GitHub's rate limit is
+    // a wait, not a failure, so a held-off pass is due again when it lifts.
+    let key = only.unwrap_or_default();
+    match ran.held {
+        Some(at) => {
+            deferred::rebook(&cfg.wake, key, at)?;
+            println!("booked again for {at}, when GitHub's rate limit lifts");
+        }
+        None => deferred::ran(&cfg.wake, key, started)?,
+    }
+    Ok(ran.ok)
 }
 
 fn show_changes(path: &str, dir: &str, head: &str) -> Result<bool, String> {
