@@ -127,7 +127,45 @@ impl Negative {
     /// their old content where the PR replaced them. Not being seen to pass
     /// there is breaking it.
     pub(super) fn removal_breaks(&self, t: Option<&Target>) -> Result<bool> {
-        Ok(self.changes.iter().any(Change::deletes) && !self.stands(t, Away::Deleted)?)
+        if !self.changes.iter().any(Change::deletes) {
+            return Ok(false);
+        }
+        match t {
+            Some(t) if t.base.is_empty() => self.reads_deleted(t),
+            _ => Ok(!self.stands(t, Away::Deleted)?),
+        }
+    }
+    /// Whether a check the base hasn't reads a deleted test file. No control
+    /// passes it (only the new tests define it), so the removal breaks it
+    /// unless it gives the same derivation with every deleted file back
+    /// where it was, an added file or directory no tree holds beside one
+    /// gone to make room: then it reads neither, and its build can't tell
+    /// them apart.
+    fn reads_deleted(&self, t: &Target) -> Result<bool> {
+        let made_room = |c: &Change| {
+            self.changes
+                .iter()
+                .any(|gone| gone.deletes() && c.clashes(&gone.path))
+        };
+        let applied: Vec<_> = self
+            .changes
+            .iter()
+            .filter(|c| !c.deletes() && !made_room(c))
+            .cloned()
+            .collect();
+        let tree = self.judging_tree("put-back", "every deleted put back", &applied)?;
+        let o = self.evaluate(&tree, &t.q, &format!("{}.put-back", t.i))?;
+        let reads = t.drv.is_empty() || value(&o) != t.drv;
+        println!(
+            "check {} is new, so the base has no control for it: {}",
+            t.name,
+            if reads {
+                "it isn't the same with the deleted test files put back, so it reads them"
+            } else {
+                "it's the same with the deleted test files put back, so their removal can't break it"
+            }
+        );
+        Ok(reads)
     }
     /// The deleted files a tree leaves away.
     fn away(&self, away: Away) -> Vec<Change> {
