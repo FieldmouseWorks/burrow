@@ -100,7 +100,7 @@ fi
     };
     let req_bytes = serde_json::to_vec(&req).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-engine-antigravity"))
+    let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
         .arg(&cfg_path)
         .env("BURROW_AG_TEST_IN", "isolated-antigravity-secret")
         .env("GH_TOKEN", "ghp_must_never_leak")
@@ -190,7 +190,7 @@ fi
         &format!(
             "#!/bin/sh\nexport {CONFIG_ENV}=\"{}\"\nexec \"{}\"\n",
             cfg_path.display(),
-            env!("CARGO_BIN_EXE_burrow-engine-antigravity"),
+            burrow_test::program!("burrow-engine-antigravity"),
         ),
     );
     let limits = Limits {

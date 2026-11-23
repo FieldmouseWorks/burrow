@@ -532,6 +532,7 @@ version = "0.0.0"
 dependencies = [
  "boon",
  "burrow-process",
+ "burrow-test",
  "conary-core",
  "serde",
  "serde_json",
