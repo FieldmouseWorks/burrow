@@ -496,7 +496,8 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
     );
     assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);
     // Its files, as the workflow's own commit has them (whatever ref its
-    // caller named), checked out where TOOLS says, before it.
+    // caller named), checked out where TOOLS says, before it: the gate's
+    // tools, the flaky action its flaky steps use, and the crates.
     let steps = crate::harness::steps(check);
     let at = steps.iter().position(|x| x["id"] == "gate").unwrap();
     // (The wait for a base's kept builds, if any, runs between them.)
@@ -512,7 +513,7 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
         tools["with"],
         crate::harness::yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates\\n\"}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\n.github/actions/flaky\\ncrates\\n\"}"
         )
     );
     // Every run but gate-reuse's hit, which builds nothing (reuse.rs).
