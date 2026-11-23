@@ -135,10 +135,11 @@ case "$*" in *'#checks.'*)
   ! breaks check-breaks ${ref% *} ${ref#* }
   exit
 esac
-expr= ref=
+expr= ref= link=
 while [ $# -gt 0 ]; do
   case $1 in
     --expr) expr=$2; shift ;;
+    --out-link) link=$2; shift ;;
     *'#nixosConfigurations.'*) ref=$1 ;;
   esac
   shift
@@ -164,6 +165,7 @@ if [ ! -d "$sys" ]; then
   printf '%s\n' "$rev" >"$sys/revision"
   ln -s "$(command -v nixos-version)" "$sys/sw/bin/nixos-version"
 fi
+[ -z "$link" ] || ln -sfn "$sys" "$link"
 echo "$sys"
 "#,
             ),

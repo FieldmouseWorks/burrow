@@ -4,6 +4,7 @@
 //! paths, and the stamp alone doesn't say which commits are live.
 
 use std::fs::{self, File, OpenOptions};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::{Config, last_line};
@@ -60,6 +61,12 @@ pub enum Already {
 /// build's own output as it comes: burrow-dispatch takes a write there for
 /// the run at work, so a long build (a patched package from source) isn't a
 /// stall while it builds.
+///
+/// The system is a garbage collector's root from the moment nix makes it
+/// (`built`), not a path nothing holds: a run checks it for many minutes
+/// before it switches, and the store's daily collection, or one a build
+/// starts when the disk runs low, can take it away in between (it did on
+/// 2026-11-23, and the switch found no system there).
 pub fn build(cfg: &Config) -> Option<String> {
     let log = File::create(cfg.state.join("logs/build.log"))
         .map_err(|e| eprintln!("{}: logs/build.log: {e}", cfg.update))
@@ -71,9 +78,20 @@ pub fn build(cfg: &Config) -> Option<String> {
     );
     last_line(
         nix(cfg, log)
-            .args(["build", "--no-link", "-L", "--print-out-paths", &toplevel])
+            .args(["build", "-L", "--print-out-paths", "--out-link"])
+            .arg(built(cfg))
+            .arg(&toplevel)
             .output(),
     )
+}
+
+/// The root that holds the last system a run built: beside the run's
+/// checkout, which is the user's to write in as nix runs as them, and out
+/// of its tree, so git never sees it.
+pub fn built(cfg: &Config) -> PathBuf {
+    let mut link = cfg.work.clone().into_os_string();
+    link.push(".system");
+    link.into()
 }
 
 /// Whether HEAD's system is the one running, apart from the commit it's
