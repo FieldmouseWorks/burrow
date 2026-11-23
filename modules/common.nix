@@ -161,6 +161,10 @@ inputs:
         config.systemd.tmpfiles.rules = lib.optional (config.users.users ? ${config.burrow.user})
           "d ${config.burrow.projectsDir} 0755 ${config.burrow.user} ${config.users.users.${config.burrow.user}.group} -";
 
+        # gh, for the modules that call it and the users who run it
+        # (github/gh.nix). github.nix's wrapper of it takes its place there.
+        config.burrow.tools.gh = lib.mkDefault (import ./github/gh.nix pkgs);
+
         # tmux for the Claudes that run in one (the usage watcher's Claude
         # Code). Not tmux's usual build: that one moves each pane into a scope
         # of its own, which takes it out of its unit and out from under its
