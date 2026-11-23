@@ -84,6 +84,14 @@ let
         --output-dir "''${XDG_RUNTIME_DIR:?}/burrow-browser" "$@"
     '';
   };
+  # The browser is up once its DevTools port answers burrow.user, the only one
+  # it answers: not once it's listening, as a busy Chromium accepts the
+  # connection long before it answers on it.
+  ready = pkgs.writeShellScript "${account}-ready" ''
+    until ${lib.getExe pkgs.curl} -fsS -o /dev/null http://127.0.0.1:${toString cfg.cdpPort}/json/version; do
+      sleep 0.5
+    done
+  '';
   # Each piece runs as the browser's user, sees no /home, and writes only its
   # state and runtime dirs. Chromium's own sandbox needs user namespaces, so
   # those stay allowed.
@@ -245,6 +253,11 @@ in
           # Closed as its window would be, so it writes its cookies first. As
           # burrow.user: the only one its DevTools port answers.
           ExecStop = "+${pkgs.util-linux}/bin/runuser -u ${user} -- ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-browser-close}/bin/burrow-browser-close ${toString cfg.cdpPort}";
+          # Started once Claude can drive it, so whatever waits on the unit
+          # (a restart, a switch, a boot) waits for that. A loaded machine can
+          # take minutes; past this it's restarted.
+          ExecStartPost = "+${pkgs.util-linux}/bin/runuser -u ${user} -- ${ready}";
+          TimeoutStartSec = "10min";
           ExecStart = lib.escapeShellArgs [
             (lib.getExe cfg.package)
             "--user-data-dir=${stateDir}/profile"
@@ -257,6 +270,10 @@ in
             "--no-first-run"
             "--no-default-browser-check"
             "--start-maximized"
+            # Its screen has no GL (Xvnc has no GLX), so the GPU process fails
+            # to start, exits and is started again, over and over, while the
+            # browser waits on it; it draws in software either way.
+            "--disable-gpu"
             # Its tabs come back after a restart, and with them the cookies
             # that have no expiry date, which many sites keep a login in:
             # without it, every restart (a deploy, a reboot) signs the owner

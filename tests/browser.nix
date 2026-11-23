@@ -148,12 +148,23 @@ pkgs.testers.runNixOSTest {
     cdp = "curl -fsS --max-time 5 http://127.0.0.1:9222/json/version"
     viewer = "curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:6080/vnc.html"
 
+    def browser_up(node):
+        # The unit is started only once DevTools answers dev, so waiting on
+        # it (or a systemctl start or restart, which waits for it) is the
+        # wait for the browser.
+        node.wait_for_unit("burrow-browser.service")
+        props = dict(line.split("=", 1) for line in node.succeed(
+            "systemctl show -p InactiveExitTimestampMonotonic -p ActiveEnterTimestampMonotonic burrow-browser.service"
+        ).split())
+        took = (int(props["ActiveEnterTimestampMonotonic"]) - int(props["InactiveExitTimestampMonotonic"])) / 1e6
+        node.log(f"burrow-browser.service: DevTools answered {took:.1f}s after the start")
+        node.succeed("su dev -c '" + cdp + "'")
+
     start_all()
     for node in (machine, nft):
-        node.wait_for_unit("burrow-browser.service")
+        browser_up(node)
         node.wait_for_unit("burrow-browser-viewer.service")
         node.wait_for_unit("user@1001.service")
-        node.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
 
     with subtest("only burrow.user reaches the DevTools port and the viewer"):
         for node in (machine, nft):
@@ -249,7 +260,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a login outlives the browser"):
         machine.succeed("systemctl restart burrow-browser.service")
-        machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
+        browser_up(machine)
         login_kept(machine)
 
     with subtest("a second profile doesn't come between Claude and the logins"):
@@ -262,7 +273,7 @@ pkgs.testers.runNixOSTest {
                " && mkdir -m 700 'Profile 1'")
         machine.succeed(f"cd /var/lib/burrow-browser/profile && runuser -u burrow-browser -- sh -c {shlex.quote(add)}")
         machine.succeed("systemctl start burrow-browser.service")
-        machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
+        browser_up(machine)
         tabs = machine.succeed("su dev -c 'curl -fsS http://127.0.0.1:9222/json/list'")
         assert "profile-picker" not in tabs, tabs
         login_kept(machine)
@@ -270,10 +281,9 @@ pkgs.testers.runNixOSTest {
     with subtest("a reboot keeps both"):
         machine.shutdown()
         machine.start()
-        machine.wait_for_unit("burrow-browser.service")
+        browser_up(machine)
         machine.wait_for_unit("burrow-claude-mcp.service")
         assert machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip() == entry
-        machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
         machine.wait_for_unit("user@1001.service")
         login_kept(machine)
 
