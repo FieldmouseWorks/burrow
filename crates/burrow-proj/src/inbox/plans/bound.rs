@@ -1,8 +1,8 @@
-//! What a task list is bound to: the parent's text as it was planned from
-//! (its title, its body and its authors' comments then), which the list
-//! goes on with and pauses without ([`Pass::pause`]). An author's comment
-//! written since, that opens with [`NOTE`], is a note on the list as it
-//! goes, never scope: it neither pauses the list nor has it replanned.
+//! What a plan is bound to: the issue's text as it was planned from (its
+//! title, its body and its authors' comments then). A task list goes on
+//! with it and pauses without ([`Pass::pause`]); there, an author's comment
+//! written since that opens with [`NOTE`] is a note on the list as it goes,
+//! never scope: it neither pauses the list nor has it replanned.
 
 use std::fs;
 
@@ -42,6 +42,9 @@ impl Pass<'_> {
         }
         let written = self.written(repo, issue)?;
         let comments = &written.comments;
+        // Only a task list takes notes: an approval to start is of the
+        // issue as it stands, which is what its job is handed.
+        let notes = self.has_task_list(Some(repo), &n);
         // The comments the plan was made with come first: every one after
         // them that's heard must be a note, so look back from the newest
         // for as long as that holds.
@@ -49,7 +52,8 @@ impl Pass<'_> {
             if self.issue_text(repo, &written.issue, &comments[..k]) == had {
                 return Some(true);
             }
-            if k > 0 && self.heard(&comments[k - 1]) && !note(&comments[k - 1]) {
+            let last = k.checked_sub(1).map(|i| &comments[i]);
+            if !notes || last.is_none_or(|c| self.heard(c) && !note(c)) {
                 break;
             }
         }

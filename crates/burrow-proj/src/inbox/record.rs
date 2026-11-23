@@ -476,7 +476,7 @@ impl Look<'_, '_> {
                     Some(id) => Record::new(
                         &name,
                         Stage::Planned,
-                        format!("it's replanned from its new text once {id}, whose brief names it, is done, or its list goes on once its text goes back"),
+                        format!("no replan starts while {id}, whose brief names it, is live; its list goes on once it's replanned from its new text, or its text goes back"),
                     )
                     .waiting(Wait::Job(id)),
                     None => Record::new(
@@ -484,7 +484,7 @@ impl Look<'_, '_> {
                         Stage::Planned,
                         "its list goes on once it's replanned from its new text, or its text goes back",
                     )
-                    .waiting(Wait::Stuck(super::plans::CHANGED.into())),
+                    .waiting(Wait::Stuck(format!("it {}", super::plans::CHANGED))),
                 },
                 Some(step) => Record::new(
                     &name,

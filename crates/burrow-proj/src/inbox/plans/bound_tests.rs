@@ -38,6 +38,24 @@ fn a_note_after_the_split_neither_pauses_its_list_nor_has_it_replanned() {
     assert_eq!(b.pass().same_source("sam/box", &parent), Some(true));
     sequence(&b, &parent);
     assert!(!b.pass().paused("sam/box", "7"));
+    // Sorted as it is: triage doesn't replan it.
+    let mut parent = parent;
+    parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    let mut pass = b.pass();
+    assert!(pass.sorted("sam/box", t, &parent, &pass.claimed("sam/box")));
+    comments_on_parent(&b, &["Note: #8 accepted.", "Drop task 1."]);
+    let mut pass = b.pass();
+    assert!(!pass.sorted("sam/box", t, &parent, &pass.claimed("sam/box")));
+}
+
+#[test]
+fn a_note_on_an_issue_approved_whole_is_a_change_as_before() {
+    let (b, parent, _) = parent_fixture();
+    fs::remove_file(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
+    assert!(b.pass().planned(Some("sam/box"), &parent));
+    comments_on_parent(&b, &["Note: #8 accepted."]);
+    assert!(!b.pass().planned(Some("sam/box"), &parent));
 }
 
 #[test]
@@ -95,7 +113,11 @@ fn why_names_the_live_job_that_keeps_a_paused_parent_from_its_replan() {
     live_job(&b, "running", "8");
     let why = b.pass().look().record("sam/box", "7", Some(&parent));
     assert_eq!(why.wait, Some(Wait::Job("lane".into())), "{why:?}");
-    assert!(why.next.contains("lane, whose brief names it"), "{why:?}");
+    assert!(
+        why.next
+            .contains("no replan starts while lane, whose brief names it, is live"),
+        "{why:?}"
+    );
     let held = b.pass().place("sam/box", "9");
     assert!(
         matches!(&held, Some(super::super::Place::Stuck(w)) if w.contains("once lane, whose brief names it, is done")),
