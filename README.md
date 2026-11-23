@@ -42,7 +42,7 @@ The modules, by job:
 
 - **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
   `heartbeat`, `robot`
-- **Doing the work:** `proj`, `probe`, `agents`, `browser`,
+- **Doing the work:** `proj`, `probe`, `agents`, `antigravity`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
 - **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`,
   `builds`
@@ -533,6 +533,13 @@ Each has an entry below, and each can be imported on its own.
   git confined to the sandbox's clone and the project's repository, so a
   link planted in a clone reaches nothing else. Idle ones stop after a day
   and are saved and deleted after a week. Opt-in per task.
+- **`antigravity`** (`burrow.engines.antigravity`, `modules/engines/antigravity.nix`,
+  `crates/burrow-engine-antigravity`): Isolated Antigravity engine surface and
+  Conary `conary-plugin v5` `job` plugin. Wires the machine flake's
+  Antigravity package or binary, isolated auth credential, runtime-configured
+  models and efforts, egress host allowlist, and approved capabilities into
+  `burrow.agents.engines.antigravity` without sharing provider code with
+  Claude or touching `burrow-proj`.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
   signed in to your accounts by you, that job engines drive through
   Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
@@ -755,8 +762,10 @@ its own packages, credential and hosts. Its other half
 (`tests/agents-plugins.nix`, `.#checks.x86_64-linux.agents.entries.plugins`
 alone) runs the example plugin (`crates/burrow-example-plugin`) through
 Conary's runner: each grant works, and without it isn't there for the VM's
-root either. Its third (`.#checks.x86_64-linux.agents.entries.conformance-example`)
-is the example's [conformance check](docs/engines.md#a-plugins-conformance-check):
+root either. Its third and fourth
+(`.#checks.x86_64-linux.agents.entries.conformance-example` and
+`conformance-antigravity`) run the example and Antigravity plugins'
+[conformance checks](docs/engines.md#a-plugins-conformance-check):
 `lib.engineConformance` builds one for any engine's plugin, and the check
 an engine adds there runs `cn plugin check` on it in its sandbox and holds
 it to what it declares.

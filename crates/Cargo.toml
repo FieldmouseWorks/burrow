@@ -13,6 +13,7 @@ members = [
     "burrow-dashboard",
     "burrow-dispatch",
     "burrow-door",
+    "burrow-engine-antigravity",
     "burrow-events",
     "burrow-engines-door",
     "burrow-example-plugin",

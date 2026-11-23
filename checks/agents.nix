@@ -18,6 +18,30 @@ let
       --set EXAMPLE_PLUGIN_DECLARES network
   '';
   inherit (import ../tests/agents/capabilities.nix) grantable;
+  antigravityStandIn = pkgs.writeShellScriptBin "antigravity" ''exit 0'';
+  antigravityConfig = pkgs.writeText "antigravity-conformance.json" (builtins.toJSON {
+    binary = pkgs.lib.getExe antigravityStandIn;
+    models = [
+      {
+        id = "test-model";
+        efforts = [ "low" "medium" "high" "xhigh" "max" ];
+      }
+    ];
+    default_model = "test-model";
+    default_effort = "medium";
+    network = true;
+    mcp = false;
+    devices = [ ];
+    meters = [ "quota" ];
+  });
+  antigravityPlugin = pkgs.runCommand "antigravity-plugin-conformance" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "burrow-engine-antigravity";
+  } ''
+    makeBinaryWrapper ${pkgs.lib.getExe' self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engine-antigravity "burrow-engine-antigravity"} \
+      $out/bin/burrow-engine-antigravity \
+      --set BURROW_ANTIGRAVITY_CONFIG ${antigravityConfig}
+  '';
 in
 pkgs.linkFarm "agents" {
   sandboxes = import ../tests/agents.nix { inherit self pkgs; };
@@ -27,5 +51,15 @@ pkgs.linkFarm "agents" {
     name = "example";
     plugin = networked;
     capabilities = pkgs.lib.subtractLists [ "kvm" "mcp" ] grantable;
+  };
+  conformance-antigravity = self.lib.engineConformance {
+    inherit pkgs;
+    name = "antigravity";
+    plugin = antigravityPlugin;
+    capabilities = pkgs.lib.subtractLists [ "kvm" "mcp" ] grantable;
+    engine = {
+      packages = [ antigravityStandIn ];
+      credentialEnv = "BURROW_ANTIGRAVITY_CREDENTIAL";
+    };
   };
 }

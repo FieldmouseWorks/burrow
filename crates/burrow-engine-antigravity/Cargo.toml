@@ -1,0 +1,17 @@
+[package]
+name = "burrow-engine-antigravity"
+description = "Isolated Antigravity engine surface and Conary v5 job plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-process = { path = "../burrow-process" }
+conary-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
