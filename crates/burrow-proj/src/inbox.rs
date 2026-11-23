@@ -142,28 +142,35 @@ fn status(cfg: &Config, inbox: &Inbox) {
     }
 }
 
-/// `proj plan done OWNER/REPO#N PR-URL`: one of the inbox's authors, on the
-/// host and never from a job, records the merged PR that landed a task
-/// list's child, and the list moves on at its repo's next pass. The author
-/// is the GitHub account the caller's own gh answers as.
+/// `proj plan`: one of the inbox's authors, on the host and never from a
+/// job, changes a task list, and the list moves on at its repo's next pass.
+/// `done OWNER/REPO#N PR-URL` records the merged PR that landed a child;
+/// `end OWNER/REPO#N` ends a parent's list (one wrongly split, or whose
+/// parent is a tracker) without closing the parent. The author is the
+/// GitHub account the caller's own gh answers as.
 pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
-    let [done, child, pr] = args else {
-        return Err(Fail::new(2, plans::PLAN_USAGE));
-    };
-    if done != "done" {
-        return Err(Fail::new(2, plans::PLAN_USAGE));
+    /// What `proj plan` is asked to do.
+    enum Asked<'a> {
+        Done(&'a str, &'a str),
+        End(&'a str),
     }
+    let (door, asked) = match args {
+        [done, child, pr] if done == "done" => ("done", Asked::Done(child, pr)),
+        [end, parent] if end == "end" => ("end", Asked::End(parent)),
+        _ => return Err(Fail::new(2, plans::PLAN_USAGE)),
+    };
     if std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty()) {
         return Err(Fail::new(
             2,
-            "proj plan done is the host's, for an author: a job never records a landed PR",
+            format!(
+                "proj plan {door} is the host's, for an author: a job never changes a task list"
+            ),
         ));
     }
-    let inbox = cfg
-        .inbox
-        .as_ref()
-        .filter(|i| i.planning)
-        .ok_or_else(|| Fail::new(1, "proj plan done: inbox planning isn't on here"))?;
+    let inbox =
+        cfg.inbox.as_ref().filter(|i| i.planning).ok_or_else(|| {
+            Fail::new(1, format!("proj plan {door}: inbox planning isn't on here"))
+        })?;
     let caller = crate::github::reported(burrow_github::call_repeating(
         &mut burrow_github::Gh::default(),
         "GET",
@@ -183,11 +190,13 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     let Some(held) = Held::lock_within(held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? else {
         return Err(Fail::new(
             1,
-            "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
+            format!(
+                "proj plan {door}: an inbox pass is still going after ten minutes; nothing changed"
+            ),
         ));
     };
     let permit = resumption::Permit::pass(held);
-    let p = Pass {
+    let mut p = Pass {
         cfg,
         inbox,
         project: projects(cfg),
@@ -199,12 +208,23 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         drain_at: None,
         skipped: Vec::new(),
     };
-    let repo = p.plan_done(child, pr, caller)?;
+    let (repo, said) = match asked {
+        Asked::Done(child, pr) => (
+            p.plan_done(child, pr, caller)?,
+            format!(
+                "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
+            ),
+        ),
+        Asked::End(parent) => (
+            p.plan_end(parent, caller)?,
+            format!(
+                "Ended {parent}'s task list; the parent stays open, its children no longer start, and the list is kept on disk."
+            ),
+        ),
+    };
     drop(permit);
     crate::job::kick(cfg, [format!("proj-inbox/{repo}")]);
-    println!(
-        "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
-    );
+    println!("{said}");
     Ok(())
 }
 
@@ -946,6 +966,7 @@ mod drain;
 pub(crate) mod enrollment;
 pub(crate) use drain::job_paused;
 mod jobs;
+mod maintained;
 mod plans;
 pub(crate) mod resumption;
 mod retirement;

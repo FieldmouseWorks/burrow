@@ -10,6 +10,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod bound;
+mod end;
 mod place;
 pub(super) use place::{CHANGED, Place};
 
@@ -86,6 +87,9 @@ impl List {
                 (None, None) => String::new(),
             };
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
+        }
+        if self.tasks.is_empty() {
+            text.push_str("\nNo task is left on it, so none of its children starts.");
         }
         if let Some(child) = self.next().map(|i| &self.children[i])
             && child.waits
@@ -723,6 +727,20 @@ impl Pass<'_> {
         if let Some(id) = self.owner(repo, n) {
             return Hold::Yes(format!("its own job {id} is still live"));
         }
+        // A bot's page was never one piece of work: its list ends, rather
+        // than pause for good on the bot's next edit.
+        if let Some(what) = super::maintained::maintained(parent) {
+            let Some(input) = self.input(repo, parent) else {
+                self.miss(repo);
+                return Hold::Unknown;
+            };
+            if !self.end_list(repo, n, &input) {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
+            eprintln!("proj-inbox: {repo}#{n} is {what}, so its task list ended");
+            return Hold::No;
+        }
         let Some(same) = self.verified_source(repo, parent) else {
             return Hold::Unknown;
         };
@@ -939,3 +957,7 @@ mod review_tests;
 #[cfg(test)]
 #[path = "plans_trust_tests.rs"]
 mod trust_tests;
+
+#[cfg(test)]
+#[path = "maintained_tests.rs"]
+mod maintained_tests;

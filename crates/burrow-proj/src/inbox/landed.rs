@@ -728,7 +728,7 @@ impl Pass<'_> {
                         PAUSED.to_owned(),
                         format!("{repo}#{parent}'s task list is paused"),
                         format!(
-                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
+                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split; an author ends it without closing the parent with `proj plan end {repo}#{parent}` (docs/task-planning.md). The list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
                         ),
                     ),
                 };
@@ -759,17 +759,18 @@ impl Pass<'_> {
         }
     }
 
-    /// `proj plan done`'s work, under the inbox's pass lock: `caller` is the
-    /// GitHub account it runs as. Answers the repo as its clone spells it.
-    pub(crate) fn plan_done(
+    /// What a `proj plan` door is asked about, `OWNER/REPO#N`: the repo as
+    /// its clone spells it (the plans are kept under that), and N. Refused
+    /// for a repo that isn't one of the machine's projects, and for a
+    /// caller, the GitHub account it runs as, that isn't one of the inbox's
+    /// authors.
+    pub(super) fn plan_door(
         &self,
-        child: &str,
-        pr: &str,
+        door: &str,
+        issue: &str,
         caller: Option<u64>,
-    ) -> Result<String, Fail> {
-        let usage = || Fail::new(2, PLAN_USAGE);
-        let (asked, n) = reference(child).ok_or_else(usage)?;
-        // The plans are kept under the repo as its clone spells it.
+    ) -> Result<(String, u64), Fail> {
+        let (asked, n) = reference(issue).ok_or_else(|| Fail::new(2, PLAN_USAGE))?;
         let repo = self
             .project
             .keys()
@@ -778,16 +779,30 @@ impl Pass<'_> {
             .ok_or_else(|| {
                 Fail::new(
                     1,
-                    format!("proj plan done: {asked} isn't one of this machine's projects"),
+                    format!("proj plan {door}: {asked} isn't one of this machine's projects"),
                 )
             })?;
-        let (at, m) = pull_url(pr).ok_or_else(usage)?;
         if !self.allowed(caller) {
             return Err(Fail::new(
                 1,
-                "proj plan done: only one of the inbox's authors may record a child's landed PR, and the GitHub account this runs as isn't one",
+                format!(
+                    "proj plan {door}: only one of the inbox's authors may change a task list, and the GitHub account this runs as isn't one"
+                ),
             ));
         }
+        Ok((repo, n))
+    }
+
+    /// `proj plan done`'s work, under the inbox's pass lock: `caller` is the
+    /// GitHub account it runs as. Answers the repo as its clone spells it.
+    pub(crate) fn plan_done(
+        &self,
+        child: &str,
+        pr: &str,
+        caller: Option<u64>,
+    ) -> Result<String, Fail> {
+        let (repo, n) = self.plan_door("done", child, caller)?;
+        let (at, m) = pull_url(pr).ok_or_else(|| Fail::new(2, PLAN_USAGE))?;
         if !self.is_child(&repo, n) {
             return Err(Fail::new(
                 1,
@@ -824,7 +839,7 @@ fn merged(issue: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) const PLAN_USAGE: &str = "usage: proj plan done OWNER/REPO#N PR-URL (an author records the merged PR that landed a task list's child)";
+pub(crate) const PLAN_USAGE: &str = "usage: proj plan done OWNER/REPO#N PR-URL (an author records the merged PR that landed a task list's child)\n       proj plan end OWNER/REPO#N (an author ends a parent's task list, leaving the parent open)";
 
 #[cfg(test)]
 mod parse_tests {
