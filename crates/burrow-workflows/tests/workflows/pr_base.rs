@@ -143,6 +143,7 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.gate-reuse", false.into()),
         ("inputs.gate-reuse-lookup", "".into()),
         ("inputs.negative-runner", "".into()),
+        ("inputs.flaky", false.into()),
     ]
 }
 
@@ -305,6 +306,13 @@ fn only_a_prs_newer_run_cancels() {
                     ..PUSHED
                 },
             ),
+            g(
+                name,
+                Run {
+                    inputs: &[("flaky", "true")],
+                    ..PUSHED
+                },
+            ),
         ];
         assert!(!others.contains(&g(name, PUSHED)), "{name}: {others:?}");
         let mut distinct = others.to_vec();
@@ -395,6 +403,59 @@ fn only_a_prs_newer_run_cancels() {
                 ),
                 pushed,
                 "{name} {action}"
+            );
+        }
+    }
+}
+
+/// Every input the workflow declares keys every job's group, so a new input
+/// can't be left out of one: two calls on one PR that differ only in it would
+/// otherwise cancel each other, and one of them never gives a result.
+/// `negative-runner` keys only the negative's (only_a_prs_newer_run_cancels
+/// holds it there), and `negative` none, as #1210 left it.
+#[test]
+fn every_input_keys_every_group() {
+    let jobs = jobs();
+    let declared = workflow(".github/workflows/flake-check.yml")["on"]["workflow_call"]["inputs"]
+        .as_mapping()
+        .unwrap()
+        .clone();
+    let known = inputs();
+    for (k, spec) in &declared {
+        let k = text(k);
+        if k == "negative" {
+            continue;
+        }
+        let (_, now) = known
+            .iter()
+            .find(|(n, _)| n.strip_prefix("inputs.") == Some(k))
+            .unwrap_or_else(|| panic!("no input {k} in inputs()"));
+        let other: &'static str = match (text(&spec["type"]), now) {
+            ("boolean", V::Bool(b)) => {
+                if *b {
+                    "false"
+                } else {
+                    "true"
+                }
+            }
+            ("number", _) => "7",
+            ("string", _) => "other",
+            (t, v) => panic!("{k}: a {t} as {v:?}"),
+        };
+        let inputs: &'static [(&'static str, &'static str)] = Box::leak(Box::new([(
+            Box::leak(k.to_owned().into_boxed_str()) as &str,
+            other,
+        )]));
+        let changed = Run { inputs, ..PUSHED };
+        // reuse's group is its run's own, but a run's calls share it.
+        for name in JOBS.iter().copied().chain(["reuse"]) {
+            if k == "negative-runner" && name != "negative" {
+                continue;
+            }
+            assert_ne!(
+                group(&jobs, name, &changed),
+                group(&jobs, name, &PUSHED),
+                "{name}'s group leaves out {k}"
             );
         }
     }
