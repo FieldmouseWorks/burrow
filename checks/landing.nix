@@ -155,7 +155,13 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   # config, as Conary's loaders read them, each repo reading its own, with
   # its own evidence.
   ${flowFiles} events ${pairTemplate} || fail "Conary's events::Runtime refuses remi's and Conary's events file"
-  ${flowFiles} flow ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} ${pairConfig "sam/vault"} || fail "Conary's flow::Config refuses remi's, Conary's or vault's flow config"
+  # The loader reads renovate-sweep's key (the example runs it) by the file
+  # each config names, which only the machine has: a stand-in here.
+  for f in ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} ${pairConfig "sam/vault"} ${askedConfig}; do
+    jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal"' $f >/dev/null \
+      || fail "$f doesn't name renovate-sweep's key by its file"
+  done
+  ${flowFiles} flow --stand-in-keys ${pairConfig "sam/remi"} ${pairConfig "sam/conary"} ${pairConfig "sam/vault"} || fail "Conary's flow::Config refuses remi's, Conary's or vault's flow config"
   for repo in sam/remi sam/conary sam/vault; do
     [ "$(jq -r --arg r $repo '.flow_config[$r]' ${pairTemplate})" = ${pair.burrow.autoland.flowConfigs}/$repo.json ] \
       || fail "$repo doesn't read its own flow config"
@@ -178,7 +184,7 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
     || fail "conaryd's flow doesn't ask through the owner's door: $(jq -c .review_ask ${askedConfig})"
   jq -e --argjson door '${builtins.toJSON { inherit (controlledDoor) command repos; }}' '.review_ask == $door' ${controlledConfig} >/dev/null \
     || fail "conaryd's flow, run by a controller of its own, doesn't ask through the owner's door: $(jq -c .review_ask ${controlledConfig})"
-  ${flowFiles} flow ${askedConfig} || fail "Conary's flow::Config refuses the owner's door"
+  ${flowFiles} flow --stand-in-keys ${askedConfig} || fail "Conary's flow::Config refuses the owner's door"
   jq -e 'has("review_ask") | not' ${on.burrow.autoland.flow.base}/sam/homelab.json >/dev/null \
     || fail "a flow config asks through a door the machine doesn't have"
   grep -q "${template}" ${lib.last (lib.splitString " " driver.serviceConfig.ExecStart)} || fail "burrow-landing doesn't write the rendered events file"

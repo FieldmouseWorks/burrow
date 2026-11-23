@@ -150,25 +150,21 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]"] and .settings.people == ["sam"]' ${noApp.plain} >/dev/null \
     || fail "without one, not the steward's authors and bots: $(jq -c .trusted_authors ${noApp.plain})"
   # Conary's own types: the configs rendered, and the class policy. The
-  # loader reads the key each names by its file (renovate-sweep's, which
-  # the example runs), which only the machine has: here a stand-in's.
-  printf '%064d' 0 > major-seal
-  loadable=()
+  # loader reads each key a config names by its file (renovate-sweep's, as
+  # the example runs it), which only the machine has: a stand-in here.
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
     jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal"' $f >/dev/null \
       || fail "$f doesn't name renovate-sweep's key by its file"
-    jq --arg k "$PWD/major-seal" '.settings.major_key_file = $k' $f > "loadable-''${#loadable[@]}.json"
-    loadable+=("loadable-''${#loadable[@]}.json")
   done
-  ${flowFiles} flow "''${loadable[@]}" || fail "Conary's flow::Config refuses a rendered config"
+  ${flowFiles} flow --stand-in-keys ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
   ${flowFiles} policy ${policy} || fail "Conary's Policy refuses the machine's class policy"
   # And they refuse what the machine's cn would: a key Conary doesn't know,
   # a value of the wrong type, a policy with a key it doesn't take.
-  jq '.settings.bogus = 1' loadable-0.json > key.json
-  jq '.settings.rounds = "two"' loadable-0.json > type.json
+  jq '.settings.bogus = 1' ${withApp.homelab} > key.json
+  jq '.settings.rounds = "two"' ${withApp.homelab} > type.json
   jq '. + {bogus: []}' ${policy} > policy.json
-  ! ${flowFiles} flow key.json || fail "a flow config with a key Conary doesn't know was taken"
-  ! ${flowFiles} flow type.json || fail "a flow config with a value of the wrong type was taken"
+  ! ${flowFiles} flow --stand-in-keys key.json || fail "a flow config with a key Conary doesn't know was taken"
+  ! ${flowFiles} flow --stand-in-keys type.json || fail "a flow config with a value of the wrong type was taken"
   ! ${flowFiles} policy policy.json || fail "a policy with a key Conary doesn't know was taken"
   touch $out
 ''
