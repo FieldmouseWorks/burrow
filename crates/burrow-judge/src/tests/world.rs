@@ -284,7 +284,6 @@ impl flow::Read for World {
             resolved_reviews: BTreeSet::new(),
             updated_at: 0,
             suites: BTreeMap::new(),
-            checks_complete: true,
             rebase_removed: vec![],
             timeline_cut_at: None,
             since: Default::default(),

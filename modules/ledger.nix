@@ -19,6 +19,8 @@ inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.ledger;
+  # The Conary burrow's crates link: the package is held to it.
+  conary = inputs.self.lib.conary;
   inherit (config.burrow) user;
   inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
@@ -240,10 +242,16 @@ in
 
     package = mkOption {
       type = types.package;
+      default = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.conary;
+      defaultText = lib.literalExpression "burrow.packages.\${system}.conary";
       description = ''
-        Conary, whose `cn` keeps the ledger (its flake's packages.default).
-        The package must carry its runtime tools, including git; units do
-        not supply them.
+        Conary, whose `cn` keeps the ledger. By default it's built at the rev
+        burrow's crates link (`burrow.lib.conary`, read from crates/Cargo.lock),
+        so the flow and the judge that checks it compute alike, and a bump of
+        that pin moves both. One given instead must be built from that rev
+        too: one that says its rev (`passthru.rev`, as a flake's packages from
+        burrow's lib.project do) and says another fails the build. It must
+        carry its runtime tools, including git; units do not supply them.
       '';
     };
 
@@ -656,6 +664,9 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [{
+      assertion = (cfg.package.rev or null) == null || cfg.package.rev == conary.rev;
+      message = "burrow.ledger.package is Conary at ${cfg.package.rev or ""}, but burrow's crates link Conary at ${conary.rev} (crates/Cargo.lock), so the judge would refuse what the flow sends it. Leave burrow.ledger.package at its default, which builds that rev, or build it from that rev.";
+    } {
       assertion = controller != null -> controller != user && controller != "root";
       message = "burrow.ledger.controllerUser: a user of its own, never burrow.user or root, or a producer would trust every authoring session.";
     } {

@@ -74,6 +74,9 @@ let
   } // (if rust == null then { } else rust);
   pyCfg = { dirs = [ "." ]; format = false; } // (if python == null then { } else python);
   rustDir = if rustCfg.dir == "." then self else self + "/${rustCfg.dir}";
+  # The commit the packages are built from: a dirty tree's says so, and a
+  # path with no git has none.
+  rev = self.rev or self.dirtyRev or null;
 
   # What the repo's rust-toolchain(.toml) asks for, as rust-overlay's
   # fromRustupToolchain takes it; without one, latest stable with rustfmt and
@@ -124,6 +127,8 @@ let
     cargoExtraArgs = "--locked --workspace";
     # The gate runs the tests.
     doCheck = false;
+    # The commit, for what holds a package to one (burrow.ledger.package).
+    passthru = { inherit rev; };
   } // runtime pkgs);
 
   # rust.members: each member with a binary, built alone. Its workspace is
@@ -519,8 +524,9 @@ let
       };
       cargoLockParsed = lockFor dirs;
       postPatch = "cp ${cargoToml} Cargo.toml";
-      # What it's built from, for the checks to read.
-      passthru = { inherit cargoToml; };
+      # What it's built from, for the checks to read, and the commit, for
+      # what holds a package to one (burrow.ledger.package).
+      passthru = { inherit cargoToml rev; };
       strictDeps = true;
       nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
       buildInputs = rustCfg.buildInputs pkgs;
@@ -546,6 +552,7 @@ let
       default = pkgs.symlinkJoin {
         name = "${rootToml.workspace.metadata.crane.name or "workspace"}-${rootToml.workspace.package.version or "0.0.0"}";
         paths = lib.attrValues members;
+        passthru = { inherit rev; };
       };
     };
 

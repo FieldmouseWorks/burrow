@@ -479,7 +479,10 @@ Each has an entry below, and each can be imported on its own.
   each repo's notes (`refs/notes/conary`), with session links only for the
   repos `sessionLinks` names. `cn why FILE:LINE` answers from the ledger here
   and from the notes in any other clone, and `cn verify` checks the ledger
-  against the anchor. With `daemon`, conaryd serves the ledger's calls on
+  against the anchor. Its `cn` and conaryd are Conary at the rev burrow's
+  crates link (`crates/Cargo.lock`, `burrow.lib.conary`), so the flow and
+  the judge that checks it compute alike: bumping that pin moves both, and a
+  `package` built from another rev fails the build. With `daemon`, conaryd serves the ledger's calls on
   `/run/conary/conaryd.sock`, read-only, as a user of its own, with no
   network, and every Claude of `burrow.user` gets them, and `why`, as the
   `conary` MCP server. With `door`, an issue labelled `undo` in the probe's

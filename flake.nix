@@ -34,10 +34,10 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      # The ledger's machines take Conary from its own flake; burrow's checks
-      # build theirs with a stand-in for its `cn`, which passes the files
-      # their build loads (`cn policy`, the shadow's `cn flow settings`) and
-      # nothing else.
+      # The ledger's machines take Conary at the rev burrow's crates link
+      # (packages.conary); burrow's checks build theirs with a stand-in for
+      # its `cn`, which passes the files their build loads (`cn policy`, the
+      # shadow's `cn flow settings`) and nothing else.
       cnStandIn = pkgs.writeShellScriptBin "cn" ''case "$1 $2" in "policy "*|"flow settings") exit 0;; esac; exit 1'';
       names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
       # Each module on its own, with only what it imports, in a check of its
@@ -146,6 +146,9 @@
       lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; };
       # An engine plugin's conformance check in its sandbox; see
       # lib/engine-conformance.nix.
+      # The Conary burrow's crates link (crates/Cargo.lock), and the ledger's
+      # package by default.
+      lib.conary = import ./lib/conary.nix { inherit (nixpkgs) lib; };
       lib.engineConformance = import ./lib/engine-conformance.nix { inherit self; };
 
       templates.default = {
@@ -167,6 +170,9 @@
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: builtins.removeAttrs p [ "default" ]) crates.packages)
         { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
+        # Conary at that pin: burrow.ledger.package's default, for every
+        # platform the crates are built for.
+        (nixpkgs.lib.mapAttrs (sys: _: { conary = (self.lib.conary.flake self { inherit rust-overlay; }).packages.${sys}.default; }) crates.packages)
       ];
 
       # A bare machine with every module on, for the checks and as an example.
