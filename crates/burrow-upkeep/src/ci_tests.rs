@@ -368,6 +368,28 @@ fn a_lost_runner_is_run_again_whole_once_then_named_the_machines() {
 }
 
 #[test]
+fn a_runner_that_lost_communication_is_run_again_too() {
+    // #1489's own `train / negative`, job 137975045560.
+    let mut h = Hub {
+        attempt: 1,
+        annotations: Some(json!([{"annotation_level": "failure", "message":
+            "The hosted runner lost communication with the server. Anything in your workflow \
+             that terminates the runner process, starves it for CPU/Memory, or blocks its \
+             network access can cause this error."}])),
+        conclusion: "failure",
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.names, ["train / negative (runner lost, run again)"]);
+    assert!(
+        h.asked
+            .iter()
+            .any(|(m, p)| m == "POST" && p.ends_with("/actions/runs/7/rerun"))
+    );
+}
+
+#[test]
 fn a_lost_runner_already_rerun_is_red_without_another_ask() {
     let mut h = Hub {
         attempt: 2,

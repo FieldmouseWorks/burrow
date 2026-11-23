@@ -115,12 +115,19 @@ pub fn rerun(p: &mut Pass, run: &str, how: Rerun) -> Result<Result<(), String>, 
     }
 }
 
-/// The one failure annotation GitHub leaves on a job whose runner was
-/// shut down under it (run 45213576258, both attempts): its process got
-/// SIGTERM, and the step wrote no verdict of its own. GitHub's "The runner
-/// has received a shutdown signal" is in the job's log, not its
-/// annotations.
-const RUNNER_GONE: [&str; 1] = ["Process completed with exit code 143."];
+/// Whether one failure annotation is GitHub's, saying the job's runner
+/// went away rather than the step failing, as the API gave them:
+/// - shut down under it (run 45213576258, both attempts): its process got
+///   SIGTERM and the step wrote no verdict of its own. GitHub's "The
+///   runner has received a shutdown signal" is in the job's log, not its
+///   annotations.
+/// - lost (job 137975045560, #1489's `train / negative`): "The hosted
+///   runner lost communication with the server. Anything in your workflow
+///   that terminates the runner process, ..."
+fn runner_gone(message: &str) -> bool {
+    message == "Process completed with exit code 143."
+        || message.starts_with("The hosted runner lost communication with the server.")
+}
 
 /// Whether a failed check run's annotations say only that its runner went
 /// away: at least one of GitHub's runner-gone messages, and no failure
@@ -130,8 +137,7 @@ fn runner_lost(annotations: &[Value]) -> bool {
         .iter()
         .filter(|a| a["annotation_level"] == "failure")
         .peekable();
-    failures.peek().is_some()
-        && failures.all(|a| text(&a["message"]).is_some_and(|m| RUNNER_GONE.contains(&m)))
+    failures.peek().is_some() && failures.all(|a| text(&a["message"]).is_some_and(runner_gone))
 }
 
 #[derive(Default)]
