@@ -17,7 +17,7 @@ fn offenders(source: &str, literal_only: bool) -> Vec<String> {
             .take_while(|c| *c != ')')
             .filter(|c| !c.is_whitespace())
             .collect();
-        let own = arg.contains("current_exe") || arg.contains("CARGO_BIN_EXE");
+        let own = arg.contains("current_exe") || arg.contains("program!(");
         if own || (literal_only && !arg.starts_with('"')) {
             let line = source[..at].matches('\n').count() + 1;
             found.push(format!("line {line}, Command::new starting {arg}"));
@@ -61,7 +61,7 @@ fn tests_start_proj_programs_without_the_job_environment() {
 #[test]
 fn the_scan_finds_what_main_had() {
     let host_jobs = "let mut command = Command::new(&cfg.me);";
-    let shared = "Command::new(env!(\"CARGO_BIN_EXE_burrow-proj\"))";
+    let shared = "Command::new(burrow_test::program!(\"burrow-proj\"))";
     let rerun = "std::process::Command::new(\n    std::env::current_exe().unwrap(),\n)";
     assert_eq!(
         offenders(host_jobs, true),

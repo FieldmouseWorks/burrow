@@ -83,7 +83,7 @@ impl Case {
             p.join("bin").display(),
             std::env::var("PATH").unwrap()
         );
-        let mut c = Command::new(env!("CARGO_BIN_EXE_burrow-flake-wait"));
+        let mut c = Command::new(burrow_test::program!("burrow-flake-wait"));
         c.current_dir(p)
             .env("PATH", path)
             .env("FAKE", p.join("fake"))

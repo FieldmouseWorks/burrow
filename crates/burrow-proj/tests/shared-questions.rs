@@ -61,7 +61,7 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
     let run = |args: &[&str]| {
         // Run from inside a job, a bare command's reply would go to the live
         // host through that job's bridge, not to this test's config.
-        let out = host_jobs::owner(env!("CARGO_BIN_EXE_burrow-proj").as_ref(), &config)
+        let out = host_jobs::owner(burrow_test::program!("burrow-proj").as_ref(), &config)
             .args(args)
             .output()
             .unwrap();

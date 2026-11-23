@@ -4,7 +4,7 @@
 
 use std::os::unix::fs::symlink;
 
-use crate::machine::{CONFIRM, Machine, ok, refused, said};
+use crate::machine::{Machine, confirm, ok, refused, said};
 
 /// Nothing a refusal may touch was run: systemctl only asked.
 fn untouched(m: &Machine) {
@@ -28,7 +28,7 @@ fn a_confirm_keeps_only_the_system_it_means() {
     // Another's switch replaced it: exit 4, and nothing changed.
     let m = Machine::switched(false);
     let (one, two, three) = (m.sys("one"), m.sys("two"), m.system("three", None));
-    let out = m.command(CONFIRM, &[&three]).output().unwrap();
+    let out = m.command(confirm(), &[&three]).output().unwrap();
     assert_eq!(
         said(&out),
         refused(
@@ -49,7 +49,7 @@ fn a_confirm_keeps_only_the_system_it_means() {
     let link = m.path("result");
     symlink(&two, &link).unwrap();
     let out = m
-        .command(CONFIRM, &[link.to_str().unwrap()])
+        .command(confirm(), &[link.to_str().unwrap()])
         .output()
         .unwrap();
     assert_eq!(said(&out), ok(&format!("confirmed: {two}\n")));
@@ -65,9 +65,9 @@ fn a_confirm_keeps_only_the_system_it_means() {
     }
     // Nothing pending: it's kept already when it's the confirmed one, and
     // isn't when it isn't (reverted, or another's was confirmed).
-    let out = m.command(CONFIRM, &[&two]).output().unwrap();
+    let out = m.command(confirm(), &[&two]).output().unwrap();
     assert_eq!(said(&out), ok(&format!("already confirmed: {two}\n")));
-    let out = m.command(CONFIRM, &[&three]).output().unwrap();
+    let out = m.command(confirm(), &[&three]).output().unwrap();
     assert_eq!(
         said(&out),
         refused(

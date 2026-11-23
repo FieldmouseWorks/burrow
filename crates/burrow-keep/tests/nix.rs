@@ -133,7 +133,7 @@ impl Case {
     /// A push's keep step: burrow-keep on `store`, after a gate whose step
     /// came out as `gate`, with `run/kept` holding what was restored.
     fn keep(&self, store: &str, run: &str, gate: &str) -> String {
-        let mut cmd = self.on(store, env!("CARGO_BIN_EXE_burrow-keep"), &[]);
+        let mut cmd = self.on(store, burrow_test::program!("burrow-keep"), &[]);
         cmd.args(["--gate", gate]).arg(self.path(run));
         self.run(cmd)
     }
@@ -321,7 +321,7 @@ fn a_push_whose_gate_failed_keeps_what_it_built() {
     assert!(!c.valid("s2", &check));
 
     // An outcome that isn't the gate's passing or failing keeps nothing.
-    let mut cmd = c.on("s1", env!("CARGO_BIN_EXE_burrow-keep"), &[]);
+    let mut cmd = c.on("s1", burrow_test::program!("burrow-keep"), &[]);
     cmd.args(["--gate", "skipped"]).arg(c.path("run1"));
     assert!(!cmd.output().unwrap().status.success());
     assert_eq!(c.cached("run1/kept"), kept);

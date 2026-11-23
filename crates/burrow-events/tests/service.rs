@@ -33,7 +33,7 @@ impl Service {
     fn start_on(dir: &Path, config: Value, credentials: &Path, socket: &TcpListener) -> Service {
         let path = dir.join("events.json");
         fs::write(&path, config.to_string()).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-events"))
+        let mut child = Command::new(burrow_test::program!("burrow-events"))
             .env("EVENTS_CONFIG", &path)
             .env("CREDENTIALS_DIRECTORY", credentials)
             .env(
@@ -325,7 +325,7 @@ fn no_socket() {
     let dir = tempfile::tempdir().unwrap();
     let (config, creds) = landing(dir.path(), 9);
     fs::write(dir.path().join("events.json"), config.to_string()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_burrow-events"))
+    let out = Command::new(burrow_test::program!("burrow-events"))
         .env("EVENTS_CONFIG", dir.path().join("events.json"))
         .env("CREDENTIALS_DIRECTORY", creds)
         .stdin(Stdio::null())

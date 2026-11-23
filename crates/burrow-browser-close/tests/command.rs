@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{Answer, DevTools, browser, nobody};
 
 fn run(args: &[&str], pid: Option<&str>) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_burrow-browser-close"));
+    let mut c = Command::new(burrow_test::program!("burrow-browser-close"));
     c.args(args).env_remove("MAINPID");
     if let Some(pid) = pid {
         c.env("MAINPID", pid);

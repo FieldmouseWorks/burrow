@@ -106,7 +106,7 @@ impl Machine {
     }
 
     fn run(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
+        let mut child = Command::new(burrow_test::program!("burrow-health"))
             .arg(self.path("config.json"))
             .args(args)
             .env("SYSTEMCTL_LOG", self.path("systemctl.log"))
@@ -298,7 +298,7 @@ fn output_it_cant_write_fails_it() {
         &[][..],
         &["compare", m.path("before").to_str().unwrap(), "0"],
     ] {
-        let ran = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
+        let ran = Command::new(burrow_test::program!("burrow-health"))
             .arg(m.path("config.json"))
             .args(args)
             .env("SYSTEMCTL_LOG", m.path("systemctl.log"))
@@ -523,13 +523,13 @@ fn what_it_cant_run() {
         assert_eq!(stdout(&ran), "", "{args:?}");
     }
     assert_eq!(m.read("systemctl.log"), "");
-    let ran = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
+    let ran = Command::new(burrow_test::program!("burrow-health"))
         .output()
         .unwrap();
     assert_eq!(ran.status.code(), Some(2));
     assert!(stderr(&ran).starts_with("usage: burrow-health CONFIG"));
     // A config it can't read, or with a field it doesn't know.
-    let ran = Command::new(env!("CARGO_BIN_EXE_burrow-health"))
+    let ran = Command::new(burrow_test::program!("burrow-health"))
         .arg(m.path("missing.json"))
         .output()
         .unwrap();

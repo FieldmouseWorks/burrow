@@ -89,7 +89,7 @@ impl Machine {
             stand_ins().display(),
             std::env::var("PATH").unwrap()
         );
-        let mut command = Command::new(env!("CARGO_BIN_EXE_house-sync"));
+        let mut command = Command::new(burrow_test::program!("house-sync"));
         command
             .arg(d.join("config.json"))
             .args(args)
@@ -212,12 +212,12 @@ fn what_it_cant_run() {
     ] {
         assert_eq!(m.run(args).status.code(), Some(2), "{args:?}");
     }
-    let ran = Command::new(env!("CARGO_BIN_EXE_house-sync"))
+    let ran = Command::new(burrow_test::program!("house-sync"))
         .output()
         .unwrap();
     assert_eq!(ran.status.code(), Some(2));
     // A config it can't read, or with a field it doesn't know.
-    let ran = Command::new(env!("CARGO_BIN_EXE_house-sync"))
+    let ran = Command::new(burrow_test::program!("house-sync"))
         .arg(m.dir.path().join("missing.json"))
         .output()
         .unwrap();

@@ -85,7 +85,7 @@ impl Machine {
             stand_ins().display(),
             std::env::var("PATH").unwrap()
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-notify"))
+        let mut child = Command::new(burrow_test::program!("burrow-notify"))
             .arg(self.path("config.json"))
             .args(args)
             .env("PATH", path)
@@ -161,7 +161,7 @@ fn anyone_else_runs_it_as_the_user() {
         format!(
             "-u sam -- env HOME={} BURROW_NOTIFY_AS_USER=1 {} {} open k1 Stuck It's stuck.\n",
             d.display(),
-            env!("CARGO_BIN_EXE_burrow-notify"),
+            burrow_test::program!("burrow-notify"),
             m.path("config.json").display()
         )
     );
@@ -245,12 +245,12 @@ fn what_it_cant_run() {
             "{args:?}"
         );
     }
-    let ran = Command::new(env!("CARGO_BIN_EXE_burrow-notify"))
+    let ran = Command::new(burrow_test::program!("burrow-notify"))
         .output()
         .unwrap();
     assert_eq!(ran.status.code(), Some(2));
     // A config it can't read, or with a field it doesn't know.
-    let ran = Command::new(env!("CARGO_BIN_EXE_burrow-notify"))
+    let ran = Command::new(burrow_test::program!("burrow-notify"))
         .arg(m.path("missing.json"))
         .args(["pending", "k1"])
         .output()
