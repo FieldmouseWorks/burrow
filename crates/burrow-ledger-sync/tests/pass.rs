@@ -136,6 +136,12 @@ fn a_full_pass_syncs_every_owners_repos_in_one_cn_sync() {
     assert_eq!(pass.calls("gh").len(), 2, "{:?}", pass.calls("gh"));
     // Each repo's line reaches the journal.
     assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 3);
+    // And the journal says how many calls the pass made.
+    assert!(
+        stderr(&out).contains("syncing 3 repos in one cn sync"),
+        "{}",
+        stderr(&out)
+    );
     // Set up, the ledger isn't set up again.
     let out = pass.run(&[]);
     assert!(passed(&out), "{}", stderr(&out));

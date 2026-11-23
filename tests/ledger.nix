@@ -135,6 +135,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /tmp/cn-calls")
         machine.succeed("systemctl start burrow-ledger.service")
         assert calls() == ["sync sam/a sam/b kim/c"], calls()
+        machine.succeed("journalctl -u burrow-ledger.service | grep -F 'syncing 3 repos in one cn sync'")
 
     with subtest("as the machine's own App, cn asks for each repo's token, and never has the user's login"):
         app.wait_for_unit("fake-github.service")

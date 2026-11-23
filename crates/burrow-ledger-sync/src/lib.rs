@@ -150,6 +150,8 @@ fn list(owner: &str) -> Result<Vec<String>, String> {
 /// line for takes its exit's word: 75, GitHub was unavailable before it got
 /// to it, else it failed.
 fn sync(wake: &Path, repos: &[String]) -> bool {
+    // What a pass's journal is read by for how many calls it made.
+    say!("syncing {} repos in one cn sync", repos.len());
     let mut child = match Command::new("cn")
         .arg("sync")
         .args(repos)
