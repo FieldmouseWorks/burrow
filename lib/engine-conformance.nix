@@ -87,25 +87,24 @@ pkgs.testers.runNixOSTest {
     dev("proj run demo call")
     host.wait_until_succeeds("test -e /tmp/calls.exit", timeout=LONG)
 
-    def done(what, engine=NAME):
+    # Every step's output first, so a failure shows all of them.
+    done = {}
+    for what, engine in [("check", NAME), *approvals.items(), ("holds", NAME)]:
         code = host.succeed(f"cat /tmp/{what}.exit").strip()
         out, err = host.succeed(f"cat /tmp/{what}.out"), host.succeed(f"cat /tmp/{what}.err")
         print(f"{what}: exit {code}\n{out}\n{err}")
-        if code != "0":
-            print(host.execute(f"journalctl --no-pager -t agent-plugin-{engine} | tail -n 100")[1])
-        return code, out, err
+        if code != "0" and what != "holds":
+            print(host.execute(f"journalctl --no-pager -t agent-plugin-{engine} | tail -n 60")[1])
+        done[what] = (code, err)
 
     with subtest("cn plugin check passes on the plugin, in its sandbox"):
-        code, out, err = done("check")
-        assert code == "0", err
+        assert done["check"][0] == "0", done["check"][1]
 
     with subtest("the fixture runs under the plugin's describe, as the plugin"):
-        for what, engine in approvals.items():
-            code, out, err = done(what, engine)
-            assert code == "0", err
+        for what in approvals:
+            assert done[what][0] == "0", done[what][1]
 
     with subtest("what the plugin declares works under its grant, and nothing else"):
-        code, out, err = done("holds")
-        assert code == "0", err
+        assert done["holds"][0] == "0", done["holds"][1]
   '';
 }
