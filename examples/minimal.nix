@@ -26,6 +26,11 @@
         # Dependabot keeps this one's own dependencies.
         followOnly = [ "sam/kept" ];
       };
+      # Its tools' Cargo pins on another repo's main, as their manifests say.
+      follow = {
+        enable = true;
+        manifests = [{ repo = "sam/homelab"; path = "tools/Cargo.toml"; }];
+      };
     };
     proj.enable = true;
     agents.enable = true;

@@ -1,0 +1,21 @@
+[package]
+name = "cargo-follow"
+description = "A Cargo pin on another repo's default branch moved to its head, when that changes what the pin's crates build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+burrow-github = { path = "../burrow-github" }
+serde.workspace = true
+serde_json.workspace = true
+toml = { version = "1.0", default-features = false, features = ["parse", "serde", "std"] }
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

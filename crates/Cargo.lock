@@ -531,6 +531,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-engine-antigravity"
+version = "0.0.0"
+dependencies = [
+ "boon",
+ "burrow-process",
+ "burrow-test",
+ "conary-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-engines-door"
 version = "0.0.0"
 dependencies = [
@@ -565,6 +578,7 @@ name = "burrow-example-plugin"
 version = "0.0.0"
 dependencies = [
  "burrow-grants",
+ "burrow-test",
  "conary-core",
  "serde",
  "serde_json",
@@ -782,6 +796,17 @@ dependencies = [
  "burrow-door",
  "burrow-github",
  "jiff 1.0.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-ledger-sync"
+version = "0.0.0"
+dependencies = [
+ "burrow-test",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -1079,6 +1104,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
+name = "cargo-follow"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "burrow-github",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1162,7 +1199,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=e3a1687b0d8b99c6b7e167a556c7099ae4f6d530#e3a1687b0d8b99c6b7e167a556c7099ae4f6d530"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1179,7 +1216,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=e3a1687b0d8b99c6b7e167a556c7099ae4f6d530#e3a1687b0d8b99c6b7e167a556c7099ae4f6d530"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
@@ -1221,9 +1258,9 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "percent-encoding",
  "time",

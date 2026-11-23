@@ -283,7 +283,7 @@ let
   # calls pass the steward's token in GH_TOKEN, which they use as given, and
   # the rest (`status`, a project's clone) go as the caller, its App's socket
   # in a job's env too.
-  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
+  stewardTools = [ config.burrow.tools.gh config.programs.git.package pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service. A pass gets its tools
   # however it's started: by its units, or by hand or a Claude job

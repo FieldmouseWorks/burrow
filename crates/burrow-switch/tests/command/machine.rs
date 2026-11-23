@@ -4,7 +4,9 @@
 //!
 //! The stand-ins act as much as the tests need: switch-to-configuration
 //! `test` makes its system the one that runs, systemd-run arms the revert's
-//! timer and runs what it's told to wait for, nix-env points the profile.
+//! timer and runs what it's told to wait for, nix-env points the profile,
+//! nix makes its out-link, and switch-to-configuration keeps what the
+//! switch's build roots held as it ran in FAKE/rooted.
 //! A file in FAKE makes one fail or answer otherwise.
 
 use std::fs;
@@ -166,7 +168,12 @@ exec "$@"
 PATH='@PATH@'
 echo "$*" >>"$FAKE/nix"
 [ ! -e "$FAKE/fail-nix" ] || exit 1
-cat "$FAKE/built"
+built=$(cat "$FAKE/built")
+while [ $# -gt 0 ]; do
+  [ "$1" != --out-link ] || ln -sfn "$built" "$2"
+  shift
+done
+echo "$built"
 "#,
     ),
     (
@@ -196,6 +203,9 @@ PATH='@PATH@'
 sys=${0%/bin/switch-to-configuration}
 name=${sys##*/}
 echo "$name $*" >>"$FAKE/switch-to-configuration"
+for root in "${FAKE%/fake}"/state/built/*/system; do
+  [ ! -L "$root" ] || readlink "$root" >>"$FAKE/rooted"
+done
 n=$(cat "$FAKE/locked-$name" 2>/dev/null || echo 0)
 if [ "$n" -gt 0 ]; then echo $((n - 1)) >"$FAKE/locked-$name"; exit 11; fi
 if [ -e "$FAKE/hang-$name" ]; then echo dead >"$FAKE/timer-state"; exit 1; fi

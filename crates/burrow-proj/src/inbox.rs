@@ -142,8 +142,8 @@ fn status(cfg: &Config, inbox: &Inbox) {
     }
 }
 
-pub(crate) use plans::plan;
-
+mod plan_door;
+pub use plan_door::plan;
 mod dirs;
 use dirs::dirs;
 mod forget;
@@ -882,6 +882,7 @@ mod drain;
 pub(crate) mod enrollment;
 pub(crate) use drain::job_paused;
 mod jobs;
+mod maintained;
 mod plans;
 pub(crate) mod resumption;
 mod retirement;

@@ -737,7 +737,7 @@ impl Pass<'_> {
                         PAUSED.to_owned(),
                         format!("{repo}#{parent}'s task list is paused"),
                         format!(
-                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split (docs/task-planning.md); the list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
+                            "{repo}#{parent} {CHANGED}, so its task list is paused and none of its children starts. It goes on once the parent is replanned from its new text, or its text is back as it was split; an author ends it without closing the parent with `proj plan end {repo}#{parent}` (docs/task-planning.md). The list and the work done on it are kept meanwhile. No replan starts while a live job's brief names the parent: `proj why {repo}#{parent}` names the job. A `Continued as` or `proj plan done` on a child is read once it goes on."
                         ),
                     ),
                 };
@@ -771,7 +771,7 @@ impl Pass<'_> {
 
 #[path = "plan_done.rs"]
 mod door;
-pub(crate) use door::plan;
+pub(crate) use door::PLAN_USAGE;
 
 /// A merged PR's URL, from its issue as REST gives it.
 fn merged(issue: &Value) -> Option<String> {

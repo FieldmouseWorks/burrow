@@ -10,6 +10,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod bound;
+mod end;
 mod place;
 pub(super) use place::{CHANGED, Place};
 
@@ -86,6 +87,9 @@ impl List {
                 (None, None) => String::new(),
             };
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
+        }
+        if self.tasks.is_empty() {
+            text.push_str("\nNo task is left on it, so none of its children starts.");
         }
         if let Some(child) = self.next().map(|i| &self.children[i])
             && child.waits
@@ -706,6 +710,14 @@ impl Pass<'_> {
         if !self.eligible(repo, parent) {
             return Hold::Yes("its parent isn't one the inbox may read".into());
         }
+        // An end begun and cut short is carried through first.
+        if self.ending(repo, n) {
+            if !self.finish_end(repo, n) {
+                self.miss(repo);
+                return Hold::Unknown;
+            }
+            return Hold::No;
+        }
         let bytes = match fs::read(d.join("tasks.json")) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Hold::No,
@@ -722,6 +734,23 @@ impl Pass<'_> {
         // whose brief merely mentions the parent doesn't own it.
         if let Some(id) = self.owner(repo, n) {
             return Hold::Yes(format!("its own job {id} is still live"));
+        }
+        // A bot's page was never one piece of work: its list ends, rather
+        // than pause for good on the bot's next edit.
+        if let Some(what) = super::maintained::maintained(parent) {
+            if let Some(why) = self.list_writer(repo, n) {
+                return Hold::Yes(format!("its list ends once nothing writes it: {why}"));
+            }
+            let Some(input) = self.input(repo, parent) else {
+                self.miss(repo);
+                return Hold::Unknown;
+            };
+            if !self.end_list(repo, n, &input) {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
+            eprintln!("proj-inbox: {repo}#{n} is {what}, so its task list ended");
+            return Hold::No;
         }
         let Some(same) = self.verified_source(repo, parent) else {
             return Hold::Unknown;
@@ -917,8 +946,7 @@ enum Hold {
 
 #[path = "landed.rs"]
 mod landed;
-pub(crate) use landed::plan;
-pub(super) use landed::{Closing, declared_done};
+pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
 use landed::{Now, Stall};
 
 #[cfg(test)]
@@ -944,3 +972,7 @@ mod review_tests;
 #[cfg(test)]
 #[path = "plans_trust_tests.rs"]
 mod trust_tests;
+
+#[cfg(test)]
+#[path = "maintained_tests.rs"]
+mod maintained_tests;

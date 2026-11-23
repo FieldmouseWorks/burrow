@@ -1,5 +1,5 @@
 //! `proj plan done` is the host's, for an author: from inside a job it
-//! refuses both forms before it reads anything (inbox/plan_done.rs).
+//! refuses both forms before it reads anything (inbox/plan_door.rs).
 use serde_json::json;
 use std::fs;
 
@@ -34,7 +34,7 @@ fn a_job_never_marks_a_child_done() {
         let said = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{form:?}: {said}");
         assert!(
-            said.contains("a job never records a child done"),
+            said.contains("a job never changes a task list"),
             "{form:?}: {said}"
         );
     }

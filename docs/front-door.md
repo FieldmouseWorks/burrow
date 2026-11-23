@@ -288,6 +288,10 @@ repo, changes nothing, and answers with a verdict the inbox carries out.
 | `duplicate #M` | closed as not planned, saying of what |
 | `done` | closed as completed, saying where |
 
+An issue whose body a bot maintains (Renovate's Dependency Dashboard, opened
+by a bot account) is labelled `tracker` without a job, and is never split or
+planned: the bot rewrites it every run (docs/task-planning.md).
+
 An answer with no verdict is `later`, saying so. A sorting job that ends with no
 answer at all (its engine refused it, say) leaves the issue as it was: it's
 sorted again once it changes, or once another issue's verdict shows sorting

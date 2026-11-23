@@ -100,7 +100,7 @@ pub fn parse(text: &str) -> Result<Vec<Task>, String> {
     Ok(tasks)
 }
 
-/// `OWNER/REPO#N`, as `proj await`, `proj plan done` and a task's
+/// `OWNER/REPO#N`, as `proj await`, `proj plan` and a task's
 /// `carries` take one.
 pub(crate) fn reference(s: &str) -> Option<(String, u64)> {
     let (repo, n) = s.trim().split_once('#')?;

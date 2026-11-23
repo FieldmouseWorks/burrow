@@ -112,7 +112,7 @@ let
       flock = "${pkgs.util-linux}/bin/flock";
       gh = lib.getExe cfg.gh;
       # gh as the jobs run it, for what proj does on GitHub as a job.
-      jobGh = lib.getExe (config.burrow.tools.gh or pkgs.gh);
+      jobGh = lib.getExe config.burrow.tools.gh;
       git = lib.getExe config.programs.git.package;
       systemctl = "${pkgs.systemd}/bin/systemctl";
       systemdRun = "${pkgs.systemd}/bin/systemd-run";

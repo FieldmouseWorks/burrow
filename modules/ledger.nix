@@ -163,69 +163,17 @@ let
   # count is the train's own, from `env`: one fact, one home.
   reuseConfig = pkgs.writeText "conary-gate-reuse.json" (builtins.toJSON reuse.settings);
 
+  # The pass (crates/burrow-ledger-sync), as a writer of the ledger: every
+  # owner's repos, or the one it's given, in one `cn sync`.
+  syncConfig = pkgs.writeText "burrow-ledger-sync.json" (builtins.toJSON {
+    inherit (cfg) owners;
+    inherit wake;
+  });
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
-    runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
+    runtimeInputs = [ cfg.package cfg.gh ];
     text = writer + ''
-      wake=${lib.escapeShellArg wake}
-      # Sets the ledger up, until set-up has finished: its last step keeps
-      # the anchor's copy beside the log. Run on a ledger that's set up, it
-      # checks the anchor's whole history on GitHub, a call per commit on
-      # it, and every sync adds one. A ledger whose key was lost fails here
-      # until the key is back, and sync refuses one whose anchor moved.
-      [ -e "$CONARY_LEDGER/anchor" ] || cn init >/dev/null
-
-      # GitHub couldn't be asked (its rate limit, its errors, the network;
-      # cn exits 75): the repo's pass is booked for five minutes on, and
-      # this one hasn't failed. A failed unit is for what retrying won't fix,
-      # which is what fails a switch that runs meanwhile. Only a booking
-      # written makes it no failure.
-      sync_repo() {
-        local rc=0
-        cn sync "$1" || rc=$?
-        [ "$rc" = 75 ] || return "$rc"
-        echo "$1: GitHub is unavailable; again in five minutes" >&2
-        book "$1" "$(($(date +%s) + 300))"
-      }
-
-      # Books a repo's next pass at a time. Every other repo's booking stays,
-      # however overdue: burrow-events reads the file only once this pass
-      # ends, and takes a booking only if it came after that repo's last
-      # pass started, so one already seen to is no pass. Runs as `x || y`
-      # does, without errexit, so each step says when it fails.
-      book() {
-        (
-          flock 9 || exit 1
-          booked='{}'
-          if [ -e "$wake" ]; then
-            # Exactly one object: jq reads a stream, so an empty file or
-            # two documents would pass a check of each one.
-            booked=$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one {repo: epoch}") end' "$wake") || exit 1
-          fi
-          jq -c --arg repo "$1" --argjson at "$2" '. + {($repo): $at}' <<<"$booked" >"$wake.new" || exit 1
-          mv -f "$wake.new" "$wake"
-        ) 9>>"$wake.lock"
-      }
-
-      if [ $# -gt 0 ]; then
-        sync_repo "$1"
-        exit
-      fi
-      # One repo or owner failing doesn't hold up the rest, but fails the pass.
-      failed=0
-      owners=(${lib.escapeShellArgs cfg.owners})
-      for owner in "''${owners[@]}"; do
-        if ! repos=$(gh repo list "$owner" --limit 1000 --no-archived --source --json nameWithOwner --jq '.[].nameWithOwner'); then
-          echo "couldn't list $owner's repos" >&2
-          failed=1
-          continue
-        fi
-        while read -r repo; do
-          [ -n "$repo" ] || continue
-          sync_repo "$repo" || { echo "couldn't sync $repo" >&2; failed=1; }
-        done <<<"$repos"
-      done
-      exit "$failed"
+      exec ${lib.getExe inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-ledger-sync} ${syncConfig} "$@"
     '';
   };
 in
@@ -793,8 +741,8 @@ in
         then "ledger: record every repo's PRs in Conary's ledger"
         else "ledger: record %I's PRs in Conary's ledger";
       # GitHub being unavailable isn't a failure: it books the repo's next
-      # pass (sync_repo). After the ledger's access, so what a first sync
-      # makes takes the directory's default entries.
+      # pass (crates/burrow-ledger-sync). After the ledger's access, so what
+      # a first sync makes takes the directory's default entries.
       after = [ "network-online.target" "burrow-ledger-access.service" ];
       wants = [ "network-online.target" ];
       serviceConfig = {

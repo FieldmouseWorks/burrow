@@ -191,6 +191,11 @@ impl Pass<'_> {
         {
             return true;
         }
+        // A bot's page is a tracker by rule, never by a job's verdict, and
+        // never planned: sorted once it's labelled so.
+        if super::maintained::maintained(issue).is_some() {
+            return labels.contains(&TRACKER);
+        }
         if self.inbox.planning && self.started_issue_job(Some(repo), &raw(&issue["number"])) {
             return true;
         }
@@ -246,6 +251,13 @@ impl Pass<'_> {
             let n = raw(&issue["number"]);
             if self.sorted(repo, &t, issue, &claimed) || handled.contains(&n) {
                 self.planner_wait(repo, &n, None);
+                continue;
+            }
+            if super::maintained::maintained(issue).is_some() {
+                self.planner_wait(repo, &n, None);
+                if !self.add_label(repo, &n, TRACKER) {
+                    self.miss(repo);
+                }
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -473,7 +485,14 @@ impl Pass<'_> {
                 stale = !Self::handed(&d, &now);
             }
             let mut failed = false;
-            if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
+            // A bot's page is sorted by rule, not by its verdict (one
+            // started before that held): it's stopped, and labelled below.
+            if !barred
+                && !stale
+                && open.is_some_and(|i| {
+                    !self.sorted(repo, t, i, &claimed) && super::maintained::maintained(i).is_none()
+                })
+            {
                 // The answer as its end kept it, with no GitHub call
                 // ([`super::settle`]); read now if it was never settled.
                 let answer = match super::settle::settled(&job) {
