@@ -172,7 +172,7 @@ on:
           gate on this exact tree: the push's tree, this workflow's
           repository, file and commit (by the commit's tree), and its inputs
           that can change a result (runner, install-nix, eval-apart, legs,
-          build-skip and keep-builds). Only a hit, the lookup answering this
+          build-skip, keep-builds and flaky). Only a hit, the lookup answering this
           request and naming a run of this repository, skips the gate: the
           job named check reports the pass, linking the run it reused, and
           builds, attests and keeps nothing. A miss, an error, an answer it
@@ -192,6 +192,15 @@ on:
           machine.
         type: string
         default: ''
+      flaky:
+        description: >-
+          Give a check that fails one more try, and file one that then
+          passes as a `flaky:` issue (docs/flaky-tests.md): the flaky
+          action's start step before each leg's gate and its file step
+          after, built with the runner's cargo. Needs issues write, which a
+          caller grants: a report it can't file fails the run.
+        type: boolean
+        default: false
 jobs:
   # Which gate a PR gets: none here when the train lands it (pr-gate off,
   # and its base is the default branch, compared as git compares refs: an
@@ -357,15 +366,17 @@ jobs:
           LEGS: ${{ inputs.legs }}
           SKIP: ${{ inputs.build-skip }}
           KEEP: ${{ inputs.keep-builds }}
+          FLAKY: ${{ inputs.flaky }}
         run: |
           commit=$(git -C .flake-check rev-parse 'HEAD^{commit}')
           [ "$commit" = "$WORKFLOW_SHA" ] || { echo "the workflow's checkout is $commit, not $WORKFLOW_SHA"; exit 1; }
           jq -cnS --arg repository "$WORKFLOW_REPOSITORY" --arg file "$WORKFLOW_FILE" --arg commit "$commit" \
             --arg tree "$(git -C .flake-check rev-parse 'HEAD^{tree}')" --arg runner "$RUNNER_LABEL" \
             --argjson nix "$INSTALL_NIX" --argjson apart "$APART" --argjson legs "$LEGS" --arg skip "$SKIP" --argjson keep "$KEEP" \
+            --argjson flaky "$FLAKY" \
             '{source: "tree", workflow: {$repository, $file, $commit, $tree},
               inputs: {$runner, "install-nix": $nix, "eval-apart": $apart, $legs,
-                       "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep}}' \
+                       "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep, $flaky}}' \
             > "$RUNNER_TEMP/gate.json"
           echo "this gate: $(cat "$RUNNER_TEMP/gate.json")"
       - id: lookup
@@ -538,6 +549,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/flake-check
+            .github/actions/flaky
             crates
       # gate-reuse: the gate this is, for the attestation to name.
       - *identity
@@ -613,6 +625,14 @@ jobs:
       # building what the store would have served of what it builds cold,
       # takes nothing from it, and keeps a flake's own nixConfig out of every
       # build, since the store gets what this leg builds (builds.rs).
+      # flaky: FLAKY_EXPIRED and FLAKY_REPORT for the gate, which gives a
+      # check that fails one more try (docs/flaky-tests.md), from this
+      # workflow's own commit (the tools checkout).
+      - id: flaky-start
+        if: inputs.flaky && needs.reuse.outputs.hit != 'true'
+        uses: ./.flake-check/.github/actions/flaky
+        with:
+          step: start
       - id: gate
         if: needs.reuse.outputs.hit != 'true'
         shell: bash
@@ -652,6 +672,15 @@ jobs:
         with:
           name: ${{ steps.leg.outputs.name }}
           path: ${{ runner.temp }}/flake.log
+      # flaky: what passed on its second try, filed. One it can't file fails
+      # the leg's job, which the gate job reads, and a pass whose report
+      # wasn't filed is signed an error (the subject step, next): an
+      # unrecorded flake is one nobody fixes.
+      - id: flaky-file
+        if: ${{ !cancelled() && inputs.flaky && steps.flaky-start.outcome == 'success' }}
+        uses: ./.flake-check/.github/actions/flaky
+        with:
+          step: file
       # The gate's result, signed with this job's own GitHub identity, in the
       # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
       # every repo's with the job's own token, whose audience names the digest
@@ -671,6 +700,7 @@ jobs:
         env: &subject-env
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
+          FILED: ${{ steps.flaky-file.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: &subject |
@@ -687,9 +717,11 @@ jobs:
               "error "?*) result=error why=${said#error } ;;
               *) result=error why="the gate ended without saying a check failed (the job's log has the last it said)" ;;
             esac
-            if [ "$result" = error ]; then
-              printf '\nflake-check: error: %s\n' "$why" >> "$RUNNER_TEMP/flake.log" || echo "no room to log why: $why"
-            fi
+          elif [ "$FILED" = failure ]; then
+            result=error why="its flaky checks' report couldn't be filed (docs/flaky-tests.md)"
+          fi
+          if [ "$result" = error ]; then
+            printf '\nflake-check: error: %s\n' "$why" >> "$RUNNER_TEMP/flake.log" || echo "no room to log why: $why"
           fi
           # Artifact names are shared by every job in a run, and a caller may
           # run this job more than once (a matrix, a re-run), so each job's

@@ -4,6 +4,7 @@
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
 mod builds;
+mod flaky;
 mod gate;
 mod memory;
 mod negative;

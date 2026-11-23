@@ -151,6 +151,28 @@ tests catching the base when the same check passes on the base and on the
 PR's head: a test that a wait ends waits forever on the code with that
 bug. Anything else about a timeout can't tell (#1212).
 
+## A check that flakes
+
+With `FLAKY_EXPIRED` and `FLAKY_REPORT` both set and not empty, the gate
+keeps the contract in [docs/flaky-tests.md](../../docs/flaky-tests.md#what-a-gate-does)
+for its checks (`src/flaky.rs`); unset, it builds as it always did. After
+the build fails, a check whose own derivation is the one left to build (its
+`nix-store --realise --dry-run` names it alone) is built once more on its
+own, in the slot it took, linked apart from its first try, and without the
+build store's shadow again. Its name is its attribute under
+`checks.SYSTEM` (`browser`). One that passes goes in the report, with the end of its
+first try's `nix log`, and counts as a pass; that pass is what the leg
+signs, its log holding both tries. A check that fails again, is named in
+`FLAKY_EXPIRED`, has a name the flaky tool refuses, or failed because a
+derivation it needs did (a build that broke, not a test), fails the gate
+as before. The planner (`cold`) and the negative run give no second try.
+
+The workflow's `flaky` input (off by default) runs the flaky action's
+`start` step before each leg's gate and its `file` step after, from the
+workflow's own commit, so the caller grants `issues: write`. A leg whose
+report can't be filed fails, and a pass it signs is then an `error`
+("A gate that breaks"). A gate-reuse hit runs neither: it builds nothing.
+
 ## A failure the negative tree made
 
 The negative tree is the base's code with the head's version of each test
@@ -241,7 +263,7 @@ one step shared by every job that needs it, says which gate a run is.
 sorted:
 
 ```json
-{"inputs":{"build-skip":["agents"],"eval-apart":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
+{"inputs":{"build-skip":["agents"],"eval-apart":true,"flaky":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
  "source":"tree","workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
 ```
 
