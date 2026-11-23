@@ -198,12 +198,17 @@
             // nixpkgs.lib.listToAttrs (map (name: nixpkgs.lib.nameValuePair "standalone-${name}" (standalone name)) names)
             // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
             // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+              let
+                # A project's testFiles are from its own root; burrow's
+                # negative run reads them from burrow's.
+                at = dir: nixpkgs.lib.mapAttrs (_: c: if c ? testFiles then c // { testFiles = map (g: "${dir}/${g}") c.testFiles; } else c);
+              in
               # lib/project.nix's own gates, on the smallest projects that have them.
-              (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
+              at "tests/house/rust" (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
               // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
-                (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
-              // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
-              // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") houseInclude.checks.${system}
+                (at "tests/house/rust-native" (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system})
+              // at "tests/house/python" (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
+              // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") (at "tests/house/rust-include" houseInclude.checks.${system})
             );
           twice = builtins.attrNames (builtins.intersectAttrs own made);
         in

@@ -92,6 +92,11 @@ impl Repo {
     /// The same, with t's attributes past its derivation's (`{ testFiles
     /// = [ ]; }`, say) as this Nix expression.
     fn declaring(t_extra: &str) -> Repo {
+        Repo::holding(t_extra, &[])
+    }
+
+    /// The same, with these files on main too.
+    fn holding(t_extra: &str, files: &[(&str, &str)]) -> Repo {
         let g = Gate::new();
         let origin = g.dir();
         let system = &g.system;
@@ -133,6 +138,9 @@ impl Repo {
             &origin.join("tests/check.nix"),
             "{ drv }: drv \"fromtests\" [ ]\n",
         );
+        for (f, text) in files {
+            write(&origin.join(f), text);
+        }
         g.s.git(&origin, &["init", "-q"]);
         g.s.git(&origin, &["add", "-A"]);
         g.s.git(&origin, &["commit", "-qm", "main"]);

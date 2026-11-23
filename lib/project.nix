@@ -655,6 +655,15 @@ let
       rust-test = craneLib.cargoTest (common // {
         inherit cargoArtifacts;
         nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ rustCfg.testInputs pkgs;
+        # It reads the whole directory, but runs only its packages' tests
+        # and the fixtures beside them (lib/rust-test-files.nix).
+        passthru.testFiles = import ./rust-test-files.nix {
+          root = rustDir;
+          prefix = if rustCfg.dir == "." then "" else rustCfg.dir;
+          packages = map (d: if d == rustRoot then "" else lib.removePrefix "${rustRoot}/" d)
+            (builtins.filter (d: d != rustRoot || rootToml ? package) cargoDirs);
+          inherit (rustCfg) include;
+        };
         # A crate's test executables, built as rust-test builds them but not
         # run: `rust-test.testBinaries "CRATE"`, each in bin/, for a check
         # that runs the tests a Nix build can't (#[ignore]d, with
