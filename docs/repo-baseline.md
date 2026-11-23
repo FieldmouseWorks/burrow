@@ -189,7 +189,12 @@ root only.
    branch is deleted. A check run cancelled with nothing run through since
    (its runner shut down under it, say) is run again once, and CI is pending
    meanwhile. Cancelled again on the same head, it is red, the head's to fix
-   like a hang: a Claude job takes it. One GitHub stopped at its job's
+   like a hang: a Claude job takes it. A check run that failed only because
+   its runner was lost (GitHub's exit 143, and no error of the step's own)
+   is likewise pending and run again once, whole when it's a called
+   workflow's, so it runs that workflow's current copy; lost again, it is
+   red, named "the runner was lost again after a rerun": the machine's, not
+   the head's. One GitHub stopped at its job's
    `timeout-minutes` (its annotation says so) is red at once. In a repo with its merge train on (`train`), it goes
    into the train instead, CI on the PR itself optional: Conary's `cn train`
    merges the PRs in the train onto the default branch together, has CI run
