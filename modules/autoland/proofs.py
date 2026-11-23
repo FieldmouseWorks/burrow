@@ -260,9 +260,6 @@ def merged(repo, pr, checks, st, tip):
     attrs = C.repo_cfg(repo)["proofBuilds"]
     if not tip or not evaluable(repo, checks):
         return None
-    left = pass_left()
-    if left is not None and left < MERGED_MIN:
-        return None  # optional: the pass has no time for its eval, the next one tries
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     key = [head, tip, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("mergedOutputs")
@@ -270,6 +267,9 @@ def merged(repo, pr, checks, st, tip):
         return got["paths"]
     if C.DRY:
         return None
+    left = pass_left()
+    if left is not None and left < MERGED_MIN:
+        return None  # optional: the pass has no time for its eval, the next one tries
     paths, failed = None, True
     try:
         mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
