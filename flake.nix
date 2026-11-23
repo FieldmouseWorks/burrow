@@ -144,6 +144,9 @@
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
       lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; };
+      # An engine plugin's conformance check in its sandbox; see
+      # lib/engine-conformance.nix.
+      lib.engineConformance = import ./lib/engine-conformance.nix { inherit self; };
 
       templates.default = {
         path = ./templates/project;

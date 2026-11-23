@@ -527,7 +527,9 @@ Each has an entry below, and each can be imported on its own.
   ([a plugin's grants](docs/engines.md#a-plugins-grants)). A VM for one engine gets none
   of another's. An engine's `plugin` runs in
   [a VM of its own per call](docs/engines.md#a-plugins-sandbox), as
-  `agent-plugin-NAME`, with its grants and nothing else. `agent fetch` runs
+  `agent-plugin-NAME`, with its grants and nothing else, and passes
+  [its conformance check](docs/engines.md#a-plugins-conformance-check)
+  (`lib.engineConformance`) there. `agent fetch` runs
   git confined to the sandbox's clone and the project's repository, so a
   link planted in a clone reaches nothing else. Idle ones stop after a day
   and are saved and deleted after a week. Opt-in per task.
@@ -753,4 +755,8 @@ its own packages, credential and hosts. Its other half
 (`tests/agents-plugins.nix`, `.#checks.x86_64-linux.agents.entries.plugins`
 alone) runs the example plugin (`crates/burrow-example-plugin`) through
 Conary's runner: each grant works, and without it isn't there for the VM's
-root either.
+root either. Its third (`.#checks.x86_64-linux.agents.entries.conformance-example`)
+is the example's [conformance check](docs/engines.md#a-plugins-conformance-check):
+`lib.engineConformance` builds one for any engine's plugin, and the check
+an engine adds there runs `cn plugin check` on it in its sandbox and holds
+it to what it declares.
