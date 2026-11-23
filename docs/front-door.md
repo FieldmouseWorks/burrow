@@ -247,6 +247,12 @@ into project jobs.
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
   have the box user's permissions.
+- **Task lists:** a parent split into children moves on as each child is
+  done ([task planning](task-planning.md)). When no pass can tell, an author
+  records it from the host, never from a job: `proj plan done OWNER/REPO#N
+  PR-URL` for a merged PR that landed it some other way, or `proj plan done
+  OWNER/REPO#N --no-pr REASON` for a closed child whose record was the
+  deliverable.
 - Jobs are headless (`claude -p`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.

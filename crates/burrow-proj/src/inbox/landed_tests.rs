@@ -527,7 +527,7 @@ fn a_closing_reference_from_another_repo_advances_the_list() {
 /// issue is made and dropped once it's closed, which `pending` reads; the
 /// issue itself (`notices.d/KEY`) made unless `ensure-fails` is there,
 /// closed unless `close-fails` is. Either failing still exits 0.
-fn notifier(b: &mut Box) {
+pub(super) fn notifier(b: &mut Box) {
     let notify = b.path("notify");
     let at = b.path("notices.d");
     fs::create_dir_all(&at).unwrap();
@@ -544,7 +544,7 @@ fn notifier(b: &mut Box) {
     b.cfg.notify = Some(notify);
 }
 
-fn notice_open(b: &Box) -> bool {
+pub(super) fn notice_open(b: &Box) -> bool {
     b.path("notices.d/proj-plan-sam_box-7").exists()
 }
 
