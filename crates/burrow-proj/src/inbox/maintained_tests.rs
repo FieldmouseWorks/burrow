@@ -228,3 +228,89 @@ fn an_author_ends_a_paused_list_without_closing_its_parent() {
         "nothing left to end"
     );
 }
+
+/// Parent 7's list, as [`parent_fixture`] has it, paused by an edit, its
+/// notice open: the parent as GitHub has it.
+fn paused_list() -> (Box, Value) {
+    let (mut b, mut parent, _) = parent_fixture();
+    notifier(&mut b);
+    parent["body"] = json!("Changed scope");
+    parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(b.pass().paused("sam/box", "7") && notice_open(&b));
+    (b, parent)
+}
+
+// An end GitHub cuts short (its checklist, here) stays begun: each pass,
+// or asking again, carries it through, rather than leave a list with no
+// task, still paused, its notice open and nothing to retry it.
+#[test]
+fn an_end_github_cuts_short_is_finished_later() {
+    let (b, parent) = paused_list();
+    let author = burrow_github::fake::author("sam").id;
+    fs::write(b.path("fail"), "issues/comments/100\n").unwrap();
+    assert!(b.pass().plan_end("sam/box#7", Some(author)).is_err());
+    assert!(stored(&b).tasks.is_empty(), "part of it held");
+    assert!(b.pass().ending("sam/box", "7"));
+    assert!(b.pass().paused("sam/box", "7") && notice_open(&b));
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(b.pass().ending("sam/box", "7"), "GitHub still refuses");
+    let again = b.pass().plan_end("sam/box#7", Some(author)).unwrap_err();
+    assert!(
+        !again.say.unwrap_or_default().contains("no task list"),
+        "asking again isn't refused"
+    );
+    fs::remove_file(b.path("fail")).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!b.pass().ending("sam/box", "7"));
+    assert!(!b.pass().paused("sam/box", "7"));
+    assert!(!notice_open(&b));
+    assert!(b.log().contains("No task is left on it"));
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    assert!(
+        b.pass().sorted("sam/box", &t, &parent, &Default::default()),
+        "the text it ended on is kept"
+    );
+}
+
+// Nothing ends a list something could still write back: the parent's own
+// job with a split pending, or a sorting verdict being carried out. The
+// door refuses, and a dashboard's list waits for it.
+#[test]
+fn a_list_something_could_still_write_isnt_ended() {
+    let author = burrow_github::fake::author("sam").id;
+    for writer in ["worker", "sorting"] {
+        for dash in [false, true] {
+            let (b, parent) = if dash {
+                let (mut b, _) = split_dashboard();
+                let edited = renovate_edits(&mut b);
+                (b, edited)
+            } else {
+                paused_list()
+            };
+            let state = b.cfg.inbox.as_ref().unwrap().state.clone();
+            let d = match writer {
+                "worker" => files::worker(&state, "sam_box", "7"),
+                _ => files::sorting(&state, "sam_box", "7"),
+            };
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join(files::File::Job), "w1\n").unwrap();
+            if writer == "worker" {
+                let at = b.pass().plan_dir("sam/box", "7").join("worker-split");
+                fs::write(at, "pending\n").unwrap();
+            }
+            if dash {
+                b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+            } else {
+                let refused = b.pass().plan_end("sam/box#7", Some(author)).unwrap_err();
+                assert!(
+                    refused.say.unwrap_or_default().contains("nothing changed"),
+                    "{writer}"
+                );
+            }
+            assert_eq!(stored(&b).tasks.len(), 2, "{writer} {dash}");
+            assert!(!b.pass().ending("sam/box", "7"), "{writer} {dash}");
+        }
+    }
+}

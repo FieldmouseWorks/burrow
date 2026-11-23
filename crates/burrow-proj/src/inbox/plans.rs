@@ -710,6 +710,14 @@ impl Pass<'_> {
         if !self.eligible(repo, parent) {
             return Hold::Yes("its parent isn't one the inbox may read".into());
         }
+        // An end begun and cut short is carried through first.
+        if self.ending(repo, n) {
+            if !self.finish_end(repo, n) {
+                self.miss(repo);
+                return Hold::Unknown;
+            }
+            return Hold::No;
+        }
         let bytes = match fs::read(d.join("tasks.json")) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Hold::No,
@@ -730,6 +738,9 @@ impl Pass<'_> {
         // A bot's page was never one piece of work: its list ends, rather
         // than pause for good on the bot's next edit.
         if let Some(what) = super::maintained::maintained(parent) {
+            if let Some(why) = self.list_writer(repo, n) {
+                return Hold::Yes(format!("its list ends once nothing writes it: {why}"));
+            }
             let Some(input) = self.input(repo, parent) else {
                 self.miss(repo);
                 return Hold::Unknown;
