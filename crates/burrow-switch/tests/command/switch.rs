@@ -194,13 +194,20 @@ fn a_switch_builds_the_flake_as_its_owner() {
         "{:?}",
         said(&out)
     );
+    let (nix, link) = rooted(&m.fake("nix"));
     assert_eq!(
-        m.fake("nix"),
+        nix,
         format!(
-            "build --no-link --print-out-paths {}#nixosConfigurations.box.config.system.build.toplevel\n",
+            "build --print-out-paths --out-link ROOT {}#nixosConfigurations.box.config.system.build.toplevel\n",
             m.path("flake").display()
         )
     );
+    // A root of its own, held while it activates (a collection while it
+    // waits for the lock would take the system away), gone once it's live.
+    let built = m.path("state/built");
+    assert!(link.starts_with(&format!("{}/", built.display())), "{link}");
+    assert_eq!(m.fake("rooted"), format!("{two}\n"));
+    assert_eq!(fs::read_dir(&built).unwrap().count(), 0);
     // Its own checkout: as itself.
     assert_eq!(m.fake("runuser"), "");
     // A link to it: built where it leads.
@@ -208,7 +215,7 @@ fn a_switch_builds_the_flake_as_its_owner() {
     let out = m.switch(&[m.path("link").to_str().unwrap()]);
     assert_eq!(said(&out), ok(&format!("already running {two}\n")));
     assert_eq!(
-        m.fake("nix"),
+        rooted(&m.fake("nix")).0,
         m.which(&m.path("flake").display().to_string())
             .split_once(' ')
             .unwrap()
@@ -233,22 +240,35 @@ fn a_switch_builds_the_flake_as_its_owner() {
     let out = m.switch(&["/"]);
     assert_eq!(said(&out).0, Some(0), "{:?}", said(&out));
     let nix = m.which("/").to_string();
-    assert_eq!(m.fake("runuser"), format!("-u {owner} -- {nix}"));
+    assert_eq!(rooted(&m.fake("runuser")).0, format!("-u {owner} -- {nix}"));
     // A build that fails puts nothing live.
     m.set("fail-nix", "");
     let out = m.switch(&[]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(said(&out).2.contains(" build --no-link --print-out-paths "));
+    assert!(
+        said(&out)
+            .2
+            .contains(" build --print-out-paths --out-link ")
+    );
     assert!(said(&out).2.ends_with(": exit status: 1\n"));
     assert_eq!(m.running(), m.sys("three"));
+    assert_eq!(fs::read_dir(&built).unwrap().count(), 0);
+}
+
+/// A build's words with the root it made said as ROOT (each switch's is
+/// its own), and that root.
+fn rooted(words: &str) -> (String, String) {
+    let (before, after) = words.split_once("--out-link ").unwrap();
+    let (link, rest) = after.split_once(' ').unwrap();
+    (format!("{before}--out-link ROOT {rest}"), link.to_string())
 }
 
 impl Machine {
     /// What the switch runs the build of the flake in `dir` with, after
-    /// runuser's words.
+    /// runuser's words, its root said as ROOT.
     fn which(&self, dir: &str) -> String {
         format!(
-            "{} build --no-link --print-out-paths {dir}#nixosConfigurations.box.config.system.build.toplevel\n",
+            "{} build --print-out-paths --out-link ROOT {dir}#nixosConfigurations.box.config.system.build.toplevel\n",
             crate::machine::bin().join("nix").display()
         )
     }
