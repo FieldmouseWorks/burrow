@@ -13,7 +13,7 @@ fn hook(config: &str, input: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_burrow-guard"))
+    let mut child = Command::new(burrow_test::program!("burrow-guard"))
         .arg(&path)
         .env("XDG_RUNTIME_DIR", dir.path())
         .stdin(Stdio::piped())

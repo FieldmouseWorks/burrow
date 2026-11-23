@@ -48,7 +48,7 @@ impl Unit {
             lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
         )
         .unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-heartbeat"));
+        let mut cmd = Command::new(burrow_test::program!("burrow-heartbeat"));
         cmd.arg(&self.config)
             .env("CREDENTIALS_DIRECTORY", &self.creds)
             .env("RUNTIME_DIRECTORY", &self.run)
@@ -205,7 +205,7 @@ fn outside_its_unit_it_says_so() {
 #[test]
 fn what_it_cant_run() {
     let unit = Unit::new(&common::nobody());
-    let bin = Path::new(env!("CARGO_BIN_EXE_burrow-heartbeat"));
+    let bin = Path::new(burrow_test::program!("burrow-heartbeat"));
     assert_eq!(
         Command::new(bin).output().unwrap().status.code(),
         Some(2),

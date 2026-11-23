@@ -40,7 +40,10 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}/../../../crates
       env:
+        # Its intermediates too, which .cargo's build-dir would put in
+        # the checkout.
         CARGO_TARGET_DIR: ${{ runner.temp }}/house-build
+        CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/house-build
       run: cargo build --release --locked --quiet -p burrow-house
     - name: Check the PR
       shell: bash

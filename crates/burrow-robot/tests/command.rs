@@ -44,7 +44,7 @@ impl Box {
     /// robot with these words, asking `url`, with nothing of the caller's
     /// ROBOT_ variables or proxies.
     fn robot(&self, url: &str, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-robot"));
+        let mut cmd = Command::new(burrow_test::program!("burrow-robot"));
         cmd.arg(&self.config).args(args).env("ROBOT_URL", url);
         for var in [
             "ROBOT_USER",
@@ -384,7 +384,7 @@ fn what_it_cant_run() {
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert_eq!(said(&out), (String::new(), said_.to_owned()), "{args:?}");
     }
-    let bin = env!("CARGO_BIN_EXE_burrow-robot");
+    let bin = burrow_test::program!("burrow-robot");
     assert_eq!(Command::new(bin).output().unwrap().status.code(), Some(2));
     let extra = b.config.with_file_name("extra.json");
     fs::write(

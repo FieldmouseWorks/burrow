@@ -14,8 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-pub const SWITCH: &str = env!("CARGO_BIN_EXE_burrow-switch");
-pub const CONFIRM: &str = env!("CARGO_BIN_EXE_burrow-confirm");
+pub fn switch() -> &'static str {
+    burrow_test::program!("burrow-switch")
+}
+pub fn confirm() -> &'static str {
+    burrow_test::program!("burrow-confirm")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 pub fn bin() -> &'static Path {
@@ -329,11 +333,11 @@ impl Machine {
     }
 
     pub fn switch(&self, words: &[&str]) -> Output {
-        self.command(SWITCH, words).output().unwrap()
+        self.command(switch(), words).output().unwrap()
     }
 
     pub fn confirm(&self) -> Output {
-        self.command(CONFIRM, &[]).output().unwrap()
+        self.command(confirm(), &[]).output().unwrap()
     }
 
     /// How the stand-in `name` was run, since it was last asked.
@@ -353,7 +357,7 @@ impl Machine {
     pub fn me(&self) -> String {
         format!(
             "{} {}",
-            fs::canonicalize(SWITCH).unwrap().display(),
+            fs::canonicalize(switch()).unwrap().display(),
             self.path("config.json").display()
         )
     }

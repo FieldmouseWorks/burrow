@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-const BIN: &str = env!("CARGO_BIN_EXE_burrow-update");
+fn program() -> &'static str {
+    burrow_test::program!("burrow-update")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
@@ -89,7 +91,7 @@ impl Machine {
             "update": "box-update", "host": "box", "state": m.path("state"), "work": m.path("scratch/work"),
             "user": "sam", "home": m.path("home"), "uid": 1000, "runuser": b.join("runuser"), "path": "/b",
             "configuration": "box", "system": "x86_64-linux", "heavy": null,
-            "program": BIN, "project": "homelab", "app": null, "train": null,
+            "program": program(), "project": "homelab", "app": null, "train": null,
             "origin": "https://github.com/sam/homelab", "flake": m.path("operator"),
             "group": "users", "owner": "Sam", "manifest": null,
             "releases": "https://downloads.example/claude", "checks": ["vm"],
@@ -113,7 +115,7 @@ impl Machine {
     /// through sudo wherever the tests run: as nobody, when they run as
     /// root.
     fn command(&self, words: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
+        let mut c = Command::new(program());
         c.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"));
@@ -163,7 +165,7 @@ fn a_work_limit_it_cant_read_exits_2_rather_than_running_with_none() {
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new();
-    let out = Command::new(BIN).output().unwrap();
+    let out = Command::new(program()).output().unwrap();
     assert_eq!(
         said(&out),
         (
@@ -172,7 +174,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
             "usage: burrow-update CONFIG [--force | status]\n".into()
         )
     );
-    let out = Command::new(BIN)
+    let out = Command::new(program())
         .arg(m.path("none.json"))
         .arg("status")
         .output()
@@ -231,8 +233,9 @@ fn status_goes_through_sudo_for_anyone_else() {
     assert_eq!(
         m.fake("sudo"),
         format!(
-            "-- {BIN} {} __through-sudo status\n",
-            m.path("config.json").display()
+            "-- {program} {} __through-sudo status\n",
+            m.path("config.json").display(),
+            program = program()
         )
     );
     assert_eq!(
@@ -322,7 +325,7 @@ fn unless_moved_runs_its_command_only_while_main_is_where_it_was() {
     let main = lands(&other, "one");
     let work = d.join("work");
     let word = |words: &[&str]| {
-        Command::new(BIN)
+        Command::new(program())
             .arg("unless-moved")
             .arg(&work)
             .args(words)

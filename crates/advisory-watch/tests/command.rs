@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const BIN: &str = env!("CARGO_BIN_EXE_advisory-watch");
+fn program() -> &'static str {
+    burrow_test::program!("advisory-watch")
+}
 
 use burrow_test::executable as script;
 
@@ -276,7 +278,7 @@ impl Machine {
 
     /// It, as root starts it.
     fn command(&self, words: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
+        let mut c = Command::new(program());
         c.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"))
@@ -715,8 +717,9 @@ fn a_pass_started_as_anyone_else_goes_through_sudo() {
     assert_eq!(
         m.fake("sudo"),
         format!(
-            "-- {BIN} {} __through-sudo\n",
-            m.path("config.json").display()
+            "-- {program} {} __through-sudo\n",
+            m.path("config.json").display(),
+            program = program()
         )
     );
     assert_eq!(m.seen().len(), 3);
@@ -796,7 +799,7 @@ fn usage() {
         assert_eq!(out.status.code(), Some(2), "{words:?}");
         assert_eq!(stderr(&out), "usage: advisory-watch [report]\n");
     }
-    let out = Command::new(BIN).output().unwrap();
+    let out = Command::new(program()).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(stderr(&out), "usage: advisory-watch CONFIG [report]\n");
     let mut config: serde_json::Value =

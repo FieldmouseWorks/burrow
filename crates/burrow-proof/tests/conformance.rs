@@ -25,7 +25,7 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
         &plugin,
         format!(
             "#!/bin/sh\nexec {} plugin {}\n",
-            env!("CARGO_BIN_EXE_burrow-proof-plugin"),
+            burrow_test::program!("burrow-proof-plugin"),
             config.display()
         ),
     );

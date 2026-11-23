@@ -440,6 +440,7 @@ name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "burrow-test",
  "rustix",
  "serde_json",
 ]
@@ -969,6 +970,7 @@ name = "burrow-units"
 version = "0.0.0"
 dependencies = [
  "burrow-events",
+ "burrow-test",
  "burrow-watchdog",
  "serde",
  "serde_json",
