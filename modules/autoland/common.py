@@ -97,14 +97,9 @@ def pass_deadline(seconds):
         REMOTE_DEADLINE = previous
 
 
-def pass_left():
-    """Seconds the pass has left before its own deadline, None outside one."""
-    return None if REMOTE_DEADLINE is None else REMOTE_DEADLINE - time.monotonic()
-
-
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
     if REMOTE_DEADLINE is not None:
-        remaining = pass_left()
+        remaining = REMOTE_DEADLINE - time.monotonic()
         timeout = remaining if timeout is None else min(timeout, remaining)
         if timeout <= 0:
             raise Unavailable("pass remote-call deadline reached")

@@ -144,6 +144,11 @@ def live(st):
     return moving
 
 
+def pass_left():
+    """Seconds the pass has left before its own deadline, None outside one."""
+    return None if C.REMOTE_DEADLINE is None else C.REMOTE_DEADLINE - time.monotonic()
+
+
 class Cut(C.Unavailable):
     """nix ran out of the pass's time before it answered: the eval wasn't
     at fault, so nothing is recorded against the PR (no strike, no failed
@@ -152,8 +157,8 @@ class Cut(C.Unavailable):
 
 def nix(*args, timeout=60):
     """nix's stdout. Its deadline is the timeout, but never past the pass's
-    own (common.pass_left), so a pass's eval can't outlast the pass."""
-    left = C.pass_left()
+    own (pass_left), so a pass's eval can't outlast the pass."""
+    left = pass_left()
     cut = left is not None and left < timeout
     if cut:
         timeout = left
@@ -255,7 +260,7 @@ def merged(repo, pr, checks, st, tip):
     attrs = C.repo_cfg(repo)["proofBuilds"]
     if not tip or not evaluable(repo, checks):
         return None
-    left = C.pass_left()
+    left = pass_left()
     if left is not None and left < MERGED_MIN:
         return None  # optional: the pass has no time for its eval, the next one tries
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
