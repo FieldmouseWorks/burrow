@@ -42,7 +42,7 @@ pub(crate) fn task(cfg: &Config, repo: &str, todo: &str, proofs: &str, seals: &s
          you've given up on it: ok if it can merge as it is, or held if it needs a decision \
          from {owner} or more work first (a support floor to drop, a migration, a regression), \
          with the reason in your comment. End that comment with that verdict's marker from the \
-         list below, as it is between the backticks: each is sealed on the head the PR was handed to you on, \
+         list below, as it is between the backticks, on a line of its own: each is sealed on the head the PR was handed to you on, \
          for the base it targeted, so give one only if your worktree's HEAD (git rev-parse \
          HEAD) is that head, never going by the PR's head as GitHub shows it, which may be a \
          push you never read. A marker written any other way doesn't count. One you pushed to \

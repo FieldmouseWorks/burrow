@@ -24,6 +24,11 @@ pub struct Config {
     /// The repos the steward covers, as it last found them (its
     /// repos.json): none without it.
     pub covered: Option<PathBuf>,
+    /// burrow-landing's record (burrow.landing.record), read at each pass: a
+    /// major in a repo it gives conaryd gets its verdicts sealed as conaryd
+    /// reads them (v2), the rest as the steward does (v1). None where
+    /// nothing hands landing over (no autoland): every repo the steward's.
+    pub landing: Option<PathBuf>,
     /// The machine's own App, when the jobs act as it.
     pub app: Option<App>,
     /// Who Renovate comments as, as REST spells it: its own App's bot

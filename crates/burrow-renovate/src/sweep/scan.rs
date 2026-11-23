@@ -8,7 +8,7 @@ impl Config {
         let fail = |why| Broke(format!("{}: {repo}: gh pr list: {why}", self.name));
         let out = Command::new(&self.tools.gh)
             .args(["pr", "list", "-R", repo, "--state", "open", "--search", "head:renovate/", "--limit", "1000", "--json",
-                "number,title,headRefName,headRefOid,baseRefName,labels,createdAt,statusCheckRollup"])
+                "number,title,body,headRefName,headRefOid,baseRefName,labels,createdAt,statusCheckRollup"])
             .stdin(Stdio::null()).stderr(Stdio::inherit()).output()
             .map_err(|e| fail(e.to_string()))?;
         if !out.status.success() {

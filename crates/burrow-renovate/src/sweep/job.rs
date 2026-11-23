@@ -95,10 +95,10 @@ impl Config {
         let mut seals = String::new();
         for h in handed {
             if let Some(m) = &h.major {
-                let [ok, held] = ["ok", "held"].map(|v| self.seal(repo, m, v));
+                let [ok, held] = self.seal(repo, m)?;
                 seals.push_str(&format!(
-                    "- #{} on {} for {}: ok `{}`, held `{}`\n",
-                    m.n, m.sha, m.base, ok?, held?
+                    "- #{} on {} for {}: ok `{ok}`, held `{held}`\n",
+                    m.n, m.sha, m.base
                 ));
             }
         }

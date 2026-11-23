@@ -875,6 +875,7 @@ dependencies = [
  "burrow-process",
  "burrow-settings",
  "burrow-test",
+ "conary-core",
  "conary-github",
  "jiff 1.0.1",
  "md-5",

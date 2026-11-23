@@ -4,7 +4,9 @@
 //! marker would pass for the verdict. The MAC is Conary's `SealKey::seal`,
 //! the one the autoland steward (modules/autoland/seal.py) and conaryd check
 //! a major's verdict with, so the marker is the v1 one they read:
-//! `<!-- major-verdict: ok|held SHA on BASE MAC -->`.
+//! `<!-- major-verdict: ok|held SHA on BASE MAC -->`. In a repo the landing
+//! record gives conaryd, which reads only Conary's v2 issuance, the same
+//! key seals that instead (v2.rs).
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -163,6 +165,9 @@ fn key(path: &Path, create: bool) -> io::Result<Option<SealKey>> {
 fn parse(text: &[u8]) -> Option<SealKey> {
     SealKey::from_hex(std::str::from_utf8(text).ok()?.trim()).ok()
 }
+
+mod v2;
+pub(crate) use v2::{Issuance, Read};
 
 #[cfg(test)]
 mod tests;

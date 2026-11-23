@@ -16,6 +16,7 @@
 //! the lock file refreshes, and passes.rs what a pass tells the owner and
 //! how it fails.
 
+mod conary;
 mod handing;
 mod passes;
 mod refreshes;
@@ -173,6 +174,8 @@ struct Machine {
     renovate: Option<&'static str>,
     /// The steward's repos.json, once there's one.
     covered: Option<PathBuf>,
+    /// burrow-landing's record, once there's one.
+    landing: Option<PathBuf>,
 }
 
 /// One sweep: what it exited with and said, the jobs it started and the
@@ -261,6 +264,7 @@ impl Machine {
             app: None,
             renovate: None,
             covered: None,
+            landing: None,
         };
         m.project("r", "https://github.com/sam/r.git");
         fs::create_dir(m.path("state")).unwrap();
@@ -352,6 +356,7 @@ impl Machine {
         let config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
+            "landing": self.landing,
             "renovate": self.renovate,
             "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),

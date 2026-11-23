@@ -24,6 +24,11 @@ static VERDICT: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a regex")
 });
 
+/// A job's v2 verdict on a major, as seal.rs writes it and Conary's flow
+/// reads it (conary-github's flow/markers.rs): alone on its line.
+static ISSUANCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^<!-- major-verdict:v2 ([^\n]*) -->$").expect("a regex"));
+
 /// A check's state, as the steward reads it (ci_state in
 /// modules/autoland/prs.py), so a head neither calls the other's is never
 /// left between them.
@@ -146,6 +151,31 @@ pub(crate) fn finished(checks: &[Check]) -> String {
 /// comments` said, oldest first: each (ok|held, its seal), to check with
 /// seal.rs.
 pub(crate) fn verdicts(said: &[u8], me: &str, sha: &str, base: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for body in ours(said, me) {
+        for m in VERDICT.captures_iter(&body) {
+            if &m["sha"] == sha && &m["base"] == base {
+                found.push((m["v"].to_string(), m["mac"].to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// The v2 verdicts `me` marked in what `gh pr view --json comments` said,
+/// oldest first, as Conary's flow finds them: each what's between
+/// `<!-- major-verdict:v2 ` and ` -->` on a line of its own, to check with
+/// seal.rs.
+pub(crate) fn issuances(said: &[u8], me: &str) -> Vec<String> {
+    ours(said, me)
+        .iter()
+        .flat_map(|body| ISSUANCE.captures_iter(body).map(|m| m[1].to_string()))
+        .collect()
+}
+
+/// The bodies of `me`'s comments in what `gh pr view --json comments`
+/// said, oldest first, read as the script's jq read them.
+fn ours(said: &[u8], me: &str) -> Vec<String> {
     let Ok(said) = serde_json::from_slice::<Value>(said) else {
         return Vec::new();
     };
@@ -166,11 +196,7 @@ pub(crate) fn verdicts(said: &[u8], me: &str, sha: &str, base: &str) -> Vec<(Str
         let Some(body) = c.get("body").and_then(Value::as_str) else {
             break;
         };
-        for m in VERDICT.captures_iter(body) {
-            if &m["sha"] == sha && &m["base"] == base {
-                found.push((m["v"].to_string(), m["mac"].to_string()));
-            }
-        }
+        found.push(body.to_owned());
     }
     found
 }
@@ -286,5 +312,22 @@ mod tests {
             [("ok".into(), mac.clone()), ("held".into(), mac.clone())]
         );
         assert!(verdicts(b"not json", "me", &sha, "main").is_empty());
+    }
+
+    #[test]
+    fn a_v2_verdict_is_ours_and_alone_on_its_line() {
+        let said = json!({"comments": [
+            {"author": {"login": "me"}, "body": "ok\n\n<!-- major-verdict:v2 {\"a\":1} -->\n<!-- major-verdict:v2 {\"b\":2} -->"},
+            // Quoted, or with anything else on its line, it's no marker.
+            {"author": {"login": "me"}, "body": "> <!-- major-verdict:v2 {\"c\":3} -->\nsee <!-- major-verdict:v2 {\"d\":4} -->"},
+            {"author": {"login": "me"}, "body": "<!-- major-verdict:v2 {\"e\":5} -->\r\n"},
+            {"author": {"login": "mallory"}, "body": "<!-- major-verdict:v2 {\"f\":6} -->"},
+            {"author": {"login": "me"}, "body": "<!-- major-verdict: ok x on main y -->"},
+        ]});
+        assert_eq!(
+            issuances(said.to_string().as_bytes(), "me"),
+            [r#"{"a":1}"#, r#"{"b":2}"#]
+        );
+        assert!(issuances(b"not json", "me").is_empty());
     }
 }

@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use burrow_settings::landing::{Owner, Record};
+use conary_github::flow::Revision;
 use rustix::fs::{FlockOperation, flock};
 use serde_json::Value;
 
@@ -174,6 +176,17 @@ impl Config {
     /// would fix it several times over, side by side.
     fn repo(&self, project: &str, repo: &str, who: &Who, steward: &Steward, pass: &mut Pass) {
         let info = steward.repo(repo, now());
+        // Who its majors' verdicts are sealed for: conaryd, when the record
+        // gives it the repo (or is handing it over to it). A record it
+        // can't read seals nothing, in either form.
+        let conaryd = match self.conaryd(repo) {
+            Ok(conaryd) => conaryd,
+            Err(Broke(why)) => {
+                complain(&format!("{}: {why}", self.name));
+                pass.failed = true;
+                return;
+            }
+        };
         let prs = match self.list(repo) {
             Ok(prs) => prs,
             Err(Broke(why)) => {
@@ -187,6 +200,7 @@ impl Config {
             repo,
             who,
             info: &info,
+            conaryd,
             labelled: false,
             next: None,
         };
@@ -242,17 +256,42 @@ impl Config {
         }
     }
 
-    /// The marker that seals verdict `v` on major `m`, in `repo`.
-    fn seal(&self, repo: &str, m: &Major, v: &str) -> Result<String, Broke> {
-        seal::Verdict {
-            repo,
-            n: &m.n,
-            verdict: v,
-            head: &m.sha,
-            base: &m.base,
+    /// The markers that seal major `m`'s ok and held verdicts, in `repo`:
+    /// as conaryd reads them where it lands, else as the steward does.
+    fn seal(&self, repo: &str, m: &Major) -> Result<[String; 2], Broke> {
+        let broke = |why| Broke(format!("{repo}: sealing #{}: {why}", m.n));
+        if let Some(v2) = &m.v2 {
+            let n =
+                m.n.parse()
+                    .map_err(|_| broke(format!("{:?} isn't a number", m.n)))?;
+            let issuance = seal::Issuance {
+                repo,
+                n,
+                revision: &v2.revision,
+            };
+            return issuance.markers(&self.state, v2.posted).map_err(broke);
         }
-        .marker(&self.state)
-        .map_err(|why| Broke(format!("{repo}: sealing #{} {v}: {why}", m.n)))
+        let [ok, held] = ["ok", "held"].map(|v| {
+            seal::Verdict {
+                repo,
+                n: &m.n,
+                verdict: v,
+                head: &m.sha,
+                base: &m.base,
+            }
+            .marker(&self.state)
+        });
+        Ok([ok.map_err(broke)?, held.map_err(broke)?])
+    }
+
+    /// Whether burrow-landing's record gives `repo` to conaryd, or is
+    /// handing it over to it: never with no record to read.
+    fn conaryd(&self, repo: &str) -> Result<bool, Broke> {
+        let Some(path) = &self.landing else {
+            return Ok(false);
+        };
+        let holding = Record::read(path).map_err(Broke)?.holding(repo);
+        Ok(holding.to.unwrap_or(holding.owner) == Owner::Conaryd)
     }
 
     /// The majors waiting on the owner, in one notice: the held ones apart
@@ -439,11 +478,20 @@ struct Handed {
     want: String,
 }
 
-/// A major as it's handed over: its number, head and base.
+/// A major as it's handed over: its number, head and base, and in a repo
+/// conaryd lands, what its v2 verdicts seal.
 struct Major {
     n: String,
     sha: String,
     base: String,
+    v2: Option<V2>,
+}
+
+/// What a major's v2 verdicts seal, and the highest generation already
+/// sealed on it.
+struct V2 {
+    revision: Revision,
+    posted: u64,
 }
 
 /// Something it needed broke.
@@ -455,6 +503,8 @@ struct Sweep<'a> {
     repo: &'a str,
     who: &'a Who,
     info: &'a steward::Repo,
+    /// Whether its majors' verdicts are sealed for conaryd (v2).
+    conaryd: bool,
     /// Whether the labels a job puts on a major are there yet.
     labelled: bool,
     /// Earliest refresh deadline in this repo.
@@ -491,8 +541,18 @@ impl Sweep<'_> {
         // A major's key also says the job was handed sealed verdicts on
         // this base, so one retargeted since (or handed over before its
         // task carried them) is handed over once more.
+        // Where conaryd lands, the verdicts seal the PR's revision as its
+        // flow reads it, the description included (Renovate rewrites it):
+        // a key that names it, and its form, hands it over again once that
+        // changes, or the repo changes hands.
+        let revision = (major && self.conaryd).then(|| {
+            let raw = |k| pr.0.get(k).and_then(Value::as_str).unwrap_or("");
+            Revision::for_parts(sha.clone(), base.clone(), raw("title"), raw("body"))
+        });
         let mut want = sha.clone();
-        if major {
+        if let Some(r) = &revision {
+            want = format!("{sha} v2 verdicts sealed for {base} on {}", r.description);
+        } else if major {
             want = format!("{sha} verdicts sealed for {base}");
         }
         if security {
@@ -510,16 +570,24 @@ impl Sweep<'_> {
             want.push_str(&format!(" after CI {finished}"));
         }
         // The newest one with its seal, of our own login's for this head on
-        // this base.
+        // this base; where conaryd lands, the one its flow would read, of
+        // the form sealed for it alone.
         let mut verdict = String::new();
+        let mut posted = 0;
         if major && !who.me.is_empty() {
             let said = cfg.said(
                 &cfg.tools.gh,
                 &["pr", "view", &n, "-R", repo, "--json", "comments"],
             );
-            for (v, mac) in pr::verdicts(&said, &who.me, &sha, &base) {
-                if self.sealed(&n, &v, &sha, &base, &mac) {
-                    verdict = v;
+            if let Some(r) = &revision {
+                let read = self.issued(&n, r, &pr::issuances(&said, &who.me));
+                verdict = read.verdict.unwrap_or_default();
+                posted = read.highest;
+            } else {
+                for (v, mac) in pr::verdicts(&said, &who.me, &sha, &base) {
+                    if self.sealed(&n, &v, &sha, &base, &mac) {
+                        verdict = v;
+                    }
                 }
             }
         }
@@ -772,10 +840,36 @@ impl Sweep<'_> {
         };
         Ok(Some(Handed {
             line: format!("- #{n} \"{title}\" (branch {branch}): {why}{request}\n"),
-            major: major.then_some(Major { n, sha, base }),
+            major: major.then(|| Major {
+                n,
+                sha,
+                base,
+                v2: revision.map(|revision| V2 { revision, posted }),
+            }),
             key,
             want,
         }))
+    }
+
+    /// What PR `n`'s v2 `payloads` say of `revision`, under the sweep's key.
+    fn issued(&self, n: &str, revision: &Revision, payloads: &[String]) -> seal::Read {
+        let Ok(n_) = n.parse() else {
+            return seal::Read::default();
+        };
+        let issuance = seal::Issuance {
+            repo: self.repo,
+            n: n_,
+            revision,
+        };
+        issuance
+            .read(&self.cfg.state, payloads)
+            .unwrap_or_else(|why| {
+                complain(&format!(
+                    "{}: {}: checking #{n}'s seal: {why}",
+                    self.cfg.name, self.repo
+                ));
+                seal::Read::default()
+            })
     }
 
     /// Whether `mac` seals verdict `v` on PR `n`'s `sha` for `base`.
