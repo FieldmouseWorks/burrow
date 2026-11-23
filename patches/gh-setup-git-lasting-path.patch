@@ -1,0 +1,41 @@
+--- a/pkg/cmd/auth/shared/gitcredentials/helper_config.go
++++ b/pkg/cmd/auth/shared/gitcredentials/helper_config.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"fmt"
++	"os"
+ 	"path/filepath"
+ 	"strings"
+ 
+@@ -52,7 +53,7 @@
+ 		configureCmd, err := hc.GitClient.Command(ctx,
+ 			"config", "--global", "--add",
+ 			credHelperKey,
+-			fmt.Sprintf("!%s auth git-credential", shellQuote(hc.SelfExecutablePath)),
++			fmt.Sprintf("!%s auth git-credential", shellQuote(lastingPath(hc.SelfExecutablePath))),
+ 		)
+ 		if err != nil {
+ 			configErr = err
+@@ -64,6 +65,21 @@
+ 	return configErr
+ }
+ 
++// lastingPath is the gh a helper written to the user's git config names. A
++// path in the Nix store is gone once the store is collected, and the helper
++// with it, after the blank entry above has cut off the system's helpers: the
++// system profile's gh outlives every build, and a gh found on PATH does too.
++func lastingPath(self string) string {
++	if !strings.HasPrefix(self, "/nix/store/") {
++		return self
++	}
++	const profile = "/run/current-system/sw/bin/gh"
++	if _, err := os.Stat(profile); err == nil {
++		return profile
++	}
++	return "gh"
++}
++
+ // A Helper represents a git credential helper configuration.
+ type Helper struct {
+ 	Cmd string
