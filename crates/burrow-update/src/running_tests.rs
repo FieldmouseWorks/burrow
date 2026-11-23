@@ -124,10 +124,18 @@ fn a_build_is_heads_system_with_what_nix_said_in_its_log() {
     assert_eq!(
         m.kept("nix.log"),
         format!(
-            "build --no-link -L --print-out-paths {}#nixosConfigurations.box.config.system.build.toplevel\n",
+            "build -L --print-out-paths --out-link {}.system {}#nixosConfigurations.box.config.system.build.toplevel\n",
+            m.cfg.work.display(),
             m.cfg.work.display()
         )
     );
+    // Rooted, so nothing collects it before the run switches to it: the
+    // root beside the checkout leads to it, out of git's sight.
+    assert_eq!(
+        fs::read_link(built(&m.cfg)).unwrap().to_str(),
+        Some(new.as_str())
+    );
+    assert_eq!(m.work(&["status", "--porcelain"]), "");
     // A build that names no system is none.
     fs::write(m.home("nix-says-nothing"), "").unwrap();
     assert_eq!(build(&m.cfg), None);
