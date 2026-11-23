@@ -12,7 +12,8 @@ use crate::{Fail, io_fail};
 
 /// `proj plan`: one of the inbox's authors, on the host and never from a
 /// job, changes a task list, and the list moves on at its repo's next pass.
-/// `done OWNER/REPO#N PR-URL` records the merged PR that landed a child;
+/// `done OWNER/REPO#N PR-URL` records the merged PR that landed a child,
+/// `done OWNER/REPO#N --no-pr REASON` why a closed child needed none;
 /// `end OWNER/REPO#N` ends a parent's list (one wrongly split, or whose
 /// parent is a tracker) without closing the parent. The author is the
 /// GitHub account the caller's own gh answers as.
@@ -20,12 +21,22 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     /// What `proj plan` is asked to do.
     enum Asked<'a> {
         Done(&'a str, &'a str),
+        DoneWithoutPr(&'a str, String),
         End(&'a str),
     }
+    let usage = || Fail::new(2, plans::PLAN_USAGE);
     let (door, asked) = match args {
-        [done, child, pr] if done == "done" => ("done", Asked::Done(child, pr)),
+        [done, child, pr] if done == "done" && pr != "--no-pr" => ("done", Asked::Done(child, pr)),
+        [done, child, flag, reason @ ..] if done == "done" && flag == "--no-pr" => {
+            let reason = reason.join(" ");
+            let reason = reason.trim();
+            if reason.is_empty() || reason.contains('\n') {
+                return Err(usage());
+            }
+            ("done", Asked::DoneWithoutPr(child, reason.to_owned()))
+        }
         [end, parent] if end == "end" => ("end", Asked::End(parent)),
-        _ => return Err(Fail::new(2, plans::PLAN_USAGE)),
+        _ => return Err(usage()),
     };
     if std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty()) {
         return Err(Fail::new(
@@ -81,6 +92,12 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             p.plan_done(child, pr, caller)?,
             format!(
                 "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
+            ),
+        ),
+        Asked::DoneWithoutPr(child, reason) => (
+            p.plan_done_without_pr(child, &reason, caller)?,
+            format!(
+                "Recorded {child} as done without a PR; its task list moves on at the repo's next pass."
             ),
         ),
         Asked::End(parent) => (

@@ -77,7 +77,15 @@ OWNER/REPO#N PR-URL` (`.plans/OWNER_REPO-N/landed`), under the inbox's
 pass lock. It refuses inside a job, a GitHub account outside
 `inbox.authors`, a repo that isn't one of the machine's projects and a PR
 that hasn't merged; the next pass advances the list and closes the child
-if it's still open. A child whose work went on in another issue hands
+if it's still open. A child whose deliverable was a record or a judgment
+rather than a PR is done the same way once it's closed: an author runs
+`proj plan done OWNER/REPO#N --no-pr REASON` (`.plans/OWNER_REPO-N/no-pr`),
+with the same refusals, and one more for a child that's still open. The
+reason is kept bound to the closure it was recorded on (when it closed,
+and its title and body then), as a job's awaits are: a child reopened,
+edited or closed again before a pass ticks it drops it and waits as a hand
+close does. The checklist shows the child ticked with "no PR needed" and
+the reason. A child whose work went on in another issue hands
 its place to that issue: an author comments on the closed child with a
 line starting `Continued as OWNER/REPO#N` (or `#N` in the same repo). The
 newest comment with such a line counts, and only as `written` verifies it,

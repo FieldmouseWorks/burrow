@@ -96,7 +96,7 @@ impl List {
             && let Some(n) = child.number
         {
             text.push_str(&format!(
-                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
+                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if its record was the deliverable and no PR was needed, an author records why with `proj plan done {repo}#{n} --no-pr REASON`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
             ));
         }
         text
@@ -960,6 +960,10 @@ mod landed_tests;
 #[cfg(test)]
 #[path = "landed_split_tests.rs"]
 mod landed_split_tests;
+
+#[cfg(test)]
+#[path = "landed_no_pr_tests.rs"]
+mod landed_no_pr_tests;
 
 #[cfg(test)]
 #[path = "plans_review_tests.rs"]
