@@ -151,7 +151,7 @@ printf '{{"type":"result","conversation_id":"hf-1","result":"ok:%s"}}\n' "${{#va
         fs::read_to_string(&tok_path).unwrap(),
         r#"{"access_token":"refreshed-token"}"#
     );
-    fs::set_permissions(&tok_path, fs::Permissions::from_mode(0o400)).unwrap();
+    burrow_test::permissions(&tok_path, 0o400);
     let turn2 = run_invocation(&cfg, &inv, &|| false);
     assert_eq!(turn2.error, None, "{turn2:?}");
     assert_eq!(
