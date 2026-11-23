@@ -802,6 +802,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-ledger-sync"
+version = "0.0.0"
+dependencies = [
+ "burrow-test",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-notify"
 version = "0.0.0"
 dependencies = [
@@ -1188,7 +1199,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=e3a1687b0d8b99c6b7e167a556c7099ae4f6d530#e3a1687b0d8b99c6b7e167a556c7099ae4f6d530"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1205,7 +1216,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=a570d690605379fc78ed72a1ed716478286785db#a570d690605379fc78ed72a1ed716478286785db"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=e3a1687b0d8b99c6b7e167a556c7099ae4f6d530#e3a1687b0d8b99c6b7e167a556c7099ae4f6d530"
 dependencies = [
  "base64 0.23.1",
  "conary-core",

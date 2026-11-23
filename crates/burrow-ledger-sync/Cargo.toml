@@ -1,0 +1,19 @@
+[package]
+name = "burrow-ledger-sync"
+description = "The ledger's pass: every repo of the machine's owners, or the one it's given, brought up to date by one cn sync, which reads the ledger's log once for them all"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+tempfile.workspace = true
+
+[lints]
+workspace = true
