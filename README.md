@@ -142,7 +142,12 @@ Each has an entry below, and each can be imported on its own.
   repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
   the machinery's App unless it names one of its own, so its GitHub allowance
   stalls only Renovate, and its commits are that App's bot, whose PRs the
-  steward knows as Renovate's), `advisory-watch` (CISA KEV, vulnix,
+  steward knows as Renovate's), `cargo-follow` (`follow`: a Cargo pin on
+  another repo's main kept at its head as one PR, opened or refreshed on
+  either repo's push; the manifest's
+  `metadata.follow` says what changes there are inert, so a commit that only
+  moves the upstream's own pin back on the follower opens none, and two
+  repos pinning each other don't chase one another), `advisory-watch` (CISA KEV, vulnix,
   osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check`
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as

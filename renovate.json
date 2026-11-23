@@ -12,6 +12,12 @@
       "matchFileNames": [".github/workflows/flake.yml", ".github/workflows/flake-retarget.yml"],
       "matchDepNames": ["/^fieldmouseworks/burrow$/i"],
       "enabled": false
+    },
+    {
+      "description": "cargo-follow moves the Conary pin to Conary's main (crates/Cargo.toml's metadata.follow) and skips what changes nothing burrow builds. Renovate moving it too would bring back a pin PR after every Conary merge of its own burrow pin.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^https://github\\.com/FieldmouseWorks/Conary(\\.git)?$/i"],
+      "enabled": false
     }
   ]
 }
