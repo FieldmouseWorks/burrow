@@ -16,6 +16,8 @@ struct Hub {
     annotation_failure: bool,
     /// How a completed run ended: cancelled, unless set.
     conclusion: &'static str,
+    /// The run_attempt every job (check run) reads: 1, unless set.
+    job_attempt: u64,
     /// What every check run's annotations read: none, unless set.
     annotations: Option<Value>,
     /// The runs' event: GitHub reruns no `dynamic` one, whoever asks.
@@ -58,6 +60,8 @@ impl Api for Hub {
                 });
             }
             (200, self.annotations.clone().unwrap_or_else(|| json!([])))
+        } else if path.contains("/actions/jobs/") {
+            (200, json!({"run_attempt": self.job_attempt.max(1)}))
         } else if method == "POST" {
             if self.status == 0 || self.status == 201 || self.lost {
                 self.attempt += 1;
@@ -350,20 +354,27 @@ fn a_lost_runner_is_run_again_whole_once_then_named_the_machines() {
     assert_eq!(reruns.len(), 1);
     assert!(reruns[0].1.ends_with("/actions/runs/7/rerun"), "{reruns:?}");
 
-    // It died the same way on the rerun: red, and named the machine's.
+    // The rerun is over, whichever way, while this pass still holds the
+    // first attempt's job: that says nothing of the rerun's, so it waits
+    // for its own (never red as lost again, nor asked for again).
     h.going = false;
-    let got = run(&mut h, &a, false).unwrap();
+    for how in ["failure", "success"] {
+        h.conclusion = how;
+        let got = run(&mut h, &a, false).unwrap();
+        assert_eq!(got.state, "pending", "{how}");
+        assert_eq!(posts(&h), 1);
+    }
+
+    // The rerun's own job died the same way: red, and named the machine's.
+    h.conclusion = "failure";
+    h.job_attempt = 2;
+    let again = ask(vec![check_run("train / negative", 12, 7, "FAILURE")]);
+    let got = run(&mut h, &again, false).unwrap();
     assert_eq!(got.state, "red");
     assert_eq!(
         got.names,
         ["train / negative (the runner was lost again after a rerun)"]
     );
-    assert_eq!(posts(&h), 1);
-
-    // A rerun that ended otherwise leaves this node to its replacement.
-    h.conclusion = "success";
-    let got = run(&mut h, &a, false).unwrap();
-    assert_eq!(got.state, "pending");
     assert_eq!(posts(&h), 1);
 }
 
@@ -393,6 +404,7 @@ fn a_runner_that_lost_communication_is_run_again_too() {
 fn a_lost_runner_already_rerun_is_red_without_another_ask() {
     let mut h = Hub {
         attempt: 2,
+        job_attempt: 2,
         annotations: Some(runner_gone()),
         conclusion: "failure",
         ..Hub::default()

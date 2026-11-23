@@ -157,8 +157,10 @@ struct Recovery {
     updated: Option<Result<(), String>>,
     /// Check runs GitHub stopped for running past their timeout.
     timed_out: BTreeSet<u64>,
-    /// Failed check runs whose runner was lost: no verdict of their own.
-    lost: BTreeSet<u64>,
+    /// Failed check runs whose runner was lost (no verdict of their own),
+    /// with the run_attempt of the job each one is: the attempt it lost
+    /// its runner in, whatever the run has gone on to since.
+    lost: BTreeMap<u64, u64>,
 }
 
 #[derive(Deserialize)]
@@ -240,7 +242,10 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
             let annotations: Vec<_> = pages.iter().flat_map(array).cloned().collect();
             if !cancelled(c) {
                 if runner_lost(&annotations) {
-                    recovery.lost.insert(id);
+                    // An Actions check run's id is its job's.
+                    let job = p.get(&format!("repos/{}/actions/jobs/{id}", p.repo))?;
+                    let attempt = job["run_attempt"].as_u64().unwrap_or(1);
+                    recovery.lost.insert(id, attempt);
                 }
             } else if annotations.iter().any(|a| {
                 text(&a["message"])
@@ -450,30 +455,29 @@ fn classify(
                         }
                     },
                 }
-            } else if c["databaseId"]
+            } else if let Some(&tried) = c["databaseId"]
                 .as_u64()
-                .is_some_and(|id| recovery.lost.contains(&id))
+                .and_then(|id| recovery.lost.get(&id))
             {
                 // The runner went away: no verdict of the job's own. One
-                // rerun, on the same allowance as a cancellation's; dying
-                // the same way again is the machine's, and named so.
+                // rerun, on the same allowance as a cancellation's; this
+                // job lost its runner on a rerun itself, it's the
+                // machine's, and named so. Only the job's own attempt says
+                // that: the run's may be a later one's, still unread.
                 let key = if ask.recover { rerun_key(c) } else { None };
                 let info = key.as_ref().and_then(|k| recovery.runs.get(k));
                 match (key, info) {
+                    _ if tried >= 2 => {
+                        red.push(format!("{name} (the runner was lost again after a rerun)"));
+                        broken.insert(run_id(c));
+                    }
                     (None, _) => pending.push(format!("{name} (runner lost, to be run again)")),
                     (Some(k), None) => {
                         recovery.lookup.insert(k);
                         pending.push(format!("{name} (runner lost, to be run again)"));
                     }
-                    (Some(_), Some(r))
-                        if r.status != "completed"
-                            || r.conclusion.as_deref() != Some("failure") =>
-                    {
+                    (Some(_), Some(r)) if r.status != "completed" || r.run_attempt >= 2 => {
                         pending.push(format!("{name} (runner lost, run again)"))
-                    }
-                    (Some(_), Some(r)) if r.run_attempt >= 2 => {
-                        red.push(format!("{name} (the runner was lost again after a rerun)"));
-                        broken.insert(run_id(c));
                     }
                     (Some(k), Some(_)) => {
                         match recovery.again(&k) {
