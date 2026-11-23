@@ -2,16 +2,19 @@
 //! cancellation.
 
 use std::ffi::OsString;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use crate::config::{Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat};
+use crate::config::{
+    Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
+};
 use crate::normalize::{RunError, TurnOutput, normalize_output};
 use crate::schema::Schema;
 
@@ -45,6 +48,9 @@ pub struct Invocation {
     pub output_format: OutputFormat,
     pub input_format: Option<InputFormat>,
     pub print_timeout_secs: Option<u64>,
+    /// Optional explicit `$HOME` for the child process (defaults to the
+    /// inherited `HOME` environment variable).
+    pub home_dir: Option<PathBuf>,
 }
 
 impl Invocation {
@@ -73,6 +79,7 @@ impl Invocation {
             output_format: config.output_format,
             input_format: config.input_format,
             print_timeout_secs: config.print_timeout_secs,
+            home_dir: None,
         }
     }
 }
@@ -134,11 +141,168 @@ pub fn build_args(invocation: &Invocation) -> Vec<OsString> {
 
 struct PreparedCredential {
     env_var: Option<(String, OsString)>,
-    secret_value: Option<String>,
+    secrets: Vec<String>,
     _tempdir: Option<TempDir>,
 }
 
-fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
+fn collect_secrets(secret_value: Option<&str>) -> Vec<String> {
+    let mut secrets = Vec::new();
+    let Some(raw) = secret_value else {
+        return secrets;
+    };
+    secrets.push(raw.to_owned());
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        collect_json_secrets(&value, &mut secrets);
+    }
+    secrets
+}
+
+fn collect_json_secrets(value: &serde_json::Value, out: &mut Vec<String>) {
+    const SECRET_KEYS: &[&str] = &[
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "token",
+        "api_key",
+        "client_secret",
+        "accessToken",
+        "refreshToken",
+        "idToken",
+        "apiKey",
+        "clientSecret",
+    ];
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if SECRET_KEYS.contains(&k.as_str())
+                    && let Some(s) = v.as_str()
+                    && !s.trim().is_empty()
+                    && !out.iter().any(|existing| existing == s)
+                {
+                    out.push(s.to_owned());
+                } else {
+                    collect_json_secrets(v, out);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_secrets(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn materialize_home_file(
+    home: &Path,
+    relative_path: &Path,
+    value: &str,
+) -> Result<PathBuf, String> {
+    validate_credential_home_path(relative_path)?;
+    if home.as_os_str().is_empty() {
+        return Err("credential_mode \"home-file\" requires HOME to be set".to_owned());
+    }
+    let home_meta = fs::metadata(home)
+        .map_err(|e| format!("failed to access HOME directory {}: {e}", home.display()))?;
+    if !home_meta.is_dir() {
+        return Err(format!("HOME {} is not a directory", home.display()));
+    }
+
+    let mut dir = home.to_path_buf();
+    if let Some(parent) = relative_path.parent() {
+        for comp in parent.components() {
+            let Component::Normal(part) = comp else {
+                return Err(format!(
+                    "credential_home_path {:?} must contain only normal relative path components",
+                    relative_path
+                ));
+            };
+            dir.push(part);
+            match fs::symlink_metadata(&dir) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err(format!(
+                            "refusing to follow symlink at credential directory {}",
+                            dir.display()
+                        ));
+                    }
+                    if !meta.is_dir() {
+                        return Err(format!(
+                            "credential parent path {} is not a directory",
+                            dir.display()
+                        ));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    DirBuilder::new().mode(0o700).create(&dir).map_err(|e| {
+                        format!(
+                            "failed to create isolated credential dir {}: {e}",
+                            dir.display()
+                        )
+                    })?;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "failed to inspect isolated credential dir {}: {e}",
+                        dir.display()
+                    ));
+                }
+            }
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                format!(
+                    "failed to secure isolated credential dir {}: {e}",
+                    dir.display()
+                )
+            })?;
+        }
+    }
+
+    let file_name = relative_path
+        .file_name()
+        .ok_or_else(|| "credential_home_path must name a file".to_owned())?;
+    let target = dir.join(file_name);
+    match fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to write credential through symlink {}",
+                target.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => {
+            return Err(format!(
+                "credential target path {} is a directory",
+                target.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "failed to inspect isolated credential file {}: {e}",
+                target.display()
+            ));
+        }
+    }
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".antigravity-oauth-token.")
+        .tempfile_in(&dir)
+        .map_err(|e| format!("failed to create temporary isolated credential file: {e}"))?;
+    tmp.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to secure isolated credential file: {e}"))?;
+    tmp.write_all(value.as_bytes())
+        .map_err(|e| format!("failed to write isolated credential file: {e}"))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| format!("failed to flush isolated credential file: {e}"))?;
+    tmp.persist(&target)
+        .map_err(|e| format!("failed to persist isolated credential file: {}", e.error))?;
+    Ok(target)
+}
+
+fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCredential, String> {
     let target_name = config
         .target_credential_env
         .as_deref()
@@ -146,7 +310,9 @@ fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
 
     let raw_from_file = match &config.credential_file {
         Some(path) => match fs::read_to_string(path) {
-            Ok(text) => Some(text.trim_end_matches(['\r', '\n']).to_owned()),
+            Ok(text) => {
+                Some(text.trim_end_matches(['\r', '\n']).to_owned()).filter(|s| !s.is_empty())
+            }
             Err(e) => {
                 return Err(format!(
                     "failed to read configured credential file {}: {e}",
@@ -165,6 +331,7 @@ fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
         .filter(|s| !s.is_empty());
 
     let secret_value = raw_from_file.or(raw_from_env);
+    let secrets = collect_secrets(secret_value.as_deref());
 
     match config.credential_mode {
         CredentialMode::Env => {
@@ -174,7 +341,7 @@ fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
             };
             Ok(PreparedCredential {
                 env_var,
-                secret_value,
+                secrets,
                 _tempdir: None,
             })
         }
@@ -182,21 +349,21 @@ fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
             let Some(name) = target_name else {
                 return Ok(PreparedCredential {
                     env_var: None,
-                    secret_value,
+                    secrets,
                     _tempdir: None,
                 });
             };
             if let Some(path) = &config.credential_file {
                 return Ok(PreparedCredential {
                     env_var: Some((name.to_owned(), path.as_os_str().to_os_string())),
-                    secret_value,
+                    secrets,
                     _tempdir: None,
                 });
             }
             let Some(val) = &secret_value else {
                 return Ok(PreparedCredential {
                     env_var: None,
-                    secret_value: None,
+                    secrets,
                     _tempdir: None,
                 });
             };
@@ -213,8 +380,27 @@ fn prepare_credential(config: &Config) -> Result<PreparedCredential, String> {
                 .map_err(|e| format!("failed to secure credential file: {e}"))?;
             Ok(PreparedCredential {
                 env_var: Some((name.to_owned(), file_path.into_os_string())),
-                secret_value,
+                secrets,
                 _tempdir: Some(dir),
+            })
+        }
+        CredentialMode::HomeFile => {
+            validate_credential_home_path(&config.credential_home_path)?;
+            let Some(val) = &secret_value else {
+                return Ok(PreparedCredential {
+                    env_var: None,
+                    secrets,
+                    _tempdir: None,
+                });
+            };
+            let home = home.ok_or_else(|| {
+                "credential_mode \"home-file\" requires HOME to be set".to_owned()
+            })?;
+            materialize_home_file(home, &config.credential_home_path, val)?;
+            Ok(PreparedCredential {
+                env_var: None,
+                secrets,
+                _tempdir: None,
             })
         }
     }
@@ -249,7 +435,12 @@ pub fn run_invocation(
             };
         }
     };
-    let prepared = match prepare_credential(config) {
+    let resolved_home = invocation.home_dir.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+    });
+    let prepared = match prepare_credential(config, resolved_home.as_deref()) {
         Ok(p) => p,
         Err(why) => {
             return TurnOutput {
@@ -268,28 +459,48 @@ pub fn run_invocation(
         .args(build_args(invocation))
         .current_dir(&invocation.workdir);
 
+    if let Some(home) = &invocation.home_dir {
+        command.env("HOME", home);
+    }
+
     for var in STRIPPED_ENV {
         command.env_remove(var);
     }
-    if let Some(src_env) = &config.credential_env
-        && config.target_credential_env.as_deref() != Some(src_env.as_str())
-    {
-        command.env_remove(src_env);
+    match config.credential_mode {
+        CredentialMode::HomeFile => {
+            if let Some(src_env) = &config.credential_env {
+                command.env_remove(src_env);
+            }
+            if let Some(target_env) = &config.target_credential_env {
+                command.env_remove(target_env);
+            }
+        }
+        CredentialMode::Env | CredentialMode::File => {
+            if let Some(src_env) = &config.credential_env
+                && config.target_credential_env.as_deref() != Some(src_env.as_str())
+            {
+                command.env_remove(src_env);
+            }
+        }
     }
     if let Some((key, val)) = &prepared.env_var {
         command.env(key, val);
     }
 
     let deadline = Instant::now() + Duration::from_secs(config.deadline_secs);
+    // `burrow_process::output_unless` always binds child stdin to either
+    // `/dev/null` (when empty) or a pipe closed immediately once the prompt is
+    // written, so an unauthenticated CLI never inherits an open terminal stdin.
+    let stdin_input = (!invocation.prompt.is_empty()).then_some(invocation.prompt.as_bytes());
     let result = burrow_process::output_unless(
         &mut command,
-        Some(invocation.prompt.as_bytes()),
+        stdin_input,
         deadline,
         config.max_output_bytes,
         stop,
     );
 
-    let secrets: Vec<&str> = prepared.secret_value.as_deref().into_iter().collect();
+    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
 
     match result {
         Ok(output) => normalize_output(

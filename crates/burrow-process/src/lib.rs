@@ -110,18 +110,25 @@ pub fn output_unless(
                 return Err("command was stopped".into());
             }
             if let Some(pipe) = &mut stdin {
-                if !input.is_empty() {
+                let mut done = input.is_empty();
+                if !done {
                     match pipe.write(input) {
-                        Ok(n) => input = &input[n..],
+                        Ok(n) => {
+                            input = &input[n..];
+                            done = input.is_empty();
+                        }
                         Err(e)
                             if matches!(
                                 e.kind(),
                                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                             ) => {}
+                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                            done = true;
+                        }
                         Err(e) => return Err(e.to_string()),
                     }
                 }
-                if input.is_empty() {
+                if done {
                     stdin = None;
                 }
             }
@@ -216,6 +223,23 @@ mod tests {
             !std::path::Path::new(&format!("/proc/{}", child.trim())).exists()
         });
         assert!(gone, "the group's other process is gone");
+    }
+
+    #[test]
+    fn child_exiting_before_reading_stdin_still_returns_its_output() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'out'; printf 'err' >&2; exit 1"]);
+        let input = vec![b'x'; 256 * 1024];
+        let out = output(
+            &mut command,
+            Some(&input),
+            Instant::now() + Duration::from_secs(2),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(out.stdout, b"out");
+        assert_eq!(out.stderr, b"err");
+        assert_eq!(out.status.code(), Some(1));
     }
 
     #[test]

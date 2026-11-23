@@ -5,7 +5,7 @@
 //! model ID or user-specific path is hardcoded here.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use conary_core::plugin::{Capabilities, Model, Offers, Sandbox};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,10 @@ pub const DEFAULT_DEADLINE_SECS: u64 = 1800;
 
 /// Default maximum bytes captured per stdout/stderr pipe (16 MiB).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default relative path under `$HOME` where `home-file` mode materializes
+/// the isolated Antigravity OAuth credential file (`0600`).
+pub const DEFAULT_CREDENTIAL_HOME_PATH: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
 
 /// Effort level passed to `antigravity --effort`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,13 +128,16 @@ impl InputFormat {
 
 /// How the isolated auth credential is handed to `antigravity`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum CredentialMode {
     /// Pass the credential string directly in `target_credential_env` (or `credential_env`).
     #[default]
     Env,
     /// Pass a path to a private `0600` credential file in `target_credential_env` (or `credential_env`).
     File,
+    /// Materialize the credential at `$HOME/<credential_home_path>` (`0600`) and
+    /// strip credential environment variables from the child process.
+    HomeFile,
 }
 
 /// Runtime-configured model offer advertised in Conary `describe`.
@@ -179,8 +186,11 @@ pub struct Config {
     pub target_credential_env: Option<String>,
     /// Optional explicit credential file path (independent of interactive/T3 userdata).
     pub credential_file: Option<PathBuf>,
-    /// Whether `antigravity` expects the credential value or a file path in the env var.
+    /// How the isolated credential is delivered (`env`, `file`, or `home-file`).
     pub credential_mode: CredentialMode,
+    /// Relative path under `$HOME` where `home-file` mode materializes the
+    /// isolated OAuth credential file (`0600`).
+    pub credential_home_path: PathBuf,
     /// Optional `--settings` path passed to `antigravity`.
     pub settings_file: Option<PathBuf>,
     /// Optional `--mode` (`accept-edits`, `auto`, `plan`).
@@ -224,6 +234,7 @@ impl Default for Config {
             target_credential_env: None,
             credential_file: None,
             credential_mode: CredentialMode::Env,
+            credential_home_path: PathBuf::from(DEFAULT_CREDENTIAL_HOME_PATH),
             settings_file: None,
             mode: None,
             dangerously_skip_permissions: false,
@@ -340,6 +351,7 @@ impl Config {
                 ));
             }
         }
+        validate_credential_home_path(&self.credential_home_path)?;
         validate_unique_nonblank("devices", &self.devices)?;
         validate_unique_nonblank("meters", &self.meters)?;
         if let Some(spec) = &self.json_schema {
@@ -364,6 +376,48 @@ impl Config {
             meters: self.meters.clone(),
         }
     }
+}
+
+/// Ensure `credential_home_path` is a non-empty relative path made solely of
+/// normal path components so it can never escape `$HOME`.
+pub fn validate_credential_home_path(path: &Path) -> Result<(), String> {
+    let raw = path.as_os_str().as_encoded_bytes();
+    if raw.is_empty() {
+        return Err("credential_home_path must not be empty".to_owned());
+    }
+    if path.is_absolute() || raw.starts_with(b"/") {
+        return Err(format!(
+            "credential_home_path {:?} must be a relative path under $HOME",
+            path
+        ));
+    }
+    if raw.contains(&0) {
+        return Err("credential_home_path must not contain NUL bytes".to_owned());
+    }
+    for segment in raw.split(|&b| b == b'/') {
+        if segment.is_empty() || segment == b"." || segment == b".." {
+            return Err(format!(
+                "credential_home_path {:?} must contain only normal relative path components",
+                path
+            ));
+        }
+    }
+    let mut saw_normal = false;
+    for comp in path.components() {
+        match comp {
+            Component::Normal(_) => saw_normal = true,
+            _ => {
+                return Err(format!(
+                    "credential_home_path {:?} must contain only normal relative path components",
+                    path
+                ));
+            }
+        }
+    }
+    if !saw_normal {
+        return Err("credential_home_path must not be empty".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_unique_nonblank(field: &str, values: &[String]) -> Result<(), String> {
