@@ -232,10 +232,11 @@ const SILENT_SECONDS: u32 = 60 * 60;
 /// why said, rather than hold its runner until the job is cut off with
 /// nothing said (#1488). Every build is bounded on its own, but a run is
 /// many of them, one after another, and its evaluations are bounded by
-/// nothing else. The longest runs that passed, in 40 to 200 of each caller's
+/// nothing else. The longest jobs that passed, in 40 to 200 of each caller's
 /// (2026-11-23): a negative 112 minutes and a leg 87, burrow's on hosted
-/// runners, and remi's fresh check 99; every other caller's under 30. So
-/// this is the longest with room for a slower runner. flake-check.yml's
+/// runners, and remi's fresh check 99; every other caller's 30 at most. So
+/// this is the longest with room for a slower runner, and for a wait for a
+/// heavy slot, which counts against it as the job's own did. flake-check.yml's
 /// jobs each give their run this and what their other steps take
 /// (burrow-workflows' timeouts test holds them to it).
 const RUN_SECONDS: u32 = 180 * 60;
