@@ -248,7 +248,7 @@ into project jobs.
   someone else opened gets one comment saying no job will start. Claude jobs
   have the box user's permissions.
 - **Task lists:** a parent split into children moves on as each child is
-  done ([task planning](task-planning.md)). When no pass can tell, an author
+  done (burrow's `docs/task-planning.md`). When no pass can tell, an author
   records it from the host, never from a job: `proj plan done OWNER/REPO#N
   PR-URL` for a merged PR that landed it some other way, or `proj plan done
   OWNER/REPO#N --no-pr REASON` for a closed child whose record was the
