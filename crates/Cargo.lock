@@ -516,13 +516,17 @@ dependencies = [
 name = "burrow-engine-anthropic"
 version = "0.0.0"
 dependencies = [
+ "burrow-grants",
  "burrow-probe",
  "burrow-process",
  "burrow-settings",
  "burrow-test",
+ "conary-core",
  "jiff 1.0.1",
  "rustix",
+ "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
 ]
 

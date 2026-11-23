@@ -32,7 +32,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::Command;
@@ -110,6 +110,24 @@ pub fn key(key_file: Option<&Path>) -> Result<File, Refused> {
     Ok(file)
 }
 
+/// An unlinked temporary file holding an in-memory API key value (e.g. received
+/// via `credentialEnv` inside a sandbox), rewound and ready to hand to Claude
+/// Code on `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`. The key itself never appears
+/// in an error, argument, or child environment variable.
+pub fn key_from_value(value: Option<&str>) -> Result<File, Refused> {
+    let raw = value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Refused::new("no API key is available in its credential"))?;
+    let mut file = tempfile::tempfile()
+        .map_err(|e| Refused::new(format!("its API key file can't be created: {}", e.kind())))?;
+    file.write_all(raw.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.rewind())
+        .map_err(|e| Refused::new(format!("its API key can't be prepared: {}", e.kind())))?;
+    Ok(file)
+}
+
 /// The credentials `mode`'s Claude Code starts with, set on `c` after
 /// everything else it inherits: for `claude`, no API credential; for
 /// `claude-api`, no login and the key on a descriptor, open in the file
@@ -118,6 +136,30 @@ pub fn credentials(
     c: &mut Command,
     mode: Mode,
     key_file: Option<&Path>,
+) -> Result<Option<File>, Refused> {
+    prepare_credentials(c, mode, || key(key_file))
+}
+
+/// Like [`credentials`], but for `claude-api` takes the key value directly
+/// (from `credentialEnv`, or falling back to `key_file` when no env value is
+/// present) and passes it to Claude Code solely via an unlinked file descriptor.
+pub fn credentials_from_source(
+    c: &mut Command,
+    mode: Mode,
+    key_value: Option<&str>,
+    key_file: Option<&Path>,
+) -> Result<Option<File>, Refused> {
+    prepare_credentials(c, mode, || match key_value {
+        Some(v) if !v.trim().is_empty() => key_from_value(Some(v)),
+        _ if key_file.is_some() => key(key_file),
+        _ => key_from_value(key_value),
+    })
+}
+
+fn prepare_credentials(
+    c: &mut Command,
+    mode: Mode,
+    open_key: impl FnOnce() -> Result<File, Refused>,
 ) -> Result<Option<File>, Refused> {
     for name in API_CREDENTIALS {
         c.env_remove(name);
@@ -128,7 +170,7 @@ pub fn credentials(
             for name in LOGIN_CREDENTIALS {
                 c.env_remove(name);
             }
-            let file = key(key_file)?;
+            let file = open_key()?;
             // Opened close-on-exec, as Rust opens every file: this one
             // alone is kept open across the exec, for Claude Code to read.
             rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
