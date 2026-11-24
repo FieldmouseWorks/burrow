@@ -411,3 +411,93 @@ exit 1
     assert!(!stderr.contains("ya29.bin-oauth-secret-access"), "{stderr}");
     assert!(stderr.contains("[redacted]"), "{stderr}");
 }
+
+/// The turn's instructions proj hands every plugin (burrow_grants::turn)
+/// reach the CLI ahead of the job's prompt, on fresh and continued turns, and
+/// an unset or blank variable leaves the prompt as it is.
+#[test]
+fn the_turns_instructions_go_ahead_of_the_prompt() {
+    let dir = TempDir::new().unwrap();
+    let given = dir.path().join("stdin.txt");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-stdin",
+        &format!(
+            r#"#!/bin/sh
+cat > "{}"
+printf '{{"type":"result","conversation_id":"told-1","result":"finished"}}\n'
+"#,
+            given.display(),
+        ),
+    );
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let turn = |context: Context, told: Option<&str>| {
+        let req = Request {
+            contract: CONTRACT.to_owned(),
+            execution: Some(Execution {
+                choice: None,
+                context,
+            }),
+            negotiated: Some(Negotiated {
+                by: Identity {
+                    engine: ENGINE.to_owned(),
+                    session: None,
+                },
+                offers: cfg.offers(),
+            }),
+            task: Task::Job {
+                repo: "owner/demo".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                prompt: "fix the bug".to_owned(),
+                model: None,
+                effort: None,
+            },
+        };
+        let mut cmd = Command::new(burrow_test::program!("burrow-engine-antigravity"));
+        cmd.arg(&cfg_path)
+            .env_remove(burrow_grants::turn::INSTRUCTIONS)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(told) = told {
+            cmd.env(burrow_grants::turn::INSTRUCTIONS, told);
+        }
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&req).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::read_to_string(&given).unwrap()
+    };
+
+    let told = "End the turn with proj await, ask or done.";
+    assert_eq!(
+        turn(Context::Fresh, Some(told)),
+        format!("{told}\n\nfix the bug")
+    );
+    let again = Context::Continue {
+        session: "told-1".to_owned(),
+    };
+    assert_eq!(
+        turn(again.clone(), Some(told)),
+        format!("{told}\n\nfix the bug")
+    );
+    assert_eq!(turn(again, Some("  ")), "fix the bug");
+    assert_eq!(turn(Context::Fresh, None), "fix the bug");
+}

@@ -535,6 +535,7 @@ name = "burrow-engine-antigravity"
 version = "0.0.0"
 dependencies = [
  "boon",
+ "burrow-grants",
  "burrow-process",
  "burrow-test",
  "conary-core",

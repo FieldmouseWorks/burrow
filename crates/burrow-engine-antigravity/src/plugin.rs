@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use burrow_grants::turn;
+
 use conary_core::plugin::{
     Answer, CONTRACT_V1, CONTRACTS, Context, Executed, Identity, Kind, Next, Offers, Request,
     Response, Task, fixtures, version,
@@ -58,10 +60,23 @@ pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
 }
 
 /// Answer one Conary plugin request, aborting and killing the child process
-/// group as soon as `stop()` returns `true`.
+/// group as soon as `stop()` returns `true`. The turn's instructions come
+/// from this process's environment (burrow_grants::turn).
 pub fn answer_cancellable(
     config: &Config,
     request: &Request,
+    stop: &dyn Fn() -> bool,
+) -> Result<Response, String> {
+    let instructions = turn::instructions(|name| std::env::var(name).ok());
+    answer_with(config, request, instructions.as_deref(), stop)
+}
+
+/// Answer one Conary plugin request with the turn's `instructions`, which
+/// go ahead of a job's prompt: the CLI's one input known to reach the model.
+pub fn answer_with(
+    config: &Config,
+    request: &Request,
+    instructions: Option<&str>,
     stop: &dyn Fn() -> bool,
 ) -> Result<Response, String> {
     config.validate()?;
@@ -147,10 +162,14 @@ pub fn answer_cancellable(
                 }
             };
 
+            let prompt = match instructions {
+                Some(told) => format!("{told}\n\n{prompt}"),
+                None => prompt.clone(),
+            };
             let invocation = Invocation::from_config(
                 config,
                 PathBuf::from(workdir),
-                prompt.clone(),
+                prompt,
                 resolved_model.clone(),
                 resolved_effort,
                 conversation.clone(),

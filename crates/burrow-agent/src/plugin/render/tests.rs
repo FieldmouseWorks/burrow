@@ -26,6 +26,7 @@ impl Machine {
             request: String::new(),
             probe: Some(job.join("probe-1.sock")),
             jobs: Some(job.join("host-jobs-1.sock")),
+            instructions: None,
         };
         Machine {
             dir,
@@ -256,4 +257,15 @@ fn a_workspace_is_a_project_of_its_own_and_nothing_wider() {
         .find(|f| matches!(f.task, Task::Job { .. }))
         .unwrap();
     assert_eq!(workspace(&m.cfg, &fixture.task), Ok(None));
+}
+
+#[test]
+fn a_jobs_turn_instructions_reach_its_vm_and_nothing_else_of_the_host() {
+    let mut m = Machine::new(&[]);
+    assert!(!m.attach().env.contains_key(turn::INSTRUCTIONS));
+    m.header.instructions = Some("end with proj done".into());
+    let a = m.attach();
+    assert_eq!(a.env[turn::INSTRUCTIONS], "end with proj done");
+    // Describe is given nothing, the turn's word included.
+    assert!(!Attach::nothing(&m.cfg).env.contains_key(turn::INSTRUCTIONS));
 }

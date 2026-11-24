@@ -39,14 +39,17 @@ pub(crate) const PORT: &str = "agent.plugin";
 pub(crate) const SERVICE_IP: &str = "10.0.2.101";
 pub(crate) const SERVICE_PORT: u16 = 7000;
 
-/// What the client hands the service: the runner's request, and where the
-/// caller's job listens for what only the host may do.
+/// What the client hands the service: the runner's request, where the
+/// caller's job listens for what only the host may do, and the turn's
+/// instructions (burrow_grants::turn).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub request: String,
     pub probe: Option<PathBuf>,
     pub jobs: Option<PathBuf>,
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 /// What comes back, a line each: from the guest to the service, and from

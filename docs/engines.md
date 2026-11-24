@@ -81,6 +81,19 @@ A grant is the capability's name. The runner that gives it to a sandbox
 ([below](#a-plugins-sandbox)) renders it there, and never copies the host
 job's paths or environment for it.
 
+## A turn's instructions
+
+Besides the request and its grants, proj hands every plugin a job's turn
+the turn's instructions: what the job is, and that it ends by declaring its
+next step (`proj await|ask|done`). They come in one environment variable,
+named once in [`burrow_grants::turn`](../crates/burrow-grants/src/turn.rs),
+which every side reads from there: proj sets it, a sandbox's runner carries
+it into the job's VM (never describe's), and each engine plugin gives it to
+its model the way its CLI takes extra instructions. Anthropic's appends it
+to the system prompt; Antigravity's puts it ahead of the job's prompt, the
+one input its CLI is known to give the model. A plugin that drops it leaves
+its jobs undeclared, and they stall.
+
 ## A plugin's sandbox
 
 `burrow.agents.engines.NAME.plugin` configures an engine's plugin. It runs

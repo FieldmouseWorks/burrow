@@ -32,6 +32,7 @@ pub fn call(agent: &Agent, engine: &str) -> Result<(), String> {
         request,
         probe: socket("PROJ_PROBE_SOCKET"),
         jobs: socket("PROJ_HOST_JOBS_SOCKET"),
+        instructions: burrow_grants::turn::instructions(|name| std::env::var(name).ok()),
     };
     let mut host = UnixStream::connect(&plugin.socket)
         .map_err(|e| format!("{}: {e}", plugin.socket.display()))?;

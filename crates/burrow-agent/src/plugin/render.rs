@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Component, Path, PathBuf};
 
-use burrow_grants::{Capability, Grants};
+use burrow_grants::{Capability, Grants, turn};
 use conary_core::plugin::{Task, fixtures};
 use serde::{Deserialize, Serialize};
 
@@ -110,6 +110,11 @@ impl Attach {
         }
         let held = serde_json::to_string(&held).map_err(|e| e.to_string())?;
         a.env.insert("PROJ_CAPABILITIES".to_owned(), held);
+        // The turn's instructions are proj's word to the model, as the
+        // request is: no grant, and nothing of the host's.
+        if let Some(text) = &header.instructions {
+            a.env.insert(turn::INSTRUCTIONS.to_owned(), text.clone());
+        }
         Ok(a)
     }
 
