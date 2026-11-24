@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use conary_github::api::{
-    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status,
+    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status, User,
+    WorkflowRun,
 };
 use conary_github::branches::{Branches, Merged};
 use conary_github::flow::{self, Major, Revision, SealKey, Settings, Snapshot};
@@ -213,19 +214,25 @@ impl flow::Read for Hub {
             draft: false,
             complete: true,
             merge_state: "CLEAN".into(),
+            diff: None,
             open_threads: 0,
             threads: BTreeMap::new(),
             resolved_reviews: BTreeSet::new(),
             updated_at: 0,
             suites: BTreeMap::new(),
-            checks_complete: true,
             rebase_removed: vec![],
             timeline_cut_at: None,
             since: Default::default(),
         })
     }
-    fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, String>, ApiError> {
+    fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, User>, ApiError> {
         Ok(BTreeMap::new())
+    }
+    fn dispatched_run(&self, _: &str, _: u64) -> Result<Option<WorkflowRun>, ApiError> {
+        Err(ApiError::new("not scripted"))
+    }
+    fn workflow_runs(&self, _: &str, _: &str, _: u64) -> Result<Vec<WorkflowRun>, ApiError> {
+        Err(ApiError::new("not scripted"))
     }
 }
 
