@@ -301,9 +301,8 @@ fn an_http_store_with_none_of_the_outputs_says_none() {
 fn a_store_that_doesnt_answer_is_an_error_to_say() {
     let h = Here::new();
     let drv = h.drv(&built("missing"));
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/builds", closed.local_addr().unwrap());
-    drop(closed);
+    let closed = burrow_test::ClosedPort::new();
+    let url = format!("http://{}/builds", closed.addr());
     let store = Store {
         url,
         key: String::new(),

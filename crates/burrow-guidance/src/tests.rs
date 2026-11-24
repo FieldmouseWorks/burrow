@@ -44,8 +44,8 @@ fn what_the_guidance_said_before_fails() {
         ]
     );
     assert_eq!(
-        found("| `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |"),
-        ["1: where `proj.usageHold` is kept (`.usage.json`)"]
+        found("| `proj.usageHolds` | proj's usage record, `.usage-holds.json` in its jobs dir |"),
+        ["1: where `proj.usageHolds` is kept (`.usage-holds.json`)"]
     );
 }
 
@@ -72,8 +72,7 @@ fn naming_an_option_without_its_value_passes() {
 
 #[test]
 fn the_owner_may_state_its_facts() {
-    let text =
-        "| `proj.maxJobs` | integer | 1 or more | `4` |\n| `proj.usageHold` | `.usage.json` |";
+    let text = "| `proj.maxJobs` | integer | 1 or more | `4` |\n| `proj.usageHolds` | `.usage-holds.json` |";
     assert!(check_text(PATH, text, &facts()).is_empty());
     assert_eq!(check_text("README.md", text, &facts()).len(), 2);
 }

@@ -8,8 +8,12 @@ it. `plan.rs` owns the Nix expression used to plan and evaluate outputs.
 The gate and negative runner have no Rust dependencies. It uses the workflow's existing `jq`
 for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
-builds start. A negative evaluation failure must repeat in a private local
-store without substituters, with the comparison tree evaluating afterwards.
+builds start. They run side by side, a core and 2G each, as long as the
+job's memory lasts: what one holds isn't known before it runs (`memory.rs`
+says what burrow's take), so it watches the room left, starts none while
+it's short and, should it run out, stops the biggest but the eldest, to
+evaluate again alone once the rest have (#1484). A negative evaluation
+failure must repeat in a private local store without substituters, with the comparison tree evaluating afterwards.
 That store gets each input that can be fetched, one by one, so an unrelated
 host's outage can't decide the PR (#1212); a second try that reaches for an
 input it wasn't given can't tell.
@@ -137,10 +141,21 @@ flake-check.yml's builds-write step uploads what the leg built
 The gate and negative runs give every build Nix's `max-silent-time` of an
 hour (`SILENT_SECONDS` in `src/main.rs`), after the caller's own
 `NIX_CONFIG`: a build that prints nothing for that long is killed and the
-leg fails, rather than hold its runner until the job's 6 hours run out.
+leg fails, rather than hold its runner until the run's own limit runs out.
 The other builds go on (`--keep-going`), and a push's leg keeps what they
 built. The longest quiet stretch in a burrow build that went on to pass was
 14 to 16 minutes (codex linking, on a hosted runner).
+
+A run, its evaluations and builds together, has a limit of its own
+(`RUN_SECONDS` in `src/main.rs`, which says why that figure): past it
+`timeout` stops the worker and everything it started, and the run can't
+tell, saying so: a gate signs `error` with why, and a
+negative leaves no result to attest. Each job of flake-check.yml has a
+`timeout-minutes` of its own: one that runs the gate or the negative gets
+its run's limit, the limits of its other steps and half an hour more, which
+burrow-workflows' `timeouts` test holds it to (#1488). A job with none
+took GitHub's six hours, and one still going holds every failed job of
+its run from being run again.
 
 The negative builds each check it judges on its own, once what the check is
 built from has built under that hour, with Nix's shorter `timeout`
@@ -150,6 +165,28 @@ timed out there, where every build its log started was its own, is the new
 tests catching the base when the same check passes on the base and on the
 PR's head: a test that a wait ends waits forever on the code with that
 bug. Anything else about a timeout can't tell (#1212).
+
+## A check that flakes
+
+With `FLAKY_EXPIRED` and `FLAKY_REPORT` both set and not empty, the gate
+keeps the contract in [docs/flaky-tests.md](../../docs/flaky-tests.md#what-a-gate-does)
+for its checks (`src/flaky.rs`); unset, it builds as it always did. After
+the build fails, a check whose own derivation is the one left to build (its
+`nix-store --realise --dry-run` names it alone) is built once more on its
+own, in the slot it took, linked apart from its first try, and without the
+build store's shadow again. Its name is its attribute under
+`checks.SYSTEM` (`browser`). One that passes goes in the report, with the end of its
+first try's `nix log`, and counts as a pass; that pass is what the leg
+signs, its log holding both tries. A check that fails again, is named in
+`FLAKY_EXPIRED`, has a name the flaky tool refuses, or failed because a
+derivation it needs did (a build that broke, not a test), fails the gate
+as before. The planner (`cold`) and the negative run give no second try.
+
+The workflow's `flaky` input (off by default) runs the flaky action's
+`start` step before each leg's gate and its `file` step after, from the
+workflow's own commit, so the caller grants `issues: write`. A leg whose
+report can't be filed fails, and a pass it signs is then an `error`
+("A gate that breaks"). A gate-reuse hit runs neither: it builds nothing.
 
 ## A failure the negative tree made
 
@@ -164,7 +201,10 @@ are what fail it (`src/removal.rs`):
   check, the failure is the new tests', as judged above. Not compiling for
   want of what the change adds is one. The removal alone is the base with
   those files taken away and, where the PR replaced one, its old content in
-  what replaced it.
+  what replaced it. A check only the new tests define has no control
+  there: the removal alone breaks it unless its derivation is the same with
+  every deleted file put back (a file or directory that took one's place
+  gone to make room), which says it reads none of them (#1434).
 - Where the removal breaks it by itself, it counts only if it fails, judged
   the same way, with them put back beside the new tests.
 - Where it doesn't, the tree made the failure: it can't tell, so nothing is
@@ -238,7 +278,7 @@ one step shared by every job that needs it, says which gate a run is.
 sorted:
 
 ```json
-{"inputs":{"build-skip":["agents"],"eval-apart":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
+{"inputs":{"build-skip":["agents"],"eval-apart":true,"flaky":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
  "source":"tree","workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
 ```
 

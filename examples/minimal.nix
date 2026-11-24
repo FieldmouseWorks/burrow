@@ -26,6 +26,11 @@
         # Dependabot keeps this one's own dependencies.
         followOnly = [ "sam/kept" ];
       };
+      # Its tools' Cargo pins on another repo's main, as their manifests say.
+      follow = {
+        enable = true;
+        manifests = [{ repo = "sam/homelab"; path = "tools/Cargo.toml"; }];
+      };
     };
     proj.enable = true;
     agents.enable = true;
@@ -96,7 +101,8 @@
     };
     ledger = {
       enable = true;
-      # A stand-in: a real machine takes Conary's flake's packages.default.
+      # A stand-in, so the example builds no Conary: a real machine leaves
+      # package at its default, Conary at the rev burrow's crates link.
       # It passes the files the build loads (`cn policy`, the shadow's
       # `cn flow settings`).
       package = pkgs.writeShellScriptBin "cn" ''case "$1 $2" in "policy "*|"flow settings") exit 0;; esac; exit 1'';

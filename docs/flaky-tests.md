@@ -68,6 +68,10 @@ letters, digits and `_ . : / @ + = - [ ]`, starting with a letter, a digit or
 `psiv_core::scene::tests::walk`). The flaky tool refuses a report with any
 other.
 
+burrow's shared flake gate does this for a caller that turns on its `flaky`
+input: [the runner's README](../crates/burrow-flake-check/README.md#a-check-that-flakes)
+says how it names a check and which get a second try.
+
 ## Around a gate
 
 The flaky tool (`crates/flaky`, Rust, on `gh`) reads the quarantine before the

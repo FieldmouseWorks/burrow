@@ -172,7 +172,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::login::out_for(cfg, usage::login::run_of(cfg, id)).is_some()
+    if usage::login::out_for(cfg, &usage::login::run_of(cfg, id)).is_some()
         || automation_paused(cfg, &job)
         || crate::github_quota::held(cfg, &job).is_some()
     {
@@ -439,7 +439,7 @@ pub fn take(
         // run would be refused, an --unstick turn's too. A sandbox's isn't
         // by this machine's expired login (usage/login.rs).
         usage::metered(cfg);
-        let spent = usage::login::out_for(cfg, run).is_some();
+        let spent = usage::login::out_for(cfg, &run).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if !paused && crate::record::unstuck(&job) {
             // Leaving the line needs no census lock: stale looks retain the
@@ -545,21 +545,19 @@ pub fn take(
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
-        let hold = usage::out(cfg);
-        if !due(&slots, &queue.join(&me), looked) || hold.as_ref().is_some_and(|h| h.holds_run(run))
-        {
+        let store = usage::read_store_ok(cfg);
+        let at = now();
+        if !due(&slots, &queue.join(&me), looked) || store.holds_run(&run, at) {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;
         }
         let mut seen = look(cfg, &me, &job.dir, class)?;
-        // Only the turns a hold lets by take what's free.
-        if let Some(h) = &hold {
-            seen.line
-                .retain(|w| !h.holds_run(usage::login::run_of(cfg, job_of(&w.name))));
-        }
+        // Only the turns whose engine isn't held take what's free.
+        seen.line
+            .retain(|w| !store.holds_run(&usage::login::run_of(cfg, job_of(&w.name)), at));
         looked = now();
-        let cutoff = match usage::admission_cutoff(cfg) {
+        let cutoff = match usage::admission_cutoff_for(cfg, &run.engine) {
             Ok(cutoff) => cutoff,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 drop(lk);
@@ -733,6 +731,8 @@ fn lock(path: &Path) -> Lock {
 mod owner;
 mod room;
 pub(crate) mod table;
+#[cfg(test)]
+pub(crate) use room::seen_room_engine;
 pub use room::{room, seen_room};
 
 /// Every slot of the line's and the machine's heavy work, for

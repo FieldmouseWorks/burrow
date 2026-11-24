@@ -109,6 +109,7 @@ fn push(git_ref: &str, legs: u64, reuse: bool, hit: V) -> Ctx {
         ("inputs.install-nix", true.into()),
         ("inputs.legs", legs.into()),
         ("inputs.gate-reuse", reuse.into()),
+        ("inputs.flaky", false.into()),
         ("github.event_name", "push".into()),
         ("github.ref", git_ref.into()),
         ("github.event.repository.default_branch", "main".into()),
@@ -249,6 +250,54 @@ fn a_hit_with_one_leg_builds_nothing() {
     );
 }
 
+/// flaky, when the caller asks: the flaky action's start step right before
+/// each leg's gate, from the workflow's own commit, and its file step after
+/// it, before the result is signed. Never on a hit, which builds nothing,
+/// and never unless asked: a caller that grants no issues write is left as
+/// it was (docs/flaky-tests.md).
+#[test]
+fn flaky_runs_around_the_gate_only_when_asked() {
+    let wf = wf();
+    let check = &wf["jobs"]["check"];
+    for legs in [1, 4] {
+        let mut c = push(MAIN, legs, false, V::Null);
+        let off = ran(check, &c);
+        assert!(!off.iter().any(|s| s.starts_with("flaky")), "{off:?}");
+        c.insert("inputs.flaky".into(), true.into());
+        let on = ran(check, &c);
+        let at = |id: &str| {
+            on.iter()
+                .position(|s| s == id)
+                .unwrap_or_else(|| panic!("{id}: {on:?}"))
+        };
+        assert_eq!(at("flaky-start") + 1, at("gate"), "{on:?}");
+        assert!(at("gate") < at("flaky-file"), "{on:?}");
+        if legs == 1 {
+            assert_eq!(at("flaky-file") + 1, at("subject"), "{on:?}");
+        }
+        let without: Vec<_> = on.iter().filter(|s| !s.starts_with("flaky")).collect();
+        assert_eq!(without, off.iter().collect::<Vec<_>>(), "{legs}");
+    }
+    let mut c = push(MAIN, 1, true, "true".into());
+    c.insert("inputs.flaky".into(), true.into());
+    assert_eq!(ran(check, &c), ["reused"]);
+    for id in ["flaky-start", "flaky-file"] {
+        assert_eq!(
+            step(check, id)["uses"],
+            "./.flake-check/.github/actions/flaky",
+            "{id}"
+        );
+    }
+    let tools = text(&step(check, "tools")["with"]["sparse-checkout"]);
+    assert!(
+        tools.lines().any(|l| l == ".github/actions/flaky"),
+        "{tools}"
+    );
+    let input = &wf["on"]["workflow_call"]["inputs"]["flaky"];
+    assert_eq!(input["type"], "boolean");
+    assert_eq!(input["default"], false);
+}
+
 /// A hit, with legs: no leg runs, and the gate job, named check, runs only
 /// the step that reports the reuse, with the run it names.
 #[test]
@@ -362,6 +411,7 @@ fn identity_env<'a>(over: &[(&'a str, &'a str)], sha: &'a str) -> Vec<(&'a str, 
         ("LEGS", "4"),
         ("SKIP", "agents"),
         ("KEEP", "true"),
+        ("FLAKY", "true"),
     ]
     .into_iter()
     .collect();
@@ -427,7 +477,7 @@ fn the_identity_is_the_workflows_commit_and_the_inputs_that_change_a_result() {
     assert_eq!(
         gate.as_deref().unwrap(),
         format!(
-            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"install-nix\":true,\"keep-builds\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"tree\",\
+            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"flaky\":true,\"install-nix\":true,\"keep-builds\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"tree\",\
              \"workflow\":{{\"commit\":\"{sha}\",\"file\":\".github/workflows/flake-check.yml\",\"repository\":\"FieldmouseWorks/burrow\",\"tree\":\"{tree}\"}}}}\n"
         )
     );

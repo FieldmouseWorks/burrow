@@ -157,6 +157,19 @@ pub struct Answered {
     pub kind: String,
     pub outcome: &'static str,
     pub why: Option<String>,
+    /// Posted, naming what tracks a red check's cause outside the PR: that
+    /// and the head its answers went up on (answer.rs's `Took`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<Tracker>,
+}
+
+/// What tracks a head's red check's cause outside the PR (`OWNER/REPO#N`),
+/// as a fix job named it, and that head: the steward hands the head to no
+/// other job while it's open, and runs the red run again once it closes.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Tracker {
+    pub tracker: String,
+    pub at: String,
 }
 
 pub fn claims(p: &mut Pass, l: &Look) -> Seen {
@@ -302,6 +315,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 kind: rec.kind.clone(),
                 outcome: "wrong",
                 why: Some(format!("its answers file can't be read: {e}")),
+                tracker: None,
             });
         }
         let mut retry = false;
@@ -335,12 +349,18 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             };
             also.extend(described);
             let mut wrote = Wrote::default();
+            let mut named = None;
             let (outcome, why) = match answer::answer(p, &h, &mut wrote) {
                 Ok(Posted::Answers(Took {
                     head,
                     description,
                     own,
+                    tracker,
                 })) => {
+                    named = tracker.map(|tracker| Tracker {
+                        tracker,
+                        at: head.clone(),
+                    });
                     rec.head = head;
                     rec.own = own;
                     if let Some(d) = description {
@@ -373,6 +393,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                     kind: rec.kind.clone(),
                     outcome,
                     why,
+                    tracker: named,
                 });
             }
             if again {
@@ -393,6 +414,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 kind: rec.kind.clone(),
                 outcome: "pending",
                 why: Some(why),
+                tracker: None,
             });
             retry = true;
         }

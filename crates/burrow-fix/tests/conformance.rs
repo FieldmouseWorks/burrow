@@ -61,7 +61,7 @@ fn described(dir: &Path, verb: &str, stuck: Option<&str>) -> Plugin {
         &plugin,
         format!(
             "#!/bin/sh\nexec {} {verb} {}\n",
-            env!("CARGO_BIN_EXE_burrow-fix"),
+            burrow_test::program!("burrow-fix"),
             config.display()
         ),
     );

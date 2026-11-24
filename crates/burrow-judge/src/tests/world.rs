@@ -7,7 +7,8 @@ use crate::producer::GitHub;
 use burrow_github::fake::ok;
 use burrow_github::{Api, Failed, Response as GhResponse};
 use conary_github::api::{
-    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status,
+    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status, User,
+    WorkflowRun,
 };
 use conary_github::branches::{Branches, Merged};
 use conary_github::flow::{self, ReviewThread, Revision, Snapshot, ThreadComment, fingerprint};
@@ -279,18 +280,24 @@ impl flow::Read for World {
             draft: false,
             complete: true,
             merge_state: "CLEAN".into(),
+            diff: None,
             open_threads: 0,
             threads: self.0.lock().unwrap().threads.clone(),
             resolved_reviews: BTreeSet::new(),
             updated_at: 0,
             suites: BTreeMap::new(),
-            checks_complete: true,
             rebase_removed: vec![],
             timeline_cut_at: None,
             since: Default::default(),
         })
     }
-    fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, String>, ApiError> {
+    fn pushes(&self, _: &str, _: &str) -> Result<BTreeMap<String, User>, ApiError> {
+        unreachable!()
+    }
+    fn dispatched_run(&self, _: &str, _: u64) -> Result<Option<WorkflowRun>, ApiError> {
+        unreachable!()
+    }
+    fn workflow_runs(&self, _: &str, _: &str, _: u64) -> Result<Vec<WorkflowRun>, ApiError> {
         unreachable!()
     }
 }

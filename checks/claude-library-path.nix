@@ -1,6 +1,6 @@
 # Claude Code's wrapper exports no LD_LIBRARY_PATH for the programs it runs to
 # inherit: a QEMU built against the system's glibc died loading unstable's
-# libasound through it (modules/claude/package.nix says why it's dropped).
+# libasound through it (modules/engines/anthropic/package.nix says why it's dropped).
 { self, pkgs, ... }:
 let
   claude = self.nixosConfigurations.example.config.burrow.claude.package;

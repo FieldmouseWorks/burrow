@@ -75,7 +75,7 @@ in
         app = if machineApp == null then null else machineApp.name;
         timeout = "${toString autoland.jobTimeoutMinutes}m";
         idle = "${toString autoland.jobIdleMinutes}m";
-        gh = lib.getExe (config.burrow.tools.gh or pkgs.gh);
+        gh = lib.getExe config.burrow.tools.gh;
         state = "${stateDir}/fix";
       };
       description = "What the plugin and the broker read.";
@@ -95,8 +95,8 @@ in
   options.burrow.autoland.plugins.job = {
     enable = lib.mkEnableOption ''
       the stuck role's `job` plugin, which the fix broker serves: the flow
-      hands a PR it can't settle to the stuck role as a proj job. Off until
-      Conary's flow sends it (FP11); it needs burrow.ledger.controllerUser,
+      hands a PR it can't settle to the stuck role as a proj job (Conary's
+      FP11). Off by default; it needs burrow.ledger.controllerUser,
       and burrow.github.machinery's App, which a stuck-role job opens a PR's
       follow-up issue as'';
 

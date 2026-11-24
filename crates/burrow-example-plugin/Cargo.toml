@@ -7,10 +7,14 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+burrow-grants = { path = "../burrow-grants" }
 # The plugin contract is Conary's, pinned by Cargo.lock.
 conary-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
 
 [lints]
 workspace = true

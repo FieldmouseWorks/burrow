@@ -1,4 +1,4 @@
-# The snapshot side of "instant undo": the guard (claude.nix), Claude Code's
+# The snapshot side of "instant undo": the guard (engines/anthropic.nix), Claude Code's
 # hook, takes an `@pre-*` snapshot of burrow.undo.datasets before anything deletes or rewrites
 # files. This lets the user take them without sudo, and prunes them.
 #

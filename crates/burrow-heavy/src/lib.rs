@@ -36,11 +36,13 @@ use std::time::{Duration, Instant};
 
 use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
+use wait::Waiting;
 
 pub mod config;
 pub mod cpus;
 mod line;
 mod run;
+mod wait;
 
 pub use config::Config;
 pub use line::Class;
@@ -265,6 +267,7 @@ fn take(config: &Config, share: u64, class: Class, wait: Option<u64>, command: &
     };
     let mut clock = Clock::new(wait);
     let mut said = false;
+    let line = Waiting::start("heavy: a slot, in line (heavy status)");
     // Whether the last look found someone ahead, rather than no slot free.
     let behind = Cell::new(false);
     let waiting = || {
@@ -285,6 +288,7 @@ fn take(config: &Config, share: u64, class: Class, wait: Option<u64>, command: &
         attempt(config)
     });
     drop(place);
+    drop(line);
     match got {
         Err(code) => code,
         Ok(Some((i, slot))) => {
@@ -318,6 +322,7 @@ fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsStrin
     };
     let mut clock = Clock::new(wait);
     let mut said = false;
+    let line = Waiting::start("heavy: all slots, in line (heavy status)");
     let waiting = || {
         format!(
             "heavy: waiting for all {} slots (heavy status)",
@@ -355,6 +360,7 @@ fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsStrin
             }
         }
     }
+    drop(line);
     let code = run::run(config, "all", threads, command);
     drop(held);
     drop(turn);

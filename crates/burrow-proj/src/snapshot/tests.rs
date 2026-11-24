@@ -105,7 +105,7 @@ fn full() -> Snapshot {
             })
             .collect(),
         meters: vec![Meter::Engine(EngineMeter {
-            engine: Engine::Claude,
+            engine: "claude".into(),
             reading: Some(Reading {
                 five_hour: Some(window.clone()),
                 weekly: Some(window),

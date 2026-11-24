@@ -471,12 +471,21 @@ impl Look<'_, '_> {
         }
         if let Some(super::plans::Place::Parent(step)) = place {
             let r = match step {
-                Some(_) if p.paused(repo, n) => Record::new(
-                    &name,
-                    Stage::Planned,
-                    "its list goes on once it's replanned from its new text, or its text goes back",
-                )
-                .waiting(Wait::Stuck("it changed after its split".into())),
+                // No replan starts while a live job's brief names it.
+                Some(_) if p.paused(repo, n) => match p.claimer(repo, n) {
+                    Some(id) => Record::new(
+                        &name,
+                        Stage::Planned,
+                        format!("no replan starts while {id}, whose brief names it, is live; its list goes on once it's replanned from its new text, or its text goes back"),
+                    )
+                    .waiting(Wait::Job(id)),
+                    None => Record::new(
+                        &name,
+                        Stage::Planned,
+                        "its list goes on once it's replanned from its new text, or its text goes back",
+                    )
+                    .waiting(Wait::Stuck(format!("it {}", super::plans::CHANGED))),
+                },
                 Some(step) => Record::new(
                     &name,
                     Stage::Planned,

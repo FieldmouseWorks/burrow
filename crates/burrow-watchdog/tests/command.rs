@@ -14,7 +14,7 @@ fn script(path: &Path, body: &str) {
 }
 
 fn watchdog(config: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_burrow-watchdog"))
+    Command::new(burrow_test::program!("burrow-watchdog"))
         .args(args)
         .env("WATCHDOG_CONFIG", config)
         .output()

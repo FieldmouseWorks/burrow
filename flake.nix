@@ -29,17 +29,22 @@
       # a key, so importing one twice (say, on its own and via default) is
       # harmless, and its file, so what it defines says where it came from
       # (in an error, and to update-origin) rather than nixpkgs' flake.nix.
-      module = name: {
-        _file = toString ./modules/${name}.nix;
-        key = "burrow/${name}";
-        imports = [ (import ./modules/${name}.nix inputs) ];
+      moduleFiles = {
+        anthropic = "engines/anthropic.nix";
+        antigravity = "engines/antigravity.nix";
       };
-      # The ledger's machines take Conary from its own flake; burrow's checks
-      # build theirs with a stand-in for its `cn`, which passes the files
-      # their build loads (`cn policy`, the shadow's `cn flow settings`) and
-      # nothing else.
+      module = name: let file = moduleFiles.${name} or "${name}.nix"; in {
+        _file = toString ./modules/${file};
+        key = "burrow/${name}";
+        imports = [ (import ./modules/${file} inputs) ];
+      };
+      # The ledger's machines take Conary at the rev burrow's crates link
+      # (packages.conary); burrow's checks build theirs with a stand-in for
+      # its `cn`, which passes the files their build loads (`cn policy`, the
+      # shadow's `cn flow settings`) and nothing else.
       cnStandIn = pkgs.writeShellScriptBin "cn" ''case "$1 $2" in "policy "*|"flow settings") exit 0;; esac; exit 1'';
-      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
+      antigravityStandIn = pkgs.writeShellScriptBin "antigravity" ''exit 0'';
+      names = [ "settings" "anthropic" "antigravity" "undo" "switch" "notify" "updates" "proj" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
       # Each module on its own, with only what it imports, in a check of its
       # own (standalone-NAME), so the gate's legs share the evaluations out:
       # evaluating is the check, so these build nothing. A service that says
@@ -85,10 +90,11 @@
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
             (nixpkgs.lib.optionalAttrs (name == "builds") { burrow.builds = { host = "example.org"; repos = [ "sam/homelab" ]; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; }; burrow.github = { machinery = "workers"; apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
+            (nixpkgs.lib.optionalAttrs (name == "antigravity") { burrow.engines.antigravity = { enable = true; package = antigravityStandIn; }; })
             # github has no switch: it's on with an App to serve.
-            (if name == "settings" then { }
+            (if name == "settings" || name == "antigravity" then { }
              else if name == "github" then { burrow.github.apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-             else { burrow.${{ rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
+             else { burrow.${{ anthropic = "claude"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
           ];
         };
       in pkgs.writeText "burrow-standalone-${name}" "${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n";
@@ -144,6 +150,12 @@
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
       lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; };
+      # An engine plugin's conformance check in its sandbox; see
+      # lib/engine-conformance.nix.
+      # The Conary burrow's crates link (crates/Cargo.lock), and the ledger's
+      # package by default.
+      lib.conary = import ./lib/conary.nix { inherit (nixpkgs) lib; };
+      lib.engineConformance = import ./lib/engine-conformance.nix { inherit self; };
 
       templates.default = {
         path = ./templates/project;
@@ -164,6 +176,9 @@
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: builtins.removeAttrs p [ "default" ]) crates.packages)
         { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
+        # Conary at that pin: burrow.ledger.package's default, for every
+        # platform the crates are built for.
+        (nixpkgs.lib.mapAttrs (sys: _: { conary = (self.lib.conary.flake self { inherit rust-overlay; }).packages.${sys}.default; }) crates.packages)
       ];
 
       # A bare machine with every module on, for the checks and as an example.
@@ -189,12 +204,17 @@
             // nixpkgs.lib.listToAttrs (map (name: nixpkgs.lib.nameValuePair "standalone-${name}" (standalone name)) names)
             // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
             // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+              let
+                # A project's testFiles are from its own root; burrow's
+                # negative run reads them from burrow's.
+                at = dir: nixpkgs.lib.mapAttrs (_: c: if c ? testFiles then c // { testFiles = map (g: "${dir}/${g}") c.testFiles; } else c);
+              in
               # lib/project.nix's own gates, on the smallest projects that have them.
-              (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
+              at "tests/house/rust" (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
               // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
-                (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
-              // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
-              // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") houseInclude.checks.${system}
+                (at "tests/house/rust-native" (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system})
+              // at "tests/house/python" (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
+              // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") (at "tests/house/rust-include" houseInclude.checks.${system})
             );
           twice = builtins.attrNames (builtins.intersectAttrs own made);
         in

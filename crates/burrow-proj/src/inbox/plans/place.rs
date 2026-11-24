@@ -15,6 +15,10 @@ const PAUSED: &str = "paused";
 /// long as that pause lasts.
 const PAUSE_SAID: &str = "stale-notice";
 
+/// What pauses a parent's list ([`Pass::pause`]), in words.
+pub(in crate::inbox) const CHANGED: &str =
+    "changed after its split (its title, its body, or an author's comment that isn't a `Note:`)";
+
 /// Where an issue stands on the task lists ([`Pass::place`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::inbox) enum Place {
@@ -67,7 +71,7 @@ impl Pass<'_> {
             self.retry(repo);
         }
         let said = d.join(PAUSE_SAID);
-        if !said.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
+        if !said.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning. An author's comment that opens with `Note:` is a note on the list and never pauses it.") {
             let _ = fs::write(said, "paused\n");
         }
         self.reconcile_notice(repo, n, Some(Stall::Paused));
@@ -147,8 +151,12 @@ impl Pass<'_> {
                 return Some(Place::ParentJob(id));
             }
             if list.next().is_some_and(|next| next <= index) && self.paused(repo, parent) {
+                let replan = self.claimer(repo, parent).map_or_else(
+                    || "replanned".to_owned(),
+                    |id| format!("replanned (once {id}, whose brief names it, is done)"),
+                );
                 return Some(Place::Stuck(format!(
-                    "its parent {} changed after its split, so its list is paused until the parent is replanned or its text goes back",
+                    "its parent {} {CHANGED}, so its list is paused until the parent is {replan} or its text goes back",
                     named()
                 )));
             }

@@ -37,8 +37,8 @@ jobs:
     # comparison decides, not an expression's `==`, which ignores case.
     needs: train-route
     uses: ./.github/workflows/flake-check.yml
-    # What the shared workflow needs to attest its result, and actions:
-    # write for a push to main's legs to delete the kept builds their own
+    # What the shared workflow needs to attest its result, issues: write to
+    # file a flaky check (flaky, below), and actions: write for a push to main's legs to delete the kept builds their own
     # supersedes (flake-check.yml's keep-newer and keep-prune, #1011). A
     # permission can't depend on the event, so a PR's run has it too, and
     # `train` and flake-retarget.yml's calls grant the same as this one: it
@@ -49,6 +49,7 @@ jobs:
       actions: write
       id-token: write
       attestations: write
+      issues: write
     with:
       # The agents check boots microVMs inside its test VM. A hosted runner
       # has KVM, and the test VM gets KVM of its own there, but a microVM that
@@ -87,6 +88,9 @@ jobs:
         !docs/settings-reference.md !docs/front-door.md !docs/landing.md
       docs-checks: guidance
       negative: ${{ needs.train-route.outputs.train != 'true' }}
+      # A check that fails gets one more try, and one that then passes is
+      # filed as a `flaky:` issue (docs/flaky-tests.md), with issues: write.
+      flaky: true
   # GitHub expression equality ignores case; git branch names do not.
   # Route using the event's exact refs, without checking out PR code.
   train-route:
@@ -123,6 +127,7 @@ jobs:
       actions: write
       id-token: write
       attestations: write
+      issues: write
     with:
       build-skip: agents
       eval-apart: true
@@ -133,4 +138,5 @@ jobs:
         !docs/repo-baseline.md !docs/house-style.md !docs/settings.md
         !docs/settings-reference.md !docs/front-door.md !docs/landing.md
       docs-checks: guidance
+      flaky: true
       pr-gate: false

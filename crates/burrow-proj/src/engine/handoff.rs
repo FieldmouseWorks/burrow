@@ -10,8 +10,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::Engine;
-use super::stream::{answer, resume, stream_names_session};
+#[cfg(test)]
+use super::stream::resume;
+use super::stream::resume_for;
+use super::{Engine, answer, conversation_of, stream_names_session};
 use crate::record::TurnFile;
 use crate::{job::Job, read};
 
@@ -20,24 +22,24 @@ use crate::{job::Job, read};
 /// What a turn was asked is never cut: it's the task.
 const KEEP: usize = 16_000;
 
-/// The engine turn `m` ran on. One from before engines were chosen, or on
-/// one since retired, counts as Claude's: its stream names no session Claude
-/// can resume, so it's handed on all the same.
-fn engine_of(job: &Job, m: u64) -> Engine {
+/// The engine name turn `m` ran on, preserving any provider name (defaulting to
+/// `"claude"` only for legacy turns that wrote no `m.engine` file).
+fn engine_name_of(job: &Job, m: u64) -> String {
     read(&job.turn_file(&m.to_string(), TurnFile::Engine))
-        .and_then(|e| Engine::parse(&e).ok())
-        .unwrap_or(Engine::Claude)
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "claude".to_owned())
 }
 
 /// The turns before turn `n` that `engine`'s conversation hasn't seen, oldest
 /// first: the ones after the last that ran in it, or all of them when it has
 /// no conversation to resume.
-fn unseen(job: &Job, n: u64, engine: Engine) -> Vec<u64> {
+fn unseen(job: &Job, n: u64, engine: &str) -> Vec<u64> {
+    let target_conv = conversation_of(engine);
     let saw = |m: &u64| {
-        engine_of(job, *m).conversation() == engine.conversation()
+        conversation_of(&engine_name_of(job, *m)) == target_conv
             && stream_names_session(&job.turn_file(&m.to_string(), TurnFile::Jsonl), 0)
     };
-    let from = if resume(job, engine).is_some() {
+    let from = if resume_for(job, engine).is_some() {
         (1..n).rev().find(saw).map_or(1, |m| m + 1)
     } else {
         1
@@ -65,6 +67,12 @@ fn cut(text: &str, whole: &str) -> String {
 /// that engine's conversation missed some of the job, `N.handoff`, those
 /// turns and then this one's prompt.
 pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathBuf> {
+    first_prompt_for(job, n, engine.name())
+}
+
+/// Engine-name version of [`first_prompt`], supporting cross-engine handoff
+/// across any provider names.
+pub fn first_prompt_for(job: &Job, n: &str, engine: &str) -> std::io::Result<PathBuf> {
     let prompt = job.prompt(n);
     let Ok(number) = n.parse::<u64>() else {
         return Ok(prompt);
@@ -73,24 +81,26 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
     if missed.is_empty() {
         return Ok(prompt);
     }
-    let mut text = if resume(job, engine).is_some() {
+    let mut text = if resume_for(job, engine).is_some() {
         "This job went on without this conversation since you last saw it. Here is what each turn since was asked and answered, oldest first; its work (files, commits, branches, PRs) is where they left it.".to_owned()
     } else {
         "This job began before this conversation. Here is what each turn so far was asked and answered, oldest first, starting with its brief; its work (files, commits, branches, PRs) is where they left it.".to_owned()
     };
     for m in missed {
-        let m = m.to_string();
-        let asked = read(&job.prompt(&m)).unwrap_or_default();
-        let transcript = job.turn_file(&m, TurnFile::Jsonl);
-        let said = answer(&transcript);
+        let m_str = m.to_string();
+        let asked = read(&job.prompt(&m_str)).unwrap_or_default();
+        let transcript = job.turn_file(&m_str, TurnFile::Jsonl);
+        let said = read(&job.turn_file(&m_str, TurnFile::Result))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| answer(&transcript));
         let said = if said.trim().is_empty() {
             "(nothing: the turn ended without an answer)".to_owned()
         } else {
-            cut(&said, &format!("`proj log {} --turn {m}`", job.id))
+            cut(&said, &format!("`proj log {} --turn {m_str}`", job.id))
         };
         text.push_str(&format!(
-            "\n\n## Turn {m} ({}), asked\n\n{}\n\n## Turn {m}, answered\n\n{said}\n\n(Everything turn {m} did: {}.)",
-            engine_of(job, m.parse().unwrap_or(0)).name(),
+            "\n\n## Turn {m_str} ({}), asked\n\n{}\n\n## Turn {m_str}, answered\n\n{said}\n\n(Everything turn {m_str} did: {}.)",
+            engine_name_of(job, m),
             asked.trim(),
             transcript.display(),
         ));

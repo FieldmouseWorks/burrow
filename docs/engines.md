@@ -134,6 +134,28 @@ The workspace is the project as it is, untracked files included: approving
 `workspace` gives the plugin whatever is in that folder. A workdir outside
 the projects folder, such as a worktree in a job's scratch, is refused.
 
+## A plugin's conformance check
+
+`lib.engineConformance` ([lib/engine-conformance.nix](../lib/engine-conformance.nix))
+builds a VM test for any engine's plugin, given its package, its engine's
+name and the owner's list. An engine adds one to `checks.agents`
+([checks/agents.nix](../checks/agents.nix)), which a machine builds, since
+it needs nested KVM; the example plugin's is there. From a proj job, as a
+Conary runner calls it, it checks three things:
+
+- `cn plugin check` (Conary's runner's own check) passes on the plugin, in
+  its sandbox with the owner's list.
+- The fixture ([`burrow-example-plugin`](../crates/burrow-example-plugin/src/around.rs),
+  put around the plugin) runs a job in the plugin's engine. It passes the
+  describe and Conary's own jobs to the plugin, so the plugin's describe
+  decides what's granted. It answers its own job itself, as the plugin,
+  trying every capability as its grant renders it. It runs once with the
+  owner's list and once with every name a list can hold.
+- What the plugin declares, it requires. Each of those has to work and be
+  in `PROJ_CAPABILITIES`. Nothing it doesn't declare may work, however much
+  is approved, and no GitHub login may be in its environment. A capability
+  it declares that the owner didn't approve fails the check, naming it.
+
 ## Remaining surfaces to make modular
 
 Swapping in another LLM harness (for example, Antigravity or another agent
@@ -145,11 +167,13 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   `burrow_proj::engine::Engine`, `modules/proj.nix`'s inbox label enum, and
   `crates/burrow-proj/state.schema.json` enumerate a closed set of built-in
   engines (`claude`, `claude-api`).
-  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs),
-  [`engine/capabilities.rs`](../crates/burrow-proj/src/engine/capabilities.rs)
-  (`claude_flags`), and
-  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) hardcode
-  Claude Code's CLI flags, stream JSONL schema, and session extraction.
+  Claude Code's CLI flags, stream JSONL parsing, refusal classification and
+  `claude-api` admission now live in
+  [`crates/burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/lib.rs);
+  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs) and
+  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) still
+  dispatch through `burrow-proj`'s built-in `Engine` enum until `#745` replaces
+  it.
 - **Target:** Replace the closed enum and per-engine branches with the Conary
   `job` plugin contract: each engine is an executable plugin that answers
   `describe` (models, efforts, capabilities, meters), passes
@@ -165,18 +189,19 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 2. Per-engine usage holds, meters and accounting
 
-- **Today:** [`burrow-proj/src/usage.rs`](../crates/burrow-proj/src/usage.rs),
+- **Done (#1386):** [`burrow-proj/src/usage.rs`](../crates/burrow-proj/src/usage.rs),
   [`slot/room.rs`](../crates/burrow-proj/src/slot/room.rs), and
-  [`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs) model one global
-  Claude subscription hold (`proj.usageHold`, see the [settings reference](settings-reference.md)) plus a special-case `api: bool`
-  split for `claude-api`.
-  [`burrow-probe/src/answer/usage.rs`](../crates/burrow-probe/src/answer/usage.rs)
-  parses Claude's stream records directly for token and cost totals.
-- **Target:** Key holds, expired-login notices, and meter snapshots by engine
-  name so a quota or login refusal on one engine never blocks another engine
-  from draining work. Record normalized per-run usage/cost metadata at turn
-  end (or from the plugin response) so `burrow-probe` and `burrow-dashboard`
-  read one engine-agnostic format.
+  [`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs) key usage holds
+  (`proj.usageHolds`, see the [settings reference](settings-reference.md)),
+  expired-login notices (`proj-usage-<engine>`), and meter snapshots by engine
+  name (`*` for an owner pause over all engines), so a quota or login refusal
+  on one engine never blocks another engine from draining work or taking
+  failover routes. Each completed turn writes a normalized per-run usage record
+  ([`burrow-probe/src/usage_record.rs`](../crates/burrow-probe/src/usage_record.rs))
+  that [`burrow-probe/src/answer/usage.rs`](../crates/burrow-probe/src/answer/usage.rs)
+  and [`burrow-probe/src/credit.rs`](../crates/burrow-probe/src/credit.rs)
+  aggregate across engines without parsing provider-specific stream files
+  (retaining read compatibility for historical Claude stream logs).
 
 ### 3. Judge producer (`burrow-judge`)
 
@@ -192,27 +217,32 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 4. Host guardrails (`burrow-guard`) and microVM sandboxes (`burrow.agents`)
 
-- **Today:** Host sessions rely on `/etc/claude-code/managed-settings.json`
-  and Claude Code's `PreToolUse` hook invoking
-  [`burrow-guard`](../crates/burrow-guard/src/main.rs). A non-Claude CLI will
-  not read those files or fire that hook format. The sandboxes are
-  per-engine: [`burrow.agents.engines`](../modules/agents/engines.nix) is a
-  table of each engine's guest packages and modules, its systemd credential
-  (`agent.credential`, exported as its `credentialEnv`), its own egress
-  hosts and an owner-approved capability list. Claude's entry is declared by
-  [`modules/claude.nix`](../modules/claude.nix);
+- **Today:** All Anthropic host and sandbox wiring—the Claude Code package,
+  `/etc/claude-code/managed-settings.json`, Claude Code's `PreToolUse` hook
+  adapter into [`burrow-guard`](../crates/burrow-guard/src/main.rs),
+  Anthropic's egress hosts, and the `claude` and `claude-api` entries in
+  [`burrow.agents.engines`](../modules/agents/engines.nix) (with their
+  credentials and packaged
+  [`burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/main.rs)
+  plugins)—lives in one module,
+  [`modules/engines/anthropic.nix`](../modules/engines/anthropic.nix). Both
+  modes pass [`lib.engineConformance`](../lib/engine-conformance.nix) in
+  [`checks/agents.nix`](../checks/agents.nix) inside the shared sandbox.
   [`modules/agents.nix`](../modules/agents.nix) builds one guest image and
   one filtered proxy per entry, so a VM started for an engine (`agent new
   --engine`) gets only that engine's packages and credential, and reaches
   only [the shared list](../modules/agents/allow.txt) and that engine's
-  hosts. Still Claude-shaped there: `agent claude`, the host model settings
-  `agent new` copies into a VM's `~/.claude`, and `proj run --vm`, which
-  runs Claude in the default engine's VM.
+  hosts. Host sessions still rely on `/etc/claude-code/managed-settings.json`
+  and Claude Code's `PreToolUse` hook; a non-Claude CLI will not read those
+  files or fire that hook format. Still Claude-shaped in `burrow.agents`:
+  `agent claude`, the host model settings `agent new` copies into a VM's
+  `~/.claude`, and `proj run --vm`, which runs Claude in the default
+  engine's VM.
 - **Target:**
   - **Sandbox path (default for new engines):**
-    [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. proj
-    doesn't run engines through it yet
-    ([#745](https://github.com/FieldmouseWorks/burrow/issues/745)). Inside
+    [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. `proj`
+    routes onto engine plugins in
+    [#745](https://github.com/FieldmouseWorks/burrow/issues/745). Inside
     the microVM, the VM itself is the security boundary.
   - **Host path (when needed):** Keep `burrow-guard`'s ZFS-snapshot and
     one-way-door decision logic engine-agnostic and add a thin hook/policy
@@ -250,21 +280,32 @@ land:
 3. **Land the remaining decoupling as bounded follow-ups:**
    - per-engine holds, login notices, meters, and normalized `probe usage`
      accounting;
-   - a conformance check for every engine plugin in
-     [its sandbox](#a-plugins-sandbox)
-     ([#1391](https://github.com/FieldmouseWorks/burrow/issues/1391));
+   - each engine's plugin wired to
+     [its conformance check](#a-plugins-conformance-check) as it lands
+     ([#744](https://github.com/FieldmouseWorks/burrow/issues/744),
+     [#1385](https://github.com/FieldmouseWorks/burrow/issues/1385));
    - pluggable worker dispatch in `burrow-judge`;
    - host-hook adapters into `burrow-guard` only for harnesses that need host
      execution outside a microVM.
 
 ## Done looks like
 
-Adding a new LLM harness (such as Antigravity) to the pipeline requires:
+Anthropic (`crates/burrow-engine-anthropic` + `modules/engines/anthropic.nix`)
+now follows this shape for both `claude` and `claude-api`, serving its
+`conary-plugin v5` `job` plugins through `agent-plugin-claude` and
+`agent-plugin-claude-api` and passing
+[its conformance check](#a-plugins-conformance-check) in
+[`checks/agents.nix`](../checks/agents.nix). Adding another LLM harness (such
+as Antigravity) to the pipeline requires:
 
-1. One executable plugin/adapter crate passing `cn plugin check` (handling
-   launch, stream normalization, refusal classification, and credential
-   isolation).
-2. One Nix module (or machine flake config) declaring its package, sops
-   secret, egress host allowlist, and sandbox/guard wiring.
+1. One executable plugin/adapter crate passing
+   [its conformance check](#a-plugins-conformance-check), `cn plugin check`
+   included (handling launch, stream normalization, refusal classification,
+   and credential isolation).
+2. One Nix module under `modules/engines/` (or machine flake config) declaring
+   its package, sops secret, egress host allowlist, runtime model/effort
+   offers, and sandbox/guard wiring through `burrow.agents.engines`.
 3. Zero changes to Conary's landing flow, `burrow-settings`, the inbox, the
-   scheduler, or the front doors.
+   scheduler, or the front doors (once
+   [#745](https://github.com/FieldmouseWorks/burrow/issues/745) replaces
+   `burrow-proj`'s built-in `Engine` enum).

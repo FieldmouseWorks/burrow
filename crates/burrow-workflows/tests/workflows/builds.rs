@@ -90,6 +90,7 @@ fn run(event: &str, git_ref: &str, head: Option<&str>, keep: bool, nix: bool, ur
         ("inputs.install-nix", nix.into()),
         ("inputs.legs", V::from(1)),
         ("inputs.gate-reuse", false.into()),
+        ("inputs.flaky", false.into()),
         ("github.event_name", event.into()),
         ("github.ref", git_ref.into()),
         ("github.repository", "owner/repo".into()),

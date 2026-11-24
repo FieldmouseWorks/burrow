@@ -213,7 +213,19 @@ impl Negative {
         Ok(())
     }
     fn evaluate(&self, tree: &Path, q: &str, root_name: &str) -> Result<Output> {
-        let o = output(self.eval(tree, Some(q), false))?;
+        self.evaluate_in(&memory::Slot::alone(), tree, q, root_name)
+    }
+    fn evaluate_in(
+        &self,
+        slot: &memory::Slot,
+        tree: &Path,
+        q: &str,
+        root_name: &str,
+    ) -> Result<Output> {
+        let o = slot.output(
+            self.eval(tree, Some(q), false),
+            &format!("check {q}'s evaluation in {}", s(tree)),
+        )?;
         if o.status.success() {
             let drv = String::from_utf8_lossy(&o.stdout);
             root(drv.trim_end(), &self.work.0.join("roots").join(root_name))?;
@@ -531,21 +543,29 @@ pub fn negative() -> Result<bool> {
     names.dedup();
     fs::create_dir(work.join("roots"))?;
     let side = memory::side();
-    let tasks: Vec<_> = names
-        .iter()
-        .enumerate()
-        .flat_map(|(i, name)| [(i, name, "base"), (i, name, "negative")])
+    // Every check on the base, then every check on the negative tree: a
+    // check's two weigh the same, so side by side a big one would be twice.
+    let tasks: Vec<_> = ["base", "negative"]
+        .into_iter()
+        .flat_map(|at| names.iter().enumerate().map(move |(i, name)| (i, name, at)))
         .collect();
-    let evals = memory::parallel(&tasks, side, |(i, name, at)| {
-        n.evaluate(&work.join(at), &nix_string(name), &format!("{i}.{at}"))
+    let evals = memory::parallel(&tasks, side, |(i, name, at), slot| {
+        n.evaluate_in(
+            slot,
+            &work.join(at),
+            &nix_string(name),
+            &format!("{i}.{at}"),
+        )
     });
     let mut targets = Vec::new();
     let mut caught = false;
     // Without the names nothing passed there, so only a catch counts.
     let mut unsure = names_broken;
     for (i, name) in names.iter().enumerate() {
-        let b = evals[i * 2].as_ref().map_err(|e| err(e.to_string()))?;
-        let neg = evals[i * 2 + 1].as_ref().map_err(|e| err(e.to_string()))?;
+        let b = evals[i].as_ref().map_err(|e| err(e.to_string()))?;
+        let neg = evals[names.len() + i]
+            .as_ref()
+            .map_err(|e| err(e.to_string()))?;
         let bv = value(b);
         let nv = value(neg);
         let q = nix_string(name);
@@ -602,7 +622,7 @@ pub fn negative() -> Result<bool> {
             CHECK_SECONDS / 60
         );
     }
-    let built = memory::parallel(&targets, side, |t| n.alone(&t.drv, &roots));
+    let built = memory::parallel(&targets, side, |t, _| n.alone(&t.drv, &roots));
     for (t, b) in targets.iter().zip(built) {
         match b.map_err(|e| err(e.to_string()))? {
             Alone::Passed => println!("{} built: it passes", t.drv),
@@ -756,8 +776,9 @@ fn coverage(
         let tasks: Vec<_> = (0..added.len())
             .flat_map(|j| undeclared.iter().map(move |k| (j, *k)))
             .collect();
-        let evals = memory::parallel(&tasks, side, |(j, k)| {
-            n.evaluate(
+        let evals = memory::parallel(&tasks, side, |(j, k), slot| {
+            n.evaluate_in(
+                slot,
                 &work.join(format!("one/{j}/negative")),
                 &targets[*k].q,
                 &format!("one-{j}-{k}"),

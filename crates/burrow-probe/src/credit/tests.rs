@@ -582,3 +582,35 @@ fn a_turn_moved_onto_the_credit_keeps_its_older_runs_on_the_subscription() {
     );
     assert_eq!(jobs.spends(SINCE).unwrap(), [(first, M), (second, 2 * M)]);
 }
+
+/// Runs the credit admitted outside proj's jobs are charged from their own
+/// folder like a job's turns; proj's other hidden state never is.
+#[test]
+fn runs_admitted_outside_jobs_are_charged_from_their_own_folder() {
+    let jobs = Jobs::new();
+    let at = SINCE + HOUR;
+    let ran = |cost| stream(&[run(at), init("s"), result("s", cost)]);
+    jobs.turn(ENGINE_RUNS, 1, Some(ENGINE), None, &ran(1.0));
+    jobs.turn(ENGINE_RUNS, 2, Some(ENGINE), None, &ran(1.5));
+    jobs.turn(".other", 1, Some(ENGINE), None, &ran(9.0));
+    assert_eq!(
+        jobs.spends(SINCE).unwrap(),
+        vec![(at, M), (at, M / 2)],
+        "each run its own cost, in one session"
+    );
+}
+
+/// A marker says when its run started, on which engine, and its budget.
+#[test]
+fn a_marker_is_what_the_ledger_reads() {
+    let line = marker(7, ENGINE, Some(3));
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        v,
+        json!({"type":"burrow.run","at":7,"engine":ENGINE,"budget":3})
+    );
+    assert_eq!(
+        marker(7, "claude", None),
+        r#"{"type":"burrow.run","at":7,"engine":"claude"}"#
+    );
+}

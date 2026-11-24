@@ -1,11 +1,10 @@
-//! Owner pauses: compatibility, deadline reconciliation and atomic generations.
+//! Owner pauses: deadline reconciliation, atomic v2 writes, and backward-compatible
+//! reading of legacy single-hold `.usage.json` and `.usage-owner-*` metadata.
 use super::tests::{cutoff, earlier_resets, rig, told};
 use super::*;
+use serde_json::json;
 use std::fs;
 
-// Owner-record content checks run as serialized transactions. Public admission
-// contention is tested separately, rather than assuming no concurrent fork
-// briefly inherits a descriptor before exec.
 fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
     let _held = super::lock(cfg).map_err(std::io::Error::other)?;
     super::admission_cutoff_locked(cfg)
@@ -26,6 +25,7 @@ fn owner_hold_after_release_is_fresh_and_only_explicitly_released() {
     crate::cmd::dispatch(&cfg, &args).unwrap();
     let held = out(&cfg).unwrap();
     assert!(held.owner);
+    assert_eq!(held.engine, ALL_ENGINES);
     assert_eq!(held.said, "save usage");
     back(&cfg, Some(held.at + 1));
     assert_eq!(out(&cfg), Some(held));
@@ -73,55 +73,108 @@ fn owner_deadline_survives_refusals_and_expires_normally() {
     };
     keep(&cfg, &expired).unwrap();
     assert!(out(&cfg).is_none());
-    back(&cfg, Some(now() + 1));
+    tend(&cfg);
     assert!(kept(&cfg).unwrap().back.is_some());
     // A new refusal after expiry is an ordinary usage hold again.
     record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
     assert!(!out(&cfg).unwrap().owner);
 }
 
-// The disk schema used by turns that keep the previous binary through a deploy.
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct LegacySpent {
-    until: i64,
-    said: String,
-    job: String,
-    at: i64,
-    back: Option<i64>,
-    told: i64,
-    last: Option<i64>,
-}
-
 #[test]
-fn owner_holds_survive_legacy_reads_refusals_and_successful_turns() {
+fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only() {
     let (_d, cfg) = rig();
-    record(&cfg, "ordinary", Some(now() + 60), "refused", now()).unwrap();
-    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    assert!(old.back.is_none() && old.until > now());
-    hold(&cfg, now() + 3600, "owner reason").unwrap();
-    let held = out(&cfg).unwrap();
-    let mut old: LegacySpent =
+    let t = now();
+    // 1. Legacy flat single-hold `.usage.json` reads as a `claude` hold.
+    fs::write(
+        cfg.jobs.join(LEGACY_FILE),
+        json!({
+            "until": t + 3600,
+            "said": "You've hit your monthly spend limit",
+            "job": "legacy-job",
+            "at": t - 10,
+            "back": null,
+            "told": t - 10,
+            "last": t - 10
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = out(&cfg).unwrap();
+    assert_eq!(loaded.engine, DEFAULT_ENGINE);
+    assert!(!loaded.owner);
+    assert_eq!(loaded.job, "legacy-job");
+    assert_eq!(loaded.said, "Claude reached its extra-usage cap");
+
+    // 2. Legacy `.usage-owner-*` metadata reads as a global `*` owner hold.
+    let owner_ref = ".usage-owner-legacy123";
+    fs::write(
+        cfg.jobs.join(owner_ref),
+        json!({
+            "until": t + 7200,
+            "said": "legacy owner pause",
+            "job": owner_ref,
+            "at": t - 20,
+            "back": null,
+            "told": t - 20,
+            "last": t - 20
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        cfg.jobs.join(LEGACY_FILE),
+        json!({
+            "until": t + 7200,
+            "said": "legacy owner pause",
+            "job": owner_ref,
+            "at": t - 20,
+            "back": null,
+            "told": t - 20,
+            "last": t + 7199
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded_owner = out(&cfg).unwrap();
+    assert!(loaded_owner.owner);
+    assert_eq!(loaded_owner.engine, ALL_ENGINES);
+    assert_eq!(loaded_owner.said, "legacy owner pause");
+
+    // 3. New writes keep v2 per-engine JSON in `.usage-holds.json` (without owner sidecar
+    // references in the v2 record), mirror active global `*` pauses with `.usage-owner-*`
+    // in `.usage.json` so retained pre-change API turns stay blocked, and clean them on settle.
+    hold(&cfg, t + 1200, "v2 pause").unwrap();
+    fs::remove_file(cfg.jobs.join(owner_ref)).unwrap();
+    let raw: serde_json::Value =
         serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    // The old slot/retry loop still reads an active hold, and its successful
-    // turn cannot satisfy back()'s started > last-refusal condition.
-    assert!(old.back.is_none() && old.until > now());
-    assert!(now() < old.last.unwrap());
-    // Exactly the old put() update: a refusal extends the compatible mirror
-    // and preserves the rest. It cannot erase the owner's actual deadline.
-    old.until = old.until.max(now() + 7200);
-    old.last = Some(old.last.unwrap().max(now()));
-    fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-    assert_eq!(out(&cfg), Some(held.clone()));
-    back(&cfg, Some(now() + 1));
-    assert_eq!(out(&cfg), Some(held));
-    // Replacement owner pauses update both the old reader and the metadata.
-    hold(&cfg, now() + 1200, "replacement").unwrap();
-    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    assert_eq!(old.until, out(&cfg).unwrap().until);
-    assert_eq!(out(&cfg).unwrap().said, "replacement");
+    assert_eq!(raw["version"], 2);
+    assert_eq!(raw["holds"]["*"]["owner"], true);
+    assert_eq!(raw["holds"]["*"]["said"], "v2 pause");
+    assert_eq!(raw["holds"]["*"]["job"], "owner");
+    let legacy_raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(cfg.jobs.join(LEGACY_FILE)).unwrap()).unwrap();
+    let mirror_job = legacy_raw["job"].as_str().unwrap();
+    assert!(
+        mirror_job.starts_with(".usage-owner-"),
+        "active global pause legacy mirror must reference .usage-owner-* for retained API turns"
+    );
+    assert!(cfg.jobs.join(mirror_job).exists());
     back(&cfg, None);
     assert!(out(&cfg).is_none());
+    let released = kept(&cfg).unwrap();
+    settle(
+        &cfg,
+        released.clone(),
+        released.release() + cfg.stall_queued() + 1,
+    );
+    let has_owner_sidecar = fs::read_dir(&cfg.jobs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(".usage-owner-"));
+    assert!(
+        !has_owner_sidecar,
+        "settled holds must clean up legacy owner mirror sidecars"
+    );
 }
 
 #[test]
@@ -154,45 +207,6 @@ fn owner_expiry_settles_without_a_claude_run_and_retries_its_close() {
 }
 
 #[test]
-fn legacy_refusals_at_and_after_expiry_survive_delayed_cleanup() {
-    for delta in [-1, 0, 1] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "pause").unwrap();
-        let mut expired = kept(&cfg).unwrap();
-        let deadline = now() - 10;
-        expired.until = deadline;
-        keep(&cfg, &expired).unwrap();
-        let mut old: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        old.until = deadline + 7200;
-        old.last = Some(old.last.unwrap().max(deadline + delta));
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        if delta < 0 {
-            assert!(out(&cfg).is_none());
-            assert!(kept(&cfg).unwrap().owner);
-            tend(&cfg);
-            assert!(kept(&cfg).unwrap().back.is_some());
-        } else {
-            let refused = out(&cfg).unwrap();
-            assert!(!refused.owner);
-            assert_eq!(refused.refused(), deadline + delta);
-            tend(&cfg);
-            assert_eq!(out(&cfg), Some(refused.clone()));
-            // A stale successful turn cannot end the reconciled refusal.
-            back(&cfg, Some(deadline + delta));
-            assert_eq!(out(&cfg), Some(refused));
-            earlier(&cfg, "import", deadline + 7300, Some(deadline + delta)).unwrap();
-            adopt(&cfg).unwrap();
-            tend(&cfg);
-            assert!(!out(&cfg).unwrap().owner);
-            assert!(out(&cfg).unwrap().until >= deadline + 7300);
-            back(&cfg, Some(now() + 1));
-            assert!(out(&cfg).is_none());
-        }
-    }
-}
-
-#[test]
 fn current_refusals_respect_the_same_deadline_boundary() {
     for delta in [-1, 0, 1] {
         let (_d, cfg) = rig();
@@ -214,55 +228,6 @@ fn current_refusals_respect_the_same_deadline_boundary() {
             tend(&cfg);
             assert_eq!(out(&cfg), Some(refusal));
         }
-    }
-}
-
-#[test]
-fn owner_generations_commit_only_when_the_shared_record_commits() {
-    for seconds in [0, 1] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "original").unwrap();
-        let original = out(&cfg).unwrap();
-        let old_metadata = fs::read(cfg.jobs.join(&original.job)).unwrap();
-        let mut replacement = original.clone();
-        replacement.at += seconds;
-        replacement.until += 1000;
-        replacement.said = "replacement".into();
-        // An interruption after preparing metadata has not committed anything.
-        let prepared = owner_generation(&cfg, &replacement).unwrap();
-        assert_eq!(out(&cfg), Some(original.clone()));
-        assert_ne!(prepared.job, original.job);
-        let blocked = cfg.jobs.join(format!("{FILE}.new"));
-        fs::create_dir(&blocked).unwrap();
-        assert!(keep(&cfg, &replacement).is_err());
-        assert_eq!(out(&cfg), Some(original.clone()));
-        assert_eq!(
-            fs::read(cfg.jobs.join(&original.job)).unwrap(),
-            old_metadata
-        );
-        fs::remove_dir(&blocked).unwrap();
-        keep(&cfg, &replacement).unwrap();
-        let committed = out(&cfg).unwrap();
-        assert_eq!(committed.said, "replacement");
-        assert_eq!(committed.until, replacement.until);
-        assert_ne!(committed.job, original.job);
-        // Concurrent readers of the previous record still have its metadata.
-        assert_eq!(
-            fs::read(cfg.jobs.join(&original.job)).unwrap(),
-            old_metadata
-        );
-        let mut reminder = committed.clone();
-        reminder.told += 1;
-        fs::create_dir(&blocked).unwrap();
-        assert!(keep(&cfg, &reminder).is_err());
-        assert_eq!(out(&cfg), Some(committed.clone()));
-        back(&cfg, None); // Failed release cannot downgrade the active owner.
-        assert_eq!(out(&cfg), Some(committed.clone()));
-        fs::remove_dir(&blocked).unwrap();
-        keep(&cfg, &reminder).unwrap();
-        assert_eq!(out(&cfg).unwrap().job, committed.job);
-        back(&cfg, None);
-        assert!(out(&cfg).is_none());
     }
 }
 
@@ -291,9 +256,7 @@ fn failed_creation_and_expiry_do_not_publish_partial_owner_state() {
 
 #[test]
 fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
-    for first in [
-        "tend", "dated", "undated", "adopt", "current", "legacy", "hold",
-    ] {
+    for first in ["tend", "dated", "undated", "adopt", "current", "hold"] {
         let (_d, cfg) = rig();
         hold(&cfg, now() + 3600, "expires").unwrap();
         let deadline = now() - 30;
@@ -319,15 +282,6 @@ fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
             "current" => {
                 record(&cfg, "fresh", Some(reset), "refused", deadline).unwrap();
             }
-            "legacy" => {
-                let mut raw: LegacySpent =
-                    serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-                raw.until = reset;
-                raw.last = Some(deadline);
-                fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&raw).unwrap()).unwrap();
-                // Even the import, rather than tend, can first see this write.
-                earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
-            }
             "hold" => {
                 hold(&cfg, reset, "replacement").unwrap();
             }
@@ -335,12 +289,11 @@ fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
         }
         let expected = out(&cfg);
         assert!(released(&cfg).unwrap() >= deadline - 1, "{first}");
-        if matches!(first, "current" | "legacy" | "hold") {
+        if matches!(first, "current" | "hold") {
             assert_eq!(expected.as_ref().unwrap().until, reset, "{first}");
         } else {
             assert!(expected.is_none(), "{first}");
         }
-        // Every adoption route sees the durable cutoff, even after replacement.
         earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
         earlier(&cfg, "watchdog", reset + 1000, None).unwrap();
         earlier_resets(&cfg, "owned-stale", reset + 1000, deadline - 1, true);
@@ -349,9 +302,8 @@ fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
         tend(&cfg);
         assert_eq!(out(&cfg), expected, "{first}");
         if first != "hold" {
-            // Cleanup cannot erase the cutoff; a refusal exactly at or after
-            // expiry is still new and eligible, including through imports.
             fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+            let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
             earlier(&cfg, "stale", reset + 1000, Some(deadline - 1)).unwrap();
             assert!(out(&cfg).is_none(), "{first}");
             earlier(&cfg, "boundary", reset + 2000, Some(deadline)).unwrap();
@@ -452,57 +404,9 @@ fn owner_expiry_retains_natural_admission_boundary() {
 }
 
 #[test]
-fn released_records_and_owner_metadata_remain_readable_by_the_previous_schema() {
+fn failed_release_journal_or_record_never_poisons_active_holds() {
     for owner in [false, true] {
-        for early in [false, true] {
-            let (_d, cfg) = rig();
-            let t = now();
-            if owner {
-                hold(&cfg, t + 3600, "owner reason").unwrap();
-            } else {
-                record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
-            }
-            let before: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            if owner {
-                let _: LegacySpent =
-                    serde_json::from_slice(&fs::read(cfg.jobs.join(&before.job)).unwrap()).unwrap();
-            }
-            if early {
-                back(&cfg, None);
-            } else {
-                let mut s = kept(&cfg).unwrap();
-                s.until = t - 1;
-                keep(&cfg, &s).unwrap();
-                back(&cfg, None);
-            }
-            let released = kept(&cfg).unwrap();
-            let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-            // Old writers update told and preserve job/back, then settle by
-            // deleting the compatible record. The precise cutoff survives
-            // both that write and a rollback to the strict schema.
-            let mut old: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            old.told += 1;
-            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-            assert_eq!(kept(&cfg).unwrap().owner, owner);
-            fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-            record(&cfg, "old retry", Some(t + 7200), "refused again", t + 1).unwrap();
-            let _: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            assert!(out(&cfg).is_some());
-            assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            assert!(released.back.is_some());
-        }
-    }
-}
-
-#[test]
-fn failed_release_journal_or_record_never_poison_old_writers() {
-    for owner in [false, true] {
-        for boundary in [".usage.admission.new", ".usage.json.new"] {
+        for boundary in [format!("{ADMISSION}.new"), format!("{FILE}.new")] {
             let (_d, cfg) = rig();
             let t = now();
             if owner {
@@ -510,55 +414,64 @@ fn failed_release_journal_or_record_never_poison_old_writers() {
             } else {
                 record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
             }
-            fs::create_dir(cfg.jobs.join(boundary)).unwrap();
+            fs::create_dir(cfg.jobs.join(&boundary)).unwrap();
             back(&cfg, None);
-            let mut old: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            assert!(old.back.is_none());
-            // The real old put() update preserves all fields but until/last.
-            old.until = old.until.max(t + 7200);
-            old.last = Some(old.last.unwrap_or(old.at).max(t));
-            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+            assert!(out(&cfg).is_some(), "{boundary}");
             assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            fs::remove_dir(cfg.jobs.join(boundary)).unwrap();
+            fs::remove_dir(cfg.jobs.join(&boundary)).unwrap();
             back(&cfg, None);
             let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-            let _: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
             assert_eq!(kept(&cfg).unwrap().admission, Some(cutoff));
         }
     }
 }
 
 #[test]
-fn legacy_releases_include_the_whole_release_second_and_keep_the_boundary_on_later_writes() {
-    for owner in [false, true] {
-        let (_d, cfg) = rig();
-        let t = now();
-        if owner {
-            hold(&cfg, t + 3600, "pause").unwrap();
-        } else {
-            record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
-        }
-        let mut old: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        // The old back() publishes back, without knowing the new journal.
-        old.back = Some(now());
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        assert_eq!(cutoff, (old.back.unwrap() + 1) * 1_000_000_000);
-        let mut released: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        released.told += 1;
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&released).unwrap()).unwrap();
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-        settle(&cfg, kept(&cfg).unwrap(), t + cfg.stall_queued() + 1);
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-    }
+fn legacy_releases_and_committed_cutoffs_read_cleanly() {
+    let (_d, cfg) = rig();
+    let t = now();
+    // Legacy release without admission field includes the whole release second.
+    fs::write(
+        cfg.jobs.join(LEGACY_FILE),
+        json!({
+            "until": t + 3600,
+            "said": "refused",
+            "job": "ordinary",
+            "at": t - 10,
+            "back": t,
+            "told": t
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        admission_cutoff(&cfg).unwrap(),
+        Some((t + 1) * 1_000_000_000)
+    );
+
+    // Legacy release with ADMISSION_REF preserves exact nanosecond precision.
+    let exact = t * 1_000_000_000 + 123_456_789;
+    fs::write(
+        cfg.jobs.join(LEGACY_FILE),
+        json!({
+            "until": t + 3600,
+            "said": "refused",
+            "job": format!(".usage-release-{exact}-ordinary"),
+            "at": t - 10,
+            "back": t,
+            "told": t
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = kept(&cfg).unwrap();
+    assert_eq!(loaded.job, "ordinary");
+    assert_eq!(loaded.admission, Some(exact));
+    assert_eq!(admission_cutoff(&cfg).unwrap(), Some(exact));
 }
 
 #[test]
-fn committed_reference_recovers_precision_even_without_the_retention_journal() {
+fn committed_v2_record_recovers_precision_without_the_retention_journal() {
     for owner in [false, true] {
         let (_d, cfg) = rig();
         if owner {
@@ -568,7 +481,8 @@ fn committed_reference_recovers_precision_even_without_the_retention_journal() {
         }
         back(&cfg, None);
         let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        fs::remove_file(cfg.jobs.join(".usage.admission")).unwrap();
+        fs::remove_file(cfg.jobs.join(ADMISSION)).unwrap();
+        let _ = fs::remove_file(cfg.jobs.join(LEGACY_ADMISSION));
         let s = kept(&cfg).unwrap();
         assert_eq!(s.owner, owner);
         assert_eq!(s.admission, Some(cutoff));
@@ -576,35 +490,5 @@ fn committed_reference_recovers_precision_even_without_the_retention_journal() {
         settle(&cfg, s.clone(), s.release() + cfg.stall_queued() + 1);
         assert!(kept(&cfg).is_none());
         assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-    }
-}
-
-#[test]
-fn deploy_scan_repairs_intermediate_records_before_old_running_writers_refuse() {
-    for owner in [false, true] {
-        let (_d, cfg) = rig();
-        if owner {
-            hold(&cfg, now() + 3600, "owner pause").unwrap();
-        } else {
-            record(&cfg, "legacy", Some(now() + 3600), "refused", now() - 10).unwrap();
-        }
-        back(&cfg, None);
-        let released = kept(&cfg).unwrap();
-        // The deployed intermediate generation committed these fields together,
-        // before switching to the fixed writer: no waiter need have run yet.
-        let mut intermediate = serde_json::to_value(&released).unwrap();
-        intermediate["admission"] = released.admission.unwrap().into();
-        fs::write(
-            cfg.jobs.join(FILE),
-            serde_json::to_vec(&intermediate).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            serde_json::from_slice::<LegacySpent>(&fs::read(cfg.jobs.join(FILE)).unwrap()).is_err()
-        );
-        crate::retry::pass(&cfg).unwrap();
-        let _: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        assert_eq!(kept(&cfg), Some(released));
     }
 }

@@ -178,3 +178,34 @@ fn a_refusal_names_the_capability_and_why() {
         assert!(said.contains(&expected), "{expected} not in {said:?}");
     }
 }
+
+#[test]
+fn declared_is_what_the_describe_says_whatever_was_approved() {
+    let names = |kinds: &[Kind], offered: plugin::Capabilities| -> Vec<_> {
+        declared(kinds, &offered).into_iter().map(C::name).collect()
+    };
+    assert_eq!(
+        names(&[Kind::Job], offered(true, false, &[])),
+        [
+            "workspace",
+            "job-state",
+            "git-metadata",
+            "toolchains",
+            "system",
+            "probe",
+            "units-clear",
+            "heavy",
+            "nix",
+            "network",
+        ]
+    );
+    assert_eq!(
+        names(&[Kind::Review], offered(false, true, &["kvm", "github"])),
+        ["kvm", "mcp"]
+    );
+    // What declared names, Grants grants once the owner approves it all.
+    let all: Vec<String> = C::ALL.iter().map(|c| c.name().to_owned()).collect();
+    let offer = offered(true, true, &["kvm"]);
+    let grants = granted(&[Kind::Job], &offer, &all);
+    assert_eq!(grants.items(), declared(&[Kind::Job], &offer));
+}

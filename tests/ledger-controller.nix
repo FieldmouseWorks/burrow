@@ -54,7 +54,12 @@ let
           chmod 600 "$d/etags/h1"
           echo "0 $(id -un)" >"$d/anchor"
           ;;
-        sync | sign) sign "$2" ;;
+        # A sync of one repo says it's done, as `cn sync --help` has it.
+        sync)
+          sign "$2"
+          echo "{\"repo\":\"$2\",\"outcome\":\"done\",\"prs\":[],\"refused\":[]}"
+          ;;
+        sign) sign "$2" ;;
       esac
     '';
   };

@@ -83,7 +83,8 @@ on:
           Evaluate each check, package, dev shell, formatter and NixOS system
           in a nix process of its own (as many side by side as the runner has
           cores, while each has 2G of the memory free to the job, its
-          cgroups' limits counted), then build the checks, rather than the
+          cgroups' limits counted, and one stopped to run again alone
+          should a bigger one run it out), then build the checks, rather than the
           checks in one process and then everything in one
           `nix flake check`.
           For a flake whose evaluations don't fit in its runner's memory
@@ -172,7 +173,7 @@ on:
           gate on this exact tree: the push's tree, this workflow's
           repository, file and commit (by the commit's tree), and its inputs
           that can change a result (runner, install-nix, eval-apart, legs,
-          build-skip and keep-builds). Only a hit, the lookup answering this
+          build-skip, keep-builds and flaky). Only a hit, the lookup answering this
           request and naming a run of this repository, skips the gate: the
           job named check reports the pass, linking the run it reused, and
           builds, attests and keeps nothing. A miss, an error, an answer it
@@ -192,6 +193,15 @@ on:
           machine.
         type: string
         default: ''
+      flaky:
+        description: >-
+          Give a check that fails one more try, and file one that then
+          passes as a `flaky:` issue (docs/flaky-tests.md): the flaky
+          action's start step before each leg's gate and its file step
+          after, built with the runner's cargo. Needs issues write, which a
+          caller grants: a report it can't file fails the run.
+        type: boolean
+        default: false
 jobs:
   # Which gate a PR gets: none here when the train lands it (pr-gate off,
   # and its base is the default branch, compared as git compares refs: an
@@ -209,8 +219,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     concurrency:
-      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -314,8 +325,9 @@ jobs:
   reuse:
     if: ${{ inputs.gate-reuse && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     concurrency:
-      group: ${{ format('flake-check {0} reuse {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] run-{12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, github.run_id) }}
+      group: ${{ format('flake-check {0} reuse {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} run-{13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, github.run_id) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -326,7 +338,7 @@ jobs:
     steps:
       # The runner is compiled with Nix's compiler, as the gate's is.
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - id: tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -357,15 +369,17 @@ jobs:
           LEGS: ${{ inputs.legs }}
           SKIP: ${{ inputs.build-skip }}
           KEEP: ${{ inputs.keep-builds }}
+          FLAKY: ${{ inputs.flaky }}
         run: |
           commit=$(git -C .flake-check rev-parse 'HEAD^{commit}')
           [ "$commit" = "$WORKFLOW_SHA" ] || { echo "the workflow's checkout is $commit, not $WORKFLOW_SHA"; exit 1; }
           jq -cnS --arg repository "$WORKFLOW_REPOSITORY" --arg file "$WORKFLOW_FILE" --arg commit "$commit" \
             --arg tree "$(git -C .flake-check rev-parse 'HEAD^{tree}')" --arg runner "$RUNNER_LABEL" \
             --argjson nix "$INSTALL_NIX" --argjson apart "$APART" --argjson legs "$LEGS" --arg skip "$SKIP" --argjson keep "$KEEP" \
+            --argjson flaky "$FLAKY" \
             '{source: "tree", workflow: {$repository, $file, $commit, $tree},
               inputs: {$runner, "install-nix": $nix, "eval-apart": $apart, $legs,
-                       "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep}}' \
+                       "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep, $flaky}}' \
             > "$RUNNER_TEMP/gate.json"
           echo "this gate: $(cat "$RUNNER_TEMP/gate.json")"
       - id: lookup
@@ -403,8 +417,13 @@ jobs:
         # 1 to legs: an expression has no arithmetic, so a list of each.
         leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
+    # Its gate's run (RUN_SECONDS in burrow-flake-check) and builds-write's
+    # 30, with half an hour for the rest: restores, the wait, signing and
+    # keeping.
+    # burrow-workflows' timeouts test holds every job here to its limit.
+    timeout-minutes: 240
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] leg {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} leg {13} {14}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     # Each leg's log, its digest, the commit it checked and its plan, for the
     # gate job: a matrix's legs combine their outputs, one name each.
@@ -517,7 +536,7 @@ jobs:
         shell: bash
         run: date +%s%N > "$RUNNER_TEMP/builds-restore-end"
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
         with:
           # fallback: a kept entry whose restore failed part way can leave
           # a narinfo naming a truncated NAR, which nix would otherwise fail
@@ -538,6 +557,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/flake-check
+            .github/actions/flaky
             crates
       # gate-reuse: the gate this is, for the attestation to name.
       - *identity
@@ -613,6 +633,14 @@ jobs:
       # building what the store would have served of what it builds cold,
       # takes nothing from it, and keeps a flake's own nixConfig out of every
       # build, since the store gets what this leg builds (builds.rs).
+      # flaky: FLAKY_EXPIRED and FLAKY_REPORT for the gate, which gives a
+      # check that fails one more try (docs/flaky-tests.md), from this
+      # workflow's own commit (the tools checkout).
+      - id: flaky-start
+        if: inputs.flaky && needs.reuse.outputs.hit != 'true'
+        uses: ./.flake-check/.github/actions/flaky
+        with:
+          step: start
       - id: gate
         if: needs.reuse.outputs.hit != 'true'
         shell: bash
@@ -652,6 +680,15 @@ jobs:
         with:
           name: ${{ steps.leg.outputs.name }}
           path: ${{ runner.temp }}/flake.log
+      # flaky: what passed on its second try, filed. One it can't file fails
+      # the leg's job, which the gate job reads, and a pass whose report
+      # wasn't filed is signed an error (the subject step, next): an
+      # unrecorded flake is one nobody fixes.
+      - id: flaky-file
+        if: ${{ !cancelled() && inputs.flaky && steps.flaky-start.outcome == 'success' }}
+        uses: ./.flake-check/.github/actions/flaky
+        with:
+          step: file
       # The gate's result, signed with this job's own GitHub identity, in the
       # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
       # every repo's with the job's own token, whose audience names the digest
@@ -671,6 +708,7 @@ jobs:
         env: &subject-env
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
+          FILED: ${{ steps.flaky-file.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: &subject |
@@ -687,9 +725,11 @@ jobs:
               "error "?*) result=error why=${said#error } ;;
               *) result=error why="the gate ended without saying a check failed (the job's log has the last it said)" ;;
             esac
-            if [ "$result" = error ]; then
-              printf '\nflake-check: error: %s\n' "$why" >> "$RUNNER_TEMP/flake.log" || echo "no room to log why: $why"
-            fi
+          elif [ "$FILED" = failure ]; then
+            result=error why="its flaky checks' report couldn't be filed (docs/flaky-tests.md)"
+          fi
+          if [ "$result" = error ]; then
+            printf '\nflake-check: error: %s\n' "$why" >> "$RUNNER_TEMP/flake.log" || echo "no room to log why: $why"
           fi
           # Artifact names are shared by every job in a run, and a caller may
           # run this job more than once (a matrix, a re-run), so each job's
@@ -802,7 +842,10 @@ jobs:
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
+          # Its intermediates too, which .cargo's build-dir would put in
+          # the checkout.
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/keep-build
           GATE: ${{ steps.gate.outcome }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep
@@ -906,7 +949,10 @@ jobs:
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
+          # Its intermediates too, which .cargo's build-dir would put in
+          # the checkout.
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/keep-build
           BUILDS: ${{ vars.BURROW_BUILDS_URL }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep --bin burrow-keep-upload
@@ -942,8 +988,9 @@ jobs:
     if: ${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure' || needs.reuse.outputs.hit == 'true') }}
     name: ${{ inputs.legs > 1 && 'check' || 'gate' }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
     concurrency:
-      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -1041,8 +1088,9 @@ jobs:
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
     concurrency:
-      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -1050,7 +1098,7 @@ jobs:
       - *checkout
       - *merge
       - if: inputs.install-nix && inputs.docs-checks != ''
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - id: build
         shell: bash
         env:
@@ -1075,8 +1123,11 @@ jobs:
   negative:
     if: github.event_name == 'pull_request' && inputs.negative
     runs-on: ${{ inputs.negative-runner || inputs.runner }}
+    # Its run (RUN_SECONDS in burrow-flake-check), with half an hour for
+    # the rest: restores, installing Nix, signing and the log's upload.
+    timeout-minutes: 210
     concurrency:
-      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13} {14}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -1246,7 +1297,7 @@ jobs:
         shell: bash
         run: echo 'degraded/kept-restore' >> "$GITHUB_STEP_SUMMARY"
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
         with:
           # fallback: a kept entry whose restore failed part way can leave
           # a narinfo naming a truncated NAR, which nix would otherwise fail
@@ -1331,8 +1382,9 @@ jobs:
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.flaky, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read

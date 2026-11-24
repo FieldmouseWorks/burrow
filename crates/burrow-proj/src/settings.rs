@@ -74,11 +74,24 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         view.file.clone(),
         view.setups,
     ));
+    let holds = usage::held_all(cfg)?;
+    let holds = (!holds.is_empty()).then(|| {
+        Value::Object(
+            holds
+                .into_iter()
+                .map(|(engine, s)| {
+                    (
+                        engine,
+                        json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said}),
+                    )
+                })
+                .collect(),
+        )
+    });
     readings.push(Reading::live(
-        "proj.usageHold",
+        "proj.usageHolds",
         cfg.jobs.join(usage::FILE),
-        usage::held(cfg)?
-            .map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
+        holds,
     ));
     Document::build(readings)
 }

@@ -9,9 +9,9 @@ import train as T
 import waits
 from common import CFG, DEP_RE, MIN, log
 from seal import MAJOR as MAJOR_VERDICT
-from touches import bot_edited
+from touches import bot_edited, moved_from
 from tasks import FAILURES, MISDESCRIBED, REVIEWED, fix_task, judge_task, judgment, negative, proof_task, red_fix, red_undos
-from prs import eyes, our_status
+from prs import eyes, our_status, tracked
 from step_context import ON, VERB, clock, _HEAD
 
 
@@ -55,7 +55,9 @@ class Actions:
         branch push over each other. One whose turn ended holding something
         open (running's "awaiting": a fix elsewhere, or a person's answer to
         its question) still is: the PR waits on that, as on a hold
-        (waits.HOLD), until proj resumes the job. describe: only
+        (waits.HOLD), until proj resumes the job. One that ended naming
+        what tracks its red check's cause outside the PR isn't handed on
+        either (outside). describe: only
         its description is to fix, with no push (tasks.describe_task)."""
         if at is _HEAD:
             at = self.head
@@ -64,6 +66,9 @@ class Actions:
         state = retry and self.running(kind, at)
         gone = retry and not state and self.lost(kind, at)
         how = gone and self.broke(kind)
+        tracker = gone and not how and self.ci == "red" and claims.tracker(self.st, kind, at)
+        if tracker and self.outside(kind, tracker, desc):
+            return
         if gone and not how and self.st.get(kind + "Again") == at:
             self.settle(
                 "failure", f"Two Claude jobs ended without fixing it: {desc}"[:140], "Two Claude jobs ended without fixing it", stage=S.FIX
@@ -122,6 +127,33 @@ class Actions:
                 self.digest.append(("Couldn't start a Claude job to fix it", self.line, why))
                 who = "no Claude job could start"
         self.settle("pending", f"{desc}; {who}" if who else desc, stage=S.FIX, wait=waits.HOLD if awaited else waits.STEWARD)
+
+    def outside(self, kind, tracker, desc):
+        """This head's last fix job of the kind found its red check's cause
+        outside the PR, tracked by `tracker` (claims.tracker): no other job
+        takes the head while that's open, and once it's closed, the red runs
+        from before it closed go again (prs.tracked), not to a job. True
+        while it waits on either; False once neither is left (a red after
+        the tracker closed is the head's, GitHub won't run it again, or has
+        no tracker by that name): the head goes to a job as any other."""
+        got = tracked(self.pr, tracker, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
+        if got["open"]:
+            # The tracker first: a status is cut at 140 characters.
+            self.settle("pending", f"Waiting on {tracker}, the cause its Claude job found outside the PR, to close; {desc}",
+                        stage=S.FIX, wait=waits.HOLD)
+            return True
+        if got["reran"] or got["going"]:
+            ran = "asked to run again" if got["reran"] else "running again"
+            log(f"{self.tag}: {tracker} closed: red runs {', '.join(got['reran'] + got['going'])} {ran}")
+            self.settle("pending", f"{tracker}, its cause, closed: its red check is {ran}; {desc}", stage=S.FIX)
+            return True
+        # GitHub won't run it again (a run past its rerun window, say): a
+        # job can push a head whose CI runs afresh.
+        why = got.get("unknown") or "; ".join(f"GitHub won't run {k} again: {v}" for k, v in got["refused"].items()) \
+            or "red again since it closed"
+        log(f"{self.tag}: {tracker} no longer holds it ({why}): a Claude job takes it")
+        self.st.pop(kind + "Tracker", None)
+        return False
 
     def merge(self):
         # Marked landed only once GitHub has done the merge, so a failed one

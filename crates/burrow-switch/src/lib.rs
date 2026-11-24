@@ -11,8 +11,10 @@
 //! What they keep is in `Config::state`, while a switch is unconfirmed:
 //! `pending` (the system put live), `prev` (the confirmed one it reverts
 //! to), `revert-failed` (the confirmed one, when a revert didn't get back to
-//! it) and `lock`, which a switch and a confirm hold while they work. Both
-//! run as root; what they run, they run by path (`Config::tools`).
+//! it) and `lock`, which a switch and a confirm hold while they work, and
+//! `built/PID`, where a switch's build roots the system it built until the
+//! switch is done. Both run as root; what they run, they run by path
+//! (`Config::tools`).
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};

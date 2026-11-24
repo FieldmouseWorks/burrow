@@ -333,21 +333,21 @@ impl Pass<'_> {
     /// holds its run (for `claude-api`, only the owner's pause) books the
     /// repo's pass for when it resets, and a `claude-api` credit with no
     /// room for when the clock gives it back
-    /// ([`crate::engine::api::opens`]): neither ends a turn or comes from
+    /// (`burrow_engine_anthropic::api::opens`): neither ends a turn or comes from
     /// GitHub.
     fn no_room(&mut self, repo: &str, engine: Engine) {
-        let api = engine == Engine::ClaudeApi;
-        let run = usage::login::Run {
-            sandboxed: self.inbox.vm,
-            api,
-        };
-        if let Some(spent) = usage::login::out_for(self.cfg, run) {
+        let run = usage::login::Run::new(engine.name(), self.inbox.vm);
+        if let Some(spent) = usage::login::out_for(self.cfg, &run) {
             self.book(repo, spent.until);
         }
         // A sandbox is given no key: no time gives it room.
-        if api
+        if engine == Engine::ClaudeApi
             && !self.inbox.vm
-            && let Some(at) = crate::engine::api::opens(self.cfg)
+            && let Some(at) = burrow_engine_anthropic::api::opens(
+                self.cfg.credit_file().as_deref(),
+                &self.cfg.jobs,
+                crate::now(),
+            )
         {
             self.book(repo, at);
         }

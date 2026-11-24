@@ -1,4 +1,5 @@
 //! Gate planning, per-output evaluation and whole-flake verification.
+use super::flaky::{Check, Flaky};
 use super::plan::PLAN;
 use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,7 +61,7 @@ fn evaluate(flake: &Path, system: &str, entry: &str, mode: Mode) -> Command {
         ],
     ))
 }
-fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
+fn apart(skip: &str, legs: usize, leg: usize, mode: Mode, flaky: Option<&Flaky>) -> Result<bool> {
     let system = system()?;
     let work = Work::new("eval-apart")?;
     let work = &work.0;
@@ -131,12 +132,15 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
     fs::create_dir(&evals)?;
     let side = memory::side();
     println!("{} outputs to evaluate, {side} side by side", mine.len());
-    let results = memory::parallel(&mine, side, |i| -> Result<Option<String>> {
+    let results = memory::parallel(&mine, side, |i, slot| -> Result<Option<Check>> {
         let entry = jq(entries.as_bytes(), &format!(".[{i}]"))?;
         let what = jq(entry.as_bytes(), ".what")?;
         let mut log = format!("evaluating {what}\n");
-        let result = (|| -> Result<Option<String>> {
-            let o = output(evaluate(&flake, &system, &format!("entry = {i};"), mode))?;
+        let result = (|| -> Result<Option<Check>> {
+            let o = slot.output(
+                evaluate(&flake, &system, &format!("entry = {i};"), mode),
+                &format!("evaluating {what}"),
+            )?;
             log.push_str(&String::from_utf8_lossy(&o.stderr));
             if !verdict::passed("nix eval", o.status)? {
                 return Err(failed("evaluation failed"));
@@ -156,7 +160,10 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
                 return Err(if has.status.success() { e } else { none() });
             }
             if jq(entry.as_bytes(), ".build")? == "true" {
-                return Ok(Some(format!("{drv}^*")));
+                return Ok(Some(Check {
+                    name: Some(jq(entry.as_bytes(), ".name")?),
+                    target: format!("{drv}^*"),
+                }));
             }
             if jq(entry.as_bytes(), ".skip")? == "true" {
                 log.push_str(&format!("not building {what}\n"));
@@ -189,10 +196,10 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
     }
     Ok(match mode {
         Mode::Plan => {
-            build::plan(&targets)?;
+            build::plan(&targets.into_iter().map(|c| c.target).collect::<Vec<_>>())?;
             true
         }
-        Mode::Build => build::checks(None, &targets, &roots)?,
+        Mode::Build => build::gated(flaky, None, &targets, &roots)?,
     } && ok)
 }
 /// `args` for a nix command on the flake, which with gate-reuse may not
@@ -206,12 +213,12 @@ pub(crate) fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
     }
     v
 }
-fn whole(skip: &str, mode: Mode) -> Result<bool> {
+fn whole(skip: &str, mode: Mode, flaky: Option<&Flaky>) -> Result<bool> {
     let work = Work::new("roots")?;
     let roots = &work.0;
     let mut unbuildable = false;
     let mut built = false;
-    let plan = (|| -> Result<Vec<String>> {
+    let plan = (|| -> Result<(Vec<String>, Vec<u8>)> {
         let metadata = judged(cmd("nix", &locked(&["flake", "metadata", "--json", "."])))?;
         let url = jq(&metadata, ".url")?;
         let args = plan_args(&url, &system()?, skip);
@@ -222,7 +229,7 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
         if jq(&plan, ".nixConfig")? == "true" {
             return Err(failed("flake has nixConfig"));
         }
-        Ok(args)
+        Ok((args, plan))
     })();
     // A planner cannot use the gate's build-capable fallbacks. Leave a
     // failed plan (including nixConfig) to the actual gate.
@@ -234,7 +241,7 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
         }
         plan => plan,
     };
-    if let Ok(args) = plan {
+    if let Ok((args, plan)) = plan {
         let mut c = cmd(
             "nix-instantiate",
             &[
@@ -257,7 +264,28 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
                 build::plan(&targets)?;
                 return Ok(true);
             }
-            if build::checks(Some(&roots.join("out")), &targets, roots)? {
+            // The checks' names, in the order the plan builds them (its
+            // `builds`), for their second tries: none if they don't pair.
+            let names = jq(
+                &plan,
+                &format!(
+                    r#"({} | split(" ") | map(select(. != ""))) as $s
+                | .entries[] | select(.check and (.name as $n | $s | index([$n]) | not)) | .name"#,
+                    quote(skip)
+                ),
+            )
+            .map(|n| lines(&n))
+            .unwrap_or_default();
+            let paired = names.len() == targets.len();
+            let checks: Vec<Check> = targets
+                .into_iter()
+                .enumerate()
+                .map(|(i, target)| Check {
+                    name: paired.then(|| names[i].clone()),
+                    target,
+                })
+                .collect();
+            if build::gated(flaky, Some(&roots.join("out")), &checks, roots)? {
                 built = true;
             } else {
                 let _ = run(cmd(
@@ -379,9 +407,15 @@ fn check(mode: Mode) -> Result<bool> {
     } else {
         None
     };
+    // A second try for a flaky check, only in the gate itself: the
+    // planner builds nothing (docs/flaky-tests.md, flaky.rs).
+    let flaky = match mode {
+        Mode::Build => Flaky::from_env(),
+        Mode::Plan => None,
+    };
     if var("APART") == "true" {
-        apart(&var("SKIP"), legs, leg, mode)
+        apart(&var("SKIP"), legs, leg, mode, flaky.as_ref())
     } else {
-        whole(&var("SKIP"), mode)
+        whole(&var("SKIP"), mode, flaky.as_ref())
     }
 }

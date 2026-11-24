@@ -31,7 +31,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-const SWEEP: &str = env!("CARGO_BIN_EXE_burrow-renovate-sweep");
+fn sweep() -> &'static str {
+    burrow_test::program!("burrow-renovate-sweep")
+}
 const REPO: &str = "sam/r";
 const LOCK: &str = "Lock file maintenance (cargo)";
 /// The sweep's key, in its state dir.
@@ -379,7 +381,7 @@ impl Machine {
                 fs::remove_file(fake.join(name)).unwrap();
             }
         }
-        let out = Command::new(SWEEP)
+        let out = Command::new(sweep())
             .arg(self.config())
             .args(words)
             .env("FAKE", &fake)
@@ -415,7 +417,7 @@ impl Machine {
 
     /// A sweep of `words`, started.
     fn start(&self, words: &[&str]) -> Child {
-        Command::new(SWEEP)
+        Command::new(sweep())
             .arg(self.config())
             .args(words)
             .env("FAKE", self.path("fake"))

@@ -27,7 +27,7 @@ let
   # The door, as the broker runs it with REPO PR HEAD.
   door = pkgs.writeShellScript "burrow-review-ask" ''
     export BURROW_REVIEW_ASK_CONFIG=${doorConfig}
-    export PATH=${lib.makeBinPath [ (config.burrow.tools.gh or pkgs.gh) ]}
+    export PATH=${lib.makeBinPath [ config.burrow.tools.gh ]}
     exec ${bin} door "$@"
   '';
   # Where the broker listens. Anyone may reach it: its peer check is the

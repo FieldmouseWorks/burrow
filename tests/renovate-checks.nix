@@ -128,6 +128,20 @@
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';
+  # burrow's own Conary pin, under its own renovate.json, as Renovate's own
+  # cargo manager extracts it and its own package rules apply: cargo-follow
+  # is its one mover, so Renovate leaves both its crates alone, and still
+  # moves a crates.io crate and another repo's git pin.
+  renovate-own-cargo = pkgs.runCommand "renovate-own-cargo-check" { } ''
+    export HOME=$TMPDIR
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-own-cargo.mjs} ${pkgs.renovate} ${../renovate.json} ${../crates/Cargo.toml} 2>/dev/null)
+    want='conary-core https://github.com/FieldmouseWorks/Conary off
+    conary-github https://github.com/FieldmouseWorks/Conary off
+    serde serde on
+    other https://github.com/FieldmouseWorks/Conary-other on'
+    [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+    touch $out
+  '';
   # A job on an older GitHub-hosted runner, under the example's config, by
   # Renovate's own extraction, lookup (its github-runners list, which has
   # no release dates), branching and branch processing: the runner's
@@ -221,6 +235,14 @@
   renovate-cargo-unchanged = pkgs.runCommand "renovate-cargo-unchanged-check" { } ''
     export HOME=$TMPDIR
     LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-cargo-unchanged.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
+    touch $out
+  '';
+  # A crate two workspace members use, with build metadata in its version
+  # (toml's `+spec-1.1.0`), bumps without an artifact error
+  # (modules/updates/renovate-package.nix).
+  renovate-cargo-build-metadata = pkgs.runCommand "renovate-cargo-build-metadata-check" { } ''
+    export HOME=$TMPDIR
+    LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-cargo-build-metadata.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
     touch $out
   '';
   renovate-problems = pkgs.runCommand "renovate-problems-check" { } ''

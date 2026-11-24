@@ -184,6 +184,65 @@ pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<b
     // What the build store would have served of them, when the run names
     // one: nothing is taken from it (builds.rs).
     super::builds::shadow(&announce_cold(targets));
+    built(link, targets, roots)
+}
+/// The gate's checks, with a second try for a flaky one (flaky.rs): the
+/// first build as [`checks`], and each second try in the slot its first
+/// took, linked apart from it.
+pub fn gated(
+    flaky: Option<&super::flaky::Flaky>,
+    link: Option<&Path>,
+    checks: &[super::flaky::Check],
+    roots: &Path,
+) -> Result<bool> {
+    if checks.is_empty() {
+        return Ok(true);
+    }
+    struct Real<'a> {
+        link: Option<&'a Path>,
+        roots: &'a Path,
+        tries: usize,
+    }
+    impl super::flaky::Nix for Real<'_> {
+        fn build(&mut self, targets: &[String]) -> Result<bool> {
+            self.tries += 1;
+            if self.tries == 1 {
+                return self::checks(self.link, targets, self.roots);
+            }
+            let link = self
+                .link
+                .map(|p| PathBuf::from(format!("{}-again-{}", s(p), self.tries)));
+            built(link.as_deref(), targets, self.roots)
+        }
+        fn pending(&mut self, target: &str) -> Result<Vec<String>> {
+            let o = output(cmd(
+                "nix-store",
+                &["--realise", "--dry-run", target.trim_end_matches("^*")],
+            ))?;
+            if !o.status.success() {
+                return Err(err(String::from_utf8_lossy(&o.stderr).trim().to_owned()));
+            }
+            Ok(cold_drvs(&String::from_utf8_lossy(&o.stderr)))
+        }
+        fn log(&mut self, target: &str) -> Option<String> {
+            let mut c = cmd("nix", &["log", target.trim_end_matches("^*")]);
+            c.stdin(Stdio::null());
+            let o = output(c).ok().filter(|o| o.status.success())?;
+            Some(String::from_utf8_lossy(&o.stdout).into_owned())
+        }
+    }
+    super::flaky::build(
+        flaky,
+        checks,
+        &mut Real {
+            link,
+            roots,
+            tries: 0,
+        },
+    )
+}
+/// Build them, those with VM tests in a heavy slot where there are slots.
+fn built(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     let args = |ts: &[String], vm: bool| {
         let mut a = vec!["build".to_owned(), "-L".into()];
         if let Some(p) = link {

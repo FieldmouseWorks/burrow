@@ -5,25 +5,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
 use std::fs;
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
-pub(crate) mod api;
 mod capabilities;
-pub(crate) mod claude;
-mod claude_limit;
 mod command;
 mod handoff;
 mod machine;
 mod route;
 mod stream;
-pub use command::{LONG, NEXT, exec_claude, spawn};
-pub use handoff::first_prompt;
-pub use stream::{
-    Said, answer, last_result, names_session, results, stream_names_session, stream_session,
-    stream_tail,
+pub use burrow_engine_anthropic::stream::{
+    answer, is_error, last_result, names_session, result_of, results, stream_names_session,
+    stream_session,
 };
+pub use command::{LONG, NEXT, exec_claude, spawn};
+pub use handoff::{first_prompt, first_prompt_for};
+pub use stream::{Said, stream_tail};
 
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema,
@@ -33,7 +29,7 @@ pub enum Engine {
     #[default]
     Claude,
     /// The same Claude Code, on the API credit's key instead of the
-    /// subscription's login ([`api`]).
+    /// subscription's login (`burrow_engine_anthropic::api`).
     #[serde(rename = "claude-api")]
     ClaudeApi,
 }
@@ -70,6 +66,12 @@ impl Engine {
     pub fn conversation(self) -> Self {
         match self {
             Self::Claude | Self::ClaudeApi => Self::Claude,
+        }
+    }
+    pub fn anthropic_mode(self) -> burrow_engine_anthropic::Mode {
+        match self {
+            Self::Claude => burrow_engine_anthropic::Mode::Claude,
+            Self::ClaudeApi => burrow_engine_anthropic::Mode::ClaudeApi,
         }
     }
 }
@@ -145,40 +147,23 @@ pub(crate) fn resolve(
     Ok(choice)
 }
 
-/// Where the job's route runs its turn now, when that moves the turn from
-/// `from` to another engine of the same conversation: what a run refused
-/// for usage, or for the credit, takes before it runs again. A move to
-/// another conversation is a new turn's to make, with its handoff
-/// ([`first_prompt`]), never a retry's.
+/// Conversation key for any engine name: `claude` and `claude-api` share the
+/// `claude` conversation; every other engine has a conversation of its own.
+pub fn conversation_of(engine: &str) -> &str {
+    match engine {
+        "claude" | burrow_settings::credit::ENGINE => "claude",
+        other => other,
+    }
+}
+
+/// Where the job's route runs its turn now when a refusal moves it from `from`
+/// to another engine with room. Moves within a shared conversation resume
+/// directly; moves across different conversations rebuild the handoff prompt
+/// in `turn.rs`.
 pub(crate) fn reroute(cfg: &Config, job: &Job, from: &Choice) -> Result<Option<Choice>, String> {
     let request = crate::job::Request::load(job)?;
     let next = requested(cfg, job, &request, request.engine.map(Engine::name))?;
-    Ok(
-        (next.engine != from.engine && next.engine.conversation() == from.engine.conversation())
-            .then_some(next),
-    )
-}
-
-/// Normalized terminal records let the job lifecycle and log reader share outcomes.
-pub fn result_of(line: &str) -> Option<Value> {
-    if !line.contains(r#""type":"result""#) {
-        return None;
-    }
-    let v: Value = serde_json::from_str(line).ok()?;
-    let said = match v.get("result") {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    };
-    let idle = v.get("num_turns").and_then(Value::as_f64) == Some(0.0);
-    (said || !idle || is_error(&v)).then_some(v)
-}
-
-pub fn is_error(result: &Value) -> bool {
-    !matches!(
-        result.get("is_error"),
-        None | Some(Value::Null | Value::Bool(false))
-    )
+    Ok((next.engine != from.engine).then_some(next))
 }
 
 pub fn refused(
@@ -188,9 +173,9 @@ pub fn refused(
     now: i64,
 ) -> Option<(Option<i64>, String)> {
     match engine {
-        Engine::Claude => claude::refused(last, stream, now),
-        // The credit's refusals are its own (api::refusal): none holds the
-        // subscription's turns.
+        Engine::Claude => burrow_engine_anthropic::claude::refused(last, stream, now),
+        // The credit's refusals are its own (burrow_engine_anthropic::api::refusal):
+        // none holds the subscription's turns.
         Engine::ClaudeApi => None,
     }
 }
@@ -203,12 +188,8 @@ pub fn refused_file(
     from: u64,
     now: i64,
 ) -> Option<(Option<i64>, String)> {
-    let records = stream::lines(path, from)
-        .ok()?
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok());
     match engine {
-        Engine::Claude => claude::refused_records(last, records, now),
+        Engine::Claude => burrow_engine_anthropic::claude::refused_file(last, path, from, now),
         Engine::ClaudeApi => None,
     }
 }

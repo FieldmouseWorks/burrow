@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-const BIN: &str = env!("CARGO_BIN_EXE_burrow-firmware");
+fn program() -> &'static str {
+    burrow_test::program!("burrow-firmware")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
@@ -133,7 +135,7 @@ impl Machine {
             // Everything nobody's, for nobody's run.
             chown(&self.root);
         }
-        let mut c = Command::new(BIN);
+        let mut c = Command::new(program());
         c.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"));
@@ -207,7 +209,7 @@ fn opened(list: &str) -> String {
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new();
-    let out = Command::new(BIN).output().unwrap();
+    let out = Command::new(program()).output().unwrap();
     assert_eq!(
         said(&out),
         (
@@ -216,7 +218,10 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
             "usage: burrow-firmware CONFIG [--review]\n".into()
         )
     );
-    let out = Command::new(BIN).arg(m.path("none.json")).output().unwrap();
+    let out = Command::new(program())
+        .arg(m.path("none.json"))
+        .output()
+        .unwrap();
     let (code, _, stderr) = said(&out);
     assert_eq!(code, Some(2));
     assert!(stderr.starts_with("burrow-firmware: "), "{stderr}");
@@ -246,8 +251,9 @@ fn it_starts_again_through_sudo() {
     assert_eq!(
         m.fake("sudo"),
         format!(
-            "-- {BIN} {c} __through-sudo\n-- {BIN} {c} __through-sudo --review\n",
-            c = config.display()
+            "-- {program} {c} __through-sudo\n-- {program} {c} __through-sudo --review\n",
+            c = config.display(),
+            program = program()
         )
     );
 }

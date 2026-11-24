@@ -2,7 +2,7 @@
 the App it acts as, handle() end to end on Codex's connector's posts, the
 briefs as they were before their text moved to burrow-brief, a judge that
 fails a head on its code or its description alone, past the review-round
-limit, on a conflict with its base and on dependency updates too, a PR whose merge would change nothing, one stacked on another's branch, Claude jobs that end without their answer, a fix job's answers (posted only on its own push), what a pass
+limit, on a conflict with its base and on dependency updates too, a PR whose merge would change nothing, one stacked on another's branch, Claude jobs that end without their answer, a fix job's answers (posted only on its own push), a red check's cause tracked outside the PR, what a pass
 keeps up in each repo, what a PR touches, what starts its passes, the
 digest's issues, clones under a repo's old name, burrow-upkeep's looks at a repo's settings, its branches, Renovate's dashboards and
 flaky tests, the merge train, that
@@ -27,5 +27,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("app", "handle", "owner_asks", "briefs", "misdescribed", "rounds", "merits", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "rerun", "unstarted", "stacked", "legs", "lost", "unpushed", "superseded", "deps", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting", "paused", "handoff", "landing_owner"):
+for part in ("app", "handle", "owner_asks", "briefs", "misdescribed", "rounds", "merits", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "rerun", "unstarted", "stacked", "legs", "lost", "unpushed", "tracked", "superseded", "deps", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting", "paused", "handoff", "landing_owner"):
     importlib.import_module(part)

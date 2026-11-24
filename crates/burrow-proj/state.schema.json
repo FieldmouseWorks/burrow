@@ -69,21 +69,21 @@
           ]
         },
         {
-          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login ([`api`]).",
+          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login (`burrow_engine_anthropic::api`).",
           "type": "string",
           "const": "claude-api"
         }
       ]
     },
     "EngineMeter": {
-      "description": "One engine's meter and hold.",
+      "description": "One engine's meter and hold (`engine` is an engine name, or `*` for a global owner pause).",
       "type": "object",
       "properties": {
         "engine": {
-          "$ref": "#/$defs/Engine"
+          "type": "string"
         },
         "hold": {
-          "description": "Work held back on it: Claude's usage hold.",
+          "description": "Work held back on this engine (or `*` for a global owner pause).",
           "anyOf": [
             {
               "$ref": "#/$defs/UsageHold"

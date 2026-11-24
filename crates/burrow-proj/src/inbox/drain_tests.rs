@@ -469,7 +469,7 @@ fn a_usage_hold_books_the_drain_for_its_reset() {
     fs::create_dir_all(&b.cfg.jobs).unwrap();
     let until = crate::now() + 3600;
     fs::write(
-        b.cfg.jobs.join(crate::usage::FILE),
+        b.cfg.jobs.join(crate::usage::LEGACY_FILE),
         json!({"at":crate::now(), "until":until, "said":"spent", "job":"old"}).to_string(),
     )
     .unwrap();
@@ -987,7 +987,7 @@ fn a_plan_held_retry_leaves_the_api_credits_room() {
         )
         .unwrap();
     assert_eq!(crate::retry::admission(cfg).unwrap().len(), 1);
-    let usage = cfg.jobs.join(crate::usage::FILE);
+    let usage = cfg.jobs.join(crate::usage::LEGACY_FILE);
     fs::write(
         &usage,
         json!({"at":crate::now(), "until":crate::now() + 3600, "said":"spent", "job":"retried"})

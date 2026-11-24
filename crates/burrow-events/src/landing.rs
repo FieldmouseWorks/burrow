@@ -146,15 +146,6 @@ mod tests {
         (port, conaryd_on(listener, Duration::ZERO, &[code]))
     }
 
-    /// A port nothing listens on, yet.
-    fn closed() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
     /// Whether `ok` comes true within ten seconds.
     fn soon(ok: impl Fn() -> bool) -> bool {
         let end = Instant::now() + Duration::from_secs(10);
@@ -410,16 +401,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("owners.json");
         hold(&record, "sam/r", Owner::Conaryd, None);
-        let port = closed();
-        let p = setup(&record, Some(port));
+        let closed = burrow_test::ClosedPort::new();
+        let p = setup(&record, Some(closed.port()));
         assert_eq!(deliver(p.hooks), 202);
         thread::sleep(Duration::from_millis(300));
         assert_eq!(p.held(), 1);
-        let got = conaryd_on(
-            TcpListener::bind(("127.0.0.1", port)).unwrap(),
-            Duration::ZERO,
-            &[500, 202],
-        );
+        let got = conaryd_on(closed.listen(), Duration::ZERO, &[500, 202]);
         assert!(soon(|| p.held() == 0));
         assert_eq!(got.lock().unwrap().len(), 2);
         let got = got.lock().unwrap().clone();
@@ -433,7 +420,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("owners.json");
         hold(&record, "sam/r", Owner::Conaryd, None);
-        let p = setup_with(&record, Some(closed()), |o| o.give_up = 0.5);
+        let closed = burrow_test::ClosedPort::new();
+        let p = setup_with(&record, Some(closed.port()), |o| o.give_up = 0.5);
         assert_eq!(deliver(p.hooks), 202);
         assert_eq!(p.held(), 1);
         assert!(soon(|| p.held() == 0));
@@ -454,15 +442,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("owners.json");
         hold(&record, "sam/r", Owner::Conaryd, None);
-        let port = closed();
-        let p = setup(&record, Some(port));
+        let closed = burrow_test::ClosedPort::new();
+        let p = setup(&record, Some(closed.port()));
         assert_eq!(deliver(p.hooks), 202);
         thread::sleep(Duration::from_millis(300));
-        let got = conaryd_on(
-            TcpListener::bind(("127.0.0.1", port)).unwrap(),
-            Duration::ZERO,
-            &[500],
-        );
+        let got = conaryd_on(closed.listen(), Duration::ZERO, &[500]);
         assert!(soon(|| !got.lock().unwrap().is_empty()));
         let before = rounds(&p);
         thread::sleep(Duration::from_millis(1500));
@@ -471,7 +455,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("owners.json");
         hold(&record, "sam/r", Owner::Conaryd, None);
-        let p = setup_with(&record, Some(closed()), |o| o.give_up = 0.5);
+        let closed = burrow_test::ClosedPort::new();
+        let p = setup_with(&record, Some(closed.port()), |o| o.give_up = 0.5);
         assert_eq!(deliver(p.hooks), 202);
         assert!(soon(|| p.held() == 0));
         let before = rounds(&p);

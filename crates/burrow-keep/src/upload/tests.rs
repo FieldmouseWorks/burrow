@@ -437,9 +437,8 @@ fn a_store_that_fails_or_isnt_there_fails_the_upload() {
     let e = upload_in(&run.store, &run, &m.http(), BATCH).unwrap_err();
     assert!(e.contains("HTTP 500") && e.contains("broken"), "{e}");
 
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/builds", closed.local_addr().unwrap());
-    drop(closed);
+    let closed = burrow_test::ClosedPort::new();
+    let url = format!("http://{}/builds", closed.addr());
     let door = Http::new(&url, &m.tokens, "request-token").unwrap();
     let e = upload_in(&run.store, &run, &door, BATCH).unwrap_err();
     assert!(e.contains("didn't answer"), "{e}");

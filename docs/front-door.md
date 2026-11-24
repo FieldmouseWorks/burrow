@@ -247,6 +247,12 @@ into project jobs.
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
   have the box user's permissions.
+- **Task lists:** a parent split into children moves on as each child is
+  done (burrow's `docs/task-planning.md`). When no pass can tell, an author
+  records it from the host, never from a job: `proj plan done OWNER/REPO#N
+  PR-URL` for a merged PR that landed it some other way, or `proj plan done
+  OWNER/REPO#N --no-pr REASON` for a closed child whose record was the
+  deliverable.
 - Jobs are headless (`claude -p`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.
@@ -281,6 +287,10 @@ repo, changes nothing, and answers with a verdict the inbox carries out.
 | `owner` | labelled `triage.ownerLabel`, assigned to `triage.owner`, with the call they're asked |
 | `duplicate #M` | closed as not planned, saying of what |
 | `done` | closed as completed, saying where |
+
+An issue whose body a bot maintains (Renovate's Dependency Dashboard, opened
+by a bot account) is labelled `tracker` without a job, and is never split or
+planned: the bot rewrites it every run (docs/task-planning.md).
 
 An answer with no verdict is `later`, saying so. A sorting job that ends with no
 answer at all (its engine refused it, say) leaves the issue as it was: it's

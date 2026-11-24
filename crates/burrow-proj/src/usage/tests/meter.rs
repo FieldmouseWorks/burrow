@@ -122,7 +122,12 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     let _slot = crate::slot::take(&cfg, "held", "1", crate::pick::Class::Normal, false).unwrap();
     assert!(job.turn("1", "slot").exists());
     assert!(out(&cfg).is_none());
-    assert!(told(&d).last().unwrap().starts_with("close proj-usage"));
+    assert!(
+        told(&d)
+            .last()
+            .unwrap()
+            .starts_with("close proj-usage-claude")
+    );
 }
 
 #[test]

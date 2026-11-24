@@ -463,9 +463,8 @@ mod tests {
             assert!(e.what.contains(message), "{e}");
         }
         // Nobody there at all.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", closed.local_addr().unwrap());
-        drop(closed);
+        let closed = burrow_test::ClosedPort::new();
+        let url = format!("http://{}", closed.addr());
         let e = App::new(&url, None, 7, &pem)
             .unwrap()
             .mint(&target("sam"), 0)

@@ -1,4 +1,4 @@
-//! burrow-guard CONFIG, as modules/claude/guard.nix's hook runs it: the
+//! burrow-guard CONFIG, as modules/engines/anthropic/guard.nix's hook runs it: the
 //! hook's JSON on stdin, and nothing (allow) or a decision on stdout: a
 //! question for the owner, or a refusal for what has a safe spelling of its
 //! own ([`Guard::refusal`]).

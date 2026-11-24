@@ -1,9 +1,23 @@
 # Usage records and turns across a deploy
 
-The shared usage record (`proj.usageHold`'s file, named in the
-[settings reference](settings-reference.md)) and immutable `.usage-owner-*` metadata retain the
-strict pre-trickle `Spent` schema. Readers accept the short-lived generation
-that added `admission`, but writers never serialize that field.
+The shared usage record (`proj.usageHolds`'s file, named in the
+[settings reference](settings-reference.md)) now stores per-engine holds in v2
+JSON (`{"version": 2, "holds": {...}}`) alongside per-engine `.usage-holds.released`
+and `.usage-holds.admission` maps. Under the shared `jobs/.usage.lock`, writes
+mirror any `claude` or global `*` hold, or an active `claude-api` owner pause,
+into the legacy `.usage.json`, `.usage.released`, and `.usage.admission` files in
+strict pre-change formats (including a `.usage-owner-*` metadata file published
+before `.usage.json` for active global `*` and `claude-api` owner pauses so
+retained pre-change `claude-api` turns also observe `owner = true`, cleaned up
+once settled). A pre-change reader holds `claude-api` runs only for an owner
+pause, which holds its `claude` runs too, so a `claude-api` pause holds retained
+turns on both engines while it stands; reading the mirror back keeps it that
+engine's, never a global pause. Retained pre-change `proj` turns running across
+a deploy therefore keep parsing them cleanly, observe newly set Claude, API or
+global holds across both plan and API runs, cannot clear active
+owner pauses early, and persist any later refusal for the new binary to merge.
+Reads also accept pre-deploy `.usage-owner-*` metadata and `ADMISSION_REF`
+references during cutover.
 
 A release first stages its nanosecond cutoff in `.usage.admission`. The
 compatible record's `job` reference encodes the precise cutoff and commits it

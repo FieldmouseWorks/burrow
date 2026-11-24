@@ -195,7 +195,9 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         let active = kind.ends_with("held");
         assert_eq!(
-            value["until"].as_i64().is_some_and(|t| t > crate::now()),
+            value["engines"]["claude"]["until"]
+                .as_i64()
+                .is_some_and(|t| t > crate::now()),
             active,
             "{stdout}"
         );

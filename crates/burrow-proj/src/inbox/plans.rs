@@ -9,8 +9,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod bound;
+mod end;
 mod place;
-pub(super) use place::Place;
+pub(super) use place::{CHANGED, Place};
 
 use std::{
     collections::BTreeSet,
@@ -86,12 +88,15 @@ impl List {
             };
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
         }
+        if self.tasks.is_empty() {
+            text.push_str("\nNo task is left on it, so none of its children starts.");
+        }
         if let Some(child) = self.next().map(|i| &self.children[i])
             && child.waits
             && let Some(n) = child.number
         {
             text.push_str(&format!(
-                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
+                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if its record was the deliverable and no PR was needed, an author records why with `proj plan done {repo}#{n} --no-pr REASON`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
             ));
         }
         text
@@ -403,27 +408,6 @@ impl Pass<'_> {
         }
         result
     }
-    fn same_source(&self, repo: &str, issue: &Value) -> Option<bool> {
-        let n = raw(&issue["number"]);
-        let had = match files::input(&self.plan_dir(repo, &n)) {
-            Ok(had) => had,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
-            Err(_) => return None,
-        };
-        if !self.list_bound(repo, &n, &had)? {
-            return Some(false);
-        }
-        self.input(repo, issue).map(|input| input == had)
-    }
-    fn list_bound(&self, repo: &str, n: &str, input: &str) -> Option<bool> {
-        match fs::read(self.plan_dir(repo, n).join("tasks.json")) {
-            Ok(bytes) => serde_json::from_slice::<List>(&bytes)
-                .ok()
-                .map(|list| list.source.as_ref().is_none_or(|source| source == input)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(true),
-            Err(_) => None,
-        }
-    }
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);
         fs::create_dir_all(&d)?;
@@ -726,6 +710,14 @@ impl Pass<'_> {
         if !self.eligible(repo, parent) {
             return Hold::Yes("its parent isn't one the inbox may read".into());
         }
+        // An end begun and cut short is carried through first.
+        if self.ending(repo, n) {
+            if !self.finish_end(repo, n) {
+                self.miss(repo);
+                return Hold::Unknown;
+            }
+            return Hold::No;
+        }
         let bytes = match fs::read(d.join("tasks.json")) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Hold::No,
@@ -742,6 +734,23 @@ impl Pass<'_> {
         // whose brief merely mentions the parent doesn't own it.
         if let Some(id) = self.owner(repo, n) {
             return Hold::Yes(format!("its own job {id} is still live"));
+        }
+        // A bot's page was never one piece of work: its list ends, rather
+        // than pause for good on the bot's next edit.
+        if let Some(what) = super::maintained::maintained(parent) {
+            if let Some(why) = self.list_writer(repo, n) {
+                return Hold::Yes(format!("its list ends once nothing writes it: {why}"));
+            }
+            let Some(input) = self.input(repo, parent) else {
+                self.miss(repo);
+                return Hold::Unknown;
+            };
+            if !self.end_list(repo, n, &input) {
+                self.retry(repo);
+                return Hold::Unknown;
+            }
+            eprintln!("proj-inbox: {repo}#{n} is {what}, so its task list ended");
+            return Hold::No;
         }
         let Some(same) = self.verified_source(repo, parent) else {
             return Hold::Unknown;
@@ -953,9 +962,17 @@ mod landed_tests;
 mod landed_split_tests;
 
 #[cfg(test)]
+#[path = "landed_no_pr_tests.rs"]
+mod landed_no_pr_tests;
+
+#[cfg(test)]
 #[path = "plans_review_tests.rs"]
 mod review_tests;
 
 #[cfg(test)]
 #[path = "plans_trust_tests.rs"]
 mod trust_tests;
+
+#[cfg(test)]
+#[path = "maintained_tests.rs"]
+mod maintained_tests;

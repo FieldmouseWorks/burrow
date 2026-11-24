@@ -90,7 +90,7 @@ impl Machine {
     }
 
     fn run(&self, words: &[&OsStr], user: Option<&str>, env: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-rustc-wrapper"));
+        let mut cmd = Command::new(burrow_test::program!("burrow-rustc-wrapper"));
         cmd.args(words)
             .arg(stand_ins().join("cc"))
             .args(["-c", "a.c"])
@@ -277,7 +277,7 @@ fn a_config_it_cant_read_compiles_without_the_cache_and_says_so() {
 #[test]
 fn what_it_cant_run() {
     let m = Machine::new();
-    let bin = env!("CARGO_BIN_EXE_burrow-rustc-wrapper");
+    let bin = burrow_test::program!("burrow-rustc-wrapper");
     // Nothing to compile.
     for words in [&[][..], &["config.json"]] {
         let out = Command::new(bin).args(words).output().unwrap();

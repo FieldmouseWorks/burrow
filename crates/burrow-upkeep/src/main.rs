@@ -7,7 +7,8 @@
 //! `fetch`, which fetches refs into the steward's mirror of a
 //! repo; `commits`, which reads a PR's commits whole for
 //! who made them; `ci`, which owns the CI verdict and cancelled workflow
-//! recovery; `token`, which mints the pass
+//! recovery; `tracked`, which runs a red check again once what tracks its
+//! cause outside the PR closes; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -29,6 +30,7 @@ use burrow_upkeep::mirror;
 use burrow_upkeep::pass::{Out, Pass, Proj};
 use burrow_upkeep::settle::Repo;
 use burrow_upkeep::token::{self, Installations, Token};
+use burrow_upkeep::tracked;
 use burrow_upkeep::verdict::{self, Asked};
 use gh_token::app::Minted;
 use serde::Deserialize;
@@ -76,6 +78,15 @@ const USAGE: &str = "usage:
       the head, the jobs to stop, what came of each one's answers (posted,
       wrong, unpushed, moved, refused or unanswered), when to look again and
       a rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG tracked OWNER/REPO --now SECONDS [--dry]
+      a head whose fix job found its red check's cause outside the PR; a
+      JSON object on stdin gives what tracks it (tracker, OWNER/REPO#N):
+      whether it's open, when it closed, or that GitHub has none, as the
+      App on the tracker's owner reads it; given also when it closed
+      (closed) and the head's CI as `ci` is asked (ci), each red check's
+      run that last started before then asked to run again whole: what was
+      asked, what's going, what GitHub refused and what ran since, as JSON
+      on stdout
   burrow-upkeep CONFIG commits OWNER/REPO --now SECONDS [--dry]
       a PR's commits, every one on its head since it left its base, read
       whole from GitHub's compare a page at a time; a JSON object on stdin
@@ -203,7 +214,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "verdict", "claims", "fetch", "commits", "ci",
+        "settle", "branches", "watch", "verdict", "claims", "fetch", "commits", "ci", "tracked",
     ]
     .contains(&word)
     {
@@ -253,6 +264,13 @@ fn run(args: &[String]) -> Result<(), Stop> {
     } else {
         None
     };
+    let tracking = if word == "tracked" {
+        Some(stdin::<tracked::Ask>(
+            "what tracks the cause and the head's CI, as a JSON object on stdin",
+        )?)
+    } else {
+        None
+    };
     let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
     let mut proj = Proj {
         bin: cfg.proj.clone(),
@@ -281,6 +299,19 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 }
             })?;
             json!({"ci": verdict, "limited": p.out.limited})
+        }
+        ("tracked", _) => {
+            let ask = tracking
+                .as_ref()
+                .ok_or_else(|| Stop::Usage("no tracker to read".into()))?;
+            let got = tracked::tracked(&mut p, ask).map_err(|e| {
+                if e.unanswered {
+                    Stop::Later(e.why)
+                } else {
+                    Stop::Failed(e.why)
+                }
+            })?;
+            json!({"tracked": got, "limited": p.out.limited})
         }
         ("settle", _) => {
             let repo = Repo {

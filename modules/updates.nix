@@ -444,6 +444,7 @@ in
     ./updates/health-options.nix
     (import ./common.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
+    (import ./updates/follow.nix inputs)
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }

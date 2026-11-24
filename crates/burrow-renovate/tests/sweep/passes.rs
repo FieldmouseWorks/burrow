@@ -248,7 +248,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
         assert_eq!(p.err, "usage: renovate-sweep [OWNER/REPO|--key]\n");
         assert!(p.jobs.is_empty() && p.notices.is_empty() && p.log.is_empty());
     }
-    let none = Command::new(SWEEP).output().unwrap();
+    let none = Command::new(sweep()).output().unwrap();
     assert_eq!(none.status.code(), Some(2));
     assert_eq!(
         String::from_utf8_lossy(&none.stderr),
@@ -256,7 +256,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     );
     let path = m.path("bad.json");
     fs::write(&path, r#"{"name": "renovate-sweep"}"#).unwrap();
-    let bad = Command::new(SWEEP).arg(&path).output().unwrap();
+    let bad = Command::new(sweep()).arg(&path).output().unwrap();
     assert_eq!(bad.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&bad.stderr).starts_with(&format!(

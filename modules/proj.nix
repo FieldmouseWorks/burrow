@@ -112,7 +112,7 @@ let
       flock = "${pkgs.util-linux}/bin/flock";
       gh = lib.getExe cfg.gh;
       # gh as the jobs run it, for what proj does on GitHub as a job.
-      jobGh = lib.getExe (config.burrow.tools.gh or pkgs.gh);
+      jobGh = lib.getExe config.burrow.tools.gh;
       git = lib.getExe config.programs.git.package;
       systemctl = "${pkgs.systemd}/bin/systemctl";
       systemdRun = "${pkgs.systemd}/bin/systemd-run";
@@ -186,7 +186,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
     (lib.mkRemovedOptionModule [ "burrow" "proj" "paused" ] "Use burrow.settings.allowed and settings pause OWNER/REPO; runtime pauses need no deploy.")
-    { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
+    { key = "burrow/anthropic"; imports = [ (import ./engines/anthropic.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }

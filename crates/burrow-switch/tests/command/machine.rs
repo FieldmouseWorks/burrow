@@ -4,7 +4,9 @@
 //!
 //! The stand-ins act as much as the tests need: switch-to-configuration
 //! `test` makes its system the one that runs, systemd-run arms the revert's
-//! timer and runs what it's told to wait for, nix-env points the profile.
+//! timer and runs what it's told to wait for, nix-env points the profile,
+//! nix makes its out-link, and switch-to-configuration keeps what the
+//! switch's build roots held as it ran in FAKE/rooted.
 //! A file in FAKE makes one fail or answer otherwise.
 
 use std::fs;
@@ -14,8 +16,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-pub const SWITCH: &str = env!("CARGO_BIN_EXE_burrow-switch");
-pub const CONFIRM: &str = env!("CARGO_BIN_EXE_burrow-confirm");
+pub fn switch() -> &'static str {
+    burrow_test::program!("burrow-switch")
+}
+pub fn confirm() -> &'static str {
+    burrow_test::program!("burrow-confirm")
+}
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 pub fn bin() -> &'static Path {
@@ -162,7 +168,12 @@ exec "$@"
 PATH='@PATH@'
 echo "$*" >>"$FAKE/nix"
 [ ! -e "$FAKE/fail-nix" ] || exit 1
-cat "$FAKE/built"
+built=$(cat "$FAKE/built")
+while [ $# -gt 0 ]; do
+  [ "$1" != --out-link ] || ln -sfn "$built" "$2"
+  shift
+done
+echo "$built"
 "#,
     ),
     (
@@ -192,6 +203,9 @@ PATH='@PATH@'
 sys=${0%/bin/switch-to-configuration}
 name=${sys##*/}
 echo "$name $*" >>"$FAKE/switch-to-configuration"
+for root in "${FAKE%/fake}"/state/built/*/system; do
+  [ ! -L "$root" ] || readlink "$root" >>"$FAKE/rooted"
+done
 n=$(cat "$FAKE/locked-$name" 2>/dev/null || echo 0)
 if [ "$n" -gt 0 ]; then echo $((n - 1)) >"$FAKE/locked-$name"; exit 11; fi
 if [ -e "$FAKE/hang-$name" ]; then echo dead >"$FAKE/timer-state"; exit 1; fi
@@ -329,11 +343,11 @@ impl Machine {
     }
 
     pub fn switch(&self, words: &[&str]) -> Output {
-        self.command(SWITCH, words).output().unwrap()
+        self.command(switch(), words).output().unwrap()
     }
 
     pub fn confirm(&self) -> Output {
-        self.command(CONFIRM, &[]).output().unwrap()
+        self.command(confirm(), &[]).output().unwrap()
     }
 
     /// How the stand-in `name` was run, since it was last asked.
@@ -353,7 +367,7 @@ impl Machine {
     pub fn me(&self) -> String {
         format!(
             "{} {}",
-            fs::canonicalize(SWITCH).unwrap().display(),
+            fs::canonicalize(switch()).unwrap().display(),
             self.path("config.json").display()
         )
     }

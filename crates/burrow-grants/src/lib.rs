@@ -125,6 +125,17 @@ impl Capability {
     }
 }
 
+/// What a describe declares, whatever the owner approved: what the plugin
+/// requires, and all it may be granted. `kinds` and `offered` as for
+/// [`Grants::new`].
+pub fn declared(kinds: &[Kind], offered: &plugin::Capabilities) -> Vec<Capability> {
+    Capability::ALL
+        .iter()
+        .copied()
+        .filter(|c| c.declared(kinds, offered))
+        .collect()
+}
+
 /// Why a capability that was declared or approved isn't granted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {

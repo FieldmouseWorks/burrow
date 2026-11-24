@@ -5,7 +5,7 @@
 //!   A command that deletes or rewrites files gets a ZFS snapshot of the
 //!   undo datasets (undo.rs).
 //! - R2, a one-way door: the owner is asked. The ones a pattern can name
-//!   are `permissions.ask` in modules/claude.nix, which ask even under
+//!   are `permissions.ask` in modules/engines/anthropic.nix, which ask even under
 //!   bypassPermissions; this asks for the ones a pattern can't: a
 //!   force-push or delete of a default branch (push.rs), and firmware and
 //!   Hetzner Robot calls with no undo (doors.rs).

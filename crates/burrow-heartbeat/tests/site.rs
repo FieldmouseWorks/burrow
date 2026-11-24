@@ -40,7 +40,7 @@ impl Unit {
 
     /// A watch command with its credential and runtime directories.
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-heartbeat"));
+        let mut cmd = Command::new(burrow_test::program!("burrow-heartbeat"));
         cmd.args(args)
             .env("CREDENTIALS_DIRECTORY", &self.creds)
             .env("RUNTIME_DIRECTORY", &self.root);

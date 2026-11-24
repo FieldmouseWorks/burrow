@@ -179,7 +179,15 @@ root only.
    PR whose body links the Claude session that opened it, since that session
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
-   as on a hold, until proj resumes the job to bring the fix in.
+   as on a hold, until proj resumes the job to bring the fix in. A red
+   check whose cause lies outside the PR (the machine's, another repo's)
+   goes the same way with no push: the job finds or files the issue that
+   tracks it, names it in its answers (`tracker`) and awaits it, then runs
+   the red check's whole run again once proj resumes it. A head whose job
+   named one gets no second job: it's pending on that tracker, and once
+   the tracker closes the steward runs each red run from before then
+   again through the CI owner's rerun door (burrow-upkeep's `tracked`).
+   A red after that is the head's own, and a job takes it.
 4. Codex looks again at each push, and the steward asks it to (through the
    owner's door, as in step 2) when every finding was answered without one,
    until it finds nothing on the head. A look that isn't asked for, or
@@ -189,7 +197,13 @@ root only.
    branch is deleted. A check run cancelled with nothing run through since
    (its runner shut down under it, say) is run again once, and CI is pending
    meanwhile. Cancelled again on the same head, it is red, the head's to fix
-   like a hang: a Claude job takes it. One GitHub stopped at its job's
+   like a hang: a Claude job takes it. A check run that failed only because
+   its runner was lost (GitHub's exit 143 or lost communication, and no
+   error of the step's own) is likewise pending and run again once, whole
+   when it's a called workflow's, so it runs that workflow's current copy;
+   lost again, it is
+   red, named "the runner was lost again after a rerun": the machine's, not
+   the head's. One GitHub stopped at its job's
    `timeout-minutes` (its annotation says so) is red at once. In a repo with its merge train on (`train`), it goes
    into the train instead, CI on the PR itself optional: Conary's `cn train`
    merges the PRs in the train onto the default branch together, has CI run

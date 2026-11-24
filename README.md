@@ -40,7 +40,8 @@ about what needs you, one issue per problem (`notify`).
 
 The modules, by job:
 
-- **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
+- **Engines:** `anthropic`, `antigravity`
+- **The safety net:** `undo`, `switch`, `backup`, `ops`,
   `heartbeat`, `robot`
 - **Doing the work:** `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
@@ -52,12 +53,14 @@ Each has an entry below, and each can be imported on its own.
 
 ## What's in it
 
-- **`claude`** (`burrow.claude`): Claude Code system-wide in
+- **`anthropic`** (`modules/engines/anthropic.nix`, `burrow.claude`): Anthropic's
+  Nix engine surface for both the host and the sandboxes. On the host, Claude
+  Code runs system-wide in
   `bypassPermissions`, set in `/etc/claude-code/managed-settings.json` so no
   project can override it. The only prompts are `permissions.ask` rules for
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). The standing-authority
-  commands in `modules/claude/standing.nix` (`proj reply`, `settings land`,
+  commands in `modules/engines/anthropic/standing.nix` (`proj reply`, `settings land`,
   taking a label off, `gh run rerun`) are `permissions.allow` rules, so a
   session whose mode puts Claude Code's auto-mode check in front of its
   commands doesn't have that check refuse them; the one-way doors still ask
@@ -67,7 +70,10 @@ Each has an entry below, and each can be imported on its own.
   pusher saw (`--force-with-lease --force-if-includes`, or one naming the
   commit), so a job can't drop what another pushed to the same PR. Also
   writes the machine's `/etc/claude-code/CLAUDE.md` from what the
-  other modules contribute.
+  other modules contribute. In the sandboxes, wires both `claude` and
+  `claude-api` through `burrow.agents.engines` with their packages,
+  credentials, Anthropic egress hosts, and packaged `burrow-engine-anthropic`
+  plugins (`agent-plugin-claude` and `agent-plugin-claude-api`).
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.
 - **`backup`** (`burrow.backup`): `HOST-backup`: each new snapshot of the
@@ -142,7 +148,12 @@ Each has an entry below, and each can be imported on its own.
   repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
   the machinery's App unless it names one of its own, so its GitHub allowance
   stalls only Renovate, and its commits are that App's bot, whose PRs the
-  steward knows as Renovate's), `advisory-watch` (CISA KEV, vulnix,
+  steward knows as Renovate's), `cargo-follow` (`follow`: a Cargo pin on
+  another repo's main kept at its head as one PR, opened or refreshed on
+  either repo's push; the manifest's
+  `metadata.follow` says what changes there are inert, so a commit that only
+  moves the upstream's own pin back on the follower opens none, and two
+  repos pinning each other don't chase one another), `advisory-watch` (CISA KEV, vulnix,
   osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check`
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
@@ -249,7 +260,10 @@ Each has an entry below, and each can be imported on its own.
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and
-  the network and login/App environment. An engine plugin is granted only
+  the network and login/App environment. Anthropic-specific CLI flags, stream
+  JSONL parsing, usage/login refusal classification and `claude-api` credit
+  admission live in
+  [crates/burrow-engine-anthropic](crates/burrow-engine-anthropic). An engine plugin is granted only
   [part of that contract](docs/engines.md#a-plugins-grants). A turn whose conversation is lost
   receives the preceding turns' questions and answers.
   Local jobs inspect and recover other host jobs with the ordinary
@@ -480,7 +494,10 @@ Each has an entry below, and each can be imported on its own.
   each repo's notes (`refs/notes/conary`), with session links only for the
   repos `sessionLinks` names. `cn why FILE:LINE` answers from the ledger here
   and from the notes in any other clone, and `cn verify` checks the ledger
-  against the anchor. With `daemon`, conaryd serves the ledger's calls on
+  against the anchor. Its `cn` and conaryd are Conary at the rev burrow's
+  crates link (`crates/Cargo.lock`, `burrow.lib.conary`), so the flow and
+  the judge that checks it compute alike: bumping that pin moves both, and a
+  `package` built from another rev fails the build. With `daemon`, conaryd serves the ledger's calls on
   `/run/conary/conaryd.sock`, read-only, as a user of its own, with no
   network, and every Claude of `burrow.user` gets them, and `why`, as the
   `conary` MCP server. With `door`, an issue labelled `undo` in the probe's
@@ -524,17 +541,27 @@ Each has an entry below, and each can be imported on its own.
   its engine with nothing to ask inside, egress only through an allowlist
   proxy, no GitHub token; the work comes back with `agent fetch` as
   `refs/agents/ID/*`. Each engine is an entry of `burrow.agents.engines`
-  (Claude's is declared by the `claude` module): its guest packages and
+  (Anthropic's `claude` and `claude-api` entries are declared by the
+  `anthropic` module): its guest packages and
   modules, its login (`credentialFile`, handed in as the systemd credential
   `agent.credential`), its own egress hosts on its own filtered proxy, and
   the capabilities and MCP servers the owner approved for it
   ([a plugin's grants](docs/engines.md#a-plugins-grants)). A VM for one engine gets none
   of another's. An engine's `plugin` runs in
   [a VM of its own per call](docs/engines.md#a-plugins-sandbox), as
-  `agent-plugin-NAME`, with its grants and nothing else. `agent fetch` runs
+  `agent-plugin-NAME`, with its grants and nothing else, and passes
+  [its conformance check](docs/engines.md#a-plugins-conformance-check)
+  (`lib.engineConformance`) there. `agent fetch` runs
   git confined to the sandbox's clone and the project's repository, so a
   link planted in a clone reaches nothing else. Idle ones stop after a day
   and are saved and deleted after a week. Opt-in per task.
+- **`antigravity`** (`burrow.engines.antigravity`, `modules/engines/antigravity.nix`,
+  `crates/burrow-engine-antigravity`): Isolated Antigravity engine surface and
+  Conary `conary-plugin v5` `job` plugin. Wires the machine flake's
+  Antigravity package or binary, isolated auth credential, runtime-configured
+  models and efforts, egress host allowlist, and approved capabilities into
+  `burrow.agents.engines.antigravity` without sharing provider code with
+  Claude or touching `burrow-proj`.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
   signed in to your accounts by you, that job engines drive through
   Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
@@ -757,4 +784,11 @@ its own packages, credential and hosts. Its other half
 (`tests/agents-plugins.nix`, `.#checks.x86_64-linux.agents.entries.plugins`
 alone) runs the example plugin (`crates/burrow-example-plugin`) through
 Conary's runner: each grant works, and without it isn't there for the VM's
-root either.
+root either. Its conformance entries
+(`.#checks.x86_64-linux.agents.entries.conformance-example`,
+`conformance-antigravity`, `conformance-claude`, and
+`conformance-claude-api`) are the plugins'
+[conformance checks](docs/engines.md#a-plugins-conformance-check):
+`lib.engineConformance` builds one for any engine's plugin, and each check
+an engine adds there runs `cn plugin check` on it in its sandbox and holds
+it to what it declares.

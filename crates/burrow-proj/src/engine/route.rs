@@ -1,7 +1,7 @@
 //! The engine a role's route runs a turn on now: its first engine, or, once
 //! that one is short, the first engine after it along the route
 //! (`ENGINE over PCT ENGINE ...`) with room. A script decides, each time a
-//! turn starts or a run of it is refused, from the engines' meters and holds:
+//! turn starts or a run of it is refused, from each engine's meter and hold:
 //! never a model. Nothing here is remembered, so a turn goes back to the
 //! first engine as soon as it isn't short.
 //!
@@ -11,9 +11,10 @@
 //! malformed, future or stale reading proves neither: the first engine runs
 //! as it stands, and no turn is moved onto an engine it can't vouch for.
 
-use super::{Engine, api};
+use super::Engine;
 use crate::config::Config;
 use crate::usage::login::Run;
+use burrow_engine_anthropic::api;
 use burrow_settings::roles::Route;
 
 /// What a route asks of each engine.
@@ -52,9 +53,9 @@ pub(crate) fn pick<E: Copy>(first: E, over: &[(f64, E)], meters: &impl Meters<E>
         .map_or(first, |(_, (e, _))| *e)
 }
 
-/// The machine's meters for one turn: Claude's reading (usage-reset's
-/// claude.json) and its usage hold, the API credit's meter and its key, and
-/// where the turn runs (a sandbox is given no key).
+/// The machine's per-engine meters and holds for one turn: each engine's own
+/// meter snapshot (`<engine>.json`) and per-engine hold, plus `claude-api`'s
+/// credit meter and key check, and whether the turn is sandboxed.
 pub(crate) struct Live<'a> {
     pub cfg: &'a Config,
     pub sandboxed: bool,
@@ -62,56 +63,86 @@ pub(crate) struct Live<'a> {
 }
 
 impl Live<'_> {
-    /// A hold on a run of this turn on `engine`: the plan's usage or login
-    /// for Claude, only the owner's pause for the API. A hold a fresh
-    /// Claude meter proves over is none, as the next pass would release
-    /// it ([`crate::usage::out_metered`]), so the subscription has its
-    /// turns back as soon as its meter says so.
-    fn held(&self, engine: Engine) -> bool {
-        let run = Run {
-            sandboxed: self.sandboxed,
-            api: engine == Engine::ClaudeApi,
-        };
-        crate::usage::out_metered(self.cfg).is_some_and(|h| h.holds_run(run))
+    /// Whether `engine` is held for this turn (discounting non-owner holds
+    /// proven over by a fresh meter for that engine).
+    fn held(&self, engine: &str) -> bool {
+        let run = Run::new(engine, self.sandboxed);
+        crate::usage::out_metered_for(self.cfg, &run).is_some()
     }
 
     /// A key the credit's runs can launch with: none in a sandbox, and
     /// none missing, unreadable or empty ([`api::key`]).
     fn keyed(&self) -> bool {
-        !self.sandboxed && api::key(self.cfg).is_ok()
+        !self.sandboxed && api::key(self.cfg.claude_api_key_file.as_deref()).is_ok()
     }
 
-    fn reading(&self, engine: Engine) -> Option<burrow_usage_reset::meter::Snapshot> {
+    fn reading(&self, engine: &str) -> Option<burrow_usage_reset::meter::Snapshot> {
         burrow_usage_reset::meter::Snapshot::read(
             self.cfg.meters.as_deref()?,
-            engine.name(),
+            engine,
             self.now as f64,
         )
     }
 }
 
-impl Meters<Engine> for Live<'_> {
-    fn short(&self, engine: Engine, pct: f64) -> bool {
+impl Meters<&str> for Live<'_> {
+    fn short(&self, engine: &str, pct: f64) -> bool {
         if self.held(engine) {
             return true;
         }
-        match engine {
-            Engine::Claude => self.reading(engine).is_some_and(|m| m.short(pct)),
-            // No usable key (a sandbox is given none), or missing or
-            // unreadable credit state: launch or admission would refuse it.
-            Engine::ClaudeApi => !self.keyed() || api::short(self.cfg, pct, self.now),
+        if engine == burrow_settings::credit::ENGINE {
+            return !self.keyed()
+                || api::short(
+                    self.cfg.credit_file().as_deref(),
+                    &self.cfg.jobs,
+                    pct,
+                    self.now,
+                );
         }
+        self.reading(engine).is_some_and(|m| m.short(pct))
     }
 
-    fn room(&self, engine: Engine) -> bool {
+    fn room(&self, engine: &str) -> bool {
         if self.held(engine) {
             return false;
         }
-        match engine {
-            Engine::Claude => self.reading(engine).is_some_and(|m| m.room()),
-            Engine::ClaudeApi => self.keyed() && api::room(self.cfg),
+        if engine == burrow_settings::credit::ENGINE {
+            return self.keyed()
+                && api::room(self.cfg.credit_file().as_deref(), &self.cfg.jobs, self.now);
         }
+        self.reading(engine).is_some_and(|m| m.room())
     }
+}
+
+impl Meters<Engine> for Live<'_> {
+    fn short(&self, engine: Engine, pct: f64) -> bool {
+        Meters::<&str>::short(self, engine.name(), pct)
+    }
+
+    fn room(&self, engine: Engine) -> bool {
+        Meters::<&str>::room(self, engine.name())
+    }
+}
+
+/// The engine name `route` selects now using arbitrary engine-name meters,
+/// starting from `from` when pinned on the route.
+#[cfg(test)]
+pub(crate) fn pick_names<'a>(
+    route: &'a Route,
+    from: Option<&'a str>,
+    meters: &impl Meters<&'a str>,
+) -> &'a str {
+    let mut chain: Vec<&'a str> = route.engines().collect();
+    let mut pcts: Vec<f64> = route.over.iter().map(|h| h.pct).collect();
+    if let Some(pin) = from {
+        let Some(at) = chain.iter().position(|e| *e == pin) else {
+            return pin;
+        };
+        chain.drain(..at);
+        pcts.drain(..at);
+    }
+    let over: Vec<(f64, &'a str)> = pcts.into_iter().zip(chain[1..].iter().copied()).collect();
+    pick(chain[0], &over, meters)
 }
 
 /// The engine ROUTE runs a turn on now, starting from `from` when the turn

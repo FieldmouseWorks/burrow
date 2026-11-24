@@ -104,10 +104,10 @@
         "origin": "default",
         "value": false
       },
-      "proj.usageHold": {
-        "file": "/jobs/.usage.json",
+      "proj.usageHolds": {
+        "file": "/jobs/.usage-holds.json",
         "origin": "default",
-        "value": null
+        "value": {}
       },
       "proj.usageTrickle": {
         "origin": "default",
@@ -822,9 +822,9 @@
             "x-change": "deploy",
             "x-owner": "proj"
           },
-          "proj.usageHold": {
+          "proj.usageHolds": {
             "additionalProperties": false,
-            "description": "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
+            "description": "Active usage and login holds keyed by engine name (* for an owner pause over every engine): no turn on a held engine takes a slot until its hold ends. Empty object for none.",
             "properties": {
               "file": {
                 "type": "string"
@@ -1027,7 +1027,7 @@
           "proj.roles",
           "proj.models",
           "proj.engineSetups",
-          "proj.usageHold"
+          "proj.usageHolds"
         ],
         "type": "object"
       }

@@ -41,6 +41,7 @@ def handed(st, kind, jid, pr):
     st.setdefault("answering", {})[jid] = {"kind": kind, "head": pr["headRefOid"], "body": pr["body"] or "",
                                            "at": C.NOW}
     st.pop(kind + "Unposted", None)
+    st.pop(kind + "Tracker", None)
 
 
 def stand_down(repo, pr, st, tag, strike, cleared, after):
@@ -71,7 +72,9 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
     handed out meanwhile). A job it names to stop that proj won't is left to
     stopping.py, as a new head's jobs are. Why a job's answers didn't go up
     for want of a push or of answers is kept by its kind (KIND +
-    "Unposted"), for its next job's brief."""
+    "Unposted"), for its next job's brief; what tracks a red check's cause
+    outside the PR, as posted answers named it, by its kind too (KIND +
+    "Tracker", read by tracker())."""
     if DRY or not st.get("answering"):
         return None, None
     out = C.upkeep("claims", repo, input=json.dumps({
@@ -104,6 +107,11 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
         cleared("answer")
         if outcome == "posted":
             log(f"{tag}: Claude job {jid}'s answers posted")
+            if a.get("tracker"):
+                # Its red check's cause is outside the PR, and this tracks
+                # it: the head gets no other job of the kind meanwhile
+                # (step_actions.hand_off), and a new head is none of it.
+                st[a["kind"] + "Tracker"] = a["tracker"]
             after(C.NOW, 0)  # ends: the pass that reads what went up
             status = status or "A Claude job's answers went up: reading the PR again"
         elif outcome == "moved":
@@ -115,6 +123,13 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
             log(f"{tag}: Claude job {jid}'s answers not posted: {why}")
             st[a["kind"] + "Unposted"] = {"at": pr["headRefOid"], "why": why}
     return status, out
+
+
+def tracker(st, kind, at):
+    """What tracks the cause, outside the PR, of head `at`'s red check, as
+    its last job of the kind named it (OWNER/REPO#N), or None."""
+    got = st.get(kind + "Tracker")
+    return got["tracker"] if got and got["at"] == at else None
 
 
 def unposted(st, kind, at):
