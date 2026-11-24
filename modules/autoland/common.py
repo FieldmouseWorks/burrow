@@ -978,10 +978,10 @@ def coverage(repos):
     with its proofs and how each runs (machine), and who lands its PRs as
     the landing record has it (lands: the one a handover goes to, else its
     owner; None while it can't be read). How far a pass got isn't in it."""
-    def lands(repo):
+    def lander(repo):
         holding = landing(repo)
         return holding and (holding["to"] or holding["owner"])
-    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "lands": lands(r["repo"])}
+    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "lands": lander(r["repo"])}
                                  for r in repos}}
 
 
