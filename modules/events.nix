@@ -260,14 +260,18 @@ in
             default = null;
             example = "autoland";
             description = ''
-              Another handler whose passes go first: this one starts none
-              while that one has a pass running or due, and looks again as
-              each of its passes ends. That one, in turn, starts none while
-              one of this one's runs, so neither starts a pass that finds
-              their shared lock held. For work that only carries on what
-              the other's passes started and shares their lock (the
-              steward's continuations), so it never holds a pass over new
-              work off. That handler must yield to none itself.
+              Another handler whose passes share a lock with this one's:
+              the two go in the order their passes fell due, that one's
+              first on a tie. A pass of this one's waits for that one's pass
+              that runs and those that fell due before it, and looks again
+              as each ends; that one, in turn, starts none while one of this
+              one's runs, nor one that fell due after a pass of this one's
+              that waits. So neither starts a pass that finds the lock held,
+              and neither waits for more than the passes booked ahead of
+              its own. For work that only carries on what the other's
+              passes started (the steward's continuations): a pass over new
+              work waits for at most one of its slices. That handler must
+              yield to none itself.
             '';
           };
         };

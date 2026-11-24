@@ -37,9 +37,10 @@
 //! the events that follow it get one pass, and one repo's passes are GAP
 //! apart. A handler's passes run one at a time, each repo's before its full
 //! pass, which never stands in for one (the steward's yields after a slice
-//! and resumes later). A handler can yield to another (`yieldTo`): it starts
-//! no pass while that one has one running or due, and that one starts none
-//! while one of the yielder's runs. When the service starts,
+//! and resumes later). A handler can yield to another (`yieldTo`): their
+//! passes share a lock, so neither starts one while one of the other's runs,
+//! and they go in the order they fell due, the one yielded to first on a
+//! tie. When the service starts,
 //! every handler gets a full pass, which catches up on whatever happened
 //! while it was down.
 

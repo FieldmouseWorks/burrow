@@ -319,8 +319,8 @@ Each has an entry below, and each can be imported on its own.
   rather than list every one. A repo's pass runs beside its handler's full
   pass, never folded into it (the steward's full pass yields after a slice),
   and a handler can yield to another (`yieldTo`, the steward's
-  continuations), starting nothing while that one is busy, which in turn waits
-  out a pass of the yielder's that runs. A turn ending and the
+  continuations): the two go in the order their passes fell due, and neither
+  starts one while one of the other's runs. A turn ending and the
   passes' own wake-ups (a settle delay, a review that hasn't come) kick them
   locally, and so does a switch that changes a handler's
   units. systemd holds the socket deliveries come in on, so one sent while
