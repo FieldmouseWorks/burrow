@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use burrow_grants::turn;
-
 use conary_core::plugin::{
     Answer, CONTRACT_V1, CONTRACTS, Context, Executed, Identity, Kind, Next, Offers, Request,
     Response, Task, fixtures, version,
@@ -55,25 +53,19 @@ pub fn is_conformance_job(task: &Task) -> bool {
 }
 
 /// Answer one Conary plugin request without external cancellation.
-pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
-    answer_cancellable(config, request, &|| false)
+pub fn answer(
+    config: &Config,
+    request: &Request,
+    instructions: Option<&str>,
+) -> Result<Response, String> {
+    answer_cancellable(config, request, instructions, &|| false)
 }
 
 /// Answer one Conary plugin request, aborting and killing the child process
-/// group as soon as `stop()` returns `true`. The turn's instructions come
-/// from this process's environment (burrow_grants::turn).
+/// group as soon as `stop()` returns `true`. The turn's `instructions`
+/// (burrow_grants::turn) go ahead of a job's prompt: the one input the CLI
+/// is known to give the model.
 pub fn answer_cancellable(
-    config: &Config,
-    request: &Request,
-    stop: &dyn Fn() -> bool,
-) -> Result<Response, String> {
-    let instructions = turn::instructions(|name| std::env::var(name).ok());
-    answer_with(config, request, instructions.as_deref(), stop)
-}
-
-/// Answer one Conary plugin request with the turn's `instructions`, which
-/// go ahead of a job's prompt: the CLI's one input known to reach the model.
-pub fn answer_with(
     config: &Config,
     request: &Request,
     instructions: Option<&str>,

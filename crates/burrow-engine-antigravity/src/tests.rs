@@ -254,7 +254,7 @@ fn conformance_fixture_passes_offline_with_and_without_models() {
             }),
             task: fixture.task.clone(),
         };
-        let resp = answer(&cfg, &req).unwrap();
+        let resp = answer(&cfg, &req, None).unwrap();
         assert!(fixture.conforms(&resp.answer));
         assert_eq!(resp.by.engine, ENGINE);
         let executed = resp.execution.expect("v5 execution provenance");
@@ -312,7 +312,7 @@ fi
         None,
         Context::Fresh,
     );
-    let fresh_resp = answer(&cfg, &fresh_req).unwrap();
+    let fresh_resp = answer(&cfg, &fresh_req, None).unwrap();
     assert_eq!(fresh_resp.by.engine, ENGINE);
     assert_eq!(fresh_resp.by.session.as_deref(), Some("conv-fresh-1"));
     let fresh_exec = fresh_resp.execution.unwrap();
@@ -365,7 +365,7 @@ fi
             session: "conv-fresh-1".to_owned(),
         },
     );
-    let cont_resp = answer(&cfg, &cont_req).unwrap();
+    let cont_resp = answer(&cfg, &cont_req, None).unwrap();
     assert_eq!(cont_resp.by.session.as_deref(), Some("conv-fresh-1"));
     let cont_exec = cont_resp.execution.unwrap();
     assert_eq!(cont_exec.model.as_deref(), Some("alt-model"));
@@ -397,7 +397,7 @@ fi
         },
     );
     assert!(
-        answer(&cfg, &fork_req)
+        answer(&cfg, &fork_req, None)
             .unwrap_err()
             .contains("does not support fork")
     );
@@ -496,7 +496,7 @@ exit 1
         }))
     );
     let quota_req = v5_job_request(&cfg, dir.path(), "work", None, None, Context::Fresh);
-    let err_msg = answer(&cfg, &quota_req).unwrap_err();
+    let err_msg = answer(&cfg, &quota_req, None).unwrap_err();
     assert!(err_msg.contains("antigravity quota refusal"));
     assert!(err_msg.contains("1800000000"));
 
@@ -574,7 +574,7 @@ wait
     let cancel_check = cancelled.clone();
     let pid_watch = child_pid_file.clone();
     let started = Instant::now();
-    let err = answer_cancellable(&cfg, &req, &move || {
+    let err = answer_cancellable(&cfg, &req, None, &move || {
         if fs::read_to_string(&pid_watch).is_ok_and(|p| p.ends_with('\n')) {
             cancel_check.store(true, Ordering::SeqCst);
         }

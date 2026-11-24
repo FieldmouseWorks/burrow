@@ -29,7 +29,9 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("failed to read plugin request: {e}"))?;
     let request: Request = serde_json::from_slice(&input)
         .map_err(|e| format!("failed to decode plugin request: {e}"))?;
-    let response = answer(&config, &request)?;
+    // The turn's instructions are read here, at the process's edge, alone.
+    let instructions = burrow_grants::turn::instructions(|name| std::env::var(name).ok());
+    let response = answer(&config, &request, instructions.as_deref())?;
     let bytes = serde_json::to_vec(&response)
         .map_err(|e| format!("failed to encode plugin response: {e}"))?;
     io::stdout()
