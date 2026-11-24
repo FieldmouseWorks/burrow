@@ -269,7 +269,6 @@ def run_pass(kick, continuing=False):
     if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
-    covered = []
     seen = set()
     deferred = set()
     complete = True
@@ -410,9 +409,7 @@ def run_pass(kick, continuing=False):
                     # Receipts keep the train safe across batches; a fresh
                     # ordinary look must revalidate the PR that stopped it.
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: the stopping PR is revalidated
-                if batch.seen_to(repo):
-                    covered.append(r)
-                else:
+                if not batch.seen_to(repo):
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
                 if T.on(repo):
                     # After its PRs, so the ones settled this pass are in it.
@@ -476,15 +473,10 @@ def run_pass(kick, continuing=False):
     save("digest-repos.json", digest)
     waits.publish(seen, digest, False, inventory=inventory if kick is None else None, deferred=deferred)
     if kick is None and batch.traversal_full:
-        # For renovate-sweep: it lists the ok majors of the repos this pass
-        # didn't see to (one whose pass failed among them), and tells its
-        # jobs how every repo's proofs run.
-        coverage = C.coverage(all_repos, covered)
-        old = load("repos.json", {}).get("repos", {})
-        for repo in inventory:
-            if repo.lower() in batch.state["finished"] and repo not in seen:
-                coverage["repos"][repo]["covered"] = old.get(repo, {}).get("covered", False)
-        save("repos.json", coverage)
+        # For renovate-sweep: who lands each repo, so it lists for the owner
+        # only the ok majors nothing lands, and how every repo's proofs run,
+        # for its jobs. A PR the steward is stuck on is the watchdog's (waits).
+        save("repos.json", C.coverage(all_repos))
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     if not complete:

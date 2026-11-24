@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory() as tmp:
         conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {'ci': {'name': 'waiting: CI'}}},
         watch={'kick': 'watchdog', 'escalated': f'{tmp}/escalated.json'},
-        defaults={'stallAfter': 120}, repos={},
+        defaults={'stallAfter': 120, 'proofBuilds': {}, 'proofRuns': {}, 'proofJobs': {}}, repos={},
     )))
     os.environ['AUTOLAND_CONFIG'] = str(cfg)
     import common as C
@@ -55,9 +55,8 @@ with tempfile.TemporaryDirectory() as tmp:
         clock[0] += 200  # three a slice
         W.NOTED[repo][W.key_of(repo, pr)] = W.item(repo, pr, 'CI', 120, f'autoland/{repo}', pr['headRefOid'])
 
-    def coverage(repos, covered):
-        done = {r['repo'] for r in covered}
-        return {'at': C.NOW, 'repos': {r['repo']: {'covered': r['repo'] in done} for r in repos}}
+    def landing(repo):
+        return {'owner': 'steward', 'to': None, 'generation': 0}
 
     with ExitStack() as stack:
         for obj, name, value in (
@@ -71,7 +70,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (S, 'branches', lambda repo, *a, **k: None),
             (S, 'upkeep', lambda *a: None),
             (C, 'follow_renames', lambda names: None), (C, 'taken', lambda *a: None),
-            (C, 'coverage', coverage), (C, 'poke', lambda *a: None),
+            (C, 'landing', landing), (C, 'poke', lambda *a: None),
         ):
             stack.enter_context(patch.object(obj, name, value))
         stack.enter_context(patch('time.monotonic', side_effect=lambda: clock[0]))

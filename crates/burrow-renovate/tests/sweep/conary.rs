@@ -244,6 +244,8 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     let body = "This PR contains the following updates: foo1 to v2.\r\n\r\n---\r\n";
     let mut m = Machine::as_app();
     m.landing(conaryd());
+    // The steward's list says so too, as it does once it reads the record.
+    m.steward(&[(REPO, lands("conaryd"))], 0, json!({}));
     m.prs(&[described(1, body)]);
     let p = m.pass();
     let (ok, held) = handed(p.task(), 1);
@@ -255,8 +257,8 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     assert_eq!(hub.major(KEY), None);
     hub.say(BOT_REST, &ok);
     assert_eq!(hub.major(KEY), Some(Major::Cleared));
-    // The sweep reads it as conaryd does: an ok major that conaryd lands,
-    // which no notice lists for the owner, and isn't handed over again.
+    // The sweep reads it as conaryd does: an ok major, which isn't handed
+    // over again, nor listed for the owner, as conaryd lands it.
     m.comments(1, &[marked(BOT, &ok)]);
     let p = m.pass();
     assert!(p.jobs.is_empty(), "{:#?}", p.jobs);

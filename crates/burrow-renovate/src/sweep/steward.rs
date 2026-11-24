@@ -1,8 +1,8 @@
-//! What the autoland steward last wrote about the repos it covers (its
-//! repos.json): which it covers, written when, and the proofs it runs on a
-//! machine rather than in CI, each with how. Read as the script's jq read
-//! it: its repos matched without their case, and their proofs in the order
-//! the file has them.
+//! What the autoland steward last wrote about the repos it has (its
+//! repos.json): who lands each one's PRs, written when, and the proofs it
+//! runs on a machine rather than in CI, each with how. Read as the script's
+//! jq read it: its repos matched without their case, and their proofs in
+//! the order the file has them.
 
 use std::fmt;
 use std::fs;
@@ -12,8 +12,9 @@ use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::Value;
 
-/// How long the steward's list is believed: a steward that stopped covers
-/// nothing.
+/// How long the steward's list is believed: past it, the steward has
+/// stopped, which is the stall watchdog's to take up, and who lands what
+/// isn't known.
 const BELIEVED: f64 = 6.0 * 3600.0;
 
 /// A JSON value whose objects keep their entries in the file's order, as
@@ -69,15 +70,36 @@ impl Json {
     }
 }
 
-/// The steward's repos.json, if there's one it can read.
-#[derive(Debug, Default)]
-pub(crate) struct Steward(Option<Json>);
+/// The steward's repos.json, as far as it can be read.
+#[derive(Debug)]
+pub(crate) enum Steward {
+    /// The machine has no steward: nothing lands any repo's PRs.
+    None,
+    /// It has one, whose list isn't there or isn't JSON.
+    Unread,
+    /// Its list.
+    Read(Json),
+}
+
+/// Who lands a repo's PRs: whoever does merges an ok major once its CI is
+/// green, so only one nothing lands is the owner's.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) enum Landing {
+    /// Nothing: no steward, or one that doesn't have the repo.
+    Nobody,
+    /// The steward or conaryd, by its name.
+    By(String),
+    /// Not known: the list can't be read or is too old, or its landing
+    /// record couldn't be read when it was written.
+    #[default]
+    Unknown,
+}
 
 /// What the steward says of one repo.
 #[derive(Debug, Default)]
 pub(crate) struct Repo {
-    /// Whether it covers it: it merges what's settled there.
-    pub covered: bool,
+    /// Who lands its PRs.
+    pub landing: Landing,
     /// The names of the proofs it runs on a machine there, as values to
     /// match a check's name against, in jq's `keys` order.
     pub proof_names: Vec<Value>,
@@ -87,21 +109,31 @@ pub(crate) struct Repo {
 }
 
 impl Steward {
-    /// The file at `path`; none at all when there's no steward (no path),
-    /// or it isn't there or isn't JSON.
+    /// The file at `path`, when there's a steward (a path).
     pub fn read(path: Option<&Path>) -> Steward {
-        let json = path
-            .and_then(|p| fs::read(p).ok())
-            .and_then(|text| serde_json::from_slice(&text).ok());
-        Steward(json)
+        let Some(path) = path else {
+            return Steward::None;
+        };
+        fs::read(path)
+            .ok()
+            .and_then(|text| serde_json::from_slice(&text).ok())
+            .map_or(Steward::Unread, Steward::Read)
     }
 
-    /// What it says of `repo`, its list believed if it's under six hours
-    /// old at `now`. A list that says nothing of it, or nothing jq could
-    /// read, covers it not and names no proofs there.
+    /// What it says of `repo`, who lands it believed if its list is under
+    /// six hours old at `now`. A list that doesn't have it, fresh, has
+    /// nothing land it; what jq couldn't read names no proofs there, and
+    /// who lands it isn't known.
     pub fn repo(&self, repo: &str, now: i64) -> Repo {
-        let Some(file) = &self.0 else {
-            return Repo::default();
+        let file = match self {
+            Steward::None => {
+                return Repo {
+                    landing: Landing::Nobody,
+                    ..Repo::default()
+                };
+            }
+            Steward::Unread => return Repo::default(),
+            Steward::Read(file) => file,
         };
         let fresh = match file.get("at") {
             Some(Json::Other(Value::Number(at))) => {
@@ -120,12 +152,25 @@ impl Steward {
             _ => return Repo::default(),
         };
         let Some(entry) = entry else {
-            return Repo::default();
+            let landing = if fresh {
+                Landing::Nobody
+            } else {
+                Landing::Unknown
+            };
+            return Repo {
+                landing,
+                ..Repo::default()
+            };
         };
         let Json::Object(_) = entry else {
             return Repo::default();
         };
-        let covered = fresh && matches!(entry.get("covered"), Some(Json::Other(Value::Bool(true))));
+        let landing = match entry.get("lands") {
+            Some(Json::Other(Value::String(by))) if fresh && !by.is_empty() => {
+                Landing::By(by.clone())
+            }
+            _ => Landing::Unknown,
+        };
         let (proof_names, proofs) = match entry.get("proofs") {
             Some(Json::Object(Entries(e))) => {
                 let mut names: Vec<&String> = e.iter().map(|(k, _)| k).collect();
@@ -151,7 +196,7 @@ impl Steward {
             _ => (Vec::new(), String::new()),
         };
         Repo {
-            covered,
+            landing,
             proof_names,
             proofs,
         }
@@ -163,16 +208,20 @@ mod tests {
     use super::*;
 
     fn steward(text: &str) -> Steward {
-        Steward(serde_json::from_str(text).ok())
+        serde_json::from_str(text).map_or(Steward::Unread, Steward::Read)
+    }
+
+    fn by(who: &str) -> Landing {
+        Landing::By(who.into())
     }
 
     #[test]
     fn a_repo_is_matched_without_its_case_and_its_proofs_kept_in_order() {
         let s = steward(
-            r#"{"at": 1000, "repos": {"Sam/R": {"covered": true, "proofs": {"z-proof": "ssh z", "a-proof": {"run": 1}}}}}"#,
+            r#"{"at": 1000, "repos": {"Sam/R": {"lands": "steward", "proofs": {"z-proof": "ssh z", "a-proof": {"run": 1}}}}}"#,
         );
         let r = s.repo("sam/r", 1000 + 3600);
-        assert!(r.covered);
+        assert_eq!(r.landing, by("steward"));
         assert_eq!(
             r.proof_names,
             [Value::from("a-proof"), Value::from("z-proof")]
@@ -182,35 +231,65 @@ mod tests {
             " z-proof isn't CI: it runs on a machine, like this: ssh z Rerun it that way on what you push. \
              a-proof isn't CI: it runs on a machine, like this: {\"run\":1} Rerun it that way on what you push."
         );
-        // Six hours on, it covers nothing: the steward may have stopped. Its
-        // proofs still run as they did.
+        // Six hours on, who lands it isn't known: the steward may have
+        // stopped, which is the watchdog's. Its proofs still run as they did.
         let stale = s.repo("sam/r", 1000 + 6 * 3600);
-        assert!(!stale.covered);
+        assert_eq!(stale.landing, Landing::Unknown);
         assert_eq!(stale.proof_names.len(), 2);
     }
 
     #[test]
-    fn what_it_cant_read_covers_nothing_and_names_no_proofs() {
+    fn only_a_list_that_lacks_the_repo_or_no_steward_has_nothing_land_it() {
+        // remi's list of 2026-11-24 02:20, from a pass that yielded partway
+        // through burrow: who lands each repo, however far it got.
+        let s = steward(
+            r#"{"at": 1000, "repos": {"FieldmouseWorks/burrow": {"lands": "steward", "proofs": {}},
+                "FieldmouseWorks/remi": {"lands": "conaryd", "proofs": {}}}}"#,
+        );
+        assert_eq!(
+            s.repo("fieldmouseworks/burrow", 1000).landing,
+            by("steward")
+        );
+        assert_eq!(s.repo("FieldmouseWorks/remi", 1000).landing, by("conaryd"));
+        assert_eq!(s.repo("sam/other", 1000).landing, Landing::Nobody);
+        assert_eq!(
+            s.repo("sam/other", 1000 + 6 * 3600).landing,
+            Landing::Unknown
+        );
+        assert_eq!(
+            Steward::read(None).repo("sam/r", 0).landing,
+            Landing::Nobody
+        );
+        let gone = Path::new("/nonexistent/repos.json");
+        assert_eq!(
+            Steward::read(Some(gone)).repo("sam/r", 0).landing,
+            Landing::Unknown
+        );
+    }
+
+    #[test]
+    fn what_it_cant_read_says_nobody_lands_nothing_and_names_no_proofs() {
         for text in [
             "not json",
             r#"{"at": 1000}"#,
-            r#"{"at": "1000", "repos": {"sam/r": {"covered": true}}}"#,
-            r#"{"at": 1000, "repos": {"sam/r": {"covered": "yes"}}}"#,
+            r#"{"at": "1000", "repos": {"sam/r": {"lands": "steward"}}}"#,
+            // The list before who lands each repo was in it.
+            r#"{"at": 1000, "repos": {"sam/r": {"covered": false}}}"#,
+            r#"{"at": 1000, "repos": {"sam/r": {"lands": null}}}"#,
+            r#"{"at": 1000, "repos": {"sam/r": {"lands": true}}}"#,
             r#"{"at": 1000, "repos": {"sam/r": true}}"#,
-            r#"{"at": 1000, "repos": {"sam/q": {"covered": true}}}"#,
-            r#"{"at": 1000, "repos": {"sam/r": {"covered": true, "proofs": null}}}"#,
+            r#"{"at": 1000, "repos": {"sam/r": {"lands": "steward", "proofs": null}}}"#,
         ] {
             let r = steward(text).repo("sam/r", 1000);
             assert!(r.proof_names.is_empty() && r.proofs.is_empty(), "{text}");
-            if !text.ends_with("null}}}") {
-                assert!(!r.covered, "{text}");
+            if !text.ends_with("null}}}") || text.contains("\"lands\": null") {
+                assert_eq!(r.landing, Landing::Unknown, "{text}");
             }
         }
         // Two spellings of one repo: the last is the one.
         let s = steward(
-            r#"{"at": 1000, "repos": {"sam/r": {"covered": true}, "SAM/R": {"covered": false}}}"#,
+            r#"{"at": 1000, "repos": {"sam/r": {"lands": "steward"}, "SAM/R": {"lands": null}}}"#,
         );
-        assert!(!s.repo("sam/r", 1000).covered);
-        assert!(!Steward::read(None).repo("sam/r", 0).covered);
+        assert_eq!(s.repo("sam/r", 1000).landing, Landing::Unknown);
     }
 }

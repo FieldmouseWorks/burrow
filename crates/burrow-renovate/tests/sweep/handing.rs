@@ -86,7 +86,7 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
         "{:#?}",
         p.log
     );
-    m.covered(&[REPO], &[], 0, json!({}));
+    m.landed(&[REPO], json!({}));
     m.prs(&[pr(3)]);
     let v = m.verdict(3, "ok", "main", "sam-workers");
     m.comments(3, &[v]);
@@ -100,7 +100,7 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
     // the user's own verdict is no verdict.
     let m2 = {
         let mut m2 = Machine::as_app();
-        m2.covered(&[REPO], &[], 0, json!({}));
+        m2.landed(&[REPO], json!({}));
         m2
     };
     m2.prs(&[pr(3)]);
@@ -109,7 +109,7 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
     assert_eq!(m2.pass().task().matches("#3 \"").count(), 1);
     // Without it, the job is the user's, and so is the verdict.
     let mut m = Machine::new();
-    m.covered(&[REPO], &[], 0, json!({}));
+    m.landed(&[REPO], json!({}));
     m.prs(&[pr(3)]);
     let v = m.verdict(3, "ok", "main", "sam-workers");
     m.comments(3, &[v]);
@@ -188,7 +188,7 @@ fn a_held_one_is_the_owners_and_an_ok_one_the_stewards_where_it_merges() {
         m.comments(2, &[v]);
     };
     let mut m = Machine::new();
-    m.covered(&[REPO], &[], 0, json!({}));
+    m.landed(&[REPO], json!({}));
     held(&mut m);
     let p = m.pass();
     assert!(p.jobs.is_empty(), "{:#?}", p.jobs);
@@ -199,12 +199,18 @@ fn a_held_one_is_the_owners_and_an_ok_one_the_stewards_where_it_merges() {
             "A Claude job read these and held them; its comment on each PR says why. They need a decision before they merge:\n- Update foo2 to v2: https://github.com/sam/r/pull/2"
         )
     );
-    // An ok one, green, merges on the steward's own in a repo it covers,
-    // spelled as GitHub spells it, which the clone's remote needn't match.
-    let ok = |covered: Option<(&[&str], &[&str], u64)>, p: Value| {
+    // An ok one, green, merges in a repo something lands: the steward,
+    // spelled as GitHub spells it (which the clone's remote needn't match),
+    // or conaryd. However far the steward's last pass got there: a PR it's
+    // stuck on is the stall watchdog's. Nor is it listed when who lands it
+    // isn't known (the record unread, the list stale, gone or of the
+    // format before), which is the steward stopped or failing: the
+    // watchdog's too.
+    type Lists<'a> = Option<(&'a [(&'a str, Value)], u64)>;
+    let ok = |said: Lists, p: Value| {
         let mut m = Machine::new();
-        if let Some((repos, failed, age)) = covered {
-            m.covered(repos, failed, age, json!({}));
+        if let Some((repos, age)) = said {
+            m.steward(repos, age, json!({}));
         }
         m.prs(&[p]);
         let v = m.verdict(3, "ok", "main", "me");
@@ -214,25 +220,51 @@ fn a_held_one_is_the_owners_and_an_ok_one_the_stewards_where_it_merges() {
         let (verb, body) = p.majors();
         (verb.to_string(), body.to_string())
     };
-    for repos in [&[REPO][..], &["Sam/R"]] {
-        assert_eq!(ok(Some((repos, &[], 0)), pr(3)).0, "close", "{repos:?}");
-    }
-    // It's listed for the owner in one it doesn't, or with no steward at
-    // all, or one whose last pass failed, or when the steward's list is
-    // six hours old: it may have stopped.
-    let listed = "A Claude job read these and cleared them, and their CI is green, but the autoland steward doesn't cover their repos, so nothing merges them:\n- Update foo3 to v2: https://github.com/sam/r/pull/3";
-    for covered in [
-        Some((&["sam/other"][..], &[][..], 0)),
-        None,
-        Some((&[], &[REPO], 0)),
-        Some((&[REPO], &[], 6 * 3600)),
+    let gone = || {
+        let mut m = Machine::new();
+        m.steward = Some(m.path("gone.json"));
+        m.prs(&[pr(3)]);
+        let v = m.verdict(3, "ok", "main", "me");
+        m.comments(3, &[v]);
+        m.pass().majors().0.to_string()
+    };
+    assert_eq!(gone(), "close");
+    for (repos, age) in [
+        (vec![(REPO, lands("steward"))], 0),
+        (vec![("Sam/R", lands("steward"))], 0),
+        (vec![(REPO, lands("conaryd"))], 0),
+        // remi's list of 2026-11-24 02:20, from a pass that yielded in
+        // another repo: what the steward wrote before, and now.
+        (vec![(REPO, json!({"covered": false}))], 0),
+        (vec![(REPO, lands(""))], 0),
+        (vec![(REPO, lands("steward"))], 6 * 3600),
+        (vec![("sam/other", lands("steward"))], 6 * 3600),
     ] {
-        assert_eq!(
-            ok(covered, pr(3)),
-            ("open".into(), listed.into()),
-            "{covered:?}"
-        );
+        assert_eq!(ok(Some((&repos, age)), pr(3)).0, "close", "{repos:?} {age}");
     }
+    // It's listed for the owner where nothing lands it: a steward whose
+    // fresh list doesn't have the repo, or no steward at all.
+    let listed = "A Claude job read these and cleared them, and their CI is green, but nothing lands their repos' PRs (neither the autoland steward nor conaryd has them), so nothing merges them:\n- Update foo3 to v2: https://github.com/sam/r/pull/3";
+    let other = [("sam/other", lands("steward"))];
+    for said in [Some((&other[..], 0)), None] {
+        assert_eq!(ok(said, pr(3)), ("open".into(), listed.into()), "{said:?}");
+    }
+    // Listed once, and handed over once, in the project named for it,
+    // however many clones of it the projects have (a worktree beside it).
+    let m = Machine::new();
+    m.project("a-r-worktree", "https://github.com/sam/r.git");
+    m.project("r-worktree", "git@github.com:Sam/R.git");
+    m.prs(&[pr(3), red(6)]);
+    let v = m.verdict(3, "ok", "main", "me");
+    m.comments(3, &[v]);
+    let p = m.pass();
+    assert_eq!(p.majors(), ("open", listed), "{:#?}", p.log);
+    assert_eq!(p.jobs.len(), 1, "{:#?}", p.jobs);
+    assert!(
+        p.jobs[0].iter().any(|a| a == "r") && !p.jobs[0].iter().any(|a| a.ends_with("worktree")),
+        "{:#?}",
+        p.jobs
+    );
     // One with no CI at all too, saying so.
     let mut nochecks = pr(3);
     nochecks["statusCheckRollup"] = json!([]);
@@ -451,7 +483,7 @@ fn a_job_that_doesnt_start_keeps_nothing_and_fails_the_pass() {
 fn red_ci_is_a_jobs_to_fix_first_as_the_steward_reads_red() {
     let one = |p: Value, verdict: bool| {
         let mut m = Machine::new();
-        m.covered(&[REPO], &[], 0, json!({}));
+        m.landed(&[REPO], json!({}));
         let n = p["number"].as_u64().unwrap();
         m.prs(&[p]);
         if verdict {
@@ -566,7 +598,7 @@ fn a_proof_on_a_machine_is_no_ci_to_wait_for() {
     let proof = json!({"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "startedAt": "2099-01-01T01:00:00Z"});
     let machine = |proofs: &Value| {
         let mut m = Machine::new();
-        m.covered(&[REPO], &[], 0, proofs.clone());
+        m.landed(&[REPO], proofs.clone());
         m
     };
     // Its job runs it, pending or not posted yet.
@@ -617,27 +649,27 @@ fn the_job_is_told_how_the_stewards_proofs_run_wherever_it_has_them() {
     let proofs = json!({"remi-proof": "ssh remi proof", "b-proof": {"run": 1}});
     // (In the order its file has them, which here is json!'s.)
     let told = " b-proof isn't CI: it runs on a machine, like this: {\"run\":1} Rerun it that way on what you push. remi-proof isn't CI: it runs on a machine, like this: ssh remi proof Rerun it that way on what you push. Leave its review threads";
-    // In a repo it covers, as GitHub spells it, whose last pass failed,
-    // or whose list is stale: how a proof runs hasn't changed.
-    for (repos, failed, age) in [
-        (&[REPO][..], &[][..], 0),
-        (&["Sam/R"], &[], 0),
-        (&[], &[REPO], 0),
-        (&[REPO], &[], 7 * 3600),
+    // In a repo it lands, as GitHub spells it, whose landing it couldn't
+    // read, or whose list is stale: how a proof runs hasn't changed.
+    for (repos, age) in [
+        (vec![(REPO, lands("steward"))], 0),
+        (vec![("Sam/R", lands("steward"))], 0),
+        (vec![(REPO, lands(""))], 0),
+        (vec![(REPO, lands("steward"))], 7 * 3600),
     ] {
         let mut m = Machine::new();
-        m.covered(repos, failed, age, proofs.clone());
+        m.steward(&repos, age, proofs.clone());
         m.prs(&[red(6)]);
         let p = m.pass();
         assert!(
             p.task()
                 .contains(&format!("and push to the same branch.{told}")),
-            "{repos:?} {failed:?} {age}: {}",
+            "{repos:?} {age}: {}",
             p.task()
         );
     }
     let mut m = Machine::new();
-    m.covered(&[REPO], &[], 0, json!({}));
+    m.landed(&[REPO], json!({}));
     m.prs(&[red(6)]);
     let p = m.pass();
     assert!(
@@ -663,7 +695,7 @@ fn a_pr_the_steward_is_kept_off_goes_to_no_job_until_the_label_comes_off() {
     assert_eq!(m.key(1, ""), "");
     // Pass after pass while it stays held.
     assert!(m.pass().jobs.is_empty());
-    // A major cleared ok in a repo no steward covers isn't listed for the
+    // A major cleared ok in a repo nothing lands isn't listed for the
     // owner to merge while it's held.
     let v = m.verdict(2, "ok", "main", "me");
     m.comments(2, &[v]);

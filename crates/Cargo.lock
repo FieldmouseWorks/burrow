@@ -1200,7 +1200,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=c660c3505b6723abb4d65292f3172d9e2bc5fa31#c660c3505b6723abb4d65292f3172d9e2bc5fa31"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=5c38d564f03fd798bfdc079886e5864865183b98#5c38d564f03fd798bfdc079886e5864865183b98"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1217,7 +1217,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=c660c3505b6723abb4d65292f3172d9e2bc5fa31#c660c3505b6723abb4d65292f3172d9e2bc5fa31"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=5c38d564f03fd798bfdc079886e5864865183b98#5c38d564f03fd798bfdc079886e5864865183b98"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
@@ -2437,9 +2437,9 @@ dependencies = [
 
 [[package]]
 name = "json5"
-version = "1.3.7"
+version = "1.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0348cde6df2b507ba3c3753beba226baba8567af588d6568cdb9877f02c75b60"
+checksum = "6c1d229cedc4e210dd2e2a6cdc59e36ce28e7338fb69367d0d2566e26de7d599"
 dependencies = [
  "serde",
  "ucd-trie",
