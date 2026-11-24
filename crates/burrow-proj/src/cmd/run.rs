@@ -453,6 +453,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         role: new.role.clone(),
         app: new.app.clone(),
         agent: None,
+        agent_engine: None,
         owned: new.owned,
     };
     request.save(&job).map_err(|e| Fail::new(1, e))?;
@@ -523,10 +524,14 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         write(JobFile::Since, &format!("{t}\n"))?;
     }
     if new.vm {
+        // The sandbox is made for the engine the job's route runs it on, in
+        // a sandbox, now, and its turns keep to that engine.
+        let engine = crate::engine::for_sandbox(cfg, &request, &identity)
+            .map_err(|e| Fail::new(1, format!("proj: {e}")))?;
         let out = File::create(job.file(JobFile::Agent))
             .map_err(|e| io_fail(&job.file(JobFile::Agent), e))?;
         let s = Command::new("agent")
-            .args(["new", p])
+            .args(["new", p, "--engine", &engine])
             .stdout(out)
             .status()
             .map_err(|e| Fail::new(1, format!("proj: agent: {e}")))?;
@@ -534,6 +539,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
         request.agent = read(&job.file(JobFile::Agent)).filter(|a| !a.is_empty());
+        request.agent_engine = Some(engine);
         request.save(&job).map_err(|e| Fail::new(1, e))?;
     }
     let given = if let Some(source) = &new.task_source {

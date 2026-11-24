@@ -56,6 +56,12 @@ pub(crate) struct Request {
     pub role: Option<String>,
     pub app: Option<String>,
     pub agent: Option<String>,
+    /// The engine its sandbox was made for (`agent new --engine`), which
+    /// every turn in it runs on: the sandbox has that engine's login and
+    /// hosts alone. None without a sandbox, or for one made before it was
+    /// kept, whose turns run as they always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_engine: Option<String>,
     pub owned: bool,
 }
 
@@ -140,6 +146,7 @@ impl Request {
             role: named("role"),
             app: named("app"),
             agent: named("agent"),
+            agent_engine: None,
             owned: read("owned").is_some(),
         })
     }

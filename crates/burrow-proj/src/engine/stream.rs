@@ -18,7 +18,9 @@ use crate::record::{JobFile, TurnFile};
 /// Normalized terminal records let the job lifecycle and log reader share
 /// outcomes across every engine plugin (and pre-deploy Claude streams).
 pub fn result_of(line: &str) -> Option<Value> {
-    if !line.contains(r#""type":"result""#) && !line.contains(r#""type": "result""#) {
+    // A cheap look before parsing, whatever the record's spacing: its type's
+    // value is the string "result" wherever it sits.
+    if !line.contains(r#""result""#) {
         return None;
     }
     let v: Value = serde_json::from_str(line).ok()?;

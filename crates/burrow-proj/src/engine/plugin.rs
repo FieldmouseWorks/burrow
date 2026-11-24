@@ -64,23 +64,24 @@ pub enum RefusalKind {
     ApiKeyRejected,
     BudgetExhausted,
     CreditExhausted,
-    /// The engine declares `Sandbox::Needs` and the turn would run on the
-    /// host: it doesn't run there.
-    SandboxRequired,
+    /// The engine can't run where the turn is: on the host when it declares
+    /// `Sandbox::Needs`, or in a sandbox made for another engine.
+    Misplaced,
 }
 
 impl RefusalKind {
     /// Whether the refusal holds its engine (recorded as spent, or its login
     /// as expired, machine-wide) as well as moving the turn along its route.
-    /// A refusal about this turn alone (its credit, budget or key, or a host
-    /// turn on an engine that needs a sandbox) only moves it.
+    /// A refusal about this turn alone (its credit, budget or key, or an
+    /// engine that can't run where the turn is) only moves it, where its
+    /// route now runs it elsewhere, and else ends it refused.
     pub fn holds_the_engine(self) -> bool {
         match self {
             Self::UsageLimit | Self::LoginExpired => true,
             Self::ApiKeyRejected
             | Self::BudgetExhausted
             | Self::CreditExhausted
-            | Self::SandboxRequired => false,
+            | Self::Misplaced => false,
         }
     }
 }
@@ -392,36 +393,17 @@ pub fn spawn(
         .get(&choice.engine)
         .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?;
 
+    let request_record = crate::job::Request::load(job)?;
     // The plugin a sandboxed turn runs is this same executable (the sandbox
     // shares the host's store), so its describe is this one.
     let mut described = describe(cfg, plugin_path, &choice.engine)?;
-    // A credit is admitted and spent through its ledger on the host, which a
-    // sandbox's root guest is never given: a credit-metered engine doesn't
-    // run in a sandbox, and the turn's route takes it on.
-    if agent.is_some() && described.uses_credit() {
-        return Err(SpawnError::Refused(PluginRefusal {
-            kind: RefusalKind::CreditExhausted,
-            reason: format!(
-                "{} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there",
-                choice.engine
-            ),
-            resets_at: None,
-        }));
-    }
-    // An engine that declares it needs a sandbox (it may run with its own
-    // permissions bypassed, trusting the VM as the boundary) never runs on
-    // the host: only a sandboxed turn gives it one, and the turn's route
-    // takes it on as it does a refused run.
-    if agent.is_none() && described.needs_sandbox() {
-        return Err(SpawnError::Refused(PluginRefusal {
-            kind: RefusalKind::SandboxRequired,
-            reason: format!(
-                "{} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there",
-                choice.engine
-            ),
-            resets_at: None,
-        }));
-    }
+    launch::placed(
+        agent,
+        request_record.agent_engine.as_deref(),
+        &choice.engine,
+        &described,
+    )
+    .map_err(SpawnError::Refused)?;
     // When a plugin leaves its static `describe` model catalog empty (meaning
     // unpinned turns run on the harness's own default without `--model`), an
     // explicit per-role model override admitted by `burrow-settings`'s live
@@ -450,7 +432,6 @@ pub fn spawn(
     let (model, effort) =
         resolve_model_effort(&choice.engine, &described.negotiated.offers, choice)?;
 
-    let request_record = crate::job::Request::load(job)?;
     let prompt_text = String::from_utf8_lossy(
         &crate::state_reads::bytes(prompt_path)
             .map_err(|e| format!("{}: {e}", prompt_path.display()))?,
@@ -744,7 +725,7 @@ impl Running {
                             RefusalKind::ApiKeyRejected => "api_key_rejected",
                             RefusalKind::BudgetExhausted => "budget_exhausted",
                             RefusalKind::CreditExhausted => "credit_exhausted",
-                            RefusalKind::SandboxRequired => "sandbox_required",
+                            RefusalKind::Misplaced => "misplaced",
                         },
                         "reason": refusal.reason,
                         "resets_at": refusal.resets_at,
@@ -820,6 +801,21 @@ impl Running {
                     };
                 }
             }
+        }
+
+        // A run that ended on its own with no response proved nothing the
+        // protocol asks (its provenance, its next step), whatever it
+        // streamed: only a cut run, stopped after its answer, keeps that.
+        if !cut && stdout.is_empty() && status.success() {
+            eprintln!(
+                "proj: {} plugin exited without a response",
+                self.choice.engine
+            );
+            return RunResult {
+                last: None,
+                refusal: None,
+                rc: 1,
+            };
         }
 
         // Non-zero exit without a structured refusal: log any structured error

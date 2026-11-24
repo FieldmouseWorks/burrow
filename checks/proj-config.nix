@@ -12,6 +12,11 @@
     };
     excludesMachinery = authors:
       builtins.all (author: author.id != inbox.config.burrow.github.machineApp.accountId) authors;
+    # A key set only as burrow.claude.api.keyFile is the one route readiness
+    # reads (proj.json's claudeApiKeyFile), as the host plugin is given it.
+    keyed = self.nixosConfigurations.example.extendModules {
+      modules = [ { burrow.claude.api.keyFile = "/run/keys/anthropic-api"; } ];
+    };
     injected = inbox.config.burrow.proj.inbox.authors ++ [ {
       login = "renamed-machinery";
       id = inbox.config.burrow.github.machineApp.accountId;
@@ -37,7 +42,10 @@
   assert inbox.config.burrow.events.handlers.proj-inbox-drain.unit == "proj-inbox-drain";
   assert !inbox.config.burrow.events.handlers.proj-inbox-drain.perRepo;
   assert pkgs.lib.hasSuffix "/proj-inbox drain" inbox.config.systemd.services.proj-inbox-drain.serviceConfig.ExecStart;
-  pkgs.runCommand "proj-config-check" { } ''
+  pkgs.runCommand "proj-config-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    conf=$(sed -n 's/.*export PROJ_CONFIG=\([^ ]*\) .*/\1/p' ${keyed.config.burrow.tools.proj}/bin/proj | head -n 1)
+    jq -e '.claudeApiKeyFile == "/run/keys/anthropic-api"' "$conf" >/dev/null \
+      || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

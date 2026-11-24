@@ -185,9 +185,13 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   where the guest's `proj` declares its next step, its session carries to
   the next turn and its work stays for `agent fetch`; an engine metered by a
   credit is refused there, since the credit is admitted on the host. The
-  other way round, an engine whose `describe` says it needs a sandbox is
-  refused on the host (the host-mode `claude` and `claude-api` wrappers
-  declare none), and either refusal moves the turn along its route.
+  sandbox is made for the engine the job's route runs a sandboxed turn on
+  (`agent new --engine`), which is the only engine with a login and hosts
+  there, so every turn of the job keeps to that engine, and a turn on any
+  other is refused. The other way round, an engine whose `describe` says it
+  needs a sandbox is refused on the host (the host-mode `claude` and
+  `claude-api` wrappers declare none). These refusals hold no engine, so
+  the turn ends refused unless its route now runs it elsewhere.
 
 ### 2. Per-engine usage holds, meters and accounting
 

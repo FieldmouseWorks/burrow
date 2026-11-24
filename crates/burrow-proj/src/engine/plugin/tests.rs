@@ -12,6 +12,8 @@ use crate::config::{Config, tests::example};
 use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 
+mod runs;
+
 fn setup(tmp: &TempDir) -> (Config, PathBuf) {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.projects = tmp.path().join("projects");
@@ -730,7 +732,7 @@ exit 1
         Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
         Ok(_) => panic!("a plugin that needs a sandbox started on the host"),
     };
-    assert_eq!(refused.kind, RefusalKind::SandboxRequired);
+    assert_eq!(refused.kind, RefusalKind::Misplaced);
     // It moves the turn without holding the engine: the same engine still
     // runs a sandboxed turn.
     assert!(!refused.kind.holds_the_engine());

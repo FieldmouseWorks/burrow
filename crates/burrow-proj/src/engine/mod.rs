@@ -114,7 +114,34 @@ pub(crate) fn requested(
     } else {
         crate::policy::repository(job)
     };
+    // A sandbox has its engine's login and hosts alone: its turns run on
+    // that engine, whatever the route says now.
+    if request.agent.is_some()
+        && let Some(engine) = request.agent_engine.as_deref()
+    {
+        let tuning = cfg.role_settings()?.tuning(role, repo.as_deref(), engine);
+        return Ok(Choice {
+            engine: engine.to_owned(),
+            model: tuning.model,
+            effort: tuning.effort,
+        });
+    }
     resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())
+}
+
+/// The engine a new job's sandbox is made for: where its role's route, for
+/// the repository it's admitted for, runs a sandboxed turn now.
+pub(crate) fn for_sandbox(
+    cfg: &Config,
+    request: &crate::job::Request,
+    identity: &crate::policy::Identity,
+) -> Result<String, String> {
+    let role = request.role.as_deref().unwrap_or_default();
+    let repo = match identity {
+        crate::policy::Identity::Repository(repo) if !role.is_empty() => Some(repo.as_str()),
+        _ => None,
+    };
+    resolve(cfg, role, repo, request.engine.as_deref(), true).map(|c| c.engine)
 }
 
 /// Turn startup, a refused run's retry and drain admission share role
@@ -488,6 +515,44 @@ mod scoped_tests {
         .save(&job)
         .unwrap();
         job
+    }
+
+    /// A sandbox is made for the engine its job's route runs a sandboxed
+    /// turn on, and its turns keep to that engine, with its tuning, whatever
+    /// the route says later; one made before that was kept follows the route.
+    #[test]
+    fn a_sandboxed_job_keeps_to_the_engine_its_sandbox_was_made_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        crate::config::tests::set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer claude-api models api-model",
+                "model * claude-api api-model high",
+                "role work claude",
+            ],
+        );
+        let job = started(&cfg, "vm-job", dir.path(), "work", None);
+        let mut request = crate::job::Request::load(&job).unwrap();
+        assert_eq!(
+            for_sandbox(&cfg, &request, &crate::policy::Identity::Local).unwrap(),
+            "claude"
+        );
+        request.agent = Some("work-1".into());
+        request.save(&job).unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().engine, "claude");
+        request.agent_engine = Some("claude-api".into());
+        request.save(&job).unwrap();
+        assert_eq!(
+            choice(&cfg, &job).unwrap(),
+            Choice {
+                engine: "claude-api".into(),
+                model: Some("api-model".into()),
+                effort: Some("high".into()),
+            }
+        );
     }
 
     #[test]

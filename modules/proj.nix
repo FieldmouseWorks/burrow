@@ -49,7 +49,7 @@ let
   apiModels = if anthropicCfg.api.models != null then anthropicCfg.api.models else anthropicCfg.plugin.models;
   apiDefaultModel = if anthropicCfg.api.defaultModel != null then anthropicCfg.api.defaultModel else anthropicCfg.plugin.defaultModel;
   apiDefaultEffort = if anthropicCfg.api.defaultEffort != null then anthropicCfg.api.defaultEffort else anthropicCfg.plugin.defaultEffort;
-  apiKeyFile = if anthropicCfg.api.keyFile != null then anthropicCfg.api.keyFile else cfg.claudeApi.keyFile;
+  apiKeyFile = anthropicCfg.api.resolvedKeyFile;
   hostClaudePlugin = import ./engines/anthropic/plugin.nix {
     inherit (inputs) self;
     inherit pkgs lib;
@@ -123,7 +123,8 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
-    claudeApiKeyFile = cfg.claudeApi.keyFile;
+    # The key the host plugin is given, so route readiness sees it too.
+    claudeApiKeyFile = apiKeyFile;
     plugins = hostPlugins;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";

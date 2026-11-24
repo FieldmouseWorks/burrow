@@ -13,11 +13,64 @@
 use std::path::Path;
 use std::process::Command;
 
+use super::{Described, PluginRefusal, RefusalKind};
 use crate::config::Config;
 use crate::engine::command::{host_instructions, sandbox_instructions};
 use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 use crate::scratch;
+
+/// Whether `engine` may run where the turn is, checked before anything of
+/// it runs; a refusal when it can't, which the turn's route takes on (it
+/// holds nothing, so the turn ends refused unless the route now runs it
+/// elsewhere).
+pub(super) fn placed(
+    agent: Option<&str>,
+    sandbox_engine: Option<&str>,
+    engine: &str,
+    described: &Described,
+) -> Result<(), PluginRefusal> {
+    let refused = |kind, reason: String| {
+        Err(PluginRefusal {
+            kind,
+            reason,
+            resets_at: None,
+        })
+    };
+    match agent {
+        // A sandbox has the login and hosts of the engine it was made for
+        // alone: another engine couldn't sign in or reach its service there.
+        Some(_)
+            if let Some(made) = sandbox_engine
+                && made != engine =>
+        {
+            refused(
+                RefusalKind::Misplaced,
+                format!(
+                    "{engine} isn't the engine the job's sandbox was made for ({made}), so it doesn't run there"
+                ),
+            )
+        }
+        // A credit is admitted and spent through its ledger on the host,
+        // which a sandbox's root guest is never given.
+        Some(_) if described.uses_credit() => refused(
+            RefusalKind::CreditExhausted,
+            format!(
+                "{engine} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there"
+            ),
+        ),
+        // An engine that declares it needs a sandbox (it may run with its
+        // own permissions bypassed, trusting the VM as the boundary) never
+        // runs on the host.
+        None if described.needs_sandbox() => refused(
+            RefusalKind::Misplaced,
+            format!(
+                "{engine} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there"
+            ),
+        ),
+        _ => Ok(()),
+    }
+}
 
 /// Run `plugin` inside the job's sandbox `agent`, with what the turn tells
 /// the guest: where its `proj` records the declaration (a stale one from an

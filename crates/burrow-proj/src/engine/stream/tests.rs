@@ -109,3 +109,24 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
         (Some(1234567890), "plan is spent".to_owned())
     );
 }
+
+/// A result record is one whatever its JSON spacing, so the watcher sees the
+/// turn answered (and the linger cut can stop what it left); a record of
+/// another type that merely says "result" isn't one.
+#[test]
+fn a_result_is_seen_whatever_its_json_spacing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = dir.path().into();
+    let job = Job::new(&cfg, "job");
+    fs::create_dir(&job.dir).unwrap();
+    let other =
+        r#"{"type":"user","content":[{"type":"tool_result","content":"result"}],"result":"x"}"#;
+    assert!(result_of(other).is_none());
+    let spaced = r#"{ "type"  :  "result" , "is_error" : false , "result" : "done" }"#;
+    assert_eq!(result_of(spaced).unwrap()["result"], "done");
+    fs::write(job.turn("1", "jsonl"), format!("{other}\n{spaced}\n")).unwrap();
+    let mut said = Said::new(&job, "1", 0, "claude");
+    said.look(true);
+    assert!(said.answered);
+}
