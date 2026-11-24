@@ -165,3 +165,68 @@ fn a_run_without_a_response_fails_unless_it_was_cut_after_its_answer() {
         }
     }
 }
+
+/// A run that fails (exits non-zero, with no response and no refusal) never
+/// answers with a result it streamed, which nothing verified: only a streamed
+/// error stays (the turn ends as one), and a cut run keeps its answer.
+#[test]
+fn a_failed_run_answers_only_with_an_error_unless_it_was_cut() {
+    for (streamed, cut, kept) in [
+        (
+            r#"{"type":"result","is_error":false,"result":"looks done"}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"type":"result","is_error":true,"result":"broke"}"#,
+            false,
+            true,
+        ),
+        (
+            r#"{"type":"result","is_error":false,"result":"looks done"}"#,
+            true,
+            true,
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (mut cfg, project) = setup(&tmp);
+        let desc = tmp.path().join("desc.json");
+        fs::write(&desc, describe_json("crash", vec![], vec![])).unwrap();
+        let said = tmp.path().join("said.jsonl");
+        fs::write(
+            &said,
+            format!(
+                "{}\n",
+                serde_json::json!({"event": "stream", "line": streamed})
+            ),
+        )
+        .unwrap();
+        let plugin = tmp.path().join("crash-plugin");
+        burrow_test::executable(
+            &plugin,
+            format!(
+                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
+                desc.display(),
+                said.display()
+            ),
+        );
+        cfg.plugins.insert("crash".into(), plugin);
+        let job = make_job(&cfg, &project, "job-crash");
+        let waitdir = job.turn_file("1", TurnFile::Waits);
+        fs::create_dir_all(&waitdir).unwrap();
+        let prompt = job.prompt("1");
+        fs::write(&prompt, "Answer\n").unwrap();
+        let choice = Choice {
+            engine: "crash".into(),
+            model: None,
+            effort: None,
+        };
+        let mut running =
+            spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+        let status = running.child.take().unwrap().wait().unwrap();
+        assert!(!status.success());
+        let res = running.finish(status, cut, &cfg, &job, "1", 0);
+        assert_eq!(res.rc, 3);
+        assert_eq!(res.last.is_some(), kept, "{streamed} cut={cut}");
+    }
+}

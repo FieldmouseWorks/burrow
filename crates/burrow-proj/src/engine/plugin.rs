@@ -818,16 +818,17 @@ impl Running {
             };
         }
 
-        // Non-zero exit without a structured refusal: log any structured error
-        // reported by the plugin, but leave `last` to what the harness actually
-        // emitted so crashed or OOM-killed runs (`last == None`) still trigger
-        // OOM retry or record `failed` rather than masquerading as an `error`
-        // result with exit 0.
+        // Non-zero exit without a structured refusal or a response: log any
+        // structured error reported by the plugin. What it streamed is no
+        // answer (nothing the protocol asks was verified), so a crashed or
+        // OOM-killed run still triggers OOM retry or records `failed`; only an
+        // error it streamed stays, which ends the turn as one, and a cut run,
+        // stopped after its answer, keeps that answer.
         if let Some(err) = stderr.error {
             eprintln!("proj: {} plugin error: {err}", self.choice.engine);
         }
         RunResult {
-            last: stream::last_result(&stream_path, from),
+            last: stream::last_result(&stream_path, from).filter(|l| cut || stream::is_error(l)),
             refusal: None,
             rc,
         }
