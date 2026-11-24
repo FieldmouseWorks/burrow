@@ -33,7 +33,7 @@ fn host_turn_on_a_sandbox_only_plugin_is_refused_without_executing_it() {
     let tmp = TempDir::new().unwrap();
     let (mut cfg, project) = setup(&tmp);
     let ran = recording_plugin(&tmp, &mut cfg, "vm-only", Sandbox::Needs);
-    cfg.sandbox_plugins.insert("vm-only".into());
+    cfg.sandbox_plugins.insert("vm-only".into(), vec![]);
     let job = make_job(&cfg, &project, "job-host-vm-only");
     let waitdir = job.turn_file("1", TurnFile::Waits);
     fs::create_dir_all(&waitdir).unwrap();
@@ -121,25 +121,177 @@ fn an_engine_runs_only_where_the_turn_can_give_it_what_it_needs() {
     let kind = |r: Result<(), PluginRefusal>| r.err().map(|r| r.kind);
     // On the host: only an engine that needs a sandbox is refused.
     assert_eq!(
-        kind(placed(None, None, "e", false, &needs)),
+        kind(placed(None, None, "e", false, None, &needs)),
         Some(RefusalKind::Misplaced)
     );
-    assert_eq!(kind(placed(None, None, "e", false, &plain)), None);
-    assert_eq!(kind(placed(None, None, "e", true, &plain)), None);
+    assert_eq!(kind(placed(None, None, "e", false, None, &plain)), None);
+    assert_eq!(kind(placed(None, None, "e", true, None, &plain)), None);
     // In the sandbox made for it, or one from before that was kept.
     assert_eq!(
-        kind(placed(Some("vm"), Some("e"), "e", false, &needs)),
+        kind(placed(Some("vm"), Some("e"), "e", false, None, &needs)),
         None
     );
-    assert_eq!(kind(placed(Some("vm"), None, "e", false, &needs)), None);
+    assert_eq!(
+        kind(placed(Some("vm"), None, "e", false, None, &needs)),
+        None
+    );
     // In a sandbox made for another engine, and on the credit in any.
     assert_eq!(
-        kind(placed(Some("vm"), Some("other"), "e", false, &needs)),
+        kind(placed(Some("vm"), Some("other"), "e", false, None, &needs)),
         Some(RefusalKind::Misplaced)
     );
     assert_eq!(
-        kind(placed(Some("vm"), Some("e"), "e", true, &plain)),
+        kind(placed(Some("vm"), Some("e"), "e", true, None, &plain)),
         Some(RefusalKind::CreditExhausted)
+    );
+}
+
+/// A sandbox plugin wired from `burrow.agents.engines` must have owner
+/// approval in `burrow.agents.engines.NAME.capabilities` for everything a
+/// `proj --vm` job VM exposes (e.g. `workspace`) as well as any extra
+/// capability its `describe` declares (e.g. `kvm`).
+#[test]
+fn sandboxed_turn_enforces_owner_approved_plugin_grants() {
+    let all_vm_caps: Vec<String> = super::super::launch::VM_EXPOSED_CAPABILITIES
+        .iter()
+        .map(|c| c.name().to_owned())
+        .collect();
+    let without_workspace: Vec<String> = all_vm_caps
+        .iter()
+        .filter(|c| c.as_str() != "workspace")
+        .cloned()
+        .collect();
+
+    // Case 1: owner omitted `workspace` -> refused BEFORE executing the plugin
+    // at all (even for `describe`) and before touching `agent`.
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let (_, calls) = stand_in_sandbox(&tmp, &mut cfg);
+    let ran = recording_plugin(&tmp, &mut cfg, "vm-engine", Sandbox::Needs);
+    cfg.sandbox_plugins
+        .insert("vm-engine".into(), without_workspace);
+    let job = make_job(&cfg, &project, "job-no-ws");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Work\n").unwrap();
+    let choice = Choice {
+        engine: "vm-engine".into(),
+        model: None,
+        effort: None,
+    };
+    let refused = match spawn(
+        &cfg,
+        &job,
+        "1",
+        &prompt,
+        &waitdir,
+        Some("demo-4"),
+        true,
+        "",
+        &choice,
+    ) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("launched sandbox plugin despite withheld workspace grant"),
+    };
+    assert_eq!(refused.kind, RefusalKind::Misplaced);
+    assert!(refused.reason.contains("workspace"), "{}", refused.reason);
+    assert!(!ran.exists(), "plugin executed despite withheld grant");
+    assert!(
+        !calls.exists(),
+        "sandbox was reached despite withheld grant"
+    );
+
+    // Case 2: owner approved all job-VM capabilities, but `describe` declares
+    // `devices: ["kvm"]` without owner approval -> refused via `burrow-grants`
+    // before `Task::Job` runs.
+    let tmp2 = TempDir::new().unwrap();
+    let (mut cfg2, project2) = setup(&tmp2);
+    let _ = stand_in_sandbox(&tmp2, &mut cfg2);
+    let desc_kvm = serde_json::to_string(&Response {
+        contract: CONTRACT_V1.to_owned(),
+        by: conary_core::plugin::Identity {
+            engine: "kvm-engine".to_owned(),
+            session: None,
+        },
+        execution: None,
+        answer: Answer::Describe {
+            versions: vec![(*CONTRACTS.last().unwrap()).to_owned()],
+            kinds: vec![],
+            v2_kinds: vec![Kind::Job],
+            v4_kinds: vec![],
+            models: vec![],
+            capabilities: Some(conary_core::plugin::Capabilities {
+                network: true,
+                mcp: false,
+                devices: vec!["kvm".to_owned()],
+                sandbox: Sandbox::Needs,
+            }),
+            meters: vec![],
+        },
+    })
+    .unwrap();
+    let desc_path = tmp2.path().join("desc-kvm.json");
+    fs::write(&desc_path, desc_kvm).unwrap();
+    let job_ran = tmp2.path().join("kvm-job-ran");
+    let plugin = tmp2.path().join("kvm-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ntouch {}\nexit 1\n",
+            desc_path.display(),
+            job_ran.display()
+        ),
+    );
+    cfg2.plugins.insert("kvm-engine".into(), plugin);
+    cfg2.sandbox_plugins
+        .insert("kvm-engine".into(), all_vm_caps.clone());
+    let job2 = make_job(&cfg2, &project2, "job-unapproved-kvm");
+    let waitdir2 = job2.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir2).unwrap();
+    let prompt2 = job2.prompt("1");
+    fs::write(&prompt2, "Work\n").unwrap();
+    let choice2 = Choice {
+        engine: "kvm-engine".into(),
+        model: None,
+        effort: None,
+    };
+    let refused2 = match spawn(
+        &cfg2,
+        &job2,
+        "1",
+        &prompt2,
+        &waitdir2,
+        Some("demo-4"),
+        true,
+        "",
+        &choice2,
+    ) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("launched sandbox plugin with unapproved kvm declaration"),
+    };
+    assert_eq!(refused2.kind, RefusalKind::Misplaced);
+    assert!(refused2.reason.contains("kvm"), "{}", refused2.reason);
+    assert!(!job_ran.exists(), "Task::Job ran despite unapproved kvm");
+
+    // Case 3: all job-VM capabilities approved and matching `describe` -> allowed.
+    let described_ok = parse_describe(
+        "ok-engine",
+        describe_json_with("ok-engine", vec![], vec![], Sandbox::Needs).as_bytes(),
+    )
+    .unwrap();
+    assert!(
+        placed(
+            Some("vm"),
+            Some("ok-engine"),
+            "ok-engine",
+            false,
+            Some(&all_vm_caps),
+            &described_ok
+        )
+        .is_ok()
     );
 }
 

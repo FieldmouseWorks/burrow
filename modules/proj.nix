@@ -81,13 +81,14 @@ let
   # Sandbox-only engine plugins (wired from burrow.agents.engines.<name>.plugin,
   # whose contract says they run only inside that engine's sandbox). Listed in
   # `plugins` so a `--vm` turn can run them inside its sandbox over `agent sh`,
-  # and named in `sandboxPlugins` so a host turn refuses them without ever
-  # executing them on the host.
-  sandboxOnlyPlugins = lib.mapAttrs (_: e: lib.getExe e.plugin) (
-    lib.filterAttrs (name: e: (e.plugin or null) != null && name != "claude" && name != "claude-api") (
-      config.burrow.agents.engines or { }
-    )
-  );
+  # and carried with their owner-approved `capabilities` in `sandboxPlugins` so
+  # host turns refuse them without running them and `--vm` turns enforce the
+  # same `burrow-grants` capability boundary before launch.
+  sandboxOnlyEngines = lib.filterAttrs (
+    name: e: (e.plugin or null) != null && name != "claude" && name != "claude-api"
+  ) (config.burrow.agents.engines or { });
+  sandboxOnlyPlugins = lib.mapAttrs (_: e: lib.getExe e.plugin) sandboxOnlyEngines;
+  sandboxPluginCapabilities = lib.mapAttrs (_: e: e.capabilities or [ ]) sandboxOnlyEngines;
   # The engines wired here, which burrow.proj.plugins only adds to: one of
   # its names replacing them (claude-api's credit and key, an engine's
   # sandbox build) is refused by an assertion below.
@@ -136,7 +137,7 @@ let
     # The key the host plugin is given, so route readiness sees it too.
     claudeApiKeyFile = apiKeyFile;
     plugins = hostPlugins;
-    sandboxPlugins = lib.attrNames sandboxOnlyPlugins;
+    sandboxPlugins = sandboxPluginCapabilities;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.

@@ -23,6 +23,7 @@
           burrow.agents.engines.sandboxed = {
             proxyPort = 3199;
             plugin = pkgs.hello;
+            capabilities = [ "workspace" ];
           };
         }
       ];
@@ -63,8 +64,8 @@
     conf=$(sed -n 's/.*export PROJ_CONFIG=\([^ ]*\) .*/\1/p' ${keyed.config.burrow.tools.proj}/bin/proj | head -n 1)
     jq -e '.claudeApiKeyFile == "/run/keys/anthropic-api"' "$conf" >/dev/null \
       || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
-    jq -e '(.sandboxPlugins | index("sandboxed")) != null and (.sandboxPlugins | index("claude")) == null' "$conf" >/dev/null \
-      || { echo "proj.json's sandboxPlugins missed sandboxed or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
+    jq -e '.sandboxPlugins.sandboxed == ["workspace"] and (.sandboxPlugins | has("claude") | not)' "$conf" >/dev/null \
+      || { echo "proj.json's sandboxPlugins missed sandboxed capabilities or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

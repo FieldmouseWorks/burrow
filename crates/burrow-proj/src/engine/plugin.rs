@@ -336,13 +336,13 @@ pub fn spawn(
 
     let request_record = crate::job::Request::load(job)?;
     let uses_credit = cfg.uses_credit_meter(&choice.engine);
-    let sandbox_only = cfg.sandbox_plugins.contains(&choice.engine);
+    let sandbox_approved = cfg.sandbox_plugins.get(&choice.engine).map(Vec::as_slice);
     launch::before_describe(
         agent,
         request_record.agent_engine.as_deref(),
         &choice.engine,
         uses_credit,
-        sandbox_only,
+        sandbox_approved,
     )
     .map_err(SpawnError::Refused)?;
     // Negotiate `describe` inside the job's sandbox for `--vm` turns so
@@ -353,6 +353,7 @@ pub fn spawn(
         request_record.agent_engine.as_deref(),
         &choice.engine,
         uses_credit,
+        sandbox_approved,
         &described,
     )
     .map_err(SpawnError::Refused)?;

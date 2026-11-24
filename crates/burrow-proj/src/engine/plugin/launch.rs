@@ -17,6 +17,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use burrow_grants::{Approved, Capability, Grants, Why, mcp};
+use conary_core::plugin::Kind;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 
 use super::{Described, MAX_RESPONSE_BYTES, PluginRefusal, RefusalKind};
@@ -25,6 +27,23 @@ use crate::engine::command::{host_instructions, sandbox_instructions};
 use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 use crate::scratch;
+
+/// Capabilities a `proj --vm` job VM (`agent new`) unconditionally exposes to
+/// a plugin running inside it over `agent sh`. A sandbox plugin whose owner
+/// omitted any of these from `burrow.agents.engines.NAME.capabilities` must
+/// not launch in a job VM.
+pub(super) const VM_EXPOSED_CAPABILITIES: &[Capability] = &[
+    Capability::Workspace,
+    Capability::JobState,
+    Capability::GitMetadata,
+    Capability::Toolchains,
+    Capability::System,
+    Capability::Probe,
+    Capability::UnitsClear,
+    Capability::Heavy,
+    Capability::Nix,
+    Capability::Network,
+];
 
 /// Maximum wall-clock timeout for a host `describe` call.
 const DESCRIBE_TIMEOUT_SECS: &str = "30s";
@@ -56,15 +75,17 @@ impl std::fmt::Display for SpawnError {
     }
 }
 
-/// Placement checks that can refuse a turn **before** executing the plugin at
-/// all (even for `describe`): a sandbox made for another engine, a credit
-/// engine inside a sandbox, or a sandbox-only engine on the host.
+/// Placement and pre-launch grant checks that can refuse a turn **before**
+/// executing the plugin at all (even for `describe`): a sandbox made for
+/// another engine, a credit engine inside a sandbox, a sandbox-only engine on
+/// the host, or a sandbox-only engine whose owner-approved capabilities omit
+/// what a `proj --vm` job VM exposes.
 pub(super) fn before_describe(
     agent: Option<&str>,
     sandbox_engine: Option<&str>,
     engine: &str,
     credit: bool,
-    sandbox_only: bool,
+    sandbox_approved: Option<&[String]>,
 ) -> Result<(), PluginRefusal> {
     let refused = |kind, reason: String| {
         Err(PluginRefusal {
@@ -95,9 +116,29 @@ pub(super) fn before_describe(
                 "{engine} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there"
             ),
         ),
+        // A job VM attaches workspace, toolchains, probe, nix and filtered
+        // egress: refuse a sandbox plugin before launch if the owner withheld
+        // any of those capabilities in `burrow.agents.engines.NAME.capabilities`.
+        Some(_) if let Some(approved) = sandbox_approved => {
+            let missing: Vec<&str> = VM_EXPOSED_CAPABILITIES
+                .iter()
+                .map(|c| c.name())
+                .filter(|name| !approved.iter().any(|a| a == name))
+                .collect();
+            if !missing.is_empty() {
+                return refused(
+                    RefusalKind::Misplaced,
+                    format!(
+                        "{engine} is missing owner-approved capabilities for a job VM ({}): refusing launch",
+                        missing.join(", ")
+                    ),
+                );
+            }
+            Ok(())
+        }
         // A plugin wired from `burrow.agents.engines` may only run inside its
         // sandbox: refuse it on the host before ever launching its executable.
-        None if sandbox_only => refused(
+        None if sandbox_approved.is_some() => refused(
             RefusalKind::Misplaced,
             format!(
                 "{engine} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there"
@@ -227,22 +268,59 @@ fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Co
 }
 
 /// Whether `engine` may run where the turn is, checked after `describe` as
-/// well; a refusal when it can't, which the turn's route takes on (it holds
-/// nothing, so the turn ends refused unless the route now runs it elsewhere).
+/// well; enforces `burrow-grants` capability intersection for sandbox plugins
+/// in a `--vm` turn and refuses host turns on any plugin declaring
+/// `Sandbox::Needs`.
 pub(super) fn placed(
     agent: Option<&str>,
     sandbox_engine: Option<&str>,
     engine: &str,
     credit: bool,
+    sandbox_approved: Option<&[String]>,
     described: &Described,
 ) -> Result<(), PluginRefusal> {
-    before_describe(
-        agent,
-        sandbox_engine,
-        engine,
-        credit,
-        described.needs_sandbox(),
-    )
+    before_describe(agent, sandbox_engine, engine, credit, sandbox_approved)?;
+    if agent.is_none() && described.needs_sandbox() {
+        return Err(PluginRefusal {
+            kind: RefusalKind::Misplaced,
+            reason: format!(
+                "{engine} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there"
+            ),
+            resets_at: None,
+        });
+    }
+    if agent.is_some()
+        && let Some(approved_caps) = sandbox_approved
+    {
+        let registry = mcp::Registry::default();
+        let approved = Approved {
+            capabilities: approved_caps,
+            mcp_servers: &[],
+            registry: &registry,
+        };
+        let grants = Grants::new(
+            &[Kind::Job],
+            &described.negotiated.offers.capabilities,
+            &approved,
+        );
+        let denied: Vec<String> = grants
+            .refusals()
+            .iter()
+            .filter(|r| matches!(r.why, Why::NotApproved | Why::Never(_) | Why::UnknownDevice))
+            .map(|r| r.capability.clone())
+            .collect();
+        if !denied.is_empty() {
+            return Err(PluginRefusal {
+                kind: RefusalKind::Misplaced,
+                reason: format!(
+                    "{engine} declared capabilities not approved for its sandbox ({}): refusing launch",
+                    denied.join(", ")
+                ),
+                resets_at: None,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Run `plugin` inside the job's sandbox `agent`, with what the turn tells
