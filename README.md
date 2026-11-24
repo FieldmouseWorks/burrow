@@ -40,9 +40,10 @@ about what needs you, one issue per problem (`notify`).
 
 The modules, by job:
 
-- **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
+- **Engines:** `anthropic`, `antigravity`
+- **The safety net:** `undo`, `switch`, `backup`, `ops`,
   `heartbeat`, `robot`
-- **Doing the work:** `proj`, `probe`, `agents`, `antigravity`, `browser`,
+- **Doing the work:** `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
 - **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`,
   `builds`
@@ -52,12 +53,14 @@ Each has an entry below, and each can be imported on its own.
 
 ## What's in it
 
-- **`claude`** (`burrow.claude`): Claude Code system-wide in
+- **`anthropic`** (`modules/engines/anthropic.nix`, `burrow.claude`): Anthropic's
+  Nix engine surface for both the host and the sandboxes. On the host, Claude
+  Code runs system-wide in
   `bypassPermissions`, set in `/etc/claude-code/managed-settings.json` so no
   project can override it. The only prompts are `permissions.ask` rules for
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). The standing-authority
-  commands in `modules/claude/standing.nix` (`proj reply`, `settings land`,
+  commands in `modules/engines/anthropic/standing.nix` (`proj reply`, `settings land`,
   taking a label off, `gh run rerun`) are `permissions.allow` rules, so a
   session whose mode puts Claude Code's auto-mode check in front of its
   commands doesn't have that check refuse them; the one-way doors still ask
@@ -67,7 +70,10 @@ Each has an entry below, and each can be imported on its own.
   pusher saw (`--force-with-lease --force-if-includes`, or one naming the
   commit), so a job can't drop what another pushed to the same PR. Also
   writes the machine's `/etc/claude-code/CLAUDE.md` from what the
-  other modules contribute.
+  other modules contribute. In the sandboxes, wires both `claude` and
+  `claude-api` through `burrow.agents.engines` with their packages,
+  credentials, Anthropic egress hosts, and packaged `burrow-engine-anthropic`
+  plugins (`agent-plugin-claude` and `agent-plugin-claude-api`).
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.
 - **`backup`** (`burrow.backup`): `HOST-backup`: each new snapshot of the
@@ -531,7 +537,8 @@ Each has an entry below, and each can be imported on its own.
   its engine with nothing to ask inside, egress only through an allowlist
   proxy, no GitHub token; the work comes back with `agent fetch` as
   `refs/agents/ID/*`. Each engine is an entry of `burrow.agents.engines`
-  (Claude's is declared by the `claude` module): its guest packages and
+  (Anthropic's `claude` and `claude-api` entries are declared by the
+  `anthropic` module): its guest packages and
   modules, its login (`credentialFile`, handed in as the systemd credential
   `agent.credential`), its own egress hosts on its own filtered proxy, and
   the capabilities and MCP servers the owner approved for it
@@ -773,10 +780,11 @@ its own packages, credential and hosts. Its other half
 (`tests/agents-plugins.nix`, `.#checks.x86_64-linux.agents.entries.plugins`
 alone) runs the example plugin (`crates/burrow-example-plugin`) through
 Conary's runner: each grant works, and without it isn't there for the VM's
-root either. Its third and fourth
-(`.#checks.x86_64-linux.agents.entries.conformance-example` and
-`conformance-antigravity`) run the example and Antigravity plugins'
+root either. Its conformance entries
+(`.#checks.x86_64-linux.agents.entries.conformance-example`,
+`conformance-antigravity`, `conformance-claude`, and
+`conformance-claude-api`) are the plugins'
 [conformance checks](docs/engines.md#a-plugins-conformance-check):
-`lib.engineConformance` builds one for any engine's plugin, and the check
+`lib.engineConformance` builds one for any engine's plugin, and each check
 an engine adds there runs `cn plugin check` on it in its sandbox and holds
 it to what it declares.

@@ -1,6 +1,6 @@
 # The PreToolUse guard (crates/burrow-guard), with this machine's config (its
-# src/config.rs): Claude Code's hook (claude.nix). A compiled wrapper rather
-# than a script, since it runs on every tool call.
+# src/config.rs): Claude Code's hook (../anthropic.nix). A compiled wrapper
+# rather than a script, since it runs on every tool call.
 { inputs, pkgs, lib, config }:
 let
   # How long Claude Code gives the hook; past it, the command runs

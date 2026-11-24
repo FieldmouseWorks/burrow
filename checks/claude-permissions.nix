@@ -1,7 +1,7 @@
 # The managed settings let the standing-authority commands through
-# (modules/claude/standing.nix) and nothing near them, and still ask at
-# every one-way door: claude/r2.nix and extraAsk, each with and without sudo,
-# with the guard hook in front. Commands are judged the way Claude Code reads
+# (modules/engines/anthropic/standing.nix) and nothing near them, and still
+# ask at every one-way door: anthropic/r2.nix and extraAsk, each with and
+# without sudo, with the guard hook in front. Commands are judged the way Claude Code reads
 # its Bash rules (`*` is any text, a trailing ` *` also takes the bare
 # command; ask beats allow), so the check tests itself on mutants: no allow
 # rules (the settings before standing.nix), an allow rule as wide as `gh`,
@@ -87,7 +87,7 @@ let
   wrong = s: lib.concatLists (lib.mapAttrsToList (want: cmds:
     map (cmd: "${cmd}: ${decide s cmd}, not ${want}") (lib.filter (cmd: decide s cmd != want) cmds)) cases);
 
-  r2 = lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) ((import ../modules/claude/r2.nix) ++ extraAsk);
+  r2 = lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) ((import ../modules/engines/anthropic/r2.nix) ++ extraAsk);
   sameSet = a: b: lib.sort lib.lessThan a == lib.sort lib.lessThan b;
   guarded = s: lib.any (h: h.matcher == "Bash"
     && lib.any (x: lib.hasSuffix "/bin/claude-guard" x.command) h.hooks) (s.hooks.PreToolUse or [ ]);

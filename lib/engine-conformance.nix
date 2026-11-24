@@ -38,10 +38,15 @@ pkgs.testers.runNixOSTest {
 
   nodes.host = {
     imports = [ (import ../tests/agents/plugin-host.nix { inherit self; }) ];
-    burrow.agents.engines = lib.mapAttrs (_: own: engine // own // {
+    burrow.agents.engines = lib.mapAttrs (_: own: lib.mkForce ({
+      packages = [ ];
+      guestModules = [ ];
+      credentialFile = null;
+      credentialEnv = null;
+    } // engine // own // {
       hosts = (engine.hosts or [ ]) ++ [ "conformance.example" ];
       mcpServers = (engine.mcpServers or [ ]) ++ [ "notes" ];
-    }) engines;
+    })) engines;
     networking.hosts."127.0.0.1" = [ "conformance.example" ];
   };
 

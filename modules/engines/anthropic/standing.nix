@@ -8,7 +8,7 @@
 # A rule's wildcard stands for any text in that place, so a label edit that
 # also changes another field of the same issue or PR matches too; every one
 # of these is reversible. The R2 ask rules outrank them (ask beats allow),
-# and the guard hook (claude/guard.nix) still runs before every command.
+# and the guard hook (./guard.nix) still runs before every command.
 # checks/claude-permissions.nix holds the list to these forms.
 [
   # Pass news (a sign-in, a ruling) to a parked job.

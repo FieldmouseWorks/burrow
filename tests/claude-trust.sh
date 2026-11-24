@@ -1,4 +1,4 @@
-# claude-trust (modules/claude/trust.sh) on a stand-in ~/.claude.json: each
+# claude-trust (modules/engines/anthropic/trust.sh) on a stand-in ~/.claude.json: each
 # folder trusted under the spelling given and its real path, the rest of the
 # config kept, a folder not made yet trusted at its path, nothing written
 # when it's trusted already, and Claude Code's own lock on the config kept

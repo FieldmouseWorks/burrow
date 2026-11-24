@@ -810,7 +810,7 @@ fn a_command_too_deep_to_read_asks() {
 
 #[test]
 fn a_long_command_is_read_before_the_hook_gives_up() {
-    // The hook gives the guard 10 seconds (modules/claude.nix), and a
+    // The hook gives the guard 10 seconds (modules/engines/anthropic/guard.nix), and a
     // command it cuts off runs unchecked. Each shape here took longer than
     // that once the words after each word were copied for it.
     let b = Box::new();

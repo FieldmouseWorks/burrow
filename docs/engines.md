@@ -216,27 +216,32 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 4. Host guardrails (`burrow-guard`) and microVM sandboxes (`burrow.agents`)
 
-- **Today:** Host sessions rely on `/etc/claude-code/managed-settings.json`
-  and Claude Code's `PreToolUse` hook invoking
-  [`burrow-guard`](../crates/burrow-guard/src/main.rs). A non-Claude CLI will
-  not read those files or fire that hook format. The sandboxes are
-  per-engine: [`burrow.agents.engines`](../modules/agents/engines.nix) is a
-  table of each engine's guest packages and modules, its systemd credential
-  (`agent.credential`, exported as its `credentialEnv`), its own egress
-  hosts and an owner-approved capability list. Claude's entry is declared by
-  [`modules/claude.nix`](../modules/claude.nix);
+- **Today:** All Anthropic host and sandbox wiring—the Claude Code package,
+  `/etc/claude-code/managed-settings.json`, Claude Code's `PreToolUse` hook
+  adapter into [`burrow-guard`](../crates/burrow-guard/src/main.rs),
+  Anthropic's egress hosts, and the `claude` and `claude-api` entries in
+  [`burrow.agents.engines`](../modules/agents/engines.nix) (with their
+  credentials and packaged
+  [`burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/main.rs)
+  plugins)—lives in one module,
+  [`modules/engines/anthropic.nix`](../modules/engines/anthropic.nix). Both
+  modes pass [`lib.engineConformance`](../lib/engine-conformance.nix) in
+  [`checks/agents.nix`](../checks/agents.nix) inside the shared sandbox.
   [`modules/agents.nix`](../modules/agents.nix) builds one guest image and
   one filtered proxy per entry, so a VM started for an engine (`agent new
   --engine`) gets only that engine's packages and credential, and reaches
   only [the shared list](../modules/agents/allow.txt) and that engine's
-  hosts. Still Claude-shaped there: `agent claude`, the host model settings
-  `agent new` copies into a VM's `~/.claude`, and `proj run --vm`, which
-  runs Claude in the default engine's VM.
+  hosts. Host sessions still rely on `/etc/claude-code/managed-settings.json`
+  and Claude Code's `PreToolUse` hook; a non-Claude CLI will not read those
+  files or fire that hook format. Still Claude-shaped in `burrow.agents`:
+  `agent claude`, the host model settings `agent new` copies into a VM's
+  `~/.claude`, and `proj run --vm`, which runs Claude in the default
+  engine's VM.
 - **Target:**
   - **Sandbox path (default for new engines):**
-    [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. proj
-    doesn't run engines through it yet
-    ([#745](https://github.com/FieldmouseWorks/burrow/issues/745)). Inside
+    [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. `proj`
+    routes onto engine plugins in
+    [#745](https://github.com/FieldmouseWorks/burrow/issues/745). Inside
     the microVM, the VM itself is the security boundary.
   - **Host path (when needed):** Keep `burrow-guard`'s ZFS-snapshot and
     one-way-door decision logic engine-agnostic and add a thin hook/policy
@@ -284,13 +289,22 @@ land:
 
 ## Done looks like
 
-Adding a new LLM harness (such as Antigravity) to the pipeline requires:
+Anthropic (`crates/burrow-engine-anthropic` + `modules/engines/anthropic.nix`)
+now follows this shape for both `claude` and `claude-api`, serving its
+`conary-plugin v5` `job` plugins through `agent-plugin-claude` and
+`agent-plugin-claude-api` and passing
+[its conformance check](#a-plugins-conformance-check) in
+[`checks/agents.nix`](../checks/agents.nix). Adding another LLM harness (such
+as Antigravity) to the pipeline requires:
 
 1. One executable plugin/adapter crate passing
    [its conformance check](#a-plugins-conformance-check), `cn plugin check`
    included (handling launch, stream normalization, refusal classification,
    and credential isolation).
-2. One Nix module (or machine flake config) declaring its package, sops
-   secret, egress host allowlist, and sandbox/guard wiring.
+2. One Nix module under `modules/engines/` (or machine flake config) declaring
+   its package, sops secret, egress host allowlist, runtime model/effort
+   offers, and sandbox/guard wiring through `burrow.agents.engines`.
 3. Zero changes to Conary's landing flow, `burrow-settings`, the inbox, the
-   scheduler, or the front doors.
+   scheduler, or the front doors (once
+   [#745](https://github.com/FieldmouseWorks/burrow/issues/745) replaces
+   `burrow-proj`'s built-in `Engine` enum).

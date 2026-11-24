@@ -1,6 +1,6 @@
-# Claude in an agent sandbox (../agents/guest.nix), the image ../claude.nix
-# declares for its engine entry: nothing to ask, since the VM is the boundary,
-# and the host's effort to start at.
+# Claude in an agent sandbox (../../agents/guest.nix), the image
+# ../anthropic.nix declares for its engine entries: nothing to ask, since the
+# VM is the boundary, and the host's effort to start at.
 { effort }:
 { lib, ... }:
 {

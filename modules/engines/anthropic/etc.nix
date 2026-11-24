@@ -5,8 +5,8 @@
 # a busy machine that's over 100k entries, and the Claudes holding it open
 # grew to several gigabytes each. A mode makes NixOS copy the file instead.
 #
-# Imported by the host's Claude (../claude.nix) and the sandboxes'
-# (../agents/guest.nix).
+# Imported by the host's Anthropic module (../anthropic.nix) and its
+# sandboxes' guest module (./guest.nix).
 { config, lib, ... }:
 let
   linked = lib.filter
