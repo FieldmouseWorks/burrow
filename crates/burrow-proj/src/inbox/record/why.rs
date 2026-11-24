@@ -91,26 +91,20 @@ impl Pass<'_> {
         match self.admission(&label, i, repo, going) {
             Ok(engine) if self.lane(i) => {
                 r.next = format!(
-                    "the drain's next pass hands it on to {}: a repair goes past the drain's cap",
-                    engine.name()
+                    "the drain's next pass hands it on to {engine}: a repair goes past the drain's cap"
                 );
             }
             Ok(engine) => {
-                r.next = format!(
-                    "the drain's next pass hands it on to {}, in its order",
-                    engine.name()
-                );
+                r.next = format!("the drain's next pass hands it on to {engine}, in its order");
             }
             Err(Held::Cap) => {
                 r.next = "the drain hands it on once one of its jobs ends, in its order".into();
                 *r = r.clone().waiting(Wait::Drain);
             }
             Err(Held::Engine(engine)) => {
-                r.next = format!(
-                    "the drain hands it on to {} once it has room, in its order",
-                    engine.name()
-                );
-                *r = r.clone().waiting(Wait::Engine(engine.name().to_owned()));
+                r.next =
+                    format!("the drain hands it on to {engine} once it has room, in its order");
+                *r = r.clone().waiting(Wait::Engine(engine));
             }
             Err(Held::Unroutable(why)) => {
                 r.next =

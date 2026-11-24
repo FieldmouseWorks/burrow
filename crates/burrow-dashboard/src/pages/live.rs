@@ -166,7 +166,7 @@ fn slot_card(s: &Slot) -> Markup {
             @if let Some(h) = &s.holder {
                 p.holder { (holder_line(h)) }
                 p.engine {
-                    @if let Some(e) = h.engine { (e.name()) } @else { "engine unknown" }
+                    @if let Some(e) = &h.engine { (e) } @else { "engine unknown" }
                     " · " (h.model.as_deref().unwrap_or("engine's own model"))
                     @if let Some(x) = &h.effort { " · " (x) }
                 }
@@ -328,7 +328,7 @@ fn holds(h: &Holds) -> Markup {
                 @match &h.triage {
                     Some(t) => {
                         div { dt { "Drain" } dd {
-                            @if let Some(e) = t.drain { (e.name()) ", " (t.drain_jobs) " at once" }
+                            @if let Some(e) = &t.drain { (e) ", " (t.drain_jobs) " at once" }
                             @else { "hands none on" }
                         } }
                         div { dt { "Sorting" } dd { (t.sorting_at_once) " at once" } }

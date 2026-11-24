@@ -45,7 +45,6 @@ use std::time::Duration;
 
 use super::nonblocking_pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::config::Config;
-use crate::engine::Engine;
 use crate::job::Job;
 use crate::{mtime, now, now_nanos, read, usage};
 
@@ -301,11 +300,9 @@ pub fn take_engine(
     n: &str,
     given: Class,
     may_hand_over: bool,
-    engine: Engine,
+    _engine: &str,
 ) -> io::Result<File> {
-    match engine {
-        Engine::Claude | Engine::ClaudeApi => take(cfg, id, n, given, may_hand_over),
-    }
+    take(cfg, id, n, given, may_hand_over)
 }
 
 /// Wait in line for a slot, then hold it: the slot is this process's until
@@ -573,7 +570,7 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
 /// one of its pool free. Advisory: a turn already on its way may take the
 /// slot first, and the new one then waits in line like any other. For what
 /// work nobody is waiting on (proj-inbox's drain) starts only on idle slots.
-pub fn room(cfg: &Config, engine: Engine) -> bool {
+pub fn room(cfg: &Config, engine: &str) -> bool {
     let free = |dir: &str, n: usize| -> usize {
         let dir = cfg.jobs.join(dir);
         if fs::create_dir_all(&dir).is_err() {
@@ -589,14 +586,11 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
             })
             .count()
     };
-    match engine {
-        Engine::Claude | Engine::ClaudeApi => {
-            usage::metered(cfg);
-            usage::out(cfg).is_none()
-                && in_line(cfg).is_empty()
-                && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
-        }
-    }
+    let _ = engine;
+    usage::metered(cfg);
+    usage::out(cfg).is_none()
+        && in_line(cfg).is_empty()
+        && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
 }
 
 /// Queue mutations and this census share the admission lock. An unreadable

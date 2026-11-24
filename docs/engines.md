@@ -163,29 +163,23 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 1. Closed engine lists and built-in `proj` execution
 
-- **Today:** `burrow_settings::roles::ENGINES`,
-  `burrow_proj::engine::Engine`, `modules/proj.nix`'s inbox label enum, and
-  `crates/burrow-proj/state.schema.json` enumerate a closed set of built-in
-  engines (`claude`, `claude-api`).
-  Claude Code's CLI flags, stream JSONL parsing, refusal classification and
-  `claude-api` admission now live in
-  [`crates/burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/lib.rs);
-  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs) and
-  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) still
-  dispatch through `burrow-proj`'s built-in `Engine` enum until `#745` replaces
-  it.
-- **Target:** Replace the closed enum and per-engine branches with the Conary
-  `job` plugin contract: each engine is an executable plugin that answers
-  `describe` (models, efforts, capabilities, meters), passes
-  `cn plugin check`, renders capability grants into its own CLI/env,
-  normalizes stream output into `(session, result, error, usage)`, classifies
-  refusals, and isolates its own credentials.
-- **Tracked by:** [#668](https://github.com/FieldmouseWorks/burrow/issues/668)
-  and its children
-  [#744](https://github.com/FieldmouseWorks/burrow/issues/744),
-  [#745](https://github.com/FieldmouseWorks/burrow/issues/745), planned at
-  `proj` stage 8 ([proj-design.md](proj-design.md#the-stages),
-  [#983](https://github.com/FieldmouseWorks/burrow/issues/983)).
+- **Done (#745):** `burrow_settings::roles::ENGINES`,
+  `burrow_proj::engine::Engine`, `modules/proj.nix`'s closed inbox label enum,
+  and all provider-specific execution/stream-parsing/refusal paths in
+  `burrow-proj` are gone, and `burrow-proj` no longer depends on
+  `burrow-engine-anthropic`. Every `proj` role executes through Conary's
+  `conary-plugin v5` (`job`) protocol
+  ([`engine/plugin.rs`](../crates/burrow-proj/src/engine/plugin.rs)):
+  `describe` negotiates the contract, stable `by.engine` identity, offered
+  models/efforts, capabilities and meters; `Task::Job` runs with v5
+  `Execution`/`Negotiated` provenance verification; and generic stderr
+  diagnostics (`stream`, `session`, `activity`, `usage`, `refusal`, `error`)
+  supply live progress, normalized usage and refusal classification without
+  provider-specific code in `burrow-proj`. `burrow.proj` wires host and
+  sandbox plugin executables (`claude`, `claude-api`, any enabled engine
+  plugin in `burrow.agents.engines`, and `burrow.proj.plugins`) and
+  `burrow-settings` validates engine names dynamically against configured and
+  offered engine plugins.
 
 ### 2. Per-engine usage holds, meters and accounting
 

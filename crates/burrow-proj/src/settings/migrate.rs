@@ -38,13 +38,22 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 /// A roles file: `ROLE[@OWNER/REPO] ENGINE` a line.
-fn routes(path: &Path, text: &str) -> Result<BTreeMap<String, roles::Route>, String> {
+fn routes(
+    path: &Path,
+    text: &str,
+    allowed_engines: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, roles::Route>, String> {
     let mut out = BTreeMap::new();
     for (n, line) in lines(text) {
         let at = |e: String| format!("{} line {n}: {line}: {e}", path.display());
         let words: Vec<_> = line.split_whitespace().collect();
         let key = Key::parse(words[0]).map_err(at)?.canonical();
         let route = roles::route(&words[1..]).map_err(at)?;
+        for engine in route.engines() {
+            if !allowed_engines.contains(engine) {
+                return Err(at(format!("unknown engine {engine}")));
+            }
+        }
         if out.insert(key, route).is_some() {
             return Err(at("a second line for this role".into()));
         }
@@ -59,7 +68,11 @@ fn effort_ok(effort: &str) -> bool {
 }
 
 /// A models file: `ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]` a line.
-fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
+fn models(
+    path: &Path,
+    text: &str,
+    allowed_engines: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, Tuning>, String> {
     let mut out = BTreeMap::new();
     for (n, line) in lines(text) {
         let at = |e: String| format!("{} line {n}: {e}", path.display());
@@ -72,7 +85,7 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
                 ));
             }
         };
-        if !roles::ENGINES.contains(&engine) {
+        if !allowed_engines.contains(engine) {
             return Err(at(format!("unknown engine {engine}")));
         }
         let model = (model != "-").then(|| model.to_owned());
@@ -96,11 +109,15 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
 
 /// What the old files in DIR hold, as the settings will, and the switch
 /// they had in flight.
-fn read(dir: &Path) -> Result<Migration, String> {
+fn read(dir: &Path, configured_engines: &[String]) -> Result<Migration, String> {
+    let allowed_engines: std::collections::BTreeSet<String> =
+        roles::default_offers_for(configured_engines)
+            .into_keys()
+            .collect();
     let roles_path = dir.join("roles");
     let models_path = dir.join("models");
     let tuned = match text(&models_path)? {
-        Some(t) => models(&models_path, &t)?,
+        Some(t) => models(&models_path, &t, &allowed_engines)?,
         None => BTreeMap::new(),
     };
     // Each engine offered the models and efforts its roles were set to.
@@ -113,7 +130,7 @@ fn read(dir: &Path) -> Result<Migration, String> {
     }
     let routing = Roles {
         roles: match text(&roles_path)? {
-            Some(t) => routes(&roles_path, &t)?,
+            Some(t) => routes(&roles_path, &t, &allowed_engines)?,
             None => BTreeMap::new(),
         },
         models: tuned.clone(),
@@ -139,7 +156,7 @@ fn read(dir: &Path) -> Result<Migration, String> {
                 setups.saved.insert(
                     name,
                     Roles {
-                        roles: routes(&path, &t)?,
+                        roles: routes(&path, &t, &allowed_engines)?,
                         models: tuned.clone(),
                     },
                 );
@@ -212,7 +229,7 @@ fn migrate_locked(settings: &burrow_settings::Config, dir: &Path) -> Result<Stri
         Ok("The settings took the old files already.\n".into())
     } else {
         let receipts = recovery::run(dir)?;
-        let mut from = read(dir)?;
+        let mut from = read(dir, &settings.engines)?;
         from.receipts = receipts;
         settings.migrate(from, "proj settings migrate")?;
         Ok(format!(

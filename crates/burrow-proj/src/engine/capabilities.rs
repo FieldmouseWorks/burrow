@@ -258,50 +258,41 @@ mod tests {
         // The host's contract has every item of the list a plugin is granted from.
         let items: Vec<Capability> = grants.items.iter().map(|g| g.capability).collect();
         assert_eq!(items, Capability::ALL);
-        let claude = burrow_engine_anthropic::command::claude_flags(
-            &super::super::command::anthropic_grants(&grants),
-        );
-        let config: serde_json::Value = serde_json::from_str(claude.last().unwrap()).unwrap();
-        assert_eq!(
-            config["mcpServers"]["machine.ledger"]["command"],
-            "/bin/server"
-        );
-        assert_eq!(
-            config["mcpServers"]["machine.ledger"]["env"]["SETTING"],
-            "value"
-        );
-        assert_eq!(
-            config["mcpServers"]["machine.ledger"]["env"]["EXTRA"],
-            "inherited"
-        );
-        assert_eq!(
-            config["mcpServers"]["machine.ledger"]["env"]["NIX_REMOTE"],
-            "daemon"
-        );
-        assert!(claude.contains(&"--strict-mcp-config".to_owned()));
-        assert!(claude.contains(&output.to_string_lossy().into_owned()));
+        let servers = grants.servers();
+        let ledger = &servers["machine.ledger"];
+        assert_eq!(ledger.command, "/bin/server");
+        assert_eq!(ledger.env["SETTING"], "value");
+        assert_eq!(ledger.env["EXTRA"], "inherited");
+        assert_eq!(ledger.env["NIX_REMOTE"], "daemon");
+        let mcp = grants
+            .items
+            .iter()
+            .find(|g| g.capability == Capability::Mcp)
+            .unwrap();
+        assert!(mcp.paths.contains(&(output.clone(), true)));
+        assert!(mcp.paths.contains(&(socket.clone(), false)));
         let clear = grants
             .items
             .iter()
             .find(|g| g.capability == Capability::UnitsClear)
             .unwrap();
         assert_eq!(clear.paths, vec![(clear_socket.clone(), false)]);
-        assert_eq!(grants.environment()["NIX_REMOTE"], "daemon");
-        let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
-        assert_eq!(settings["env"]["NIX_REMOTE"], "daemon");
+        let env_map = grants.environment();
+        assert_eq!(env_map["NIX_REMOTE"], "daemon");
         assert_eq!(
-            settings["env"]["PROJ_PROBE_SOCKET"],
+            env_map["PROJ_PROBE_SOCKET"],
             dir.path()
                 .join("scratch/probe.sock")
                 .to_string_lossy()
                 .as_ref()
         );
         assert_eq!(
-            settings["env"]["PROJ_HOST_JOBS_SOCKET"],
+            env_map["PROJ_HOST_JOBS_SOCKET"],
             dir.path()
                 .join("scratch/host-jobs.sock")
                 .to_string_lossy()
                 .as_ref()
         );
+        assert!(grants.inherits_environment());
     }
 }

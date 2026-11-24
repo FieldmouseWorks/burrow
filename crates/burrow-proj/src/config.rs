@@ -5,8 +5,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::engine::Engine;
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -129,11 +127,23 @@ pub struct Config {
     /// The engines' meters (claude.json), written by usage-reset.
     pub meters: Option<PathBuf>,
     /// The API key the `claude-api` engine runs on, alone in its file
-    /// (burrow.proj.claudeApi.keyFile): read for that engine's runs only,
-    /// and handed to Claude Code on a descriptor (engine/api.rs). None
-    /// refuses every `claude-api` launch.
+    /// (burrow.proj.claudeApi.keyFile): used by credit-meter route readiness
+    /// checks; the plugin itself opens the file when launching a turn.
     #[serde(default)]
     pub claude_api_key_file: Option<PathBuf>,
+    /// Configured Conary `conary-plugin v5` (`job`) executables for host turns,
+    /// keyed by engine plugin name (for example `claude`, `claude-api`,
+    /// `antigravity`, or any custom engine plugin).
+    #[serde(default)]
+    pub plugins: BTreeMap<String, PathBuf>,
+    /// Configured Conary `conary-plugin v5` (`job`) executables for sandboxed
+    /// (`--vm`) turns (`agent-plugin-<engine>`), keyed by engine plugin name.
+    #[serde(default)]
+    pub sandbox_plugins: BTreeMap<String, PathBuf>,
+    /// Additional engine names metered by `proj.apiCredit` (beyond the
+    /// schema's default `burrow_settings::credit::ENGINE`).
+    #[serde(default)]
+    pub credit_engines: Vec<String>,
     /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).
@@ -195,8 +205,8 @@ pub struct Inbox {
     pub planning: bool,
     /// What it keeps of each issue it has a job for, a folder an issue.
     pub state: PathBuf,
-    /// Each label selects its engine.
-    pub labels: BTreeMap<String, Engine>,
+    /// Each label selects its engine plugin.
+    pub labels: BTreeMap<String, String>,
     /// Machine issue labels mapped to routing roles.
     #[serde(default)]
     pub roles: BTreeMap<String, String>,
@@ -246,7 +256,7 @@ pub struct Triage {
     pub at_once: usize,
     /// The engine ready issues are handed to, by its inbox label; None hands
     /// none on.
-    pub drain: Option<Engine>,
+    pub drain: Option<String>,
     /// Handed-on issues' jobs at once, across every repo.
     pub drain_jobs: usize,
 }
@@ -260,6 +270,21 @@ impl Config {
         self.settings
             .as_ref()
             .map(burrow_settings::Config::credit_file)
+    }
+
+    /// The configured Conary plugin executable for `engine` on the host or in a
+    /// sandbox (`--vm`).
+    pub(crate) fn plugin_for(&self, engine: &str, sandboxed: bool) -> Option<&PathBuf> {
+        if sandboxed {
+            self.sandbox_plugins.get(engine)
+        } else {
+            self.plugins.get(engine)
+        }
+    }
+
+    /// Whether `engine` is metered by `proj.apiCredit`.
+    pub(crate) fn uses_credit_meter(&self, engine: &str) -> bool {
+        engine == burrow_settings::credit::ENGINE || self.credit_engines.iter().any(|e| e == engine)
     }
 
     pub fn paused(&self, repo: &str) -> bool {
@@ -373,19 +398,40 @@ impl Config {
     }
 
     /// The engine ROLE in REPO's route starts on: the closest role key's.
-    pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
-        Engine::parse(&self.role_settings()?.route(role, repo).engine)
+    pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<String, String> {
+        crate::engine::parse_engine(&self.role_settings()?.route(role, repo).engine)
     }
 
     /// Validate the turn-start configuration without starting a job: the
-    /// module's JSON (Config::load) and the role settings every turn reads.
-    /// Runtime state (meters, usage holds and individual jobs) is not
-    /// machine configuration. The sandbox controller, when agents are on,
-    /// must be a program proj can run: pause and release call it.
+    /// module's JSON (Config::load), configured engine plugins, and the role
+    /// settings every turn reads. Runtime state (meters, usage holds and
+    /// individual jobs) is not machine configuration. The sandbox controller,
+    /// when agents are on, must be a program proj can run: pause and release
+    /// call it.
     pub fn check_config(&self) -> Result<(), String> {
         if let Some(tool) = &self.agent_tool {
             burrow_process::executable(tool)
                 .map_err(|e| format!("agentTool {}: {e}", tool.display()))?;
+        }
+        for (engine, path) in &self.plugins {
+            crate::engine::parse_engine(engine)?;
+            burrow_process::executable(path)
+                .map_err(|e| format!("plugins.{engine} {}: {e}", path.display()))?;
+        }
+        for (engine, path) in &self.sandbox_plugins {
+            crate::engine::parse_engine(engine)?;
+            burrow_process::executable(path)
+                .map_err(|e| format!("sandboxPlugins.{engine} {}: {e}", path.display()))?;
+        }
+        if let Some(inbox) = &self.inbox {
+            for (label, engine) in &inbox.labels {
+                crate::engine::parse_engine(engine)
+                    .map_err(|e| format!("inbox.labels.{label}: {e}"))?;
+            }
+            if let Some(drain) = inbox.triage.as_ref().and_then(|t| t.drain.as_deref()) {
+                crate::engine::parse_engine(drain)
+                    .map_err(|e| format!("inbox.triage.drain: {e}"))?;
+            }
         }
         self.role_view().map(|_| ())
     }
@@ -415,7 +461,7 @@ fn needs_owner_label() -> String {
 pub(crate) mod tests {
     use serde_json::{Value, json};
 
-    use super::{Config, Engine};
+    use super::Config;
 
     /// A config as the module writes one, with host event publication disabled.
     /// Tests that exercise publication must supply their own file and receiver.
@@ -558,13 +604,10 @@ pub(crate) mod tests {
     fn the_closest_role_key_picks_the_engine() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
-        assert_eq!(cfg.engine("routine", None).unwrap(), Engine::Claude);
-        assert_eq!(cfg.engine("planner", None).unwrap(), Engine::Claude);
+        assert_eq!(cfg.engine("routine", None).unwrap(), "claude");
+        assert_eq!(cfg.engine("planner", None).unwrap(), "claude");
         set(&mut cfg, dir.path(), &["role work@Sam/Code claude"]);
-        assert_eq!(
-            cfg.engine("work", Some("sAM/cODE")).unwrap(),
-            Engine::Claude
-        );
+        assert_eq!(cfg.engine("work", Some("sAM/cODE")).unwrap(), "claude");
         // A hand edit naming an engine the machine doesn't run fails the turn.
         let overlay = &cfg.settings.as_ref().unwrap().roles_file();
         let mut edited: Value = serde_json::from_slice(&std::fs::read(overlay).unwrap()).unwrap();
@@ -598,8 +641,8 @@ pub(crate) mod tests {
             cfg.inbox
                 .as_ref()
                 .and_then(|i| i.labels.get("claude"))
-                .copied(),
-            Some(Engine::Claude)
+                .map(String::as_str),
+            Some("claude")
         );
         let mut off = example();
         off["inbox"] = Value::Null;

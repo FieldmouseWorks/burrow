@@ -7,7 +7,6 @@ use std::fs;
 use serde_json::Value;
 
 use super::sorting_tests::Box;
-use crate::engine::Engine;
 use crate::now;
 use crate::snapshot::{SlotKind, SlotState, Snapshot};
 
@@ -64,7 +63,7 @@ fn the_11_11_stall() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Claude);
+    t.drain = Some("claude".into());
     t.drain_jobs = 3;
     for (i, n) in [11u64, 12, 13].into_iter().enumerate() {
         parked(&b, &format!("job-{n}"), n, 100 + n, 600 * (i as i64 + 1));
@@ -103,8 +102,11 @@ fn the_11_11_stall() {
             .all(|s| s.state == SlotState::Idle)
     );
     assert_eq!(
-        snap.holds.triage.as_ref().map(|t| (t.drain, t.drain_jobs)),
-        Some((Some(Engine::Claude), 3))
+        snap.holds
+            .triage
+            .as_ref()
+            .map(|t| (t.drain.as_deref(), t.drain_jobs)),
+        Some((Some("claude"), 3))
     );
 
     // `proj status` is the snapshot's, line for line: each job as the
@@ -167,8 +169,8 @@ fn a_parked_sorting_job_holds_its_slot() {
     assert_eq!(h.job.as_deref(), Some("sort-21"));
     assert_eq!(h.awaits, ["sam/game#121"]);
     assert_eq!(
-        (h.engine, h.model.as_deref(), h.effort.as_deref()),
-        (Some(Engine::Claude), Some("small"), Some("high"))
+        (h.engine.as_deref(), h.model.as_deref(), h.effort.as_deref()),
+        (Some("claude"), Some("small"), Some("high"))
     );
     let age = s.age.unwrap();
     assert!((900..905).contains(&age), "{age}s, not 900s");
@@ -181,7 +183,7 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
     let mut b = Box::new();
     b.cfg.projects = b.path("src");
     let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
-    t.drain = Some(Engine::Claude);
+    t.drain = Some("claude".into());
     t.drain_jobs = 2;
     fs::write(b.path("active"), "").unwrap();
     for count in 0..=3 {

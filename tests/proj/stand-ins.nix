@@ -81,7 +81,7 @@
         exit 0 ;;
       detach*)
         # shellcheck disable=SC2016
-        setsid bash -c 'trap "" TERM; exec -a proj-stray bash -c "while :; do echo stray; sleep 1; done"' &
+        setsid bash -c 'trap "" TERM PIPE; exec -a proj-stray bash -c "while :; do echo stray 2>/dev/null; sleep 1; done"' &
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
         sleep "''${prompt#detach }"
         exit 0 ;;

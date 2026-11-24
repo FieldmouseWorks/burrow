@@ -871,7 +871,6 @@ name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
  "boon",
- "burrow-engine-anthropic",
  "burrow-events",
  "burrow-github",
  "burrow-grants",
@@ -883,6 +882,7 @@ dependencies = [
  "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
+ "conary-core",
  "gh-token",
  "jiff 1.0.1",
  "pulldown-cmark",

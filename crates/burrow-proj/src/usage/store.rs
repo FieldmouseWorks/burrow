@@ -222,10 +222,32 @@ fn legacy_owner_metadata(cfg: &Config, job: &str) -> Result<Option<Spent>, Strin
     }))
 }
 
+/// Sanitize raw billing/settings URLs from pre-change `.usage.json` records
+/// during deploy overlap; plugins normalize new refusal reasons themselves.
+pub(super) fn normalize_legacy_refusal(engine: &str, said: &str) -> String {
+    if engine != DEFAULT_ENGINE {
+        return said.to_owned();
+    }
+    let s = said.to_lowercase();
+    if s.contains("https://") || s.contains("monthly spend limit") || s.contains("raise it at") {
+        let name = if s.contains("weekly") {
+            "weekly allowance"
+        } else if s.contains("5-hour") || s.contains("five-hour") {
+            "five-hour allowance"
+        } else if s.contains("extra usage") || s.contains("spend limit") {
+            "extra-usage cap"
+        } else {
+            "usage allowance"
+        };
+        return format!("Claude reached its {name}");
+    }
+    said.to_owned()
+}
+
 fn normalize_loaded(engine: &str, s: &mut Spent) {
     s.engine = engine.to_owned();
-    if !s.owner && engine == DEFAULT_ENGINE {
-        s.said = burrow_engine_anthropic::claude::normalize_refusal(&s.said);
+    if !s.owner {
+        s.said = normalize_legacy_refusal(engine, &s.said);
     }
     if !s.owner && login::is(&s.said) {
         s.login = true;

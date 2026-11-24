@@ -75,18 +75,18 @@ impl<'a> Job<'a> {
     }
 
     /// The engine recorded for this turn, including jobs that changed engines.
-    pub fn engine_label(&self, n: &str) -> &'static str {
+    pub fn engine_label(&self, n: &str) -> String {
         match read(&self.turn_file(n, TurnFile::Engine)).as_deref() {
-            Some("claude") | None => "Claude",
-            Some(burrow_settings::credit::ENGINE) => "Claude API",
-            _ => "Unknown",
+            Some("claude") | None => "Claude".to_owned(),
+            Some(burrow_settings::credit::ENGINE) => "Claude API".to_owned(),
+            Some(other) => other.to_owned(),
         }
     }
 
     /// What turn N runs on, in its N.engine, N.model and N.effort: no model
     /// or effort file for the engine's own.
     pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) -> io::Result<()> {
-        self.record_engine(n, choice.engine)?;
+        self.record_engine(n, &choice.engine)?;
         for (kind, said) in [
             (TurnFile::Model, &choice.model),
             (TurnFile::Effort, &choice.effort),
@@ -111,24 +111,24 @@ impl<'a> Job<'a> {
     /// first move onto the credit keeps the engine the turn was on in
     /// N.engine-before first, for good: the runs it made before markers
     /// named their engine ran there, and the ledger charges them by it.
-    pub fn record_engine(&self, n: &str, engine: crate::engine::Engine) -> io::Result<()> {
-        use crate::engine::Engine;
+    pub fn record_engine(&self, n: &str, engine: &str) -> io::Result<()> {
+        let credit_engine = burrow_settings::credit::ENGINE;
         let path = self.turn_file(n, TurnFile::Engine);
         let was = read(&path);
-        if engine.conversation() == Engine::ClaudeApi.conversation()
-            && was.as_deref() == Some(Engine::ClaudeApi.name())
+        if crate::engine::conversation_of(engine) == crate::engine::conversation_of(credit_engine)
+            && was.as_deref() == Some(credit_engine)
         {
             return Ok(());
         }
-        if engine == Engine::ClaudeApi
-            && let Some(was) = was.filter(|was| was != engine.name())
+        if engine == credit_engine
+            && let Some(was) = was.filter(|was| was != engine)
         {
             let before = self.turn_file(n, TurnFile::EngineBefore);
             if read(&before).is_none() {
                 crate::state_reads::write(before, &was)?;
             }
         }
-        crate::state_reads::write(path, engine.name())
+        crate::state_reads::write(path, engine)
     }
 
     /// Before publishing another turn, remove every artifact beyond the last
@@ -387,7 +387,6 @@ mod tests {
     /// changes it, and a turn that starts on the credit has none.
     #[test]
     fn a_turns_first_move_onto_the_credit_keeps_the_engine_it_was_on() {
-        use crate::engine::Engine;
         let tmp = tempfile::TempDir::new().unwrap();
         let mut v = example();
         v["jobs"] = tmp.path().to_str().unwrap().into();
@@ -396,20 +395,20 @@ mod tests {
         fs::create_dir(&job.dir).unwrap();
         let before = |n: &str| fs::read_to_string(job.turn(n, "engine-before")).ok();
         let engine = |n: &str| fs::read_to_string(job.turn(n, "engine")).unwrap();
-        job.record_engine("1", Engine::Claude).unwrap();
-        job.record_engine("1", Engine::Claude).unwrap();
+        job.record_engine("1", "claude").unwrap();
+        job.record_engine("1", "claude").unwrap();
         assert_eq!(before("1"), None);
-        job.record_engine("1", Engine::ClaudeApi).unwrap();
+        job.record_engine("1", "claude-api").unwrap();
         assert_eq!(engine("1"), "claude-api");
         assert_eq!(before("1").as_deref(), Some("claude"));
-        for again in [Engine::Claude, Engine::ClaudeApi, Engine::Claude] {
+        for again in ["claude", "claude-api", "claude"] {
             job.record_engine("1", again).unwrap();
             assert_eq!(engine("1"), "claude-api");
             assert_eq!(before("1").as_deref(), Some("claude"));
         }
-        job.record_engine("2", Engine::ClaudeApi).unwrap();
-        job.record_engine("2", Engine::Claude).unwrap();
-        job.record_engine("2", Engine::ClaudeApi).unwrap();
+        job.record_engine("2", "claude-api").unwrap();
+        job.record_engine("2", "claude").unwrap();
+        job.record_engine("2", "claude-api").unwrap();
         assert_eq!(before("2"), None);
     }
 

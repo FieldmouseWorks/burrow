@@ -44,9 +44,9 @@ fn capture_saves_the_choice_startup_runs_not_a_second_resolution() {
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
     let resolved = engine::choice(&r.cfg, &job).unwrap();
-    assert_eq!(resolved.engine, engine::Engine::Claude);
+    assert_eq!(resolved.engine, "claude");
     let ran = engine::Choice {
-        engine: engine::Engine::Claude,
+        engine: "claude".into(),
         model: Some("m".into()),
         effort: Some("high".into()),
     };
@@ -184,7 +184,7 @@ fn initial_and_retained_waiters_keep_identity_when_rollback_ignores_protected_st
             }
             fs::remove_file(job.turn("1", "execution")).unwrap();
             let choice = engine::Choice {
-                engine: engine::Engine::Claude,
+                engine: "claude".into(),
                 model: Some("saved-choice".into()),
                 effort: Some("high".into()),
             };

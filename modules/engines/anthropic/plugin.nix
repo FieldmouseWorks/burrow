@@ -17,6 +17,8 @@
   maxBudgetUsd ? null,
   credit ? null,
   appendSystemPrompt ? null,
+  hostMode ? false,
+  apiKeyFile ? null,
 }:
 let
   bin = self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engine-anthropic;
@@ -44,10 +46,12 @@ let
       // lib.optionalAttrs (meters != null) { inherit meters; }
       // lib.optionalAttrs (program != null) { inherit program; }
       // lib.optionalAttrs (credentialEnv != null) { inherit credentialEnv; }
+      // lib.optionalAttrs (apiKeyFile != null) { inherit apiKeyFile; }
       // lib.optionalAttrs (apiBaseUrl != null) { inherit apiBaseUrl; }
       // lib.optionalAttrs (maxBudgetUsd != null) { inherit maxBudgetUsd; }
       // lib.optionalAttrs (credit != null) { inherit credit; }
       // lib.optionalAttrs (appendSystemPrompt != null) { inherit appendSystemPrompt; }
+      // lib.optionalAttrs hostMode { inherit hostMode; }
     )
   );
 in

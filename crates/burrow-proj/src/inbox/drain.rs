@@ -35,7 +35,6 @@ use serde_json::Value;
 
 use super::triage::READY;
 use super::{Pass, RETRY, dirs, key, raw};
-use crate::engine::Engine;
 use crate::github::api;
 use crate::snapshot::Priority;
 use crate::{Fail, io_fail, now, slot, swap, usage};
@@ -48,7 +47,7 @@ pub(super) enum Held {
     /// No engine can be chosen for its job: why.
     Unroutable(String),
     /// The engine its job would run on has no room.
-    Engine(Engine),
+    Engine(String),
 }
 
 /// What a turn's end kicks while a ready issue waits for a slot: the
@@ -204,10 +203,10 @@ impl Pass<'_> {
                             .ends_with(&format!("/repos/{}", repo.to_lowercase()))
                 })
                 && let Ok(engine) = self.drain_engine(listed, &label, &repo)
-                && !slot::room(self.cfg, engine, self.inbox.vm)
+                && !slot::room(self.cfg, &engine, self.inbox.vm)
             {
                 blocked = true;
-                self.no_room(&repo, engine);
+                self.no_room(&repo, &engine);
                 continue;
             }
             let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
@@ -234,7 +233,7 @@ impl Pass<'_> {
                 }
                 Err(Held::Engine(engine)) => {
                     blocked = true;
-                    self.no_room(&repo, engine);
+                    self.no_room(&repo, &engine);
                     continue;
                 }
             }
@@ -264,11 +263,11 @@ impl Pass<'_> {
     /// The label the drain hands issues on with, its engine's: None while
     /// the drain is off, or no label names its engine.
     pub(super) fn drain_label(&self) -> Option<String> {
-        let engine = self.inbox.triage.as_ref()?.drain?;
+        let engine = self.inbox.triage.as_ref()?.drain.as_deref()?;
         self.inbox
             .labels
             .iter()
-            .find(|(_, e)| **e == engine)
+            .find(|(_, e)| e.as_str() == engine)
             .map(|(l, _)| l.clone())
     }
 
@@ -283,7 +282,7 @@ impl Pass<'_> {
         issue: &Value,
         repo: &str,
         going: usize,
-    ) -> Result<Engine, Held> {
+    ) -> Result<String, Held> {
         let repair = self.lane(issue);
         let cap = self.inbox.triage.as_ref().map_or(0, |t| t.drain_jobs);
         if going >= cap && !repair {
@@ -297,9 +296,9 @@ impl Pass<'_> {
         // or making the slots' folders.
         let room = || {
             if self.observe {
-                slot::seen_room(self.cfg, engine, self.inbox.vm)
+                slot::seen_room(self.cfg, &engine, self.inbox.vm)
             } else {
-                slot::room(self.cfg, engine, self.inbox.vm)
+                slot::room(self.cfg, &engine, self.inbox.vm)
             }
         };
         if !repair && !room() {
@@ -311,7 +310,7 @@ impl Pass<'_> {
     /// The engine the issue's job would run on once it carries the drain's
     /// label: the exact routing the enrollment event will give start(),
     /// including a role mapped to that label.
-    fn drain_engine(&self, issue: &Value, label: &str, repo: &str) -> Result<Engine, String> {
+    fn drain_engine(&self, issue: &Value, label: &str, repo: &str) -> Result<String, String> {
         let mut enrolled = issue.clone();
         let labelled = serde_json::json!({"name": label});
         match enrolled["labels"].as_array_mut() {
@@ -323,27 +322,26 @@ impl Pass<'_> {
             self.cfg,
             role.as_deref().unwrap_or_default(),
             Some(repo),
-            pinned.map(Engine::name),
+            pinned.as_deref(),
             self.inbox.vm,
         )
         .map(|choice| choice.engine)
     }
 
     /// No room on the engine for the repo's ready issue: a usage hold that
-    /// holds its run (for `claude-api`, only the owner's pause) books the
-    /// repo's pass for when it resets, and a `claude-api` credit with no
-    /// room for when the clock gives it back
-    /// (`burrow_engine_anthropic::api::opens`): neither ends a turn or comes from
+    /// holds its run books the repo's pass for when it resets, and a
+    /// credit-metered engine with no room books one for when the clock gives
+    /// it back (`engine::credit::opens`): neither ends a turn or comes from
     /// GitHub.
-    fn no_room(&mut self, repo: &str, engine: Engine) {
-        let run = usage::login::Run::new(engine.name(), self.inbox.vm);
+    fn no_room(&mut self, repo: &str, engine: &str) {
+        let run = usage::login::Run::new(engine, self.inbox.vm);
         if let Some(spent) = usage::login::out_for(self.cfg, &run) {
             self.book(repo, spent.until);
         }
-        // A sandbox is given no key: no time gives it room.
-        if engine == Engine::ClaudeApi
+        // A sandbox is given no credit key: no time gives it room.
+        if self.cfg.uses_credit_meter(engine)
             && !self.inbox.vm
-            && let Some(at) = burrow_engine_anthropic::api::opens(
+            && let Some(at) = crate::engine::credit::opens(
                 self.cfg.credit_file().as_deref(),
                 &self.cfg.jobs,
                 crate::now(),

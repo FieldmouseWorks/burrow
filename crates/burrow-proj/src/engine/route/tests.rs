@@ -234,7 +234,7 @@ impl Rig {
         super::super::resolve(&self.cfg, "work", None, None, sandboxed).unwrap()
     }
 
-    fn engine(&self) -> Engine {
+    fn engine(&self) -> String {
         self.choice(false).engine
     }
 }
@@ -246,13 +246,13 @@ fn the_subscription_short_by_its_fresh_meter_moves_to_the_credit_with_its_tuning
     let r = rig(ROUTE);
     r.claude(97.0, 60);
     let choice = r.choice(false);
-    assert_eq!(choice.engine, Engine::ClaudeApi);
+    assert_eq!(choice.engine, "claude-api");
     assert_eq!(choice.model.as_deref(), Some("api-model"));
     assert_eq!(choice.effort.as_deref(), Some("high"));
     // Under the threshold, the subscription and its own tuning.
     r.claude(94.0, 60);
     let choice = r.choice(false);
-    assert_eq!(choice.engine, Engine::Claude);
+    assert_eq!(choice.engine, "claude");
     assert_eq!(choice.model.as_deref(), Some("sub-model"));
     assert_eq!(choice.effort.as_deref(), Some("low"));
 }
@@ -262,36 +262,36 @@ fn a_stale_reading_moves_nothing_and_a_refusal_moves_it_anyway() {
     let r = rig(ROUTE);
     // An hour old, and from the future.
     r.claude(97.0, 3600);
-    assert_eq!(r.engine(), Engine::Claude);
+    assert_eq!(r.engine(), "claude");
     r.claude(97.0, -60);
-    assert_eq!(r.engine(), Engine::Claude);
+    assert_eq!(r.engine(), "claude");
     // Claude Code said it's out of usage: the credit, though the cached
     // reading is stale (and says it has room).
     r.claude(10.0, 7200);
     r.refused();
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
     // With no reading at all, too.
     fs::remove_file(r.cfg.meters.as_ref().unwrap().join("claude.json")).unwrap();
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
 }
 
 #[test]
 fn the_subscription_takes_the_next_turn_back_once_its_hold_is_gone() {
     let mut r = rig(ROUTE);
     r.refused();
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
     // The hold over, the reading fresh and under the threshold.
     fs::remove_file(r.cfg.jobs.join(crate::usage::FILE)).unwrap();
     let _ = fs::remove_file(r.cfg.jobs.join(crate::usage::LEGACY_FILE));
     r.claude(20.0, 10);
-    assert_eq!(r.engine(), Engine::Claude);
+    assert_eq!(r.engine(), "claude");
     // The same for a route set over a chain that started on the credit.
     set(
         &mut r.cfg,
         r.tmp.path(),
         &["role * claude-api over 50 claude"],
     );
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
 }
 
 /// A fresh meter asked for after the refusal, with room, proves the hold
@@ -303,9 +303,9 @@ fn a_fresh_meter_after_the_refusal_gives_the_subscription_its_turn_back() {
     let now = crate::now();
     r.refused_at(now - 100);
     r.claude_asked(20.0, 200, 150);
-    assert_eq!(r.engine(), Engine::ClaudeApi, "asked before the refusal");
+    assert_eq!(r.engine(), "claude-api", "asked before the refusal");
     r.claude_asked(20.0, 50, 40);
-    assert_eq!(r.engine(), Engine::Claude);
+    assert_eq!(r.engine(), "claude");
     assert!(crate::usage::out(&r.cfg).is_some(), "nothing was released");
 }
 
@@ -351,22 +351,22 @@ fn a_credit_without_room_or_state_keeps_the_turn_on_the_subscription() {
     for (name, short) in cases {
         let mut r = rig(ROUTE);
         r.refused();
-        assert_eq!(r.engine(), Engine::ClaudeApi, "{name}: before");
+        assert_eq!(r.engine(), "claude-api", "{name}: before");
         short(&mut r);
-        assert_eq!(r.engine(), Engine::Claude, "{name}");
+        assert_eq!(r.engine(), "claude", "{name}");
     }
     // Some spent, room left: still the credit.
     let r = rig(ROUTE);
     r.refused();
     r.spent(3);
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
 }
 
 #[test]
 fn a_sandbox_never_moves_to_the_credit() {
     let r = rig(ROUTE);
     r.refused();
-    assert_eq!(r.choice(true).engine, Engine::Claude);
+    assert_eq!(r.choice(true).engine, "claude");
 }
 
 #[test]
@@ -374,11 +374,11 @@ fn the_credits_threshold_is_its_cycles_spend() {
     // The credit first, the subscription past half the credit's budget.
     let r = rig("claude-api over 50 claude");
     r.claude(10.0, 60);
-    assert_eq!(r.engine(), Engine::ClaudeApi);
+    assert_eq!(r.engine(), "claude-api");
     r.spent(9);
-    assert_eq!(r.engine(), Engine::ClaudeApi, "$9 of $20");
+    assert_eq!(r.engine(), "claude-api", "$9 of $20");
     r.spent(1);
-    assert_eq!(r.engine(), Engine::Claude, "$10 of $20");
+    assert_eq!(r.engine(), "claude", "$10 of $20");
 }
 
 /// A route that starts on the credit, with no key its runs can launch with:
@@ -399,9 +399,9 @@ fn a_credit_first_without_a_usable_key_goes_on_to_the_subscription() {
     for (name, unkeyed) in cases {
         let mut r = rig("claude-api over 50 claude");
         r.claude(10.0, 60);
-        assert_eq!(r.engine(), Engine::ClaudeApi, "{name}: before");
+        assert_eq!(r.engine(), "claude-api", "{name}: before");
         unkeyed(&mut r);
-        assert_eq!(r.engine(), Engine::Claude, "{name}");
+        assert_eq!(r.engine(), "claude", "{name}");
     }
 }
 
@@ -414,8 +414,8 @@ fn a_pin_starts_the_route_where_it_names_the_engine() {
             .unwrap()
             .engine
     };
-    assert_eq!(pinned("claude"), Engine::ClaudeApi);
-    assert_eq!(pinned("claude-api"), Engine::ClaudeApi);
+    assert_eq!(pinned("claude"), "claude-api");
+    assert_eq!(pinned("claude-api"), "claude-api");
     // Pinned to an engine the route doesn't name: that engine alone.
     let r = rig("claude");
     r.refused();
@@ -423,14 +423,14 @@ fn a_pin_starts_the_route_where_it_names_the_engine() {
         super::super::resolve(&r.cfg, "work", None, Some("claude-api"), false)
             .unwrap()
             .engine,
-        Engine::ClaudeApi
+        "claude-api"
     );
     let r = rig("claude-api");
     assert_eq!(
         super::super::resolve(&r.cfg, "work", None, Some("claude"), false)
             .unwrap()
             .engine,
-        Engine::Claude
+        "claude"
     );
 }
 
@@ -439,7 +439,7 @@ fn a_route_of_one_engine_never_moves() {
     let r = rig("claude");
     r.refused();
     r.claude(100.0, 10);
-    assert_eq!(r.engine(), Engine::Claude);
+    assert_eq!(r.engine(), "claude");
 }
 
 #[test]
@@ -563,7 +563,7 @@ fn a_refused_run_moves_its_turn_and_the_move_is_its_identity() {
     let r = rig(ROUTE);
     let job = job_at(&r, None);
     let started = choice(&r.cfg, &job).unwrap();
-    assert_eq!(started.engine, Engine::Claude);
+    assert_eq!(started.engine, "claude");
     assert_eq!(
         reroute(&r.cfg, &job, &started).unwrap(),
         None,
@@ -572,8 +572,12 @@ fn a_refused_run_moves_its_turn_and_the_move_is_its_identity() {
     r.refused();
     let next = reroute(&r.cfg, &job, &started).unwrap().unwrap();
     assert_eq!(
-        (next.engine, next.model.as_deref(), next.effort.as_deref()),
-        (Engine::ClaudeApi, Some("api-model"), Some("high"))
+        (
+            next.engine.as_str(),
+            next.model.as_deref(),
+            next.effort.as_deref()
+        ),
+        ("claude-api", Some("api-model"), Some("high"))
     );
     crate::retry::Identity::reroute(&job, "1", &next).unwrap();
     assert_eq!(choice(&r.cfg, &job).unwrap(), next);
@@ -583,7 +587,7 @@ fn a_refused_run_moves_its_turn_and_the_move_is_its_identity() {
     let _ = fs::remove_file(r.cfg.jobs.join(crate::usage::LEGACY_FILE));
     r.spent(15);
     let back = reroute(&r.cfg, &job, &next).unwrap().unwrap();
-    assert_eq!(back.engine, Engine::Claude);
+    assert_eq!(back.engine, "claude");
     assert_eq!(back.model.as_deref(), Some("sub-model"));
     // A sandbox's turn stays: no key goes into a VM.
     let r = rig(ROUTE);
@@ -626,7 +630,7 @@ fn a_turn_that_has_been_on_the_credit_stays_in_its_ledger() {
     )
     .unwrap();
     let charged = || {
-        api::short(
+        super::super::credit::short(
             r.cfg.credit_file().as_deref(),
             &r.cfg.jobs,
             10.0,
@@ -643,7 +647,7 @@ fn a_turn_that_has_been_on_the_credit_stays_in_its_ledger() {
     assert_eq!(engine().as_deref(), Some("claude-api"), "the restore");
     // The handover's turn starts again on its identity and records it.
     let resumed = choice(&r.cfg, &job).unwrap();
-    assert_eq!(resumed.engine, Engine::Claude);
+    assert_eq!(resumed.engine, "claude");
     job.record_choice("1", &resumed).unwrap();
     assert_eq!(
         engine().as_deref(),

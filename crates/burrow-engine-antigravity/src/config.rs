@@ -362,8 +362,9 @@ impl Config {
 
     /// Conary `Offers` advertised by `describe`.
     pub fn offers(&self) -> Offers {
+        let models: Vec<Model> = self.models.iter().map(ModelSpec::to_conary).collect();
         Offers {
-            models: self.models.iter().map(ModelSpec::to_conary).collect(),
+            models,
             capabilities: Capabilities {
                 sandbox: Sandbox::Needs,
                 network: self.network,

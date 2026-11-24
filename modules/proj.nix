@@ -44,6 +44,55 @@ let
     settings = config.burrow.settings.effective;
   });
 
+  creditFile = "${stateDir}/settings/overlay.credit.json";
+  anthropicCfg = config.burrow.claude;
+  apiModels = if anthropicCfg.api.models != null then anthropicCfg.api.models else anthropicCfg.plugin.models;
+  apiDefaultModel = if anthropicCfg.api.defaultModel != null then anthropicCfg.api.defaultModel else anthropicCfg.plugin.defaultModel;
+  apiDefaultEffort = if anthropicCfg.api.defaultEffort != null then anthropicCfg.api.defaultEffort else anthropicCfg.plugin.defaultEffort;
+  apiKeyFile = if anthropicCfg.api.keyFile != null then anthropicCfg.api.keyFile else cfg.claudeApi.keyFile;
+  hostClaudePlugin = import ./engines/anthropic/plugin.nix {
+    inherit (inputs) self;
+    inherit pkgs lib;
+    mode = "claude";
+    hostMode = true;
+    program = lib.getExe' anthropicCfg.package "claude";
+    models = anthropicCfg.plugin.models;
+    defaultModel = anthropicCfg.plugin.defaultModel;
+    defaultEffort = anthropicCfg.plugin.defaultEffort;
+    appendSystemPrompt = anthropicCfg.plugin.appendSystemPrompt;
+  };
+  hostClaudeApiPlugin = import ./engines/anthropic/plugin.nix {
+    inherit (inputs) self;
+    inherit pkgs lib apiKeyFile;
+    mode = "claude-api";
+    hostMode = true;
+    program = lib.getExe' anthropicCfg.package "claude";
+    models = apiModels;
+    defaultModel = apiDefaultModel;
+    defaultEffort = apiDefaultEffort;
+    apiBaseUrl = anthropicCfg.api.baseUrl;
+    maxBudgetUsd = anthropicCfg.api.maxBudgetUsd;
+    credit = {
+      inherit creditFile;
+      jobsDir = cfg.jobsDir;
+    };
+    appendSystemPrompt = anthropicCfg.plugin.appendSystemPrompt;
+  };
+  extraHostPlugins = lib.mapAttrs (_: e: lib.getExe e.plugin) (
+    lib.filterAttrs (name: e: (e.plugin or null) != null && name != "claude" && name != "claude-api") (
+      config.burrow.agents.engines or { }
+    )
+  );
+  hostPlugins = extraHostPlugins // {
+    claude = lib.getExe hostClaudePlugin;
+    "claude-api" = lib.getExe hostClaudeApiPlugin;
+  } // lib.mapAttrs (_: lib.getExe) cfg.plugins;
+  sandboxPlugins =
+    if config.burrow.agents.enable or false then
+      lib.mapAttrs (_: pkg: lib.getExe pkg) (config.burrow.agents.plugins or { })
+    else
+      { };
+
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
@@ -80,6 +129,8 @@ let
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
     claudeApiKeyFile = cfg.claudeApi.keyFile;
+    plugins = hostPlugins;
+    inherit sandboxPlugins;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
@@ -225,11 +276,21 @@ in
       description = ''
         A file holding only the Anthropic API key the `claude-api` engine
         runs on, readable by the jobs' user and kept out of the store (a
-        sops-nix secret, say). proj opens it for that engine's runs alone and
-        hands it to Claude Code on a descriptor; no other turn sees it, and
-        every other turn starts with no API credential at all. Null refuses
-        every `claude-api` launch. The credit it spends is metered by
+        sops-nix secret, say). The `claude-api` engine plugin opens it for
+        that engine's runs alone; no other turn sees it, and every other
+        turn starts with no API credential at all. Null refuses every
+        `claude-api` launch. The credit it spends is metered by
         `proj.apiCredit` (docs/settings.md).
+      '';
+    };
+    plugins = lib.mkOption {
+      type = lib.types.attrsOf lib.types.package;
+      default = { };
+      description = ''
+        Additional Conary `conary-plugin v5` (`job`) engine plugin packages
+        available to host `proj` turns, keyed by engine name. Built-in
+        Anthropic plugins (`claude`, `claude-api`) and enabled engine plugins
+        registered in `burrow.agents.engines` are wired automatically.
       '';
     };
     jobsDir = lib.mkOption {
@@ -418,7 +479,7 @@ in
         answers go back as comments and their replies there continue it
       '';
       labels = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.enum [ "claude" "claude-api" ]);
+        type = lib.types.attrsOf (lib.types.strMatching "[a-z0-9][a-z0-9-]*");
         default = { claude = "claude"; };
         description = "Issue labels and the engine each starts. Each label is created in each repo.";
       };
@@ -504,7 +565,7 @@ in
           description = "Sorting jobs at once, across every repo. Each waits in line behind work someone asked for.";
         };
         drain = lib.mkOption {
-          type = lib.types.nullOr (lib.types.enum [ "claude" "claude-api" ]);
+          type = lib.types.nullOr (lib.types.strMatching "[a-z0-9][a-z0-9-]*");
           default = null;
           example = "claude";
           description = ''

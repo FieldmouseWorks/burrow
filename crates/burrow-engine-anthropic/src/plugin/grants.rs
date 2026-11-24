@@ -7,7 +7,7 @@
 //! and claude.ai connectors.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burrow_grants::Capability;
 use serde::Deserialize;
@@ -56,15 +56,32 @@ struct WireMcpServer {
     env: BTreeMap<String, String>,
 }
 
-/// Build [`Grants`] for one job run from the plugin's environment and `workdir`.
+/// Build [`Grants`] for one sandboxed job run from the plugin's environment
+/// and `workdir`.
 pub fn from_env(env: &dyn Fn(&str) -> Option<String>, workdir: &Path) -> Result<Grants, String> {
-    let caps = parse_capabilities(env("PROJ_CAPABILITIES").as_deref())?;
+    from_env_with_host(env, workdir, false)
+}
+
+/// Build [`Grants`] for one job run. When `host_mode` is false (the default,
+/// used by every sandboxed plugin), enforces the strict environment allowlist
+/// and never forwards GitHub tokens or host environment inheritance. When
+/// `host_mode` is true (host-only `proj` wrappers), preserves the host-resolved
+/// login/App environment, path grants, and MCP servers while still keeping
+/// Anthropic credentials out of `--settings`.
+pub fn from_env_with_host(
+    env: &dyn Fn(&str) -> Option<String>,
+    workdir: &Path,
+    host_mode: bool,
+) -> Result<Grants, String> {
+    let caps = parse_capabilities(env("PROJ_CAPABILITIES").as_deref(), host_mode)?;
     let has = |cap: Capability| caps.contains(cap.name());
 
     let mut out_env = BTreeMap::new();
-    for &name in BASELINE_ENV {
-        if let Some(val) = env(name) {
-            out_env.insert(name.to_owned(), val);
+    if !host_mode {
+        for &name in BASELINE_ENV {
+            if let Some(val) = env(name) {
+                out_env.insert(name.to_owned(), val);
+            }
         }
     }
 
@@ -111,50 +128,71 @@ pub fn from_env(env: &dyn Fn(&str) -> Option<String>, workdir: &Path) -> Result<
         ],
     );
 
-    // Defense in depth: never let any GitHub token or Anthropic credential into
-    // `grants.env` (which is also serialized into `--settings` argv).
-    for &name in FORBIDDEN_GITHUB_ENV
+    // Defense in depth: never let any Anthropic credential into `grants.env`
+    // (which is also serialized into `--settings` argv). In sandbox mode, also
+    // strip every GitHub token variable.
+    if !host_mode {
+        for &name in FORBIDDEN_GITHUB_ENV {
+            out_env.remove(name);
+        }
+    }
+    for &name in crate::api::API_CREDENTIALS
         .iter()
-        .chain(crate::api::API_CREDENTIALS)
         .chain(crate::api::LOGIN_CREDENTIALS)
     {
         out_env.remove(name);
     }
 
-    let mut paths = Vec::new();
-    if has(Capability::Workspace) && workdir.is_dir() {
-        paths.push((workdir.to_path_buf(), true));
-    }
+    let paths = if host_mode
+        && let Some(raw) = env("PROJ_GRANT_PATHS")
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        serde_json::from_str::<Vec<(PathBuf, bool)>>(raw)
+            .map_err(|e| format!("invalid PROJ_GRANT_PATHS JSON: {e}"))?
+    } else {
+        let mut paths = Vec::new();
+        if has(Capability::Workspace) && workdir.is_dir() {
+            paths.push((workdir.to_path_buf(), true));
+        }
+        paths
+    };
 
     let servers = if has(Capability::Mcp) {
-        parse_mcp_servers(env("PROJ_MCP_SERVERS").as_deref())?
+        parse_mcp_servers(env("PROJ_MCP_SERVERS").as_deref(), host_mode)?
     } else {
         BTreeMap::new()
     };
 
     Ok(Grants {
         env: out_env,
-        inherit_environment: false,
+        inherit_environment: host_mode,
         paths,
         servers,
     })
 }
 
-fn parse_capabilities(raw: Option<&str>) -> Result<BTreeSet<String>, String> {
+fn parse_capabilities(raw: Option<&str>, host_mode: bool) -> Result<BTreeSet<String>, String> {
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(BTreeSet::new());
     };
     let list: Vec<String> =
         serde_json::from_str(raw).map_err(|e| format!("invalid PROJ_CAPABILITIES JSON: {e}"))?;
-    // Never accept capabilities that burrow never grants to a plugin.
+    // Never accept capabilities that burrow never grants to a sandboxed plugin.
     let set = list
         .into_iter()
-        .filter(|c| c != Capability::Github.name() && c != Capability::Environment.name())
+        .filter(|c| {
+            host_mode || (c != Capability::Github.name() && c != Capability::Environment.name())
+        })
         .collect();
     Ok(set)
 }
 
-fn parse_mcp_servers(raw: Option<&str>) -> Result<BTreeMap<String, McpServer>, String> {
+fn parse_mcp_servers(
+    raw: Option<&str>,
+    host_mode: bool,
+) -> Result<BTreeMap<String, McpServer>, String> {
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(BTreeMap::new());
     };
@@ -166,8 +204,10 @@ fn parse_mcp_servers(raw: Option<&str>) -> Result<BTreeMap<String, McpServer>, S
             return Err(format!("PROJ_MCP_SERVERS[{name:?}] has an empty command"));
         }
         let mut server_env = wire.env;
-        for &forbidden in FORBIDDEN_GITHUB_ENV {
-            server_env.remove(forbidden);
+        if !host_mode {
+            for &forbidden in FORBIDDEN_GITHUB_ENV {
+                server_env.remove(forbidden);
+            }
         }
         servers.insert(
             name,

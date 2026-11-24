@@ -256,9 +256,9 @@ fn child() {
     } else {
         let state = Checkpoint::load(&job, "1").unwrap();
         let engine = read(&job.turn("1", "engine"))
-            .and_then(|s| engine::Engine::parse(&s).ok())
-            .unwrap_or_default();
-        let held = slot::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap();
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| engine::DEFAULT_ENGINE.to_owned());
+        let held = slot::take_engine(&cfg, &id, "1", Class::Normal, true, &engine).unwrap();
         if let Some(state) = state {
             state.resume(&job, "1", &job.path("prompt.1")).unwrap();
         }

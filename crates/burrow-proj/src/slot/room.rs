@@ -3,11 +3,9 @@
 
 use std::fs;
 
-use burrow_engine_anthropic::api;
-
 use super::{Lock, line, lock};
 use crate::config::Config;
-use crate::engine::Engine;
+use crate::engine::credit;
 use crate::usage::{self, login::Run};
 
 /// Whether a turn on this engine started now would get a slot, as far as a
@@ -16,20 +14,20 @@ use crate::usage::{self, login::Run};
 /// pipeline's. A fresh meter for that engine releases a non-owner hold it
 /// proves over first ([`usage::metered_engine`]); [`seen_room`] is the same
 /// read-only look with nothing released or made.
-pub fn room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
-    usage::metered_engine(cfg, engine.name());
+pub fn room(cfg: &Config, engine: &str, sandboxed: bool) -> bool {
+    usage::metered_engine(cfg, engine);
     fs::create_dir_all(cfg.jobs.join(".slots")).is_ok() && seen_room(cfg, engine, sandboxed)
 }
 
 /// [`room`], only reading: what an observer (`proj why`) says of the
 /// drain's room.
-pub fn seen_room(cfg: &Config, engine: Engine, sandboxed: bool) -> bool {
-    if engine == Engine::ClaudeApi
-        && (sandboxed || !api::room(cfg.credit_file().as_deref(), &cfg.jobs, crate::now()))
+pub fn seen_room(cfg: &Config, engine: &str, sandboxed: bool) -> bool {
+    if cfg.uses_credit_meter(engine)
+        && (sandboxed || !credit::room(cfg.credit_file().as_deref(), &cfg.jobs, crate::now()))
     {
         return false;
     }
-    seen_room_engine(cfg, engine.name(), sandboxed)
+    seen_room_engine(cfg, engine, sandboxed)
 }
 
 /// Engine-name room check without provider-specific enum dispatch: checks

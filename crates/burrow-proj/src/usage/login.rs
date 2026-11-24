@@ -11,9 +11,13 @@ use super::store::{ALL_ENGINES, DEFAULT_ENGINE, Spent};
 use super::{out_for as usage_out_for, policy, when};
 use crate::config::Config;
 
-/// Whether the refusal text `said` matches Claude's expired-login sentinel.
+/// Legacy expired-login refusal sentinel (kept for deploy-overlap compatibility
+/// with pre-change `.usage.json` and `.usage-holds.json` records).
+pub(crate) const LOGGED_OUT: &str = "Claude Code couldn't authenticate: its login here expired";
+
+/// Whether the refusal text `said` matches the legacy expired-login sentinel.
 pub(crate) fn is(said: &str) -> bool {
-    said == burrow_engine_anthropic::claude::LOGGED_OUT
+    said == LOGGED_OUT
 }
 
 /// A run a hold may apply to: which engine it runs on, and whether it runs in
@@ -81,13 +85,9 @@ pub(crate) fn run_of(cfg: &Config, id: &str) -> Run {
             crate::retry::Identity::load(&job, &n)
                 .ok()
                 .flatten()
-                .map(|i| i.choice.engine.name().to_owned())
+                .map(|i| i.choice.engine)
         })
-        .or_else(|| {
-            crate::job::Request::peek(&job)
-                .ok()
-                .and_then(|r| r.engine.map(|e| e.name().to_owned()))
-        })
+        .or_else(|| crate::job::Request::peek(&job).ok().and_then(|r| r.engine))
         .unwrap_or_else(|| DEFAULT_ENGINE.to_owned());
     Run {
         engine,
@@ -102,6 +102,7 @@ pub(crate) fn sandboxed(cfg: &Config, id: &str) -> bool {
 
 /// Whether a turn refused on `said` holds the host engine: a sandbox's expired
 /// token belongs only to that sandbox, never to this machine's host login.
+#[cfg(test)]
 pub(crate) fn holds_machine(said: &str, sandboxed: bool) -> bool {
     !(sandboxed && is(said))
 }
@@ -202,6 +203,17 @@ pub(super) fn closed_for(engine: &str) -> String {
 
 /// What a sandbox's turn refused for expired auth ends saying.
 pub(crate) const SANDBOX: &str = "Claude Code couldn't authenticate in the sandbox: its token (burrow.agents.engines.claude.credentialFile, from `claude setup-token`) expired or was revoked; make a new one and run the job again";
+
+/// What a sandbox's turn refused for expired auth on `engine` ends saying.
+pub(crate) fn sandbox_message(engine: &str) -> String {
+    if engine == DEFAULT_ENGINE {
+        SANDBOX.to_owned()
+    } else {
+        format!(
+            "{engine} couldn't authenticate in the sandbox: its credential (burrow.agents.engines.{engine}.credentialFile) expired or was revoked; refresh it and run the job again"
+        )
+    }
+}
 
 const RESUMED: &str = "Your last run was refused before it finished: Claude Code's login on this machine had expired, and every Claude job here waited until someone logged in again. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What you were asked this turn:";
 

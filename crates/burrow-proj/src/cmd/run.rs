@@ -54,7 +54,7 @@ pub struct New {
     /// has is refused, however that job stands.
     pub join: bool,
     /// Inbox label choice, kept for every turn.
-    pub engine: Option<crate::engine::Engine>,
+    pub engine: Option<String>,
     /// The kind of work it is, which picks its engine (Config::roles).
     pub role: Option<String>,
 }
@@ -449,7 +449,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     // What every turn of it runs as, kept where the job can't write it.
     let mut request = crate::job::Request {
         project: project.clone(),
-        engine: new.engine,
+        engine: new.engine.clone(),
         role: new.role.clone(),
         app: new.app.clone(),
         agent: None,

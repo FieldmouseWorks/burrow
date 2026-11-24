@@ -243,9 +243,15 @@ fn lock(jobs: &Path) -> Result<File, Refused> {
         .map_err(|e| Refused::new(format!("{}: {e}", path.display())))
 }
 
-/// A run the credit admitted outside proj's jobs, recorded in the meter's
-/// ledger ([`ENGINE_RUNS`]) as a turn of its own: its
-/// marker, with its budget, is written before the admission lock goes, so
+#[derive(Debug)]
+enum ReservationTarget {
+    EngineRuns { turn: u64 },
+    JobStream { path: std::path::PathBuf, from: u64 },
+}
+
+/// A run the credit admitted, recorded in either the meter's standalone
+/// `.engine-runs` ledger or directly in a proj job's turn stream (`N.jsonl`):
+/// its marker, with its budget, is written before the admission lock goes, so
 /// the meter holds that budget until [`Reservation::finish`] records its
 /// cost, and [`Reservation::abandon`] takes it back for a run that never
 /// started.
@@ -254,7 +260,7 @@ pub struct Reservation {
     /// What the run may spend, in micro-dollars: its `--max-budget-usd`.
     pub budget: i64,
     jobs: std::path::PathBuf,
-    turn: u64,
+    target: ReservationTarget,
 }
 
 /// Admit a run now, at no more than `cap` when it has one, and record it in
@@ -295,7 +301,43 @@ pub fn reserve(
     Ok(Reservation {
         budget,
         jobs: jobs.to_owned(),
-        turn,
+        target: ReservationTarget::EngineRuns { turn },
+    })
+}
+
+/// Admit a host `proj` job turn run under `.credit.lock` and append its
+/// budgeted `burrow.run` marker directly to `stream_path` (`N.jsonl`), avoiding
+/// duplicate accounting in `.engine-runs`.
+pub fn reserve_in_stream(
+    credit_file: Option<&Path>,
+    jobs: &Path,
+    stream_path: &Path,
+    now: i64,
+    cap: Option<i64>,
+    model: Option<&str>,
+) -> Result<Reservation, Refused> {
+    let admitted = admit(credit_file, jobs, now)?;
+    let budget = cap.map_or(admitted.budget, |cap| admitted.budget.min(cap));
+    let fail = |e: io::Error| Refused::new(format!("its run can't be recorded: {e}"));
+    let mut stream = state_reads::append(stream_path).map_err(fail)?;
+    let from = stream.metadata().map_err(fail)?.len();
+    let recorded = writeln!(
+        stream,
+        "{}",
+        burrow_probe::credit::marker_with_model(now, ENGINE, Some(budget), model)
+    );
+    if let Err(e) = recorded {
+        let _ = stream.set_len(from);
+        return Err(fail(e));
+    }
+    drop(admitted);
+    Ok(Reservation {
+        budget,
+        jobs: jobs.to_owned(),
+        target: ReservationTarget::JobStream {
+            path: stream_path.to_owned(),
+            from,
+        },
     })
 }
 
@@ -318,17 +360,31 @@ impl Reservation {
     /// lock, so no admission reads the turn half gone.
     pub fn abandon(self) -> Result<(), Refused> {
         let _lock = lock(&self.jobs)?;
-        self.runs()
-            .and_then(|runs| remove_turn(&runs, self.turn))
-            .map_err(|e| Refused::new(format!("its run's reservation can't be taken back: {e}")))
+        match self.target {
+            ReservationTarget::EngineRuns { turn } => self
+                .runs()
+                .and_then(|runs| remove_turn(&runs, turn))
+                .map_err(|e| {
+                    Refused::new(format!("its run's reservation can't be taken back: {e}"))
+                }),
+            ReservationTarget::JobStream { ref path, from } => state_reads::append(path)
+                .and_then(|file| file.set_len(from))
+                .map_err(|e| {
+                    Refused::new(format!("its run's reservation can't be taken back: {e}"))
+                }),
+        }
     }
 
     /// Record what the run's stream (`stdout`, all of it that was read) says
     /// of its session and cost: its `init` and `result` records, each whole
     /// line that parses. A run with no result stays held at its budget, as
     /// one stopped before its result is, until a later run of its session
-    /// accounts for it.
+    /// accounts for it. For a `JobStream` reservation, the host runner writes
+    /// the streamed records directly to `N.jsonl`, so nothing is duplicated.
     pub fn finish(self, stdout: &[u8]) -> io::Result<()> {
+        let ReservationTarget::EngineRuns { turn } = self.target else {
+            return Ok(());
+        };
         let mut lines = String::new();
         for line in stdout.split(|b| *b == b'\n') {
             let Ok(v) = serde_json::from_slice::<Value>(line) else {
@@ -344,7 +400,7 @@ impl Reservation {
             return Ok(());
         }
         self.runs()?
-            .append_file(&format!("{}.jsonl", self.turn))?
+            .append_file(&format!("{turn}.jsonl"))?
             .write_all(lines.as_bytes())
     }
 }

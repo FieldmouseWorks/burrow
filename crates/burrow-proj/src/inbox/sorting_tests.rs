@@ -13,7 +13,6 @@ use super::triage::{Verdict, verdict, why};
 use super::{Pass, raw};
 use crate::config::tests::example;
 use crate::config::{Config, Triage};
-use crate::engine::Engine;
 
 /// A machine in a temp dir: gh logs each call's arguments to `log` and what
 /// it posts to `posted`, runs `hook` with them first when there is one,
@@ -125,7 +124,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.j
             owner: Some("sam".into()),
             skip: vec!["probe".into()],
             at_once: 2,
-            drain: Some(Engine::Claude),
+            drain: Some("claude".into()),
             drain_jobs: 1,
         });
         fs::create_dir_all(&inbox.state).unwrap();
@@ -567,8 +566,8 @@ fn triage_settings_read() {
     let cfg: Config = serde_json::from_value(cfg).unwrap();
     let t = cfg.inbox.unwrap().triage.unwrap();
     assert_eq!(
-        (t.drain, t.at_once, t.owner),
-        (Some(Engine::Claude), 2, None)
+        (t.drain.as_deref(), t.at_once, t.owner),
+        (Some("claude"), 2, None)
     );
     let mut off = example();
     off["inbox"]["triage"] = Value::Null;

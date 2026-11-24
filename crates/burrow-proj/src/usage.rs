@@ -363,11 +363,7 @@ fn put(
             return Ok(owner.clone());
         }
     }
-    let normalized = if engine == DEFAULT_ENGINE {
-        burrow_engine_anthropic::claude::normalize_refusal(said)
-    } else {
-        said.to_owned()
-    };
+    let normalized = store::normalize_legacy_refusal(engine, said);
     let is_login = is_login || login::is(&normalized);
     let was = store
         .holds

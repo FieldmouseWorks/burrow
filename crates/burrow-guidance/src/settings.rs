@@ -88,12 +88,17 @@ fn values(s: &Setting) -> Regex {
     } else {
         format!(r"|\b(?:{})\b", words.join("|"))
     };
+    let engine = if has_engine(s.kind) {
+        r"|(?i)\bdefaults?\s+to\s+`?[a-z0-9][a-z0-9-]*`?"
+    } else {
+        ""
+    };
     let collection = s
         .default_value()
         .filter(|value| value.is_array() || value.is_object())
         .map(|value| format!(r"|(?:^|[^\]]){}", collection(&value)))
         .unwrap_or_default();
-    Regex::new(&format!("{VALUE}{own}{collection}")).expect("values are a regex")
+    Regex::new(&format!("{VALUE}{own}{engine}{collection}")).expect("values are a regex")
 }
 
 /// A JSON collection as Markdown may spell it: any whitespace between its
@@ -150,6 +155,14 @@ fn words(kind: &Kind) -> &'static [&'static str] {
         Kind::OneOf(words) => words,
         Kind::Maybe(kind) | Kind::List(kind) => words(kind),
         _ => &[],
+    }
+}
+
+fn has_engine(kind: &Kind) -> bool {
+    match kind {
+        Kind::Engine => true,
+        Kind::Maybe(kind) | Kind::List(kind) => has_engine(kind),
+        _ => false,
     }
 }
 

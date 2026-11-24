@@ -1,10 +1,10 @@
 // The machine's state from a run Claude Code couldn't authenticate, as on
 // 2026-11-16: held like a spent plan, and the owner told to log in.
 
+use super::LOGGED_OUT;
 use crate::usage::login::{holds_machine, moved_to, resumed};
 use crate::usage::tests::{rig, told};
 use crate::usage::*;
-use burrow_engine_anthropic::claude::LOGGED_OUT;
 
 const LIMIT: &str = "You've hit your monthly spend limit";
 
@@ -70,11 +70,7 @@ fn the_refused_turn_is_told_its_login_was_gone() {
 #[test]
 fn the_moved_turn_is_told_where_it_went() {
     let (_d, cfg) = rig();
-    let said = moved_to(
-        crate::engine::Engine::ClaudeApi.name(),
-        true,
-        "Claude reached its weekly allowance",
-    );
+    let said = moved_to("claude-api", true, "Claude reached its weekly allowance");
     let told = resumed(&cfg, &said);
     assert!(
         told.starts_with("Your last run was refused before it finished (Claude reached its weekly allowance), so this turn carries on on claude-api, "),
@@ -87,7 +83,7 @@ fn the_moved_turn_is_told_where_it_went() {
     let back = resumed(
         &cfg,
         &moved_to(
-            crate::engine::Engine::Claude.name(),
+            "claude",
             true,
             "claude-api refused: its credit has no room: today's allowance spent",
         ),
@@ -225,7 +221,7 @@ fn a_sandboxs_answer_ends_a_limit_but_no_login_hold_here() {
 /// identity says it is; the owner's pause holds it like any other.
 #[test]
 fn no_plan_hold_holds_an_api_run() {
-    use crate::engine::{Choice, Engine};
+    use crate::engine::Choice;
     use crate::usage::login::{Run, out_for, run_of};
     let (_d, cfg) = rig();
     let t = now();
@@ -248,7 +244,7 @@ fn no_plan_hold_holds_an_api_run() {
     job.set_turns(1).unwrap();
     assert_eq!(run_of(&cfg, "api-1"), Run::plan(false));
     let choice = Choice {
-        engine: Engine::ClaudeApi,
+        engine: "claude-api".into(),
         ..Choice::default()
     };
     crate::retry::Identity::capture_choice(&job, "1", &choice).unwrap();

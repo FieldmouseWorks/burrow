@@ -12,7 +12,6 @@
 
 use std::path::PathBuf;
 
-use crate::engine::Engine;
 use crate::job::{Job, valid_turn};
 
 /// A file of the job's own that holds data, not where it stands.
@@ -59,10 +58,8 @@ pub enum JobFile {
     QuestionAnsweredThrough,
     /// Its role.
     Role,
-    /// Claude's session, which the next turn resumes.
+    /// The job's active session, which the next turn resumes.
     Session,
-    /// Each engine's own session.
-    SessionOf(Engine),
     /// The engine its session is.
     SessionEngine,
     /// When it began waiting, for its place in line.
@@ -105,7 +102,6 @@ impl JobFile {
             JobFile::QuestionAnsweredThrough => "question-answered-through",
             JobFile::Role => "role",
             JobFile::Session => "session",
-            JobFile::SessionOf(engine) => return format!("session.{}", engine.name()),
             JobFile::SessionEngine => "session.engine",
             JobFile::Since => "since",
             JobFile::TaskSource => "task-source",
@@ -295,6 +291,11 @@ impl Job<'_> {
     /// The job's data file `f`.
     pub fn file(&self, f: JobFile) -> PathBuf {
         self.dir.join(f.name())
+    }
+
+    /// Conversation session file for `engine` (`session.<conversation>`).
+    pub fn session_file(&self, conversation: &str) -> PathBuf {
+        self.dir.join(format!("session.{conversation}"))
     }
 
     /// Turn N's data file `f`: N.jsonl, N.result...

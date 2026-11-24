@@ -12,9 +12,23 @@ use std::collections::BTreeMap;
 mod store;
 pub use store::{Migration, View, legacy_file};
 
-/// The engines a role can run on: Claude Code on the subscription's login,
-/// and the same CLI on the API credit ([`crate::credit::ENGINE`]).
-pub const ENGINES: &[&str] = &["claude", crate::credit::ENGINE];
+/// Retired engines whose legacy records are never routed or re-offered.
+const RETIRED_ENGINES: &[&str] = &["codex"];
+
+/// Whether `name` has valid engine-plugin syntax (`^[a-z0-9][a-z0-9-]*$`).
+pub fn valid_engine_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Whether `name` is a retired engine that may never be routed or offered.
+pub fn retired_engine(name: &str) -> bool {
+    RETIRED_ENGINES.contains(&name)
+}
 
 /// Where a role's turns go: its engine, then, in order, the engines it
 /// moves on to when the one before is short (`ENGINE over PCT ENGINE ...`).
@@ -130,8 +144,26 @@ fn word(s: &str) -> bool {
     !s.is_empty() && !s.contains(char::is_whitespace) && !s.contains('@')
 }
 
-fn engine(name: &str) -> Result<(), String> {
-    if ENGINES.contains(&name) {
+fn engine_syntax(name: &str) -> Result<(), String> {
+    if valid_engine_name(name) && !retired_engine(name) {
+        Ok(())
+    } else {
+        Err(format!("unknown engine {name}"))
+    }
+}
+
+fn known_engine(name: &str, offers: &BTreeMap<String, Offer>) -> Result<(), String> {
+    engine_syntax(name)?;
+    if offers.contains_key(name) {
+        Ok(())
+    } else {
+        Err(format!("unknown engine {name}"))
+    }
+}
+
+fn offerable_engine(name: &str, configured: &[String]) -> Result<(), String> {
+    engine_syntax(name)?;
+    if configured.is_empty() || configured.iter().any(|e| e == name) {
         Ok(())
     } else {
         Err(format!("unknown engine {name}"))
@@ -217,14 +249,34 @@ pub fn default_offers() -> BTreeMap<String, Offer> {
     declared("proj.engineOffers")
 }
 
+/// Default offers seeded with any additional configured engine plugins.
+pub fn default_offers_for(configured: &[String]) -> BTreeMap<String, Offer> {
+    let mut offers = default_offers();
+    for name in configured {
+        if valid_engine_name(name) && !retired_engine(name) {
+            offers.entry(name.clone()).or_default();
+        }
+    }
+    offers
+}
+
 impl Roles {
     /// These values over the schema's defaults, each checked against the
     /// offers.
     pub fn in_force(&self, offers: &BTreeMap<String, Offer>) -> Result<InForce, String> {
-        let mut offered = default_offers();
+        self.in_force_for(offers, &[])
+    }
+
+    /// [`Self::in_force`], seeded with the machine's configured engine plugins.
+    pub fn in_force_for(
+        &self,
+        offers: &BTreeMap<String, Offer>,
+        configured: &[String],
+    ) -> Result<InForce, String> {
+        let mut offered = default_offers_for(configured);
         offered.extend(offers.clone());
         for (name, offer) in &offered {
-            engine(name)?;
+            engine_syntax(name)?;
             for word in offer.models.iter().chain(&offer.efforts) {
                 if !plain(word) {
                     return Err(format!("{name}: offers {word:?}, not a plain word"));
@@ -235,6 +287,11 @@ impl Roles {
         let mut roles = default_routes();
         roles.extend(self.roles.clone());
         let mut models = default_models();
+        for name in configured {
+            if valid_engine_name(name) && !retired_engine(name) {
+                models.entry(format!("* {name}")).or_default();
+            }
+        }
         models.extend(self.models.clone());
         Ok(InForce {
             roles,
@@ -248,14 +305,16 @@ impl Roles {
     pub fn check(&self, offers: &BTreeMap<String, Offer>) -> Result<(), String> {
         for (key, route) in &self.roles {
             canonical(key)?;
-            route.check().map_err(|e| format!("role {key}: {e}"))?;
+            route
+                .check_against(offers)
+                .map_err(|e| format!("role {key}: {e}"))?;
         }
         for (key, tuning) in &self.models {
             let Some((role, on)) = key.split_once(' ') else {
                 return Err(format!("model {key}: expected ROLE ENGINE"));
             };
             canonical(role)?;
-            engine(on).map_err(|e| format!("model {key}: {e}"))?;
+            known_engine(on, offers).map_err(|e| format!("model {key}: {e}"))?;
             let offer = offers.get(on).cloned().unwrap_or_default();
             if let Some(model) = &tuning.model
                 && !offer.models.contains(model)
@@ -327,11 +386,11 @@ impl Route {
         std::iter::once(self.engine.as_str()).chain(self.over.iter().map(|h| h.engine.as_str()))
     }
 
-    /// Every engine known and named once, every percent from 0 to 100.
+    /// Every engine valid and named once, every percent from 0 to 100.
     fn check(&self) -> Result<(), String> {
         let mut seen = Vec::new();
         for name in self.engines() {
-            engine(name)?;
+            engine_syntax(name)?;
             if seen.contains(&name) {
                 return Err(format!("{name} is on the route twice"));
             }
@@ -342,6 +401,16 @@ impl Route {
                 "over {} {}: PCT must be a number from 0 to 100",
                 hop.pct, hop.engine
             ));
+        }
+        Ok(())
+    }
+
+    /// [`Self::check`], also verifying every engine on the route is configured
+    /// or offered on this machine.
+    fn check_against(&self, offers: &BTreeMap<String, Offer>) -> Result<(), String> {
+        self.check()?;
+        for name in self.engines() {
+            known_engine(name, offers)?;
         }
         Ok(())
     }
@@ -362,11 +431,12 @@ pub(crate) fn apply(
     roles: &mut Roles,
     offers: &mut BTreeMap<String, Offer>,
     setups: &mut Setups,
+    configured_engines: &[String],
     args: &[&str],
 ) -> Result<String, String> {
     let before = active(roles, setups);
     let offered = |offers: &BTreeMap<String, Offer>| {
-        let mut all = default_offers();
+        let mut all = default_offers_for(configured_engines);
         all.extend(offers.clone());
         all
     };
@@ -375,18 +445,19 @@ pub(crate) fn apply(
             roles.roles.remove(&Key::parse(key)?.canonical());
         }
         ["role", key, words @ ..] => {
-            roles
-                .roles
-                .insert(Key::parse(key)?.canonical(), route(words)?);
+            let parsed = route(words)?;
+            parsed.check_against(&offered(offers))?;
+            roles.roles.insert(Key::parse(key)?.canonical(), parsed);
         }
         ["model", key, on, "unset"] => {
-            engine(on)?;
+            known_engine(on, &offered(offers))?;
             roles
                 .models
                 .remove(&format!("{} {on}", Key::parse(key)?.canonical()));
         }
         ["model", key, on, model, effort @ ..] => {
-            engine(on)?;
+            let all_offers = offered(offers);
+            known_engine(on, &all_offers)?;
             let effort = match effort {
                 [] | ["-"] => None,
                 [e] => Some((*e).to_owned()),
@@ -399,11 +470,11 @@ pub(crate) fn apply(
             let key = format!("{} {on}", Key::parse(key)?.canonical());
             let mut next = roles.clone();
             next.models.insert(key, tuning);
-            next.check(&offered(offers))?;
+            next.check(&all_offers)?;
             *roles = next;
         }
         ["offer", on, what @ ("models" | "efforts"), words @ ..] => {
-            engine(on)?;
+            offerable_engine(on, configured_engines)?;
             if let Some(w) = words.iter().find(|w| !plain(w)) {
                 return Err(format!("{w:?} is not a plain word"));
             }

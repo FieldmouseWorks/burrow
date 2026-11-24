@@ -671,3 +671,57 @@ fn imports_collapse_identical_receipt_aliases_and_refuse_conflicting_answers() {
         }
     }
 }
+
+#[test]
+fn configured_and_offered_plugin_engines_route_without_a_closed_allowlist() {
+    let (_d, cfg) = rig();
+    // Offering a new engine plugin makes it routable, tunable, and savable.
+    set(&cfg, "offer antigravity models ag-fast ag-deep").unwrap();
+    set(&cfg, "offer antigravity efforts low high").unwrap();
+    set(&cfg, "offer third-plugin models third-m").unwrap();
+    set(&cfg, "offer third-plugin efforts medium").unwrap();
+    set(
+        &cfg,
+        "role * claude over 80 antigravity over 90 third-plugin",
+    )
+    .unwrap();
+    set(&cfg, "model fix antigravity ag-deep high").unwrap();
+    set(&cfg, "model triage third-plugin third-m medium").unwrap();
+    set(&cfg, "engines save multi").unwrap();
+    set(&cfg, "role * claude").unwrap();
+    set(&cfg, "engines use multi").unwrap();
+    let force = cfg.roles().unwrap();
+    assert_eq!(
+        force.route("fix", None).engines().collect::<Vec<_>>(),
+        ["claude", "antigravity", "third-plugin"]
+    );
+    assert_eq!(
+        force.tuning("fix", None, "antigravity"),
+        Tuning {
+            model: Some("ag-deep".into()),
+            effort: Some("high".into()),
+        }
+    );
+    assert_eq!(
+        force.tuning("triage", None, "third-plugin"),
+        Tuning {
+            model: Some("third-m".into()),
+            effort: Some("medium".into()),
+        }
+    );
+    // Unconfigured/unoffered engines and retired codex are still refused.
+    for bad in [
+        "role fix gemini",
+        "role fix codex",
+        "offer codex models m",
+        "offer BadName models m",
+    ] {
+        assert!(set(&cfg, bad).is_err(), "{bad}");
+    }
+    // No closed ENGINES allowlist remains in roles.rs.
+    let roles_src = fs::read_to_string(burrow_test::manifest_dir!().join("src/roles.rs")).unwrap();
+    assert!(
+        !roles_src.contains("pub const ENGINES"),
+        "closed ENGINES allowlist must be deleted"
+    );
+}

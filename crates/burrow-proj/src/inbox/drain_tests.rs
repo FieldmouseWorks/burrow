@@ -8,7 +8,6 @@ use std::fs;
 use serde_json::{Value, json};
 
 use super::sorting_tests::{Box, issue, on_github};
-use crate::engine::Engine;
 
 fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value {
     let mut i = issue(n, opener, labels);
@@ -80,7 +79,7 @@ fn the_drain_picks() {
 fn room_for_the_drain() {
     let b = Box::new();
     let cfg = &b.cfg;
-    assert!(crate::slot::room(cfg, Engine::Claude, false));
+    assert!(crate::slot::room(cfg, "claude", false));
     let slots = cfg.jobs.join(".slots");
     let held: Vec<fs::File> = (1..cfg.max_jobs)
         .map(|i| {
@@ -90,9 +89,9 @@ fn room_for_the_drain() {
         })
         .collect();
     // One free, and it's the pipeline's.
-    assert!(!crate::slot::room(cfg, Engine::Claude, false));
+    assert!(!crate::slot::room(cfg, "claude", false));
     drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Claude, false)));
+    assert!(soon(|| crate::slot::room(cfg, "claude", false)));
 }
 
 /// Whether `f` holds within a second. A slot's lock dropped here can still
@@ -185,7 +184,7 @@ fn the_drain_comes_back() {
     fs::remove_file(b.path("fail")).unwrap();
 
     on_github(&b, &four);
-    let held = hold_engine(&b, Engine::Claude);
+    let held = hold_engine(&b, "claude");
     b.pass().drain().unwrap();
     let waiting = super::record::files::drain_waiting(&state(&b));
     assert_eq!(fs::read_to_string(&waiting).unwrap(), "sam/game\n");
@@ -395,10 +394,8 @@ fn running_handed_references_are_not_drained() {
     assert!(b.log().contains("issues/7/labels -f labels[]=claude"));
 }
 
-fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
-    let (dir, count) = match engine {
-        Engine::Claude | Engine::ClaudeApi => (".slots", b.cfg.max_jobs),
-    };
+fn hold_engine(b: &Box, _engine: &str) -> Vec<fs::File> {
+    let (dir, count) = (".slots", b.cfg.max_jobs);
     let dir = b.cfg.jobs.join(dir);
     fs::create_dir_all(&dir).unwrap();
     (1..=count)
@@ -440,7 +437,7 @@ fn drain_admission_follows_room_on_the_candidates_engine() {
                 .note_ready("sam/game", std::slice::from_ref(&i))
                 .unwrap();
             on_github(&b, &i);
-            let _held = full.then(|| hold_engine(&b, Engine::Claude));
+            let _held = full.then(|| hold_engine(&b, "claude"));
             b.pass().drain().unwrap();
             let admitted = b.log().contains("issues/4/labels -f labels[]=claude");
             assert_eq!(
@@ -569,7 +566,7 @@ fn a_spent_api_credit_books_the_drain_for_when_it_opens() {
         if pause {
             crate::usage::hold(&b.cfg, paused, "save usage").unwrap();
         }
-        let _held = run.is_none().then(|| hold_engine(&b, Engine::ClaudeApi));
+        let _held = run.is_none().then(|| hold_engine(&b, "claude-api"));
         let i = found(
             "sam/game",
             4,
@@ -994,8 +991,8 @@ fn a_plan_held_retry_leaves_the_api_credits_room() {
             .to_string(),
     )
     .unwrap();
-    assert!(crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
-    assert!(!crate::slot::seen_room(cfg, Engine::Claude, false));
+    assert!(crate::slot::seen_room(cfg, "claude-api", false));
+    assert!(!crate::slot::seen_room(cfg, "claude", false));
     fs::remove_file(&usage).unwrap();
-    assert!(!crate::slot::seen_room(cfg, Engine::ClaudeApi, false));
+    assert!(!crate::slot::seen_room(cfg, "claude-api", false));
 }
