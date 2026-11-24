@@ -114,7 +114,9 @@ In your machine flake (for example `remi`):
    secret file's presence so secretless builds stay green.
 3. Set `burrow.engines.<name>` (`enable`, `package`, `credentialFile`,
    `hosts`) without hard-coding model names in tracked files.
-4. Configure per-engine model/effort offers and per-role routing live through
+4. Once `proj settings` accepts the new engine name (see the current routing
+   support status in [README.md](../README.md#how-it-fits-together)), configure
+   per-engine model/effort offers and per-role routing live through
    `proj settings` and save a named setup (`proj engines save NAME`,
    `proj engines use NAME`; see [docs/settings.md](settings.md) and
    [docs/settings-reference.md](settings-reference.md)).
@@ -146,8 +148,8 @@ nix build --no-link .#checks.x86_64-linux.guidance
 - **No provider logic in core crates.** Keep provider-specific flags, stream
   parsing, and refusal heuristics inside `crates/burrow-engine-<name>`, never
   in `burrow-proj`, `burrow-settings`, or Conary.
-- **Role coverage status.** Project jobs, sandboxes, and live per-role routing
-  already target modular plugins (`#745` replaces the last built-in `proj`
-  enum); moving `burrow-judge`, live plugin installation (`#668`), and PR
-  review (currently Codex) onto the same swappable plugin contract is in
+- **Current rollout status.** See
+  [README.md](../README.md#how-it-fits-together) for which engines `proj`
+  routes today; moving `burrow-judge`, live plugin installation (`#668`), and
+  PR review (currently Codex) onto the same swappable plugin contract is in
   progress.
