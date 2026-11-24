@@ -107,7 +107,14 @@ fn allowed(kind: &Kind) -> String {
         Kind::Date => "`YYYY-MM-DD`".into(),
         Kind::Text | Kind::Object => "any".into(),
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
-        Kind::Engine => "`[a-z0-9][a-z0-9-]*` (configured engine plugin)".into(),
+        Kind::Engine => format!(
+            "`[a-z0-9][a-z0-9-]*` (configured engine plugin), never {}",
+            crate::roles::RETIRED_ENGINES
+                .iter()
+                .map(|w| code(w))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Kind::Repo => "`OWNER/NAME`".into(),
         Kind::Maybe(kind) => format!("{}, or `null`", allowed(kind)),
         Kind::Omitted(kind) => format!("{}, or left out", allowed(kind)),

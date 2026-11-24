@@ -13,7 +13,7 @@ mod store;
 pub use store::{Migration, View, legacy_file};
 
 /// Retired engines whose legacy records are never routed or re-offered.
-const RETIRED_ENGINES: &[&str] = &["codex"];
+pub const RETIRED_ENGINES: &[&str] = &["codex"];
 
 /// Whether `name` has valid engine-plugin syntax (`^[a-z0-9][a-z0-9-]*$`).
 pub fn valid_engine_name(name: &str) -> bool {

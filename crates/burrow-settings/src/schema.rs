@@ -596,7 +596,12 @@ impl Kind {
             Kind::Usd => json!({"type": "number", "minimum": 0}),
             Kind::Date => json!({"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}),
             Kind::OneOf(words) => json!({"enum": words}),
-            Kind::Engine => json!({"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"}),
+            // As `check` takes it: the syntax, never a retired engine.
+            Kind::Engine => json!({
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "not": {"enum": crate::roles::RETIRED_ENGINES},
+            }),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
             Kind::Omitted(kind) => kind.schema(),
@@ -760,6 +765,23 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{}: default: {e}", s.name));
             }
         }
+    }
+
+    /// The exported schema refuses what `check` refuses of an engine name:
+    /// a retired engine as well as bad syntax.
+    #[test]
+    fn the_engine_schema_excludes_what_check_refuses() {
+        let schema = Kind::Engine.schema();
+        for retired in crate::roles::RETIRED_ENGINES {
+            assert!(Kind::Engine.check(&json!(retired)).is_err());
+            assert!(
+                schema["not"]["enum"]
+                    .as_array()
+                    .is_some_and(|e| e.contains(&json!(retired))),
+                "{schema}"
+            );
+        }
+        assert!(Kind::Engine.check(&json!("claude")).is_ok());
     }
 
     #[test]

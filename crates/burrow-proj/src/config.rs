@@ -405,14 +405,25 @@ impl Config {
             burrow_process::executable(path)
                 .map_err(|e| format!("plugins.{engine} {}: {e}", path.display()))?;
         }
+        // An inbox label or the drain pins its jobs to an engine: one with no
+        // plugin here would enroll issues whose every turn fails to start.
+        let plugged = |what: String, engine: &str| -> Result<(), String> {
+            crate::engine::parse_engine(engine).map_err(|e| format!("{what}: {e}"))?;
+            if self.plugins.contains_key(engine) {
+                return Ok(());
+            }
+            let configured: Vec<&str> = self.plugins.keys().map(String::as_str).collect();
+            Err(format!(
+                "{what}: no engine plugin is configured for {engine} (plugins has {})",
+                configured.join(", ")
+            ))
+        };
         if let Some(inbox) = &self.inbox {
             for (label, engine) in &inbox.labels {
-                crate::engine::parse_engine(engine)
-                    .map_err(|e| format!("inbox.labels.{label}: {e}"))?;
+                plugged(format!("inbox.labels.{label}"), engine)?;
             }
             if let Some(drain) = inbox.triage.as_ref().and_then(|t| t.drain.as_deref()) {
-                crate::engine::parse_engine(drain)
-                    .map_err(|e| format!("inbox.triage.drain: {e}"))?;
+                plugged("inbox.triage.drain".into(), drain)?;
             }
         }
         self.role_view().map(|_| ())
@@ -474,6 +485,7 @@ pub(crate) mod tests {
             "apps": {"workers": "/run/workers.env"},
             "machinery": "workers",
             "notify": "/bin/notify",
+            "plugins": {"claude": "/bin/sh"},
             "meters": null,
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude"}, "unstickLabel": "stuck",
                       "authors": [burrow_github::fake::author("sam")], "vm": false, "host": "box",
@@ -579,6 +591,38 @@ pub(crate) mod tests {
             cfg.check_config()
                 .unwrap_err()
                 .contains("not an executable file")
+        );
+    }
+
+    /// An inbox label or the drain pinning an engine with no plugin here
+    /// fails check-config, rather than enrolling issues that never start.
+    #[test]
+    fn check_config_requires_a_plugin_for_each_inbox_engine() {
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.check_config().unwrap();
+        let inbox = cfg.inbox.as_mut().unwrap();
+        inbox.labels.insert("gem".into(), "unplugged".into());
+        let err = cfg.check_config().unwrap_err();
+        assert!(
+            err.contains("inbox.labels.gem: no engine plugin is configured for unplugged"),
+            "{err}"
+        );
+        let inbox = cfg.inbox.as_mut().unwrap();
+        inbox.labels.remove("gem");
+        let triage = |drain: &str| {
+            serde_json::from_value(json!({
+                "ownerLabel": "needs-owner", "owner": null, "skip": [],
+                "atOnce": 1, "drain": drain, "drainJobs": 1,
+            }))
+            .unwrap()
+        };
+        inbox.triage = Some(triage("claude"));
+        cfg.check_config().unwrap();
+        cfg.inbox.as_mut().unwrap().triage = Some(triage("unplugged"));
+        let err = cfg.check_config().unwrap_err();
+        assert!(
+            err.contains("inbox.triage.drain: no engine plugin"),
+            "{err}"
         );
     }
 
