@@ -30,7 +30,12 @@
 # producer's key, the seal key, the look's login and the producer's line in
 # the machine's producers file. Part of burrow.autoland, which imports it.
 inputs:
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.burrow.autoland.plugins.judge;
   autoland = config.burrow.autoland;
@@ -47,13 +52,93 @@ let
   socket = if flow.producers == null then null else "${flow.producers}/judge/producer.sock";
   # What prints a repo's token (its last argument) for Conary's reads, as
   # the producer's App.
-  producerToken = if app == null then null else pkgs.writeShellScript "burrow-judge-token" ''
-    GH_TOKEN_SOCKET=${lib.escapeShellArg app.socket} exec ${config.burrow.tools.gh-token}/bin/gh-token get "$1"
-  '';
+  producerToken =
+    if app == null then
+      null
+    else
+      pkgs.writeShellScript "burrow-judge-token" ''
+        GH_TOKEN_SOCKET=${lib.escapeShellArg app.socket} exec ${config.burrow.tools.gh-token}/bin/gh-token get "$1"
+      '';
   configFile = pkgs.writeText "burrow-judge.json" (builtins.toJSON cfg.config);
   # Where the plugin reads its config: not the store path itself, since the
   # config names the flow's configs (`flow`), and those name the plugin.
   etcConfig = "burrow/autoland-judge-plugin.json";
+
+  claudeJudgePlugin = import ../engines/anthropic/plugin.nix {
+    inherit (inputs) self;
+    inherit pkgs lib;
+    mode = "claude";
+    judgeMode = true;
+    program = lib.getExe' config.burrow.claude.package "claude";
+  };
+
+  agCfg = config.burrow.engines.antigravity or { enable = false; };
+  agBinary =
+    if (agCfg.binary or null) != null then
+      agCfg.binary
+    else if (agCfg.package or null) != null then
+      lib.getExe agCfg.package
+    else
+      null;
+  agJudgeConfig = pkgs.writeText "burrow-engine-antigravity-judge.json" (
+    builtins.toJSON {
+      binary = agBinary;
+      models = [ ];
+      credential_env = agCfg.credentialEnv or "BURROW_ANTIGRAVITY_CREDENTIAL";
+      target_credential_env = agCfg.targetCredentialEnv or null;
+      credential_mode = agCfg.credentialMode or "home-file";
+      credential_home_path =
+        agCfg.credentialHomePath or ".gemini/antigravity-cli/antigravity-oauth-token";
+      settings_file = agCfg.settingsFile or null;
+      mode = "plan";
+      dangerously_skip_permissions = false;
+      sandbox = true;
+      disable_slash_commands = true;
+      output_format = "json";
+      deadline_secs = cfg.timeoutMinutes * 60;
+      network = true;
+    }
+  );
+  agPluginBin = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engine-antigravity;
+  agJudgePlugin =
+    pkgs.runCommand "burrow-engine-antigravity-judge"
+      {
+        nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+        meta.mainProgram = "burrow-engine-antigravity-judge";
+      }
+      ''
+        makeBinaryWrapper ${lib.getExe' agPluginBin "burrow-engine-antigravity"} \
+          $out/bin/burrow-engine-antigravity-judge \
+          --set BURROW_ANTIGRAVITY_CONFIG ${agJudgeConfig}
+      '';
+
+  wiredEngines =
+    lib.optionalAttrs (cfg.claudeTokenFile != null) {
+      claude = {
+        plugin = claudeJudgePlugin;
+        credentialFile = cfg.claudeTokenFile;
+        credentialEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+        hosts = cfg.hosts;
+      };
+    }
+    //
+      lib.optionalAttrs
+        ((agCfg.enable or false) && (agCfg.credentialFile or null) != null && agBinary != null)
+        {
+          antigravity = {
+            plugin = agJudgePlugin;
+            credentialFile = agCfg.credentialFile;
+            credentialEnv = agCfg.credentialEnv;
+            hosts = agCfg.hosts;
+          };
+        };
+  allEngines = wiredEngines // cfg.engines;
+  renderedEngines = lib.mapAttrs (name: eng: {
+    plugin = lib.getExe eng.plugin;
+    credential = "judge-login-${name}";
+    credential_env = eng.credentialEnv;
+    hosts = eng.hosts;
+  }) allEngines;
 in
 {
   options.burrow.autoland.plugins.judge = {
@@ -122,7 +207,8 @@ in
     };
 
     claudeTokenFile = lib.mkOption {
-      type = lib.types.str;
+      type = lib.types.nullOr lib.types.str;
+      default = null;
       example = "/run/secrets/judge-claude-token";
       description = ''
         Claude's login for the looks: a token from `claude setup-token`,
@@ -137,9 +223,42 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ "api.anthropic.com" ];
       description = ''
-        The hosts a look's gate lets it reach, on 443, and nothing else: the
-        engine's API.
+        The hosts a Claude look's gate lets it reach, on 443, and nothing else:
+        Anthropic's API. Other engines declare their own `hosts` under
+        `engines.<name>.hosts` (or `burrow.engines.antigravity.hosts`).
       '';
+    };
+
+    engines = lib.mkOption {
+      default = { };
+      description = ''
+        Additional or overridden modular Conary v5 engine surfaces for judge
+        looks. `claude` (when `claudeTokenFile` is set) and `antigravity`
+        (when `burrow.engines.antigravity.enable` and `credentialFile` are set)
+        are wired automatically.
+      '';
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            plugin = lib.mkOption {
+              type = lib.types.package;
+              description = "Conary v5 `job` plugin package configured for read-only judge looks.";
+            };
+            credentialFile = lib.mkOption {
+              type = lib.types.str;
+              description = "Root-readable isolated login credential file loaded into the look unit.";
+            };
+            credentialEnv = lib.mkOption {
+              type = lib.types.str;
+              description = "Environment variable name under which the plugin reads its login.";
+            };
+            hosts = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              description = "Egress host allowlist on port 443 (exact hosts or leading `*.` wildcards).";
+            };
+          };
+        }
+      );
     };
 
     timeoutMinutes = lib.mkOption {
@@ -170,7 +289,7 @@ in
       default = {
         inherit socket;
         inherit (flow) controller;
-        inherit (cfg) producer role hosts;
+        inherit (cfg) producer role;
         credential = "judge-key";
         seal = "judge-seal";
         flow = autoland.flowConfigs;
@@ -186,8 +305,7 @@ in
         unit = look;
         systemctl = "${config.systemd.package}/bin/systemctl";
         timeout = cfg.timeoutMinutes * 60;
-        claude = lib.getExe' config.burrow.claude.package "claude";
-        login = "claude-token";
+        engines = renderedEngines;
         inherit build;
         # The build unit's own /var/tmp (PrivateTmp, which DynamicUser
         # brings), gone when the unit is: a build's clone and its home.
@@ -216,6 +334,10 @@ in
       {
         assertion = app != null && lib.elem producer app.users;
         message = "burrow.autoland.plugins.judge: the producer acts on GitHub as an App, so it needs burrow.autoland.plugins.judge.app, one of burrow.github.apps, with ${producer} among its users.";
+      }
+      {
+        assertion = allEngines != { };
+        message = "burrow.autoland.plugins.judge: configure at least one judge engine (claudeTokenFile, burrow.engines.antigravity, or engines.<name>).";
       }
     ];
 
@@ -250,7 +372,10 @@ in
         User = producer;
         Group = producer;
         ExecStart = "${lib.getExe package} producer ${configFile}";
-        LoadCredential = [ "judge-key:${cfg.keyFile}" "judge-seal:${cfg.sealFile}" ];
+        LoadCredential = [
+          "judge-key:${cfg.keyFile}"
+          "judge-seal:${cfg.sealFile}"
+        ];
         UMask = "0027";
         # A restart drops its requests, whose plugins see their connections
         # close, and stops their looks; what a crash left is finished at
@@ -284,12 +409,17 @@ in
         # Nothing of burrow's state but its folder, nothing of the
         # projects', and none of the machine's settings for Claude (its
         # managed settings and CLAUDE.md, which are for authoring).
-        TemporaryFileSystem = [ "${stateDir}:ro" "/etc/claude-code:ro" ]
-          ++ [ "${config.burrow.projectsDir}:ro" ];
+        TemporaryFileSystem = [
+          "${stateDir}:ro"
+          "/etc/claude-code:ro"
+        ]
+        ++ [ "${config.burrow.projectsDir}:ro" ];
         BindPaths = [ "${state}/looks/%i" ];
         # No network of its own: its one way out is its folder's gate.
         PrivateNetwork = true;
-        LoadCredential = [ "claude-token:${cfg.claudeTokenFile}" ];
+        LoadCredential = lib.mapAttrsToList (
+          name: eng: "judge-login-${name}:${eng.credentialFile}"
+        ) allEngines;
         ExecStart = "${lib.getExe package} look ${configFile} %i";
         TimeoutStartSec = cfg.timeoutMinutes * 60;
         UMask = "0077";
@@ -306,7 +436,11 @@ in
       # Anything but 0 or 1 is no outcome: the unit fails, and goes.
       unitConfig.CollectMode = "inactive-or-failed";
       restartIfChanged = false;
-      path = [ pkgs.bash pkgs.coreutils config.programs.git.package ];
+      path = [
+        pkgs.bash
+        pkgs.coreutils
+        config.programs.git.package
+      ];
       environment = {
         # Its copy of its repo is the producer's, which git refuses to read
         # unless it's named safe.
@@ -331,7 +465,10 @@ in
         ProtectProc = "invisible";
         ProtectHome = true;
         SupplementaryGroups = [ producer ];
-        TemporaryFileSystem = [ "${stateDir}:ro" "${config.burrow.projectsDir}:ro" ];
+        TemporaryFileSystem = [
+          "${stateDir}:ro"
+          "${config.burrow.projectsDir}:ro"
+        ];
         BindPaths = [ "${state}/runs/%i" ];
         # No network, and no Nix daemon, whose fetches would be its way out:
         # nothing it runs gets past the look's gate.

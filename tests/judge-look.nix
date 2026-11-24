@@ -59,7 +59,11 @@ pkgs.testers.runNixOSTest {
   name = "judge-look";
 
   nodes.machine = { lib, ... }: {
-    imports = [ self.nixosModules.autoland self.nixosModules.ledger self.nixosModules.github ];
+    imports = [
+      self.nixosModules.autoland
+      self.nixosModules.ledger
+      self.nixosModules.github
+    ];
     burrow.ledger = {
       enable = true;
       package = cn;
@@ -72,7 +76,8 @@ pkgs.testers.runNixOSTest {
     # Its App, which nothing here asks: the crate's tests are GitHub's half.
     burrow.github = {
       apps.workers = {
-        id = 7; accountId = 8;
+        id = 7;
+        accountId = 8;
         slug = "acme-workers";
         keyFile = "/run/keys/workers.pem";
         api = "http://127.0.0.1:8080";
@@ -112,7 +117,7 @@ pkgs.testers.runNixOSTest {
 
     # A look's folder as the producer lays it out (look.rs, `lay`).
     def lay(id):
-        spec = {"prompt": "Judge it.", "model": "a-model", "effort": "high"}
+        spec = {"engine": "claude", "repo": "acme/widget", "prompt": "Judge it.", "model": "a-model", "effort": "high"}
         producer(" && ".join([
             f"mkdir -m 0750 {folder(id)} {folder(id)}/head {folder(id)}/base",
             f"printf %s {shlex.quote(json.dumps(spec))} >{folder(id)}/spec.json",
@@ -182,7 +187,7 @@ pkgs.testers.runNixOSTest {
         for never in ["WROTE", "SEES", "READ the producer", "REACHED"]:
             assert never not in out, out
         answer = json.loads(producer(f"cat {folder('a1')}/answer.json"))
-        assert answer == {"verdict": "pass", "why": "Read it.", "session": "look-session", "model": "a-model"}, answer
+        assert answer == {"engine": "claude", "verdict": "pass", "why": "Read it.", "session": "look-session", "model": "a-model"}, answer
 
     with subtest("burrow.user can't answer in the judge's place"):
         lay("b1")

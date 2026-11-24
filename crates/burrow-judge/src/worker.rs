@@ -1,46 +1,58 @@
 //! `burrow-judge look CONFIG ID`, a look's worker: the process its unit
 //! (`UNIT@ID.service`) starts, as the look's own user, which sees its
 //! folder of the producer's state and nothing else of it: not its keys,
-//! its records or its App. It runs the judging engine once, in a fresh
-//! session, on what the producer laid out ([`crate::look::lay`]), and
-//! leaves what it decided in the folder's answer ([`Looked`]); its exit is
-//! 0 once that's written, anything else when it isn't.
+//! its records or its App. It runs the selected modular Conary v5 engine
+//! plugin once, in a fresh session, on what the producer laid out
+//! ([`crate::look::lay`]), and leaves what it decided in the folder's answer
+//! ([`Looked`]); its exit is 0 once that's written, anything else when it
+//! isn't.
 //!
-//! The engine is Claude Code, as the machine has it, with nothing of the
-//! machine's or the PR's that could steer it: an empty home of its own
-//! (the unit hides the machine's managed settings), no MCP servers,
-//! `--restricted` (no settings files, no code-running tools, file tools
-//! held to its folders), the read-only tools alone, and run from an empty
-//! folder with the head and its base added, so no `CLAUDE.md` of the PR's
-//! is read as instructions. Its login is the unit's systemd credential,
-//! never the host's. Its one way out is the producer's gate
-//! ([`crate::egress`]), as its HTTPS proxy.
+//! No provider-specific CLI flags or environment variables live here: the
+//! worker speaks `conary-plugin/v5` (`Task::Job` with `Context::Fresh`) to the
+//! selected engine's configured plugin, passing an empty private `$HOME`, the
+//! look folder via `BURROW_JUDGE_DIR`, the strict verdict JSON schema via
+//! `BURROW_JUDGE_JSON_SCHEMA`, the engine's isolated login via its configured
+//! `credential_env`, and the egress bridge via `HTTPS_PROXY`.
+
+use crate::EngineConfig;
 use crate::egress;
 use crate::look::{ANSWER, GATE, Looked, SPEC, Spec};
-use conary_core::plugin::Judgment;
+use conary_core::plugin::{
+    Answer, CONTRACT, Capabilities, Choice, Context, Execution, Identity, Judgment, Model,
+    Negotiated, Offers, Request, Response, Sandbox, Task,
+};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The tools a look has: it reads, and changes nothing.
-pub const TOOLS: &str = "Read,Grep,Glob";
+/// Environment variable naming the read-only look folder for the engine plugin.
+pub const JUDGE_DIR_ENV: &str = "BURROW_JUDGE_DIR";
+
+/// Environment variable carrying the strict JSON schema for the verdict output.
+pub const JUDGE_SCHEMA_ENV: &str = "BURROW_JUDGE_JSON_SCHEMA";
+
+/// Reads a named systemd credential (only the selected engine's credential is
+/// loaded).
+pub type CredentialReader = Box<dyn Fn(&str) -> Result<Vec<u8>, String>>;
 
 /// What a look's worker needs.
 pub struct Worker {
-    /// Claude Code.
-    pub claude: PathBuf,
+    /// Configured modular engine surfaces, keyed by engine name.
+    pub engines: BTreeMap<String, EngineConfig>,
     /// The look's folder.
     pub dir: PathBuf,
     /// An empty folder of the look's own: its home, and where it runs.
     pub home: PathBuf,
-    /// Its login: a token from `claude setup-token`.
-    pub token: Vec<u8>,
+    /// Loads a named systemd credential (only the selected engine's credential
+    /// is read).
+    pub read_credential: CredentialReader,
 }
 
-/// The output schema a look answers to.
-fn schema() -> String {
+/// The strict JSON schema a look answers to.
+pub fn schema() -> String {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -51,46 +63,6 @@ fn schema() -> String {
         "additionalProperties": false,
     })
     .to_string()
-}
-
-/// Claude's arguments for `spec`, in `dir`.
-pub fn argv(spec: &Spec, dir: &Path) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "-p",
-        "--output-format",
-        "json",
-        "--restricted",
-        "--permission-mode",
-        "dontAsk",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
-        "--no-session-persistence",
-        "--tools",
-        TOOLS,
-        "--json-schema",
-    ]
-    .map(String::from)
-    .to_vec();
-    args.push(schema());
-    args.push("--add-dir".into());
-    args.push(dir.to_string_lossy().into_owned());
-    args.extend(["--model".into(), spec.model.clone()]);
-    if let Some(e) = &spec.effort {
-        args.extend(["--effort".into(), e.clone()]);
-    }
-    args
-}
-
-/// What Claude printed, the parts a look reads.
-#[derive(Deserialize)]
-struct Printed {
-    #[serde(default)]
-    is_error: bool,
-    subtype: Option<String>,
-    session_id: Option<String>,
-    structured_output: Option<Said>,
-    #[serde(rename = "modelUsage", default)]
-    model_usage: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -119,31 +91,95 @@ pub fn holds_login(why: &str, token: &str) -> Option<String> {
         .then(|| "the judge's look quoted its own login: it answers nothing".to_string())
 }
 
-/// What a look decided, from what Claude printed for `spec`: its verdict
-/// and reasons, by its session, on the model the look asked for, which
-/// must be the one Claude says it ran.
+/// Build the `conary-plugin/v5` fresh-session job request sent to the selected
+/// engine plugin.
+pub fn plugin_request(spec: &Spec, workdir: &Path) -> Request {
+    Request {
+        contract: CONTRACT.into(),
+        task: Task::Job {
+            repo: spec.repo.clone(),
+            workdir: workdir.to_string_lossy().into_owned(),
+            prompt: spec.prompt.clone(),
+            model: Some(spec.model.clone()),
+            effort: spec.effort.clone(),
+        },
+        execution: Some(Execution {
+            choice: Some(Choice {
+                engine: spec.engine.clone(),
+                model: Some(spec.model.clone()),
+                effort: spec.effort.clone(),
+            }),
+            context: Context::Fresh,
+        }),
+        negotiated: Some(Negotiated {
+            by: Identity {
+                engine: spec.engine.clone(),
+                session: None,
+            },
+            offers: Offers {
+                models: vec![Model {
+                    id: spec.model.clone(),
+                    efforts: spec.effort.iter().cloned().collect(),
+                    context_tokens: None,
+                    max_output_tokens: None,
+                }],
+                capabilities: Capabilities {
+                    sandbox: Sandbox::Brings,
+                    network: true,
+                    devices: vec![],
+                    mcp: false,
+                },
+                meters: vec![],
+            },
+        }),
+    }
+}
+
+/// Validate one `conary-plugin/v5` plugin stdout response against `spec`:
+/// engine identity, fresh-session provenance, requested model/effort, and
+/// strict structured `{verdict, why}` output.
 pub fn looked(printed: &[u8], spec: &Spec) -> Result<Looked, String> {
-    let p: Printed = serde_json::from_slice(printed)
-        .map_err(|e| format!("Claude printed no result that reads: {e}"))?;
-    if p.is_error || p.subtype.as_deref() != Some("success") {
+    let response: Response = serde_json::from_slice(printed)
+        .map_err(|e| format!("{} plugin printed no response that reads: {e}", spec.engine))?;
+    if response.by.engine != spec.engine {
         return Err(format!(
-            "Claude's run failed ({})",
-            p.subtype.as_deref().unwrap_or("no result")
+            "engine plugin answered as {:?}, not {:?}",
+            response.by.engine, spec.engine
         ));
     }
-    let said = p.structured_output.ok_or("Claude gave no verdict")?;
-    let session = p
-        .session_id
+    let session = response
+        .by
+        .session
         .filter(|s| !s.trim().is_empty())
-        .ok_or("Claude's run names no session")?;
-    if !p.model_usage.contains_key(&spec.model) {
+        .ok_or_else(|| format!("{} plugin run names no session", spec.engine))?;
+    let executed = response
+        .execution
+        .ok_or_else(|| format!("{} plugin returned no execution provenance", spec.engine))?;
+    if executed.context != Context::Fresh {
         return Err(format!(
-            "Claude ran {:?}, not {}",
-            p.model_usage.keys().collect::<Vec<_>>(),
-            spec.model
+            "{} plugin did not run a fresh session ({:?})",
+            spec.engine, executed.context
         ));
     }
+    if executed.model.as_deref() != Some(spec.model.as_str()) {
+        return Err(format!(
+            "{} plugin ran {:?}, not {}",
+            spec.engine, executed.model, spec.model
+        ));
+    }
+    if spec.effort.is_some() && executed.effort != spec.effort {
+        return Err(format!(
+            "{} plugin ran effort {:?}, not {:?}",
+            spec.engine, executed.effort, spec.effort
+        ));
+    }
+    let Answer::Job { summary, .. } = response.answer else {
+        return Err(format!("{} plugin returned a non-job answer", spec.engine));
+    };
+    let said: Said = serde_json::from_str(summary.trim())
+        .map_err(|e| format!("{} plugin gave no valid verdict JSON: {e}", spec.engine))?;
     let looked = Looked {
+        engine: spec.engine.clone(),
         verdict: said.verdict,
         why: said.why,
         session,
@@ -160,11 +196,18 @@ impl Worker {
         let path = self.dir.join(SPEC);
         let spec: Spec = serde_json::from_slice(&fs::read(&path).map_err(|e| at(e, &path))?)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let token = String::from_utf8(self.token.clone())
-            .map_err(|_| "its login isn't text".to_string())?;
+        let engine = self
+            .engines
+            .get(&spec.engine)
+            .ok_or_else(|| format!("no judge engine surface is configured for {}", spec.engine))?;
+        let token_bytes = (self.read_credential)(&engine.credential)?;
+        let token = String::from_utf8(token_bytes)
+            .map_err(|_| format!("{} login credential isn't UTF-8 text", spec.engine))?;
         let proxy = egress::bridge(&self.dir.join(GATE)).map_err(|e| format!("its bridge: {e}"))?;
-        let mut child = Command::new(&self.claude)
-            .args(argv(&spec, &self.dir))
+        let request_bytes = serde_json::to_vec(&plugin_request(&spec, &self.home))
+            .map_err(|e| format!("encode plugin request: {e}"))?;
+
+        let mut child = Command::new(&engine.plugin)
             .current_dir(&self.home)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -172,20 +215,32 @@ impl Worker {
             .env("TMPDIR", &self.home)
             .env("HTTPS_PROXY", &proxy)
             .env("https_proxy", &proxy)
-            .env("CLAUDE_CODE_OAUTH_TOKEN", token.trim())
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .env("DISABLE_AUTOUPDATER", "1")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .env(JUDGE_DIR_ENV, &self.dir)
+            .env(JUDGE_SCHEMA_ENV, schema())
+            .env(&engine.credential_env, token.trim())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("{}: {e}", self.claude.display()))?;
-        let mut stdin = child.stdin.take().ok_or("Claude's stdin")?;
-        let prompt = spec.prompt.clone();
-        let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
+            .map_err(|e| format!("{}: {e}", engine.plugin.display()))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("{} plugin stdin unavailable", spec.engine))?;
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&request_bytes);
+            let _ = stdin.write_all(b"\n");
+        });
         let out = child
             .wait_with_output()
-            .map_err(|e| format!("{}: {e}", self.claude.display()))?;
+            .map_err(|e| format!("{}: {e}", engine.plugin.display()))?;
         let _ = writer.join();
+        if !out.status.success() {
+            return Err(format!("{} plugin failed ({})", spec.engine, out.status));
+        }
         let looked = looked(&out.stdout, &spec)
             .map_err(|why| format!("{why} (it exited {})", out.status))?;
         if let Some(why) = holds_login(&looked.why, &token) {

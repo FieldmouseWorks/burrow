@@ -376,3 +376,88 @@ fn non_job_tasks_are_rejected() {
     assert_eq!(res.exit_code, EXIT_FAILURE);
     assert!(res.response.is_none());
 }
+
+#[test]
+fn judge_mode_runs_restricted_read_only_and_returns_structured_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let look_dir = dir.path().join("look");
+    std::fs::create_dir_all(&look_dir).unwrap();
+    let seen_args = dir.path().join("seen-args");
+    let claude_bin = dir.path().join("fake-claude");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\ncat >/dev/null\nprintf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{{\"verdict\":\"pass\",\"why\":\"Clean diff.\"}},\"modelUsage\":{{\"test-model-a\":{{\"outputTokens\":1}}}}}}\\n'\n",
+        seen_args.display()
+    );
+    std::fs::write(&claude_bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut cfg = sample_config(Mode::Claude);
+    cfg.program = Some(claude_bin);
+    cfg.judge_mode = true;
+
+    let schema = r#"{"type":"object","required":["verdict","why"]}"#;
+    let env_map: BTreeMap<&str, String> = BTreeMap::from([
+        ("BURROW_JUDGE_JSON_SCHEMA", schema.to_owned()),
+        ("BURROW_JUDGE_DIR", look_dir.to_string_lossy().into_owned()),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token".to_owned()),
+    ]);
+    let req = Request {
+        contract: conary_core::plugin::CONTRACT.into(),
+        task: Task::Job {
+            repo: "owner/repo".into(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "Judge this PR.".into(),
+            model: Some("test-model-a".into()),
+            effort: Some("high".into()),
+        },
+        execution: Some(Execution {
+            choice: Some(Choice {
+                engine: "claude".into(),
+                model: Some("test-model-a".into()),
+                effort: Some("high".into()),
+            }),
+            context: Context::Fresh,
+        }),
+        negotiated: None,
+    };
+    let res = handle_request(&cfg, &req, &|k| env_map.get(k).cloned(), 0);
+    assert_eq!(res.exit_code, 0, "stderr: {:?}", res.diagnostic);
+    let response = res.response.expect("response");
+    assert_eq!(response.by.engine, "claude");
+    assert_eq!(response.by.session.as_deref(), Some("judge-sess"));
+    let Answer::Job { summary, .. } = response.answer else {
+        panic!("expected Answer::Job");
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(parsed["verdict"], "pass");
+    assert_eq!(parsed["why"], "Clean diff.");
+
+    let args: Vec<String> = std::fs::read_to_string(&seen_args)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    for flag in [
+        "--restricted",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+    ] {
+        assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
+    }
+    let at = |f: &str| args[args.iter().position(|a| a == f).unwrap() + 1].clone();
+    assert_eq!(at("--tools"), "Read,Grep,Glob");
+    assert_eq!(at("--json-schema"), schema);
+    assert_eq!(at("--add-dir"), look_dir.to_string_lossy());
+
+    // Continuing a session is refused in judge_mode.
+    let mut non_fresh = req.clone();
+    non_fresh.execution.as_mut().unwrap().context = Context::Continue {
+        session: "prior".into(),
+    };
+    let res2 = handle_request(&cfg, &non_fresh, &|k| env_map.get(k).cloned(), 0);
+    assert_eq!(res2.exit_code, EXIT_FAILURE);
+}
