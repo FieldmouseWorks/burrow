@@ -49,6 +49,7 @@ fn every_push_and_pr_attests_and_uploads() {
     // train reads only the token, a public repo's candidates' too.
     assert!(step["env"].get("PRIVATE").is_none(), "{:?}", step["env"]);
     assert_eq!(step["env"]["OUTCOME"], "${{ steps.gate.outcome }}");
+    assert_eq!(step["env"]["FILED"], "${{ steps.flaky-file.outcome }}");
     // After it: the log, the token's attestation (only when there is one),
     // and the Sigstore bundle, for a public repo only.
     let after = &steps(&job)[at + 1..at + 4];
@@ -140,6 +141,7 @@ impl Repo {
             ("GITHUB_SHA", &sha),
             ("GITHUB_REPOSITORY", "owner/repo"),
             ("OUTCOME", c.outcome),
+            ("FILED", c.filed),
             ("SKIP", "agents"),
             ("PR_HEAD", &pr_head),
             ("CURL_LOG", curl_log.to_str().unwrap()),
@@ -199,6 +201,8 @@ struct Case<'a> {
     merge_base: &'a str,
     /// The PR's head as the event gives it, when it isn't the merge's.
     pr_head: Option<&'a str>,
+    /// How the flaky action's file step ended (empty: it didn't run).
+    filed: &'a str,
 }
 
 impl Default for Case<'_> {
@@ -212,6 +216,7 @@ impl Default for Case<'_> {
             token_url: "https://token.example/idtoken?api-version=2.0",
             merge_base: "",
             pr_head: None,
+            filed: "",
         }
     }
 }
@@ -330,6 +335,28 @@ fn a_gate_that_didnt_say_fail_attests_an_error() {
         assert_eq!(p["result"], "error", "{said:?}");
         let error = p["error"].as_str().unwrap_or_default();
         assert!(error.starts_with(why), "{said:?}: {error}");
+    }
+}
+
+/// A pass whose flaky checks' report wasn't filed is an error: an
+/// unrecorded flake is one nobody fixes (docs/flaky-tests.md). Filed, or
+/// with no flaky steps, it's a pass.
+#[test]
+fn a_pass_whose_flaky_report_wasnt_filed_attests_an_error() {
+    for (filed, result) in [("failure", "error"), ("success", "pass"), ("", "pass")] {
+        let r = Repo::new();
+        let a = r.run(Case {
+            filed,
+            ..Case::default()
+        });
+        assert_eq!(a.code, 0, "{}", a.said);
+        let (statement, _) = statement_of(a.attested.as_deref().expect("an attestation"));
+        let p = predicate(&statement, 2);
+        assert_eq!(p["result"], result, "{filed:?}");
+        if result == "error" {
+            let error = p["error"].as_str().unwrap_or_default();
+            assert!(error.contains("flaky"), "{error}");
+        }
     }
 }
 

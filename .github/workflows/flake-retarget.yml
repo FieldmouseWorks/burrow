@@ -36,6 +36,7 @@ jobs:
       actions: write
       id-token: write
       attestations: write
+      issues: write
     with:
       build-skip: agents
       eval-apart: true
@@ -47,6 +48,11 @@ jobs:
         !docs/settings-reference.md !docs/front-door.md !docs/landing.md
       docs-checks: guidance
       negative: ${{ needs.train-route.outputs.train != 'true' }}
+      # A check that fails gets one more try, and one that then passes is
+      # filed as a `flaky:` issue (docs/flaky-tests.md), with issues: write.
+      # `train` grants it too, and turns it on once main's workflow has
+      # the input: an input main's copy doesn't know fails the whole run.
+      flaky: true
   # GitHub expression equality ignores case; git branch names do not.
   # Route using the event's exact refs, without checking out PR code.
   train-route:
@@ -79,6 +85,7 @@ jobs:
       actions: write
       id-token: write
       attestations: write
+      issues: write
     with:
       build-skip: agents
       eval-apart: true
