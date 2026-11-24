@@ -237,6 +237,14 @@
     LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-cargo-unchanged.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
     touch $out
   '';
+  # A crate two workspace members use, with build metadata in its version
+  # (toml's `+spec-1.1.0`), bumps without an artifact error
+  # (modules/updates/renovate-package.nix).
+  renovate-cargo-build-metadata = pkgs.runCommand "renovate-cargo-build-metadata-check" { } ''
+    export HOME=$TMPDIR
+    LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-cargo-build-metadata.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
+    touch $out
+  '';
   renovate-problems = pkgs.runCommand "renovate-problems-check" { } ''
     export HOME=$TMPDIR
     got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-problems.mjs} ${pkgs.renovate} \
