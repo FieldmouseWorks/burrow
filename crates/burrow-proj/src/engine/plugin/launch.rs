@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use burrow_grants::{Approved, Capability, Grants, Why, mcp};
+use burrow_grants::{Approved, Capability, Grants, mcp};
 use conary_core::plugin::Kind;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 
@@ -310,18 +310,22 @@ pub(super) fn placed(
             &described.negotiated.offers.capabilities,
             &approved,
         );
+        // Every refusal matters in a job VM: `NotApproved` / `Never` /
+        // `UnknownDevice` mean the plugin asked for something the owner didn't
+        // approve, and `NotDeclared` means the VM provides an owner-approved
+        // capability (such as `network` egress via the engine proxy) that the
+        // plugin did not declare. Refuse unless declared and approved match.
         let denied: Vec<String> = grants
             .refusals()
             .iter()
-            .filter(|r| matches!(r.why, Why::NotApproved | Why::Never(_) | Why::UnknownDevice))
-            .map(|r| r.capability.clone())
+            .map(|r| format!("{} ({})", r.capability, r.why))
             .collect();
         if !denied.is_empty() {
             return Err(PluginRefusal {
                 kind: RefusalKind::Misplaced,
                 reason: format!(
-                    "{engine} declared capabilities not approved for its sandbox ({}): refusing launch",
-                    denied.join(", ")
+                    "{engine} sandbox capability grants mismatch ({}): refusing launch",
+                    denied.join("; ")
                 ),
                 resets_at: None,
             });

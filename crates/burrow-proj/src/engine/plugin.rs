@@ -749,6 +749,7 @@ impl Running {
                     };
                 }
                 Err(why) => {
+                    self.keep_usage(&stream_path, from, &stderr);
                     eprintln!(
                         "proj: {} plugin response rejected: {why}",
                         self.choice.engine
@@ -766,6 +767,7 @@ impl Running {
         // protocol asks (its provenance, its next step), whatever it
         // streamed: only a cut run, stopped after its answer, keeps that.
         if !cut && stdout.is_empty() && status.success() {
+            self.keep_usage(&stream_path, from, &stderr);
             eprintln!(
                 "proj: {} plugin exited without a response",
                 self.choice.engine

@@ -276,6 +276,86 @@ fn sandboxed_turn_enforces_owner_approved_plugin_grants() {
     assert!(refused2.reason.contains("kvm"), "{}", refused2.reason);
     assert!(!job_ran.exists(), "Task::Job ran despite unapproved kvm");
 
+    // Case 2b: owner approved all job-VM capabilities (including `network`),
+    // but `describe` omits `network` (`network: false`) -> refused via
+    // `burrow-grants` (`Why::NotDeclared`) before `Task::Job` runs, because
+    // the engine VM exposes the proxy for approved egress.
+    let tmp2b = TempDir::new().unwrap();
+    let (mut cfg2b, project2b) = setup(&tmp2b);
+    let _ = stand_in_sandbox(&tmp2b, &mut cfg2b);
+    let desc_no_net = serde_json::to_string(&Response {
+        contract: CONTRACT_V1.to_owned(),
+        by: conary_core::plugin::Identity {
+            engine: "offline-engine".to_owned(),
+            session: None,
+        },
+        execution: None,
+        answer: Answer::Describe {
+            versions: vec![(*CONTRACTS.last().unwrap()).to_owned()],
+            kinds: vec![],
+            v2_kinds: vec![Kind::Job],
+            v4_kinds: vec![],
+            models: vec![],
+            capabilities: Some(conary_core::plugin::Capabilities {
+                network: false,
+                mcp: false,
+                devices: vec![],
+                sandbox: Sandbox::Needs,
+            }),
+            meters: vec![],
+        },
+    })
+    .unwrap();
+    let desc_no_net_path = tmp2b.path().join("desc-no-net.json");
+    fs::write(&desc_no_net_path, desc_no_net).unwrap();
+    let offline_job_ran = tmp2b.path().join("offline-job-ran");
+    let offline_plugin = tmp2b.path().join("offline-plugin");
+    burrow_test::executable(
+        &offline_plugin,
+        format!(
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ntouch {}\nexit 1\n",
+            desc_no_net_path.display(),
+            offline_job_ran.display()
+        ),
+    );
+    cfg2b
+        .plugins
+        .insert("offline-engine".into(), offline_plugin);
+    cfg2b
+        .sandbox_plugins
+        .insert("offline-engine".into(), all_vm_caps.clone());
+    let job2b = make_job(&cfg2b, &project2b, "job-undeclared-network");
+    let waitdir2b = job2b.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir2b).unwrap();
+    let prompt2b = job2b.prompt("1");
+    fs::write(&prompt2b, "Work\n").unwrap();
+    let choice2b = Choice {
+        engine: "offline-engine".into(),
+        model: None,
+        effort: None,
+    };
+    let refused2b = match spawn(
+        &cfg2b,
+        &job2b,
+        "1",
+        &prompt2b,
+        &waitdir2b,
+        Some("demo-4"),
+        true,
+        "",
+        &choice2b,
+    ) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("launched sandbox plugin despite undeclared VM network capability"),
+    };
+    assert_eq!(refused2b.kind, RefusalKind::Misplaced);
+    assert!(refused2b.reason.contains("network"), "{}", refused2b.reason);
+    assert!(
+        !offline_job_ran.exists(),
+        "Task::Job ran despite undeclared network capability"
+    );
+
     // Case 3: all job-VM capabilities approved and matching `describe` -> allowed.
     let described_ok = parse_describe(
         "ok-engine",
@@ -609,4 +689,58 @@ fn host_describe_scrubs_service_user_environment() {
     describe(&cfg, &plugin, "scrub", None).unwrap();
     let body = fs::read_to_string(&seen).unwrap();
     assert_eq!(body, "home=\ncwd=/\n", "host describe leaked env: {body}");
+}
+
+/// A plugin that emits billable `usage` on stderr and then exits 0 with a
+/// malformed/mismatched response or empty stdout still records its usage in the
+/// turn's stream for accounting without treating the failed run as an answer.
+#[test]
+fn usage_is_preserved_when_response_is_rejected_or_empty() {
+    for (case, stdout_cmd) in [
+        ("malformed", "printf '%s\\n' '{not-json'"),
+        ("empty", "true"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (mut cfg, project) = setup(&tmp);
+        let desc = tmp.path().join("usage-desc.json");
+        fs::write(&desc, describe_json("usage-eng", vec![], vec![])).unwrap();
+        let plugin = tmp.path().join("usage-plugin");
+        burrow_test::executable(
+            &plugin,
+            format!(
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\nprintf '%s\\n' '{{\"event\":\"usage\",\"usage\":{{\"input_tokens\":42,\"output_tokens\":7,\"total_cost_usd\":0.01}}}}' >&2\n{stdout_cmd}\nexit 0\n",
+                desc.display()
+            ),
+        );
+        cfg.plugins.insert("usage-eng".into(), plugin);
+        let job_id = format!("job-usage-{case}");
+        let job = make_job(&cfg, &project, &job_id);
+        let waitdir = job.turn_file("1", TurnFile::Waits);
+        fs::create_dir_all(&waitdir).unwrap();
+        let prompt = job.prompt("1");
+        fs::write(&prompt, "Spend then fail\n").unwrap();
+        let choice = Choice {
+            engine: "usage-eng".into(),
+            model: None,
+            effort: None,
+        };
+        let mut running =
+            spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+        let status = running.child.take().unwrap().wait().unwrap();
+        let res = running.finish(status, false, &cfg, &job, "1", 0);
+        assert_eq!(res.rc, 1, "{case}: rejected/empty response must fail");
+        assert!(
+            res.last.is_none(),
+            "{case}: rejected/empty response must not return an answer"
+        );
+        let stream_text = fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap();
+        let usage_record: Value = stream_text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v.get("type").and_then(Value::as_str) == Some("burrow.usage"))
+            .unwrap_or_else(|| panic!("{case}: missing burrow.usage record in {stream_text:?}"));
+        assert_eq!(usage_record["usage"]["input_tokens"], 42);
+        assert_eq!(usage_record["usage"]["output_tokens"], 7);
+        assert_eq!(usage_record["total_cost_usd"], 0.01);
+    }
 }
