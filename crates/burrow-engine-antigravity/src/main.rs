@@ -5,9 +5,44 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use burrow_engine_antigravity::{Config, plugin};
-use conary_core::plugin::Request;
+use conary_core::plugin::{Request, Task};
+
+/// Says `activity` on stderr every `every` until dropped: the CLI's output
+/// comes only once it ends, so a runner's idle limit would take a long, live
+/// run for a quiet one. A hung CLI is still bounded by `deadline_secs`.
+struct Activity {
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Activity {
+    fn start(every: Duration) -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = thread::spawn(move || {
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                eprintln!(r#"{{"event":"activity"}}"#);
+            }
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Activity {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,14 +68,22 @@ fn main() -> ExitCode {
         eprintln!("burrow-engine-antigravity: failed to read plugin request: {e}");
         return ExitCode::from(plugin::EXIT_FAILURE);
     }
-    let request: Request = match serde_json::from_slice(&input) {
+    let mut request: Request = match serde_json::from_slice(&input) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("burrow-engine-antigravity: failed to decode plugin request: {e}");
             return ExitCode::from(plugin::EXIT_FAILURE);
         }
     };
+    plugin::add_instructions(
+        &mut request,
+        std::env::var("PROJ_APPEND_SYSTEM_PROMPT").ok().as_deref(),
+    );
+    let streams = std::env::var("PROJ_STREAM_EVENTS").is_ok_and(|v| v == "1");
+    let activity = (streams && matches!(request.task, Task::Job { .. }))
+        .then(|| Activity::start(Duration::from_secs(config.activity_secs)));
     let result = plugin::handle_request(&config, &request, &|| false);
+    drop(activity);
     if let Some(diag) = &result.diagnostic
         && let Ok(line) = serde_json::to_string(diag)
     {

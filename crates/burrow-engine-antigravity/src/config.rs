@@ -29,6 +29,9 @@ pub const PRINT_TIMEOUT_ENV: &str = "BURROW_ANTIGRAVITY_PRINT_TIMEOUT_SECS";
 /// Default outer wall-clock deadline (seconds) for one headless invocation.
 pub const DEFAULT_DEADLINE_SECS: u64 = 1800;
 
+/// Default interval (seconds) between a running job's `activity` events.
+pub const DEFAULT_ACTIVITY_SECS: u64 = 15;
+
 /// Default maximum bytes captured per stdout/stderr pipe (16 MiB).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -221,6 +224,10 @@ pub struct Config {
     pub devices: Vec<String>,
     /// Usage meter names declared in `describe`.
     pub meters: Vec<String>,
+    /// How often a job run that streams events (`PROJ_STREAM_EVENTS=1`) says
+    /// it's still at work, in seconds: the CLI's output comes only once it
+    /// ends, and a runner's idle limit reads these as activity.
+    pub activity_secs: u64,
 }
 
 impl Default for Config {
@@ -250,6 +257,7 @@ impl Default for Config {
             network: true,
             devices: Vec::new(),
             meters: Vec::new(),
+            activity_secs: DEFAULT_ACTIVITY_SECS,
         }
     }
 }
@@ -303,6 +311,9 @@ impl Config {
         }
         if self.deadline_secs == 0 {
             return Err("deadline_secs must be positive".to_owned());
+        }
+        if self.activity_secs == 0 {
+            return Err("activity_secs must be positive".to_owned());
         }
         if self.max_output_bytes == 0 {
             return Err("max_output_bytes must be positive".to_owned());

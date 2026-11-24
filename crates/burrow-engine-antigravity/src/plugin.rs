@@ -68,6 +68,24 @@ pub fn is_conformance_job(task: &Task) -> bool {
     })
 }
 
+/// What a runner tells the engine for the turn (burrow-proj's
+/// `PROJ_APPEND_SYSTEM_PROMPT`: how to declare its next step, and where a
+/// sandbox records it) follows the task in a job's prompt, since Antigravity
+/// has no system prompt of its own. Conary's conformance fixture, matched on
+/// its exact prompt, is left as it is.
+pub fn add_instructions(request: &mut Request, instructions: Option<&str>) {
+    let Some(extra) = instructions.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if is_conformance_job(&request.task) {
+        return;
+    }
+    if let Task::Job { prompt, .. } = &mut request.task {
+        prompt.push_str("\n\n");
+        prompt.push_str(extra);
+    }
+}
+
 /// Answer one Conary plugin request without external cancellation.
 pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
     answer_cancellable(config, request, &|| false)
