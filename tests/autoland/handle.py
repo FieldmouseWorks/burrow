@@ -552,19 +552,19 @@ for checks in (CI_GREEN, []):
     status, _ = run(clean(checks=checks), 700)
     assert len(JOBS) == 1 and "just proof" in JOBS[0] and not merged(), (checks, status, JOBS)
     assert "a Claude job is running remi-proof" in status, status
-# renovate-sweep is told how a covered repo's proofs run.
+# renovate-sweep is told how a repo's proofs run, and who lands it.
 C.NOW = C.ts(T0)
-assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
-    "at": C.NOW, "repos": {"sam/r": {"proofs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+assert C.coverage([{"repo": "sam/r"}]) == {
+    "at": C.NOW, "repos": {"sam/r": {"proofs": S.CFG["repos"]["sam/r"]["proofJobs"], "lands": "steward"}}}
 # A build the steward runs is one of them, told as how a job reruns it.
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"vm": "checks.x86_64-linux.vm"}
-told = C.coverage([{"repo": "sam/r"}], [])["repos"]["sam/r"]["proofs"]
+told = C.coverage([{"repo": "sam/r"}])["repos"]["sam/r"]["proofs"]
 assert set(told) == {"remi-proof", "vm"} and "nix build .#checks.x86_64-linux.vm -L" in told["vm"], told
 assert "never post that status yourself" in told["vm"], told
 del S.CFG["repos"]["sam/r"]["proofBuilds"]
-# ... but only the repos a pass saw to are covered: one whose pass failed
-# isn't, so renovate-sweep lists its ok majors itself, and still knows how
-# its proofs run.
+# ... and a repo whose pass failed is landed all the same: a PR the steward
+# is stuck on is the watchdog's, never an ok major renovate-sweep tells the
+# owner nothing merges. It still knows how its proofs run.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
 S.R.discover = lambda: [{"repo": f"sam/{n}", "default": "main"} for n in ("r", "bad", "flaky")]
 # A full pass's hooks (burrow-upkeep's) are handed every repo it sees to, a
@@ -603,7 +603,7 @@ hooks = [json.loads(x)[-1] for x in open(UPKEEP_RAN) if json.loads(x)[0] == "hoo
 assert hooks == [{"seen": ["sam/r", "sam/bad", "sam/flaky"], "projects": []}], hooks
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
-assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
+assert {r: v["lands"] for r, v in written.items()} == dict.fromkeys(("sam/r", "sam/bad", "sam/flaky"), "steward"), written
 assert written["sam/bad"]["proofs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()

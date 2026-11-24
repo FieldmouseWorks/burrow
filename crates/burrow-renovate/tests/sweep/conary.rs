@@ -244,6 +244,8 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     let body = "This PR contains the following updates: foo1 to v2.\r\n\r\n---\r\n";
     let mut m = Machine::as_app();
     m.landing(conaryd());
+    // The steward's list says conaryd lands it, as a real machine's would.
+    m.steward(&[(REPO, lands("conaryd"))], 0, json!({}));
     m.prs(&[described(1, body)]);
     let p = m.pass();
     let (ok, held) = handed(p.task(), 1);

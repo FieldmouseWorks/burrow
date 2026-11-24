@@ -21,9 +21,9 @@ pub struct Config {
     pub owner: String,
     /// The autoland steward's own commit status, which isn't CI.
     pub settled: String,
-    /// The repos the steward covers, as it last found them (its
-    /// repos.json): none without it.
-    pub covered: Option<PathBuf>,
+    /// The autoland steward's list of its repos (its repos.json): who
+    /// lands each, and its proofs. None without a steward.
+    pub steward: Option<PathBuf>,
     /// burrow-landing's record (burrow.landing.record), read at each pass: a
     /// major in a repo it gives conaryd gets its verdicts sealed as conaryd
     /// reads them (v2), the rest as the steward does (v1). None where

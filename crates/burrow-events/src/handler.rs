@@ -71,11 +71,10 @@ pub struct Handler {
     /// Seconds one of its passes starts after the last, at least.
     #[serde(default = "gap")]
     pub gap: f64,
-    /// Another handler whose passes go first: this one starts none while
-    /// that one's line has a pass running or due (the steward's
-    /// continuations yield to its passes over new work, which share its
-    /// lock), which in turn waits out a pass of this one's that runs. None:
-    /// it yields to none.
+    /// Another handler whose passes share a lock with this one's (the
+    /// steward's, its continuations'): the two go in the order their passes
+    /// fell due, that one's first on a tie (crate::passes::Yields). None: it
+    /// yields to none.
     #[serde(default)]
     pub yield_to: Option<String>,
     /// The steward's: it takes a repo's deliveries, kicks and wake-ups only

@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S.step, 'handle', handle), (S.L, 'lands', lambda repo: True), (S, 'branches', lambda *a, **k: None),
                 (S, 'upkeep', lambda *a: None),
                 (C, 'taken', lambda *a: None), (C, 'poke', lambda *a: None),
-                (C, 'coverage', lambda rs, done: {'repos': {r['repo']: {'covered': r in done} for r in rs}}),
+                (C, 'coverage', lambda rs: {'repos': {r['repo']: {} for r in rs}}),
             ):
                 stack.enter_context(patch.object(obj, name, fn))
             stack.enter_context(patch('time.monotonic', side_effect=lambda: clock[0]))
