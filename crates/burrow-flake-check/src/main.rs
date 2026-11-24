@@ -152,6 +152,33 @@ fn tee(mut c: Command, log: &mut dyn Write, out: &mut dyn Write) -> Result<Ended
         last: String::from_utf8_lossy(&last).trim_end().to_owned(),
     })
 }
+/// [`tee`], the command given `limit` seconds: past them it and every
+/// process it started are stopped (`timeout` signals its whole process
+/// group, and kills it a minute later if it's still there), and that's the
+/// error, so a run that ran out never reads as one that said how it ended.
+fn watch(c: Command, limit: u32, log: &mut dyn Write, out: &mut dyn Write) -> Result<Ended> {
+    let mut bounded = cmd("timeout", &["--kill-after=60", &limit.to_string()]);
+    bounded.arg(c.get_program()).args(c.get_args());
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => bounded.env(k, v),
+            None => bounded.env_remove(k),
+        };
+    }
+    let started = std::time::Instant::now();
+    let ended = tee(bounded, log, out)?;
+    // 124 is `timeout`'s own; a kill after it is a signal's, once the
+    // limit has passed.
+    let ran_out =
+        ended.code == 124 || (ended.code >= 128 && started.elapsed().as_secs() >= u64::from(limit));
+    if ran_out {
+        return Err(err(format!(
+            "it ran past its {} minutes, so it was stopped before it could say: it can't tell",
+            limit / 60
+        )));
+    }
+    Ok(ended)
+}
 fn show(o: &Output) -> Result<()> {
     io::stdout().write_all(&o.stdout)?;
     io::stderr().write_all(&o.stderr)?;
@@ -195,11 +222,25 @@ fn nix_string(v: &str) -> String {
 }
 /// A build that prints nothing for this long has stopped making progress:
 /// nix kills it (its `max-silent-time`) and the gate fails, rather than hold
-/// its runner until the job's 6 hours run out (#1102). The rest of the
+/// its runner until the run's own limit ([`RUN_SECONDS`]) runs out (#1102). The rest of the
 /// builds go on (`--keep-going`), and a push's leg still keeps what they
 /// built. burrow's longest quiet stretch in a build that went on to pass
 /// was 14 to 16 minutes, codex linking on a hosted runner.
 const SILENT_SECONDS: u32 = 60 * 60;
+/// How long a gate or negative run may take, its evaluations and builds
+/// together: past it the worker and everything it started are stopped, and
+/// the run can't tell (a gate's `error`, a negative with no result), with
+/// why said, rather than hold its runner until the job is cut off with
+/// nothing said (#1488). Every build is bounded on its own, but a run is
+/// many of them, one after another, and its evaluations are bounded by
+/// nothing else. The longest jobs that passed, in 40 to 200 of each caller's
+/// (2026-11-23): a negative 112 minutes and a leg 87, burrow's on hosted
+/// runners, and remi's fresh check 99; every other caller's 30 at most. So
+/// this is the longest with room for a slower runner, and for a wait for a
+/// heavy slot, which counts against it as the job's own did. flake-check.yml's
+/// jobs each give their run this and what their other steps take
+/// (burrow-workflows' timeouts test holds them to it).
+const RUN_SECONDS: u32 = 180 * 60;
 fn lines(v: &str) -> Vec<String> {
     v.lines().map(str::to_owned).collect()
 }
@@ -337,7 +378,7 @@ fn main() {
             "NIX_CONFIG",
             worker_config(&var("NIX_CONFIG"), builds::writes()),
         );
-        tee(c, &mut log, &mut io::stdout())
+        watch(c, RUN_SECONDS, &mut log, &mut io::stdout())
     })();
     if gate {
         std::process::exit(verdict::settle(watched));
@@ -347,7 +388,11 @@ fn main() {
         Err(e) => {
             // What it found has no whole log to be signed over: it can't tell.
             let _ = fs::remove_file(temp().join("negative.json"));
-            let _ = writeln!(io::stderr(), "{e}");
+            let _ = writeln!(
+                io::stdout(),
+                "::error title=The negative run couldn't tell::{}",
+                e.to_string().replace('%', "%25")
+            );
             std::process::exit(1);
         }
     }
@@ -386,6 +431,27 @@ mod tests {
         };
         assert!(e.to_string().contains("No space left on device"), "{e}");
         assert_eq!(log, b"one\ntwo\nthree\n");
+    }
+    /// A run past its limit is stopped, with what it started: here a
+    /// grandchild that holds the pipe open, as a build's nix does, so
+    /// stopping the worker alone would never end the read.
+    #[test]
+    fn a_run_past_its_limit_is_stopped_whole_and_cant_tell() {
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        let c = cmd("sh", &["-c", "echo started; sleep 600 & sleep 600"]);
+        let Err(e) = watch(c, 1, &mut Vec::new(), &mut out) else {
+            panic!("a run past its limit said how it ended");
+        };
+        assert!(e.to_string().contains("ran past its 0 minutes"), "{e}");
+        assert!(!e.is::<verdict::Failed>());
+        assert_eq!(out, b"started\n");
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    }
+    #[test]
+    fn a_run_inside_its_limit_ends_as_it_said() {
+        let ended = watch(three_lines(), 60, &mut Vec::new(), &mut Vec::new()).unwrap();
+        assert_eq!((ended.code, ended.last.as_str()), (1, "three"));
     }
     #[test]
     fn only_a_failure_said_is_a_checks() {
