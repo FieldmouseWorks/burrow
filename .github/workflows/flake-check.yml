@@ -338,7 +338,7 @@ jobs:
     steps:
       # The runner is compiled with Nix's compiler, as the gate's is.
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - id: tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -536,7 +536,7 @@ jobs:
         shell: bash
         run: date +%s%N > "$RUNNER_TEMP/builds-restore-end"
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
         with:
           # fallback: a kept entry whose restore failed part way can leave
           # a narinfo naming a truncated NAR, which nix would otherwise fail
@@ -1098,7 +1098,7 @@ jobs:
       - *checkout
       - *merge
       - if: inputs.install-nix && inputs.docs-checks != ''
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - id: build
         shell: bash
         env:
@@ -1297,7 +1297,7 @@ jobs:
         shell: bash
         run: echo 'degraded/kept-restore' >> "$GITHUB_STEP_SUMMARY"
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
         with:
           # fallback: a kept entry whose restore failed part way can leave
           # a narinfo naming a truncated NAR, which nix would otherwise fail
