@@ -896,12 +896,10 @@ in
       unit = "autoland-continue";
       wake = "${stateDir}/autoland/continue.json";
       # A continuation carries on a pass that yielded, and shares its lock:
-      # it waits for the steward's pass that runs and those that fell due
-      # before it, and no more, so a busy line never holds the traversal
-      # off for long. The steward's line waits out a continuation that
-      # runs, rather than start a pass that finds the lock held, and starts
-      # none that fell due after one that waits: a repo's kick, event or
-      # wake-up waits for at most one slice.
+      # it and the steward's passes go in the order they fell due, neither
+      # starting one beside the other's, so a continuation waits only for
+      # the passes booked ahead of it, and a kick, event or wake-up for at
+      # most one slice.
       yieldTo = "autoland";
     };
     systemd.services = lib.genAttrs [ "autoland" "autoland@" "autoland-continue" "autoland-continue@" ] (name: {
