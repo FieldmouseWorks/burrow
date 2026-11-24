@@ -3,11 +3,11 @@
 //! (`jobs/.usage-holds.admission`).
 //!
 //! Writes keep the authoritative v2 per-engine store in `.usage-holds.*` and mirror
-//! any `claude` or global `*` state into the legacy `.usage.json` / `.usage.released` /
-//! `.usage.admission` files in strict pre-change formats under the shared `jobs/.usage.lock`.
-//! Retained pre-change `proj` turns running across a deploy therefore keep parsing
-//! `.usage.json` cleanly, honor newly set Claude/global holds, cannot clear active owner
-//! pauses early, and persist any later refusal so the new binary merges it on next read.
+//! any `claude` or global `*` state, or an active `claude-api` owner pause, into the
+//! legacy `.usage.json` / `.usage.released` / `.usage.admission` files in strict
+//! pre-change formats under the shared `jobs/.usage.lock`. Retained pre-change `proj`
+//! turns running across a deploy therefore keep parsing `.usage.json` cleanly, honor
+//! newly set Claude/API/global holds, cannot clear active owner pauses early, and persist any later refusal so the new binary merges it on next read.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -232,16 +232,24 @@ fn normalize_loaded(engine: &str, s: &mut Spent) {
     }
 }
 
-/// Deterministic `.usage-owner-<hex>` metadata filename for an active global `*`
-/// owner pause so retained pre-change `proj` readers recognize `owner = true`
-/// (blocking `claude-api` runs as well as `claude` runs) and `project_legacy`
-/// remains pure and time-independent.
-fn legacy_owner_mirror_name(s: &Spent) -> String {
+/// The one engine besides `claude` that pre-change `proj` runs. Its runs bill the
+/// API credit, so a pre-change reader holds them only for an owner pause
+/// (`owner = true`), never for a refusal hold.
+const LEGACY_API_ENGINE: &str = "claude-api";
+
+/// Deterministic `.usage-owner-<hex>` metadata filename for the owner pause the
+/// legacy mirror fences retained runs with, so retained pre-change `proj` readers
+/// recognize `owner = true` (blocking `claude-api` runs as well as `claude` runs)
+/// and `project_legacy` remains pure and time-independent. The engine key is part
+/// of the name, so reading it back attributes the mirror to the hold it came from.
+fn legacy_owner_mirror_name(engine: &str, s: &Spent) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in s
-        .until
-        .to_le_bytes()
-        .into_iter()
+    for b in engine
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain([0])
+        .chain(s.until.to_le_bytes())
         .chain(s.at.to_le_bytes())
         .chain(s.said.as_bytes().iter().copied())
     {
@@ -251,25 +259,46 @@ fn legacy_owner_mirror_name(s: &Spent) -> String {
     format!("{LEGACY_OWNER}{hash:016x}")
 }
 
-/// Pure, time-independent projection of `store`'s `claude`/global hold into the
-/// strict 7-field `LegacySpent` format read by retained pre-change `proj` turns.
+/// The hold the legacy mirror projects (its engine key and record), and whether it
+/// is projected as an owner mirror. The legacy file carries one record, so, first
+/// match wins:
+/// 1. an active global `*` hold (an owner mirror when it is an owner pause);
+/// 2. an active `claude-api` owner pause, as an owner mirror: a pre-change reader
+///    holds `claude-api` runs only for `owner = true`, which holds its `claude`
+///    runs too, so retained turns stay held on both engines while it stands (fail
+///    closed; a `claude` hold outlasting it is projected again on the next write);
+/// 3. the `claude` hold, plain, so a `claude`-only owner pause leaves retained
+///    `claude-api` runs free;
+/// 4. a settled global `*` record.
+fn legacy_source(store: &Store) -> Option<(&str, &Spent, bool)> {
+    let active_owner = |s: &&Spent| s.owner && s.back.is_none();
+    if let Some(global) = store.holds.get(ALL_ENGINES).filter(|s| s.back.is_none()) {
+        return Some((ALL_ENGINES, global, global.owner));
+    }
+    if let Some(api) = store.holds.get(LEGACY_API_ENGINE).filter(active_owner) {
+        return Some((LEGACY_API_ENGINE, api, true));
+    }
+    if let Some(claude) = store.holds.get(DEFAULT_ENGINE) {
+        return Some((DEFAULT_ENGINE, claude, false));
+    }
+    store
+        .holds
+        .get(ALL_ENGINES)
+        .map(|s| (ALL_ENGINES, s, false))
+}
+
+/// Pure, time-independent projection of `store`'s hold ([`legacy_source`]) into
+/// the strict 7-field `LegacySpent` format read by retained pre-change `proj` turns.
 /// Active owner pauses set `last = until - 1` so an early successful old turn
 /// cannot clear them while a post-deadline refusal at `>= until` still registers.
-/// Active global `*` owner pauses also point `job` at a `.usage-owner-<hex>`
-/// metadata file so retained pre-change readers set `owner = true` and hold
-/// `claude-api` turns too; a `claude`-only owner pause keeps `job` plain so
-/// retained `claude-api` turns stay free.
+/// An owner mirror points `job` at a `.usage-owner-<hex>` metadata file so retained
+/// pre-change readers set `owner = true` and hold `claude-api` turns too; a
+/// `claude`-only owner pause keeps `job` plain so retained `claude-api` turns stay
+/// free.
 fn project_legacy(store: &Store) -> Option<LegacySpent> {
-    let (global_active_owner, pick) =
-        if let Some(global) = store.holds.get(ALL_ENGINES).filter(|s| s.back.is_none()) {
-            (global.owner, global)
-        } else if let Some(claude) = store.holds.get(DEFAULT_ENGINE) {
-            (false, claude)
-        } else {
-            (false, store.holds.get(ALL_ENGINES)?)
-        };
-    let job = if global_active_owner {
-        legacy_owner_mirror_name(pick)
+    let (engine, pick, mirror) = legacy_source(store)?;
+    let job = if mirror {
+        legacy_owner_mirror_name(engine, pick)
     } else {
         pick.job.clone()
     };
@@ -288,6 +317,14 @@ fn project_legacy(store: &Store) -> Option<LegacySpent> {
         told: pick.told,
         last,
     })
+}
+
+/// The engine whose owner pause `store`'s legacy mirror currently fences retained
+/// runs with, other than the global `*`, and that mirror's metadata name.
+fn legacy_mirror_of(store: &Store) -> Option<(String, String)> {
+    let (engine, pick, mirror) = legacy_source(store)?;
+    (mirror && engine != ALL_ENGINES)
+        .then(|| (engine.to_owned(), legacy_owner_mirror_name(engine, pick)))
 }
 
 fn decode_legacy(cfg: &Config, legacy: LegacySpent) -> Result<(String, Spent), String> {
@@ -349,6 +386,16 @@ fn merge_legacy(store: &mut Store, legacy_engine: String, legacy: Spent) {
                 store.holds.insert(ALL_ENGINES.to_owned(), legacy);
             }
             _ => {}
+        }
+        return;
+    }
+
+    // The owner mirror of an engine's own pause (`claude-api`'s): a retained old
+    // turn only rewrites it to note its notice or settle its deadline, neither of
+    // which may clear, replace or widen the pause. Its deadline ends it here.
+    if legacy_engine != DEFAULT_ENGINE {
+        if let Some(cur) = store.holds.get_mut(&legacy_engine) {
+            cur.told = cur.told.max(legacy.told);
         }
         return;
     }
@@ -455,7 +502,17 @@ pub(crate) fn read_store(cfg: &Config) -> Result<Store, String> {
         return Ok(s.clone());
     }
 
-    let (legacy_engine, legacy_spent) = decode_legacy(cfg, legacy_raw)?;
+    let mirror = store.as_ref().and_then(legacy_mirror_of);
+    let (mut legacy_engine, mut legacy_spent) = decode_legacy(cfg, legacy_raw)?;
+    // An owner mirror decodes as a global pause; one of an engine's own pause is
+    // that engine's, never a new `*` hold over every engine.
+    if legacy_engine == ALL_ENGINES
+        && let Some((engine, name)) = mirror
+        && legacy_spent.job == name
+    {
+        legacy_spent.engine.clone_from(&engine);
+        legacy_engine = engine;
+    }
     let Some(ref mut s) = store else {
         let mut s = Store::empty();
         s.holds.insert(legacy_engine, legacy_spent);

@@ -437,3 +437,97 @@ fn retained_legacy_api_turn_honors_mirrored_global_owner_pause_but_not_claude_on
         "pre-change claude-api run must stay free during a claude-only pause"
     );
 }
+
+/// The v2 store as the new binary reads it, legacy mirror merged.
+fn v2_store(cfg: &Config) -> crate::usage::store::Store {
+    crate::usage::store::read_store(cfg).unwrap()
+}
+
+#[test]
+fn retained_legacy_api_turn_honors_api_only_owner_pause_and_its_rewrites_stay_api_only() {
+    let (_d, cfg) = rig();
+    let t = now();
+
+    // A `claude-api`-only owner pause holds a retained pre-change `claude-api` run:
+    // only an owner mirror does that there, which holds its `claude` runs too.
+    hold_for(&cfg, "claude-api", t + 3600, "api credit audit").unwrap();
+    let (spent, owner) =
+        pre_change_read(&cfg).expect("api-only owner pause must be mirrored for retained turns");
+    assert!(
+        owner,
+        "pre-change reader must see the api-only pause as owner=true"
+    );
+    assert_eq!(spent.until, t + 3600);
+    assert!(
+        pre_change_holds_run(&spent, owner, true, t),
+        "pre-change claude-api run must be blocked by an api-only owner pause"
+    );
+    assert!(pre_change_holds_run(&spent, owner, false, t));
+    // The new binary reads its own mirror back unchanged: still api-only.
+    assert!(out_for(&cfg, &Run::new("claude", false)).is_none());
+    assert!(out_for(&cfg, &Run::new("claude-api", false)).unwrap().owner);
+
+    // A retained turn rewrites the mirror, as the pre-change binary does to note
+    // its notice: no `*` hold appears, the api pause stands, `told` carries over.
+    let legacy_path = cfg.jobs.join(".usage.json");
+    let mut told: PreChangeSpent =
+        serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+    told.told = t + 30;
+    fs::write(&legacy_path, serde_json::to_string(&told).unwrap()).unwrap();
+    let store = v2_store(&cfg);
+    assert!(!store.holds.contains_key(ALL_ENGINES), "{store:?}");
+    assert!(!store.holds.contains_key("claude"), "{store:?}");
+    let api = &store.holds["claude-api"];
+    assert!(api.owner && api.back.is_none() && api.until == t + 3600);
+    assert_eq!(api.told, t + 30);
+    assert!(out_for(&cfg, &Run::new("claude", false)).is_none());
+
+    // Its expiry write (`back = until`, the pre-change `reconcile_expiry`) settles
+    // nothing early and never becomes a `*` record either.
+    let mut expired = told;
+    expired.back = Some(expired.until);
+    fs::write(&legacy_path, serde_json::to_string(&expired).unwrap()).unwrap();
+    let store = v2_store(&cfg);
+    assert!(!store.holds.contains_key(ALL_ENGINES), "{store:?}");
+    assert!(store.holds["claude-api"].holds(t));
+
+    // A post-deadline refusal by a retained `claude` run is a `claude` refusal.
+    let mut refused = expired;
+    refused.back = None;
+    refused.last = Some(t + 3600);
+    refused.at = t + 3600;
+    refused.until = t + 7200;
+    fs::write(&legacy_path, serde_json::to_string(&refused).unwrap()).unwrap();
+    let store = v2_store(&cfg);
+    assert!(!store.holds.contains_key(ALL_ENGINES), "{store:?}");
+    assert!(!store.holds["claude"].owner);
+    assert_eq!(store.holds["claude"].until, t + 7200);
+    assert!(store.holds["claude-api"].owner);
+}
+
+#[test]
+fn api_only_owner_pause_fences_retained_turns_over_a_claude_refusal_and_back_frees_it() {
+    let (_d, cfg) = rig();
+    let t = now();
+
+    // An active `claude` refusal and a `claude-api` owner pause: retained turns
+    // are held on both engines.
+    record_for(&cfg, "claude", "new-cl", Some(t + 1800), SAID, t).unwrap();
+    hold_for(&cfg, "claude-api", t + 3600, "api credit audit").unwrap();
+    let (spent, owner) = pre_change_read(&cfg).unwrap();
+    assert!(pre_change_holds_run(&spent, owner, true, t));
+    assert!(pre_change_holds_run(&spent, owner, false, t));
+    assert!(!v2_store(&cfg).holds.contains_key(ALL_ENGINES));
+
+    // `proj usage back --engine claude-api` frees retained api runs and leaves the
+    // `claude` refusal (projected plain again) and no `*` record.
+    back_for(&cfg, Some("claude-api"), None);
+    let (spent, owner) = pre_change_read(&cfg).unwrap();
+    assert!(!owner);
+    assert!(!pre_change_holds_run(&spent, owner, true, t));
+    assert!(pre_change_holds_run(&spent, owner, false, t));
+    let store = v2_store(&cfg);
+    assert!(!store.holds.contains_key(ALL_ENGINES), "{store:?}");
+    assert!(store.holds["claude"].holds(t) && !store.holds["claude"].owner);
+    assert!(out_for(&cfg, &Run::new("claude-api", false)).is_none());
+}
