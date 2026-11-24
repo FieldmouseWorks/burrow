@@ -69,6 +69,22 @@ pub enum RefusalKind {
     SandboxRequired,
 }
 
+impl RefusalKind {
+    /// Whether the refusal holds its engine (recorded as spent, or its login
+    /// as expired, machine-wide) as well as moving the turn along its route.
+    /// A refusal about this turn alone (its credit, budget or key, or a host
+    /// turn on an engine that needs a sandbox) only moves it.
+    pub fn holds_the_engine(self) -> bool {
+        match self {
+            Self::UsageLimit | Self::LoginExpired => true,
+            Self::ApiKeyRejected
+            | Self::BudgetExhausted
+            | Self::CreditExhausted
+            | Self::SandboxRequired => false,
+        }
+    }
+}
+
 /// Structured refusal reported by an engine plugin on stderr.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct PluginRefusal {

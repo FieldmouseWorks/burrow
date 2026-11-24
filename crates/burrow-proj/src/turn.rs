@@ -591,15 +591,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         // Structured refusal reported by the engine plugin on stderr.
         match run.refusal {
-            Some(refusal)
-                if matches!(
-                    refusal.kind,
-                    RefusalKind::CreditExhausted
-                        | RefusalKind::BudgetExhausted
-                        | RefusalKind::ApiKeyRejected
-                        | RefusalKind::SandboxRequired
-                ) =>
-            {
+            Some(refusal) if !refusal.kind.holds_the_engine() => {
                 if let Some((next, same_conv)) = moved(&choice)? {
                     choice = next;
                     if !same_conv {

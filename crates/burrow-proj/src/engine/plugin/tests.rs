@@ -731,6 +731,9 @@ exit 1
         Ok(_) => panic!("a plugin that needs a sandbox started on the host"),
     };
     assert_eq!(refused.kind, RefusalKind::SandboxRequired);
+    // It moves the turn without holding the engine: the same engine still
+    // runs a sandboxed turn.
+    assert!(!refused.kind.holds_the_engine());
     assert!(!ran.exists(), "the plugin's job ran");
     assert!(!job.turn_file("1", TurnFile::Started).exists());
     assert_eq!(
