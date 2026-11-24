@@ -329,14 +329,20 @@ pub fn spawn(
     app_env: &str,
     choice: &Choice,
 ) -> Result<Running, SpawnError> {
-    let plugin_path = cfg
-        .plugins
-        .get(&choice.engine)
-        .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?;
+    let (plugin_path, sandbox_approved) = match agent {
+        Some(_) if let Some(vm) = cfg.vm_plugins.get(&choice.engine) => {
+            (&vm.plugin, Some(vm.capabilities.as_slice()))
+        }
+        _ => (
+            cfg.plugins
+                .get(&choice.engine)
+                .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?,
+            cfg.sandbox_plugins.get(&choice.engine).map(Vec::as_slice),
+        ),
+    };
 
     let request_record = crate::job::Request::load(job)?;
     let uses_credit = cfg.uses_credit_meter(&choice.engine);
-    let sandbox_approved = cfg.sandbox_plugins.get(&choice.engine).map(Vec::as_slice);
     launch::before_describe(
         agent,
         request_record.agent_engine.as_deref(),

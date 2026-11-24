@@ -144,6 +144,12 @@ pub struct Config {
     /// turns enforce `burrow-grants` against this list before launch.
     #[serde(default)]
     pub sandbox_plugins: BTreeMap<String, Vec<String>>,
+    /// Strict sandbox plugins for dual-mode engines (which have a host-mode
+    /// plugin in `plugins` and a sandbox plugin in `burrow.agents.engines`):
+    /// `--vm` turns run this plugin inside the VM and enforce `burrow-grants`
+    /// against its owner-approved capability list.
+    #[serde(default)]
+    pub vm_plugins: BTreeMap<String, VmPlugin>,
     /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).
@@ -161,6 +167,16 @@ pub struct Config {
     /// The proj this is, whole: PROJ_SELF, its wrapper, as a store path.
     #[serde(skip)]
     pub me: PathBuf,
+}
+
+/// Strict sandbox plugin executable and owner-approved capabilities for a
+/// dual-mode engine's `--vm` turns.
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmPlugin {
+    pub plugin: PathBuf,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// A stdio MCP server and the host paths its tools need.
@@ -411,6 +427,11 @@ impl Config {
             crate::engine::parse_engine(engine)?;
             burrow_process::executable(path)
                 .map_err(|e| format!("plugins.{engine} {}: {e}", path.display()))?;
+        }
+        for (engine, vm) in &self.vm_plugins {
+            crate::engine::parse_engine(engine)?;
+            burrow_process::executable(&vm.plugin)
+                .map_err(|e| format!("vmPlugins.{engine} {}: {e}", vm.plugin.display()))?;
         }
         // An inbox label or the drain pins its jobs to an engine: one with no
         // plugin here would enroll issues whose every turn fails to start.

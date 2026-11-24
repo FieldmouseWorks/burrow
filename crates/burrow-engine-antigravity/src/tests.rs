@@ -727,3 +727,112 @@ fn a_config_never_declares_mcp() {
     assert!(cfg.unwrap_err().to_string().contains("mcp"));
     assert!(!Config::default().offers().capabilities.mcp);
 }
+
+#[test]
+fn host_mode_declares_no_sandbox_refuses_skip_permissions_and_isolates_home() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let real_home = dir.path().join("real-home");
+    fs::create_dir_all(&real_home).unwrap();
+    let cred_src = dir.path().join("host-oauth-token");
+    fs::write(&cred_src, "{\"access_token\":\"host-tok-999\"}\n").unwrap();
+
+    let observed_home = dir.path().join("observed-home");
+    let observed_args = dir.path().join("observed-args");
+    let observed_cred = dir.path().join("observed-cred");
+    let observed_mode = dir.path().join("observed-mode");
+    let observed_gh = dir.path().join("observed-gh");
+    let observed_claude = dir.path().join("observed-claude");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-host",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s' \"$HOME\" > \"{}\"\n\
+             printf '%s\\n' \"$@\" > \"{}\"\n\
+             cat \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\" > \"{}\"\n\
+             stat -c '%a' \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\" > \"{}\"\n\
+             printf '%s' \"${{GH_TOKEN_SOCKET:-}}\" > \"{}\"\n\
+             printf '%s' \"${{CLAUDE_CODE_OAUTH_TOKEN:-}}${{ANTHROPIC_API_KEY:-}}\" > \"{}\"\n\
+             printf '{{\"conversation_id\":\"host-sess-1\",\"type\":\"result\",\"result\":\"ok\"}}\\n'\n",
+            observed_home.display(),
+            observed_args.display(),
+            observed_cred.display(),
+            observed_mode.display(),
+            observed_gh.display(),
+            observed_claude.display(),
+        ),
+    );
+
+    // Sandbox default keeps Sandbox::Needs.
+    let sandbox_cfg = base_config(fixture.clone());
+    assert_eq!(sandbox_cfg.offers().capabilities.sandbox, Sandbox::Needs);
+
+    // host_mode = true refuses dangerously_skip_permissions = true.
+    let mut invalid = base_config(fixture.clone());
+    invalid.host_mode = true;
+    invalid.dangerously_skip_permissions = true;
+    let err = invalid.validate().unwrap_err();
+    assert!(err.contains("dangerously_skip_permissions"), "{err}");
+
+    // host_mode = true with safe flags declares Sandbox::None and isolates $HOME.
+    let mut cfg = base_config(fixture);
+    cfg.host_mode = true;
+    cfg.dangerously_skip_permissions = false;
+    cfg.mode = Some(Mode::Auto);
+    cfg.credential_mode = crate::CredentialMode::HomeFile;
+    cfg.credential_file = Some(cred_src);
+    cfg.validate().unwrap();
+    assert_eq!(cfg.offers().capabilities.sandbox, Sandbox::None);
+
+    let inv = Invocation::from_config(
+        &cfg,
+        dir.path().to_path_buf(),
+        "host task".to_owned(),
+        None,
+        None,
+        None,
+    );
+    assert!(!inv.dangerously_skip_permissions);
+    assert_eq!(inv.mode, Some(Mode::Auto));
+
+    // Confirm describe reports Sandbox::None.
+    let desc = describe(&cfg);
+    match desc.answer {
+        Answer::Describe { capabilities, .. } => {
+            assert_eq!(capabilities.unwrap().sandbox, Sandbox::None);
+        }
+        other => panic!("expected Describe, got {other:?}"),
+    }
+
+    let turn = run_invocation(&cfg, &inv, &|| false);
+    assert_eq!(turn.error, None, "{turn:?}");
+    assert_eq!(turn.session.as_deref(), Some("host-sess-1"));
+
+    let child_home = fs::read_to_string(&observed_home).unwrap();
+    let current_home = std::env::var("HOME").unwrap_or_default();
+    assert_ne!(child_home, current_home, "host turn reused real $HOME");
+    assert!(
+        !real_home.join(".gemini").exists(),
+        "real $HOME must never be written"
+    );
+    assert_eq!(
+        fs::read_to_string(&observed_cred).unwrap(),
+        "{\"access_token\":\"host-tok-999\"}"
+    );
+    assert_eq!(fs::read_to_string(&observed_mode).unwrap().trim(), "600");
+    let args = fs::read_to_string(&observed_args).unwrap();
+    assert!(args.contains("--mode\nauto\n"), "{args}");
+    assert!(!args.contains("--dangerously-skip-permissions"), "{args}");
+    assert!(
+        fs::read_to_string(&observed_claude).unwrap().is_empty(),
+        "Anthropic credentials must remain stripped in host mode"
+    );
+    // Verify the isolated per-turn home directory was cleaned up after exit.
+    assert!(
+        !Path::new(&child_home).exists(),
+        "isolated host HOME {child_home} should be cleaned up on turn exit"
+    );
+    let _ = fs::metadata(dir.path()).unwrap().permissions().mode();
+}

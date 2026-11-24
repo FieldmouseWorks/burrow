@@ -18,8 +18,12 @@ use crate::config::{
 use crate::normalize::{RunError, TurnOutput, normalize_output};
 use crate::schema::Schema;
 
-/// Environment variables that must NEVER leak into the `antigravity` child:
-/// GitHub tokens and other engines' credentials.
+/// Cross-engine credentials that must NEVER leak into the `antigravity` child,
+/// whether running in a sandbox or on the host.
+pub const CROSS_ENGINE_STRIPPED_ENV: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
+/// Environment variables that must NEVER leak into a sandboxed `antigravity`
+/// child (`host_mode = false`): GitHub tokens and other engines' credentials.
 pub const STRIPPED_ENV: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -72,7 +76,7 @@ impl Invocation {
             add_dirs: config.add_dirs.clone(),
             json_schema: config.json_schema.clone(),
             mode: config.mode,
-            dangerously_skip_permissions: config.dangerously_skip_permissions,
+            dangerously_skip_permissions: config.dangerously_skip_permissions && !config.host_mode,
             sandbox: config.sandbox,
             disable_slash_commands: config.disable_slash_commands,
             settings_file: config.settings_file.clone(),
@@ -435,11 +439,43 @@ pub fn run_invocation(
             };
         }
     };
-    let resolved_home = invocation.home_dir.clone().or_else(|| {
-        std::env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from)
-    });
+    let orig_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    // In host mode with `home-file` credentials, materialize into a private
+    // per-turn `$HOME` so interactive desktop or T3 userdata in the real
+    // `$HOME` is never read or overwritten.
+    let isolated_host_home = if config.host_mode
+        && config.credential_mode == CredentialMode::HomeFile
+        && invocation.home_dir.is_none()
+    {
+        match tempfile::Builder::new()
+            .prefix("antigravity-host-home-")
+            .tempdir()
+            .and_then(|dir| {
+                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                Ok(dir)
+            }) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                return TurnOutput {
+                    error: Some(RunError::ProcessFailed {
+                        exit_code: None,
+                        signal: None,
+                        message: format!("failed to create isolated host HOME: {e}"),
+                    }),
+                    ..TurnOutput::default()
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let effective_home = invocation
+        .home_dir
+        .clone()
+        .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
+    let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
     let prepared = match prepare_credential(config, resolved_home.as_deref()) {
         Ok(p) => p,
         Err(why) => {
@@ -459,11 +495,32 @@ pub fn run_invocation(
         .args(build_args(invocation))
         .current_dir(&invocation.workdir);
 
-    if let Some(home) = &invocation.home_dir {
+    if let Some(home) = &effective_home {
         command.env("HOME", home);
+        if isolated_host_home.is_some()
+            && let Some(real_home) = &orig_home
+        {
+            if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
+                let gitconfig = real_home.join(".gitconfig");
+                if gitconfig.is_file() {
+                    command.env("GIT_CONFIG_GLOBAL", gitconfig);
+                }
+            }
+            if std::env::var_os("CARGO_HOME").is_none() {
+                let cargo_home = real_home.join(".cargo");
+                if cargo_home.is_dir() {
+                    command.env("CARGO_HOME", cargo_home);
+                }
+            }
+        }
     }
 
-    for var in STRIPPED_ENV {
+    let stripped = if config.host_mode {
+        CROSS_ENGINE_STRIPPED_ENV
+    } else {
+        STRIPPED_ENV
+    };
+    for var in stripped {
         command.env_remove(var);
     }
     match config.credential_mode {

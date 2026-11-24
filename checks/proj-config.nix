@@ -36,6 +36,12 @@
             plugin = pkgs.hello;
             capabilities = [ "workspace" ];
           };
+          burrow.engines.antigravity = {
+            enable = true;
+            package = pkgs.hello;
+            credentialFile = "/run/keys/antigravity-oauth";
+            credentialMode = "home-file";
+          };
         }
       ];
     };
@@ -75,14 +81,16 @@
     conf=$(sed -n 's/.*export PROJ_CONFIG=\([^ ]*\) .*/\1/p' ${keyed.config.burrow.tools.proj}/bin/proj | head -n 1)
     jq -e '.claudeApiKeyFile == "/run/keys/anthropic-api"' "$conf" >/dev/null \
       || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
-    jq -e '.sandboxPlugins.sandboxed == ["workspace"] and (.sandboxPlugins | has("claude") | not)' "$conf" >/dev/null \
-      || { echo "proj.json's sandboxPlugins missed sandboxed capabilities or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
+    jq -e '.sandboxPlugins.sandboxed == ["workspace"] and (.sandboxPlugins | has("claude") | not) and (.sandboxPlugins | has("antigravity") | not)' "$conf" >/dev/null \
+      || { echo "proj.json's sandboxPlugins missed sandboxed capabilities or included host-capable engines: $(jq .sandboxPlugins "$conf")"; exit 1; }
     jq -e '.plugins["extra-host"] | endswith("/bin/extra-host")' "$conf" >/dev/null \
       || { echo "proj.json missed verified extra-host plugin: $(jq .plugins "$conf")"; exit 1; }
     if printf '{"contract":"conary-plugin/v5","kind":"describe"}\n' | ${sandboxExtraPlugin}/bin/extra-vm-plugin | jq -e '(.capabilities.sandbox // "none") != "needs"' >/dev/null; then
       echo "extra-vm-plugin unexpectedly passed host-plugin sandbox check"
       exit 1
     fi
+    jq -e '(.plugins.antigravity | endswith("/bin/burrow-engine-antigravity-host")) and (.vmPlugins.antigravity.plugin | endswith("/bin/burrow-engine-antigravity")) and (.vmPlugins.antigravity.capabilities | index("workspace") != null)' "$conf" >/dev/null \
+      || { echo "proj.json did not wire dual-mode antigravity host + vm plugins cleanly: $(jq '{plugins, vmPlugins}' "$conf")"; exit 1; }
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

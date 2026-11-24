@@ -74,6 +74,41 @@ let
     })
   );
 
+  resolvedHostCredentialFile =
+    if cfg.host.credentialFile != null then cfg.host.credentialFile else cfg.credentialFile;
+
+  hostPluginConfig = pkgs.writeText "burrow-engine-antigravity-host.json" (
+    builtins.toJSON ({
+      binary = resolvedBinary;
+      models = map (m: {
+        inherit (m) id efforts;
+        context_tokens = m.contextTokens;
+        max_output_tokens = m.maxOutputTokens;
+      }) cfg.models;
+      default_model = cfg.defaultModel;
+      default_effort = cfg.defaultEffort;
+      credential_env = cfg.credentialEnv;
+      target_credential_env = cfg.targetCredentialEnv;
+      credential_file = resolvedHostCredentialFile;
+      credential_mode = cfg.credentialMode;
+      credential_home_path = cfg.credentialHomePath;
+      settings_file =
+        if cfg.host.settingsFile != null then cfg.host.settingsFile else cfg.settingsFile;
+      mode = cfg.host.mode;
+      host_mode = true;
+      dangerously_skip_permissions = false;
+      sandbox = cfg.host.sandbox;
+      disable_slash_commands = true;
+      output_format = cfg.outputFormat;
+      add_dirs = cfg.addDirs;
+      print_timeout_secs = cfg.printTimeoutSeconds;
+      deadline_secs = cfg.deadlineSeconds;
+      network = lib.elem "network" cfg.capabilities;
+      devices = lib.optional (lib.elem "kvm" cfg.capabilities) "kvm";
+      meters = cfg.meters;
+    })
+  );
+
   pluginBin = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engine-antigravity;
 
   wrappedPlugin =
@@ -87,6 +122,19 @@ let
         makeBinaryWrapper ${lib.getExe' pluginBin "burrow-engine-antigravity"} \
           $out/bin/burrow-engine-antigravity \
           --set BURROW_ANTIGRAVITY_CONFIG ${pluginConfig}
+      '';
+
+  wrappedHostPlugin =
+    pkgs.runCommand "burrow-engine-antigravity-host-plugin"
+      {
+        nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+        meta.mainProgram = "burrow-engine-antigravity-host";
+        passthru.config = hostPluginConfig;
+      }
+      ''
+        makeBinaryWrapper ${lib.getExe' pluginBin "burrow-engine-antigravity"} \
+          $out/bin/burrow-engine-antigravity-host \
+          --set BURROW_ANTIGRAVITY_CONFIG ${hostPluginConfig}
       '';
 in
 {
@@ -343,11 +391,65 @@ in
       description = "Extra NixOS modules for the Antigravity sandbox guest image.";
     };
 
+    host = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Also wire a host-mode Antigravity plugin (`Sandbox::None`,
+          `--dangerously-skip-permissions` refused, isolated per-turn `$HOME`)
+          into `burrow.proj` so host `proj` roles can run on Antigravity while
+          `--vm` jobs keep using the strict sandbox plugin.
+        '';
+      };
+
+      credentialFile = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/secrets/antigravity-agent-credential";
+        description = ''
+          Isolated credential file readable by the host `proj` user for
+          host-mode Antigravity turns. Defaults to `credentialFile` when null.
+        '';
+      };
+
+      mode = mkOption {
+        type = types.nullOr (
+          types.enum [
+            "accept-edits"
+            "auto"
+            "plan"
+          ]
+        );
+        default = "auto";
+        description = "Execution mode passed via `antigravity --mode` on host turns.";
+      };
+
+      sandbox = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Pass `--sandbox` to `antigravity` on host turns.";
+      };
+
+      settingsFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = "Optional settings file passed via `antigravity --settings` on host turns (defaults to `settingsFile`).";
+      };
+    };
+
     pluginPackage = mkOption {
       type = types.package;
       readOnly = true;
       default = wrappedPlugin;
-      description = "The configured `burrow-engine-antigravity` Conary v5 plugin executable.";
+      description = "The configured sandbox `burrow-engine-antigravity` Conary v5 plugin executable.";
+    };
+
+    hostPluginPackage = mkOption {
+      type = types.package;
+      readOnly = true;
+      default = wrappedHostPlugin;
+      description = "The configured host-mode `burrow-engine-antigravity` Conary v5 plugin executable.";
     };
   };
 

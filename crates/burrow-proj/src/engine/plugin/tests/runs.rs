@@ -744,3 +744,118 @@ fn usage_is_preserved_when_response_is_rejected_or_empty() {
         assert_eq!(usage_record["total_cost_usd"], 0.01);
     }
 }
+
+/// A dual-mode engine (`plugins` for host turns, `vm_plugins` for `--vm`
+/// turns) runs its host plugin on host turns and its strict sandbox plugin
+/// (with `burrow-grants` enforcement) inside `--vm` turns.
+#[test]
+fn dual_mode_engine_selects_host_or_vm_plugin_and_enforces_vm_grants() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let (_, calls) = stand_in_sandbox(&tmp, &mut cfg);
+
+    let host_ran = tmp.path().join("dual-host-ran");
+    let host_desc = tmp.path().join("dual-host-desc.json");
+    let host_turn = tmp.path().join("dual-host-turn.json");
+    fs::write(
+        &host_desc,
+        describe_json_with("dual", vec![], vec![], Sandbox::None),
+    )
+    .unwrap();
+    fs::write(
+        &host_turn,
+        job_json(
+            "dual",
+            "host-s1",
+            Context::Fresh,
+            None,
+            None,
+            "host ran",
+            Next::Done,
+        ),
+    )
+    .unwrap();
+    let host_bin = tmp.path().join("dual-host-plugin");
+    burrow_test::executable(
+        &host_bin,
+        format!(
+            "#!/bin/sh\ntouch {}\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {}\n",
+            host_ran.display(),
+            host_desc.display(),
+            host_turn.display()
+        ),
+    );
+    cfg.plugins.insert("dual".into(), host_bin);
+
+    let vm_ran = tmp.path().join("dual-vm-ran");
+    let vm_desc = tmp.path().join("dual-vm-desc.json");
+    fs::write(
+        &vm_desc,
+        describe_json_with("dual", vec![], vec![], Sandbox::Needs),
+    )
+    .unwrap();
+    let vm_bin = tmp.path().join("dual-vm-plugin");
+    burrow_test::executable(
+        &vm_bin,
+        format!(
+            "#!/bin/sh\ntouch {}\ncat {}\n",
+            vm_ran.display(),
+            vm_desc.display()
+        ),
+    );
+    cfg.vm_plugins.insert(
+        "dual".into(),
+        crate::config::VmPlugin {
+            plugin: vm_bin,
+            capabilities: vec!["workspace".into()],
+        },
+    );
+
+    let job = make_job(&cfg, &project, "job-dual");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Dual mode\n").unwrap();
+    let choice = Choice {
+        engine: "dual".into(),
+        model: None,
+        effort: None,
+    };
+
+    // Host turn runs the host plugin and never touches the VM plugin.
+    let mut running = spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    let res = running.finish(status, false, &cfg, &job, "1", 0);
+    assert_eq!(res.rc, 0);
+    assert!(host_ran.exists());
+    assert!(!vm_ran.exists());
+
+    // VM turn uses vm_plugins and enforces its owner-approved capability list
+    // before launching (here missing required VM capabilities).
+    crate::job::Request {
+        project: project.to_string_lossy().into_owned(),
+        agent: Some("dual-1".into()),
+        agent_engine: Some("dual".into()),
+        ..Default::default()
+    }
+    .save(&job)
+    .unwrap();
+    let refused = match spawn(
+        &cfg,
+        &job,
+        "2",
+        &prompt,
+        &waitdir,
+        Some("dual-1"),
+        true,
+        "",
+        &choice,
+    ) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("expected VM capability refusal, got Failed({e})"),
+        Ok(_) => panic!("expected VM capability refusal, got Ok"),
+    };
+    assert_eq!(refused.kind, RefusalKind::Misplaced);
+    assert!(!vm_ran.exists());
+    assert!(!calls.exists());
+}
