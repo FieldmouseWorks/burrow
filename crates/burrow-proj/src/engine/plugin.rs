@@ -109,6 +109,26 @@ pub struct PluginUsage {
     pub total_cost_usd: Option<f64>,
 }
 
+impl PluginUsage {
+    /// Give a result record this usage, as the turn's accounting reads it,
+    /// where the record carries none of its own: its own always wins.
+    fn stamp(&self, record: &mut Value) {
+        if !record["usage"].is_object() {
+            record["usage"] = json!({
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_read_input_tokens": self.cache_read_input_tokens,
+                "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            });
+        }
+        if record.get("total_cost_usd").is_none_or(Value::is_null)
+            && let Some(cost) = self.total_cost_usd
+        {
+            record["total_cost_usd"] = Value::from(cost);
+        }
+    }
+}
+
 /// Structured stderr diagnostic event emitted by Conary engine plugins.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -220,19 +240,28 @@ pub fn describe(cfg: &Config, plugin_path: &Path, engine: &str) -> Result<Descri
             .write_all(&req_bytes)
             .and_then(|()| stdin.write_all(b"\n"));
     }
+    // Its stderr drains as stdout is read, past what's kept, so a plugin that
+    // says more there than a pipe holds never blocks its answer.
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let _ = (&mut err).take(64 * 1024).read_to_end(&mut kept);
+            let _ = std::io::copy(&mut err, &mut std::io::sink());
+            kept
+        })
+    });
     let mut stdout = Vec::new();
     if let Some(out) = child.stdout.take() {
         out.take(MAX_RESPONSE_BYTES as u64 + 1)
             .read_to_end(&mut stdout)
             .map_err(|e| format!("{engine} plugin describe stdout read failed: {e}"))?;
     }
-    let mut stderr = Vec::new();
-    if let Some(err) = child.stderr.take() {
-        let _ = err.take(64 * 1024).read_to_end(&mut stderr);
-    }
     let status = child
         .wait()
         .map_err(|e| format!("{engine} plugin describe wait failed: {e}"))?;
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
     if !status.success() {
         let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
         return Err(if detail.is_empty() {
@@ -757,17 +786,20 @@ impl Running {
                             record["session_id"] = Value::from(sid);
                         }
                         if let Some(u) = &stderr.usage {
-                            record["usage"] = json!({
-                                "input_tokens": u.input_tokens,
-                                "output_tokens": u.output_tokens,
-                                "cache_read_input_tokens": u.cache_read_input_tokens,
-                                "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                            });
-                            if let Some(cost) = u.total_cost_usd {
-                                record["total_cost_usd"] = Value::from(cost);
-                            }
+                            u.stamp(&mut record);
                         }
                         append_line(&stream_path, &record.to_string());
+                    } else if let Some(u) = &stderr.usage
+                        // The run streamed its own result: what it reported
+                        // apart goes into that record, the one the turn's
+                        // accounting reads, where it carries none.
+                        && let Err(e) =
+                            stream::amend_last_result(&stream_path, from, |r| u.stamp(r))
+                    {
+                        eprintln!(
+                            "proj: {} plugin's usage couldn't go into its result: {e}",
+                            self.choice.engine
+                        );
                     }
                     apply_protocol_next(cfg, job, &next);
                     return RunResult {

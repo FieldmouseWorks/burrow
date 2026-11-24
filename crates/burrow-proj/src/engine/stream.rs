@@ -105,6 +105,45 @@ pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
         .last()
 }
 
+/// Rewrite the last result record a run (from `from`) left, as `amend`
+/// leaves it, when it changes it. Only once the run is over: the stream is
+/// replaced whole, and nothing else appends to it meanwhile.
+pub fn amend_last_result(
+    stream: &Path,
+    from: u64,
+    amend: impl FnOnce(&mut Value),
+) -> io::Result<()> {
+    let bytes = crate::state_reads::bytes(stream)?;
+    let start = usize::try_from(from)
+        .ok()
+        .filter(|&s| s <= bytes.len())
+        .ok_or_else(|| io::Error::other("the run starts past the stream's end"))?;
+    let run = std::str::from_utf8(&bytes[start..]).map_err(io::Error::other)?;
+    let lines: Vec<&str> = run.split('\n').collect();
+    let Some(last) = lines.iter().rposition(|l| result_of(l).is_some()) else {
+        return Ok(());
+    };
+    let mut record: Value = serde_json::from_str(lines[last])?;
+    let before = record.clone();
+    amend(&mut record);
+    if record == before {
+        return Ok(());
+    }
+    let amended = record.to_string();
+    let mut out = bytes[..start].to_vec();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(if i == last {
+            amended.as_bytes()
+        } else {
+            line.as_bytes()
+        });
+    }
+    crate::state_reads::write(stream, out)
+}
+
 /// Read a normalized `burrow.refusal` record (or legacy pre-deploy rate-limit
 /// refusal record) from `path` starting at `from`, used by deploy-overlap
 /// retained retry checkpoint recovery (`retry.rs`).

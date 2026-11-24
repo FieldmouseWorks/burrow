@@ -741,3 +741,114 @@ exit 1
         ""
     );
 }
+
+/// A plugin that says more on stderr during `describe` than a pipe holds
+/// still gets its answer read: stderr drains while stdout is read.
+#[test]
+fn describe_reads_a_plugin_that_says_more_on_stderr_than_a_pipe_holds() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, _) = setup(&tmp);
+    let desc_path = tmp.path().join("desc.json");
+    fs::write(&desc_path, describe_json("chatty", vec![], vec![])).unwrap();
+    let plugin = tmp.path().join("chatty-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            "#!/usr/bin/env bash\ncat >/dev/null\nhead -c 1000000 /dev/zero | tr '\\0' x >&2\ncat {}\n",
+            desc_path.display()
+        ),
+    );
+    cfg.plugins.insert("chatty".into(), plugin);
+    let started = std::time::Instant::now();
+    let described = describe(&cfg, &cfg.plugins["chatty"], "chatty").unwrap();
+    assert_eq!(described.version, 5);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+
+/// A plugin that streams its own result record without usage, and reports
+/// its usage apart, has that usage in the one result its turn's accounting
+/// reads; a streamed result's own usage stays as it is.
+#[test]
+fn reported_usage_goes_into_a_streamed_result_that_carries_none() {
+    for (streamed, want_input, want_cost) in [
+        (
+            r#"{"type":"result","is_error":false,"result":"streamed answer"}"#,
+            120,
+            0.12,
+        ),
+        (
+            r#"{"type":"result","is_error":false,"result":"streamed answer","usage":{"input_tokens":7,"output_tokens":3},"total_cost_usd":0.5}"#,
+            7,
+            0.5,
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (mut cfg, project) = setup(&tmp);
+        let desc_path = tmp.path().join("desc.json");
+        fs::write(&desc_path, describe_json("streamer", vec![], vec![])).unwrap();
+        let resp_path = tmp.path().join("resp.json");
+        fs::write(
+            &resp_path,
+            job_json(
+                "streamer",
+                "sess-s",
+                Context::Fresh,
+                None,
+                None,
+                "streamed answer",
+                Next::Done,
+            ),
+        )
+        .unwrap();
+        let said = tmp.path().join("stderr.jsonl");
+        fs::write(
+            &said,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"event": "stream", "line": streamed}),
+                serde_json::json!({"event": "usage", "session": "sess-s", "usage": {
+                    "input_tokens": 120, "output_tokens": 45, "total_cost_usd": 0.12}}),
+            ),
+        )
+        .unwrap();
+        let plugin = tmp.path().join("streamer-plugin");
+        burrow_test::executable(
+            &plugin,
+            format!(
+                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {desc}; exit 0; fi\ncat {said} >&2\ncat {resp}\n",
+                desc = desc_path.display(),
+                said = said.display(),
+                resp = resp_path.display(),
+            ),
+        );
+        cfg.plugins.insert("streamer".into(), plugin);
+        let job = make_job(&cfg, &project, "job-streamer");
+        let waitdir = job.turn_file("1", TurnFile::Waits);
+        fs::create_dir_all(&waitdir).unwrap();
+        let prompt = job.prompt("1");
+        fs::write(&prompt, "Stream\n").unwrap();
+        let choice = Choice {
+            engine: "streamer".into(),
+            model: None,
+            effort: None,
+        };
+        let mut running =
+            spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+        let status = running.child.take().unwrap().wait().unwrap();
+        let res = running.finish(status, false, &cfg, &job, "1", 0);
+        assert_eq!(res.rc, 0);
+        let last = res.last.expect("the streamed result");
+        assert_eq!(last["result"], "streamed answer");
+        assert_eq!(last["usage"]["input_tokens"], want_input, "{last}");
+        assert_eq!(last["total_cost_usd"], want_cost, "{last}");
+        let stream = fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap();
+        assert_eq!(
+            stream
+                .lines()
+                .filter(|l| stream::result_of(l).is_some())
+                .count(),
+            1,
+            "{stream}"
+        );
+    }
+}
