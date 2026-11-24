@@ -1,6 +1,5 @@
 use super::tests::fixture;
 use super::*;
-use crate::engine::Engine;
 
 fn pending(job: &Job, due: u64, targets: Vec<String>) {
     swap(
@@ -334,7 +333,7 @@ fn host_registration_and_replay_attribute_the_configured_client() {
         if let Some(app) = selected {
             swap(job.path("app"), app).unwrap();
         }
-        swap(job.turn("1", "engine"), Engine::Claude.name()).unwrap();
+        swap(job.turn("1", "engine"), "claude").unwrap();
         swap(job.path("link"), "sam/r#7").unwrap();
         fs::write(d.path().join("limited"), "").unwrap();
         crate::cmd::record_wait(
@@ -544,10 +543,10 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     cfg.waits = Some(d.path().join("watchdog"));
     let since = now() - 10;
     for (id, engine, app, emergency) in [
-        ("claude", Engine::Claude, "workers", false),
-        ("another", Engine::Claude, "workers", false),
-        ("emergency", Engine::Claude, "workers", true),
-        ("other", Engine::Claude, "other", false),
+        ("claude", "claude", "workers", false),
+        ("another", "claude", "workers", false),
+        ("emergency", "claude", "workers", true),
+        ("other", "claude", "other", false),
     ] {
         let job = Job::new(&cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
@@ -560,7 +559,7 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
         .unwrap();
         job.set_turns(1).unwrap();
         swap(job.path("link"), "sam/r#7").unwrap();
-        swap(job.turn("1", "engine"), engine.name()).unwrap();
+        swap(job.turn("1", "engine"), engine).unwrap();
         swap(job.path("prompt.1"), "queued").unwrap();
         fs::File::open(job.path("prompt.1"))
             .unwrap()

@@ -12,11 +12,45 @@
     };
     excludesMachinery = authors:
       builtins.all (author: author.id != inbox.config.burrow.github.machineApp.accountId) authors;
+    # A key set only as burrow.claude.api.keyFile is the one route readiness
+    # reads (proj.json's claudeApiKeyFile), as the host plugin is given it.
+    # A sandbox-only plugin wired in burrow.agents.engines is recorded in
+    # proj.json's sandboxPlugins so host turns refuse it without running it.
+    # An extra host plugin in burrow.proj.plugins is verified at build time
+    # in a pure sandbox to prove it does not declare Sandbox::Needs.
+    hostExtraPlugin = pkgs.writeShellScriptBin "extra-host-plugin" ''
+      cat >/dev/null
+      printf '{"contract":"conary-plugin/v1","by":{"engine":"extra-host"},"versions":["conary-plugin/v5"],"v2_kinds":["job"],"models":[],"capabilities":{"sandbox":"none","network":true,"devices":[],"mcp":false},"meters":[]}\n'
+    '';
+    sandboxExtraPlugin = pkgs.writeShellScriptBin "extra-vm-plugin" ''
+      cat >/dev/null
+      printf '{"contract":"conary-plugin/v1","by":{"engine":"extra-vm"},"versions":["conary-plugin/v5"],"v2_kinds":["job"],"models":[],"capabilities":{"sandbox":"needs","network":true,"devices":[],"mcp":false},"meters":[]}\n'
+    '';
+    keyed = self.nixosConfigurations.example.extendModules {
+      modules = [
+        {
+          burrow.claude.api.keyFile = "/run/keys/anthropic-api";
+          burrow.proj.plugins.extra-host = hostExtraPlugin;
+          burrow.agents.engines.sandboxed = {
+            proxyPort = 3199;
+            plugin = pkgs.hello;
+            capabilities = [ "workspace" ];
+          };
+        }
+      ];
+    };
+    # burrow.proj.plugins only adds engines: naming a wired one (claude-api,
+    # whose wrapper holds the credit and its key) fails an assertion.
+    replaced = self.nixosConfigurations.example.extendModules {
+      modules = [ { burrow.proj.plugins.claude-api = pkgs.hello; } ];
+    };
+    refused = builtins.filter (a: !a.assertion) replaced.config.assertions;
     injected = inbox.config.burrow.proj.inbox.authors ++ [ {
       login = "renamed-machinery";
       id = inbox.config.burrow.github.machineApp.accountId;
     } ];
   in
+  assert builtins.any (a: pkgs.lib.hasInfix "burrow.proj.plugins adds engines; claude-api" a.message) refused;
   assert inbox.config.systemd.services.burrow-engines-door.serviceConfig.User == inbox.config.burrow.user;
   assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
   assert inbox.config.burrow.events.handlers.engines.repos == [ "sam/homelab" ];
@@ -37,7 +71,18 @@
   assert inbox.config.burrow.events.handlers.proj-inbox-drain.unit == "proj-inbox-drain";
   assert !inbox.config.burrow.events.handlers.proj-inbox-drain.perRepo;
   assert pkgs.lib.hasSuffix "/proj-inbox drain" inbox.config.systemd.services.proj-inbox-drain.serviceConfig.ExecStart;
-  pkgs.runCommand "proj-config-check" { } ''
+  pkgs.runCommand "proj-config-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    conf=$(sed -n 's/.*export PROJ_CONFIG=\([^ ]*\) .*/\1/p' ${keyed.config.burrow.tools.proj}/bin/proj | head -n 1)
+    jq -e '.claudeApiKeyFile == "/run/keys/anthropic-api"' "$conf" >/dev/null \
+      || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
+    jq -e '.sandboxPlugins.sandboxed == ["workspace"] and (.sandboxPlugins | has("claude") | not)' "$conf" >/dev/null \
+      || { echo "proj.json's sandboxPlugins missed sandboxed capabilities or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
+    jq -e '.plugins["extra-host"] | endswith("/bin/extra-host")' "$conf" >/dev/null \
+      || { echo "proj.json missed verified extra-host plugin: $(jq .plugins "$conf")"; exit 1; }
+    if printf '{"contract":"conary-plugin/v5","kind":"describe"}\n' | ${sandboxExtraPlugin}/bin/extra-vm-plugin | jq -e '(.capabilities.sandbox // "none") != "needs"' >/dev/null; then
+      echo "extra-vm-plugin unexpectedly passed host-plugin sandbox check"
+      exit 1
+    fi
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

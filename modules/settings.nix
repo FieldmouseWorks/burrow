@@ -17,6 +17,13 @@ let
     landingRecord = if config.burrow.autoland.enable or false then config.burrow.landing.record else null;
     conaryd = lib.attrByPath [ "burrow" "landing" "conaryd" ] [ ] config;
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
+    engines = lib.unique (
+      [ "claude" "claude-api" ]
+      ++ lib.attrNames (
+        lib.filterAttrs (_: e: (e.plugin or null) != null) (config.burrow.agents.engines or { })
+      )
+      ++ lib.attrNames (config.burrow.proj.plugins or { })
+    );
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);
   command = pkgs.writeShellScriptBin "settings" ''

@@ -43,8 +43,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Optional capability overrides in [`PluginConfig`]. `sandbox` is always
-/// [`Sandbox::Needs`] because this plugin runs in burrow's shared sandbox.
+/// Optional capability overrides in [`PluginConfig`]. `sandbox` isn't one:
+/// it follows the mode ([`PluginConfig::capabilities`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeclaredCapabilities {
@@ -105,6 +105,11 @@ pub struct PluginConfig {
     pub credit: Option<CreditConfig>,
     #[serde(default)]
     pub append_system_prompt: Option<String>,
+    /// True only for host-mode `proj` wrappers (never inside sandboxes):
+    /// allows host `~/.claude` login, host environment inheritance, and live
+    /// host capability/system-prompt handoff.
+    #[serde(default)]
+    pub host_mode: bool,
 }
 
 impl PluginConfig {
@@ -188,11 +193,17 @@ impl PluginConfig {
             .unwrap_or_else(|| self.mode.default_credential_env())
     }
 
-    /// Capabilities declared by `describe`: always [`Sandbox::Needs`].
+    /// Capabilities declared by `describe`: [`Sandbox::Needs`] in burrow's
+    /// shared sandbox, and [`Sandbox::None`] for a host-mode `proj` wrapper,
+    /// which runs on the host under its managed permissions and guard.
     pub fn capabilities(&self) -> Capabilities {
         let declared = self.capabilities.clone().unwrap_or_default();
         Capabilities {
-            sandbox: Sandbox::Needs,
+            sandbox: if self.host_mode {
+                Sandbox::None
+            } else {
+                Sandbox::Needs
+            },
             network: declared.network,
             devices: declared.devices,
             mcp: declared.mcp,
@@ -306,6 +317,8 @@ pub enum DiagnosticEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<JobUsage>,
     },
+    /// Optional real-time raw stream line forwarded when `PROJ_STREAM_EVENTS=1`.
+    Stream { line: String },
 }
 
 /// Final outcome of handling one `conary-plugin v5` request.
@@ -360,14 +373,15 @@ impl PluginResult {
 
 /// Build the `describe` answer for `config`.
 pub fn describe(config: &PluginConfig) -> Answer {
+    let offers = config.offers();
     Answer::Describe {
         versions: CONTRACTS.map(str::to_owned).to_vec(),
         kinds: Vec::new(),
         v2_kinds: vec![Kind::Job],
         v4_kinds: Vec::new(),
-        models: config.models.clone(),
-        capabilities: Some(config.capabilities()),
-        meters: config.meters(),
+        models: offers.models,
+        capabilities: Some(offers.capabilities),
+        meters: offers.meters,
     }
 }
 
@@ -487,6 +501,18 @@ pub fn handle_request(
     env: &dyn Fn(&str) -> Option<String>,
     now: i64,
 ) -> PluginResult {
+    handle_request_with_stream(config, request, env, now, &mut |_| {})
+}
+
+/// [`handle_request`], invoking `on_stream` for each stdout line emitted while
+/// the harness runs.
+pub fn handle_request_with_stream(
+    config: &PluginConfig,
+    request: &Request,
+    env: &dyn Fn(&str) -> Option<String>,
+    now: i64,
+    on_stream: &mut dyn FnMut(&str),
+) -> PluginResult {
     let engine = config.engine_name();
     if version(&request.contract).is_none() {
         return PluginResult::error(
@@ -599,7 +625,8 @@ pub fn handle_request(
                 );
             }
 
-            let grants = match grants::from_env(env, Path::new(workdir)) {
+            let grants = match grants::from_env_with_host(env, Path::new(workdir), config.host_mode)
+            {
                 Ok(g) => g,
                 Err(why) => return PluginResult::error(engine, None, why, None),
             };
@@ -621,7 +648,7 @@ pub fn handle_request(
                 credit: config.credit.as_ref(),
             };
 
-            match run::execute(config, &grants, &spec, env, now) {
+            match run::execute_with_stream(config, &grants, &spec, env, now, on_stream) {
                 JobOutcome::Ok {
                     session,
                     answer,
@@ -701,7 +728,25 @@ pub fn run_stdio(
         }
     };
     let now = jiff::Timestamp::now().as_second();
-    let result = handle_request(config, &request, &|name| std::env::var(name).ok(), now);
+    let stream_events = std::env::var("PROJ_STREAM_EVENTS")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let result = handle_request_with_stream(
+        config,
+        &request,
+        &|name| std::env::var(name).ok(),
+        now,
+        &mut |line| {
+            if stream_events
+                && let Ok(encoded) = serde_json::to_string(&DiagnosticEvent::Stream {
+                    line: line.to_owned(),
+                })
+            {
+                let _ = writeln!(err, "{encoded}");
+                let _ = err.flush();
+            }
+        },
+    );
     if let Some(diag) = &result.diagnostic
         && let Ok(line) = serde_json::to_string(diag)
     {

@@ -1,89 +1,89 @@
-//! Engines own commands, sessions, streams and refusals; turns own lifecycle.
+//! Engine selection, routing, plugin execution, and normalized transcripts.
+//!
+//! `burrow-proj` holds no closed engine list and no provider-specific execution
+//! or stream-parsing logic. Every engine is identified by its configured plugin
+//! name (`String`) and executed through Conary's `conary-plugin v5` (`job`)
+//! protocol ([`plugin`]).
 
-use crate::{config::Config, job::Job, read};
+use crate::{config::Config, job::Job};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 #[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::path::Path;
 
 mod capabilities;
 mod command;
+pub(crate) mod credit;
 mod handoff;
 mod machine;
+pub(crate) mod plugin;
 mod route;
 mod stream;
-pub use burrow_engine_anthropic::stream::{
-    answer, is_error, last_result, names_session, result_of, results, stream_names_session,
-    stream_session,
-};
-pub use command::{LONG, NEXT, exec_claude, spawn};
-pub use handoff::{first_prompt, first_prompt_for};
-pub use stream::{Said, stream_tail};
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum Engine {
-    #[default]
-    Claude,
-    /// The same Claude Code, on the API credit's key instead of the
-    /// subscription's login (`burrow_engine_anthropic::api`).
-    #[serde(rename = "claude-api")]
-    ClaudeApi,
-}
+pub use command::{LONG, NEXT};
+pub use handoff::{first_prompt, first_prompt_for};
+pub use plugin::{PluginRefusal, RefusalKind, RunResult, Running, SpawnError, exec_plugin, spawn};
+pub use stream::{
+    Said, answer, is_error, last_result, names_session, record_session, refused_file, result_of,
+    results, resume_for, stream_names_session, stream_session, stream_tail,
+};
+
+/// Default engine name when legacy records predate explicit engine tracking.
+pub const DEFAULT_ENGINE: &str = "claude";
 
 /// What a job's record says when it names Codex, which proj no longer runs:
 /// the work is retired, never carried on another engine's model.
 pub const RETIRED: &str = "- this job ran on Codex, which is retired: label its issue `claude` to start it again on Claude";
 
-/// Read as [`Engine::parse`] does, so a record from a Codex turn (a request,
-/// an execution identity) fails its job with why, rather than run on Claude.
-impl<'de> Deserialize<'de> for Engine {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+/// Validate an engine plugin name from a job record, CLI flag, or route:
+/// rejects retired `codex` with [`RETIRED`] and enforces valid plugin syntax.
+pub fn parse_engine(s: &str) -> Result<String, String> {
+    if burrow_settings::roles::retired_engine(s) {
+        return Err(RETIRED.trim_start_matches("- ").to_owned());
     }
-}
-impl Engine {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::ClaudeApi => burrow_settings::credit::ENGINE,
-        }
-    }
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "claude" => Ok(Self::Claude),
-            burrow_settings::credit::ENGINE => Ok(Self::ClaudeApi),
-            "codex" => Err(RETIRED.trim_start_matches("- ").to_owned()),
-            _ => Err(format!("unknown engine {s}")),
-        }
-    }
-    /// The conversation an engine's turns carry on: both Claude engines run
-    /// the same CLI on the same sessions, so a job moving between the
-    /// subscription and the credit resumes where it was.
-    pub fn conversation(self) -> Self {
-        match self {
-            Self::Claude | Self::ClaudeApi => Self::Claude,
-        }
-    }
-    pub fn anthropic_mode(self) -> burrow_engine_anthropic::Mode {
-        match self {
-            Self::Claude => burrow_engine_anthropic::Mode::Claude,
-            Self::ClaudeApi => burrow_engine_anthropic::Mode::ClaudeApi,
-        }
+    if burrow_settings::roles::valid_engine_name(s) {
+        Ok(s.to_owned())
+    } else {
+        Err(format!("unknown engine {s}"))
     }
 }
 
-/// What one turn runs on: the engine its role gives it, and the model and
-/// effort the settings give that role on that engine. None leaves the
-/// engine's own setting.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) fn deserialize_engine<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<String, D::Error> {
+    let raw = String::deserialize(d)?;
+    parse_engine(&raw).map_err(serde::de::Error::custom)
+}
+
+pub(crate) fn deserialize_opt_engine<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    raw.map(|s| parse_engine(&s))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+/// What one turn runs on: the engine plugin its role gives it, and the model
+/// and effort the settings give that role on that engine. None leaves the
+/// plugin's own setting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
-    pub engine: Engine,
+    #[serde(deserialize_with = "deserialize_engine")]
+    pub engine: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+impl Default for Choice {
+    fn default() -> Self {
+        Self {
+            engine: DEFAULT_ENGINE.to_owned(),
+            model: None,
+            effort: None,
+        }
+    }
 }
 
 /// Inbox jobs pin their label's engine; role jobs resolve the settings each turn.
@@ -96,7 +96,7 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
         return Ok(identity.choice);
     }
     let request = crate::job::Request::load(job)?;
-    requested(cfg, job, &request, request.engine.map(Engine::name))
+    requested(cfg, job, &request, request.engine.as_deref())
 }
 
 /// The request's role, scoped to the repository its admission bound (not
@@ -114,7 +114,34 @@ pub(crate) fn requested(
     } else {
         crate::policy::repository(job)
     };
+    // A sandbox has its engine's login and hosts alone: its turns run on
+    // that engine, whatever the route says now.
+    if request.agent.is_some()
+        && let Some(engine) = request.agent_engine.as_deref()
+    {
+        let tuning = cfg.role_settings()?.tuning(role, repo.as_deref(), engine);
+        return Ok(Choice {
+            engine: engine.to_owned(),
+            model: tuning.model,
+            effort: tuning.effort,
+        });
+    }
     resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())
+}
+
+/// The engine a new job's sandbox is made for: where its role's route, for
+/// the repository it's admitted for, runs a sandboxed turn now.
+pub(crate) fn for_sandbox(
+    cfg: &Config,
+    request: &crate::job::Request,
+    identity: &crate::policy::Identity,
+) -> Result<String, String> {
+    let role = request.role.as_deref().unwrap_or_default();
+    let repo = match identity {
+        crate::policy::Identity::Repository(repo) if !role.is_empty() => Some(repo.as_str()),
+        _ => None,
+    };
+    resolve(cfg, role, repo, request.engine.as_deref(), true).map(|c| c.engine)
 }
 
 /// Turn startup, a refused run's retry and drain admission share role
@@ -131,20 +158,19 @@ pub(crate) fn resolve(
     // One version of the settings: the engine and its tuning can't come
     // from either side of an `engines use`.
     let settings = cfg.role_settings()?;
-    let pinned = pinned.map(Engine::parse).transpose()?;
+    let pinned = pinned.map(parse_engine).transpose()?;
     let meters = route::Live {
         cfg,
         sandboxed,
         now: crate::now(),
     };
-    let engine = route::engine(settings.route(role, repo), pinned, &meters)?;
-    let tuning = settings.tuning(role, repo, engine.name());
-    let choice = Choice {
+    let engine = route::engine(settings.route(role, repo), pinned.as_deref(), &meters)?;
+    let tuning = settings.tuning(role, repo, &engine);
+    Ok(Choice {
         engine,
         model: tuning.model,
         effort: tuning.effort,
-    };
-    Ok(choice)
+    })
 }
 
 /// Conversation key for any engine name: `claude` and `claude-api` share the
@@ -162,36 +188,8 @@ pub fn conversation_of(engine: &str) -> &str {
 /// in `turn.rs`.
 pub(crate) fn reroute(cfg: &Config, job: &Job, from: &Choice) -> Result<Option<Choice>, String> {
     let request = crate::job::Request::load(job)?;
-    let next = requested(cfg, job, &request, request.engine.map(Engine::name))?;
+    let next = requested(cfg, job, &request, request.engine.as_deref())?;
     Ok((next.engine != from.engine).then_some(next))
-}
-
-pub fn refused(
-    engine: Engine,
-    last: &Value,
-    stream: &str,
-    now: i64,
-) -> Option<(Option<i64>, String)> {
-    match engine {
-        Engine::Claude => burrow_engine_anthropic::claude::refused(last, stream, now),
-        // The credit's refusals are its own (burrow_engine_anthropic::api::refusal):
-        // none holds the subscription's turns.
-        Engine::ClaudeApi => None,
-    }
-}
-
-/// Refusal metadata is parsed a record at a time, including after retry offsets.
-pub fn refused_file(
-    engine: Engine,
-    last: &Value,
-    path: &Path,
-    from: u64,
-    now: i64,
-) -> Option<(Option<i64>, String)> {
-    match engine {
-        Engine::Claude => burrow_engine_anthropic::claude::refused_file(last, path, from, now),
-        Engine::ClaudeApi => None,
-    }
 }
 
 #[cfg(test)]
@@ -220,7 +218,7 @@ mod tests {
         assert_eq!(
             chosen,
             Choice {
-                engine: Engine::ClaudeApi,
+                engine: "claude-api".into(),
                 model: Some("api-model".into()),
                 effort: Some("high".into()),
             }
@@ -233,13 +231,49 @@ mod tests {
             Some("sub-model")
         );
         let pinned = resolve(&cfg, "work", None, Some("claude"), false).unwrap();
-        assert_eq!(pinned.engine, Engine::Claude);
+        assert_eq!(pinned.engine, "claude");
         assert_eq!(pinned.model.as_deref(), Some("sub-model"));
         let saved = serde_json::to_string(&chosen).unwrap();
         assert!(saved.contains(r#""engine":"claude-api""#), "{saved}");
         assert_eq!(serde_json::from_str::<Choice>(&saved).unwrap(), chosen);
-        assert_eq!(Engine::parse("claude-api"), Ok(Engine::ClaudeApi));
-        assert_eq!(Engine::ClaudeApi.conversation(), Engine::Claude);
+        assert_eq!(parse_engine("claude-api"), Ok("claude-api".to_owned()));
+        assert_eq!(conversation_of("claude-api"), "claude");
+    }
+
+    #[test]
+    fn arbitrary_plugin_engines_resolve_routes_and_models_through_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        set(
+            &mut cfg,
+            tmp.path(),
+            &[
+                "offer antigravity models ag-m1",
+                "offer antigravity efforts low high",
+                "offer third-plugin models third-m1",
+                "offer third-plugin efforts medium",
+                "role triage antigravity",
+                "model triage antigravity ag-m1 high",
+                "role review third-plugin",
+                "model review third-plugin third-m1 medium",
+            ],
+        );
+        assert_eq!(
+            resolve(&cfg, "triage", None, None, false).unwrap(),
+            Choice {
+                engine: "antigravity".into(),
+                model: Some("ag-m1".into()),
+                effort: Some("high".into()),
+            }
+        );
+        assert_eq!(
+            resolve(&cfg, "review", None, None, false).unwrap(),
+            Choice {
+                engine: "third-plugin".into(),
+                model: Some("third-m1".into()),
+                effort: Some("medium".into()),
+            }
+        );
     }
 
     #[test]
@@ -260,7 +294,7 @@ mod tests {
             ],
         );
         let chosen = resolve(&cfg, "planner", None, None, false).unwrap();
-        assert_eq!(chosen.engine, Engine::Claude);
+        assert_eq!(chosen.engine, "claude");
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }
 
@@ -288,8 +322,8 @@ mod tests {
         );
         let c = job(&cfg, "two");
         assert_eq!(
-            (c.engine, c.model.as_deref(), c.effort.as_deref()),
-            (Engine::Claude, Some("small"), Some("low"))
+            (c.engine.as_str(), c.model.as_deref(), c.effort.as_deref()),
+            ("claude", Some("small"), Some("low"))
         );
         // One change through the door, and the next job of the role takes it.
         cfg.settings
@@ -389,13 +423,13 @@ for session in ('writer-session', 'reviewer-session'):
         fs::write(job.path("role"), "steward-judged").unwrap();
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
-            (c.engine, c.model.as_deref(), c.effort.as_deref()),
-            (Engine::Claude, Some("chosen"), Some("max"))
+            (c.engine.as_str(), c.model.as_deref(), c.effort.as_deref()),
+            ("claude", Some("chosen"), Some("max"))
         );
         // Pinned by its starter (an inbox label), not by a file it writes:
         // its model and effort follow its role on the engine it's pinned to.
         let mut request = crate::job::Request::load(&job).unwrap();
-        request.engine = Some(Engine::Claude);
+        request.engine = Some("claude".into());
         request.save(&job).unwrap();
         fs::write(job.path("engine"), "other").unwrap();
         let job = Job::new(&cfg, "judge");
@@ -437,6 +471,23 @@ for session in ('writer-session', 'reviewer-session'):
         let err = choice(&cfg, &job).unwrap_err();
         assert!(err.contains("Codex, which is retired"), "{err}");
     }
+
+    #[test]
+    fn burrow_proj_has_no_closed_engine_enum_or_anthropic_crate_dependency() {
+        let root = burrow_test::manifest_dir!();
+        let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(
+            !cargo_toml.contains("burrow-engine-anthropic"),
+            "burrow-proj must not depend on burrow-engine-anthropic"
+        );
+        let engine_mod = fs::read_to_string(root.join("src/engine/mod.rs")).unwrap();
+        assert!(
+            !engine_mod
+                .lines()
+                .any(|l| l.trim_start().starts_with(concat!("pub enum ", "Engine"))),
+            "closed Engine enum must be deleted"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -451,19 +502,57 @@ mod scoped_tests {
         id: &'a str,
         project: &Path,
         role: &str,
-        engine: Option<Engine>,
+        engine: Option<&str>,
     ) -> Job<'a> {
         let job = Job::new(cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
         crate::job::Request {
             project: project.to_string_lossy().into_owned(),
-            engine,
+            engine: engine.map(str::to_owned),
             role: Some(role.into()),
             ..Default::default()
         }
         .save(&job)
         .unwrap();
         job
+    }
+
+    /// A sandbox is made for the engine its job's route runs a sandboxed
+    /// turn on, and its turns keep to that engine, with its tuning, whatever
+    /// the route says later; one made before that was kept follows the route.
+    #[test]
+    fn a_sandboxed_job_keeps_to_the_engine_its_sandbox_was_made_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        crate::config::tests::set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer claude-api models api-model",
+                "model * claude-api api-model high",
+                "role work claude",
+            ],
+        );
+        let job = started(&cfg, "vm-job", dir.path(), "work", None);
+        let mut request = crate::job::Request::load(&job).unwrap();
+        assert_eq!(
+            for_sandbox(&cfg, &request, &crate::policy::Identity::Local).unwrap(),
+            "claude"
+        );
+        request.agent = Some("work-1".into());
+        request.save(&job).unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().engine, "claude");
+        request.agent_engine = Some("claude-api".into());
+        request.save(&job).unwrap();
+        assert_eq!(
+            choice(&cfg, &job).unwrap(),
+            Choice {
+                engine: "claude-api".into(),
+                model: Some("api-model".into()),
+                effort: Some("high".into()),
+            }
+        );
     }
 
     #[test]
@@ -510,13 +599,7 @@ mod scoped_tests {
         let job = started(&cfg, "judged", &project, "steward-judged", None);
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
         // A scoped role pinned to its engine takes its repo's line too.
-        let job = started(
-            &cfg,
-            "pinned",
-            &project,
-            "steward-handed",
-            Some(Engine::Claude),
-        );
+        let job = started(&cfg, "pinned", &project, "steward-handed", Some("claude"));
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
         for (id, url) in [
             ("other", "https://github.com/other/code.git"),

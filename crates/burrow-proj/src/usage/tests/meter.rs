@@ -14,7 +14,7 @@ fn seen_agrees(cfg: &Config, d: &tempfile::TempDir, held: bool) -> bool {
     let told_before = told(d).len();
     let _ = fs::remove_dir(cfg.jobs.join(".slots"));
     let slots = cfg.jobs.join(".slots").exists();
-    let seen = crate::slot::seen_room(cfg, crate::engine::Engine::Claude, false);
+    let seen = crate::slot::seen_room(cfg, "claude", false);
     assert_eq!(out(cfg).map(|s| (s.until, s.back, s.refused())), before);
     assert_eq!(out(cfg).is_some(), held);
     assert_eq!(told(d).len(), told_before);
@@ -64,11 +64,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();
     assert!(!seen_agrees(&cfg, &d, true));
-    assert!(!crate::slot::room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
+    assert!(!crate::slot::room(&cfg, "claude", false));
     // A later refusal supersedes the original hold's start.
     record(&cfg, "held", Some(t + 7200), SAID, t - 10).unwrap();
     for at in [(t - 11) as f64, (t - 10) as f64, (t - 10) as f64 + 0.2] {
@@ -78,11 +74,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
             .record(cfg.meters.as_ref().unwrap(), "claude")
             .unwrap();
         assert!(!seen_agrees(&cfg, &d, true));
-        assert!(!crate::slot::room(
-            &cfg,
-            crate::engine::Engine::Claude,
-            false
-        ));
+        assert!(!crate::slot::room(&cfg, "claude", false));
         assert!(out(&cfg).is_some());
         assert_eq!(told(&d).len(), 1);
     }
@@ -94,11 +86,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
         .record(cfg.meters.as_ref().unwrap(), "claude")
         .unwrap();
     assert!(!seen_agrees(&cfg, &d, true));
-    assert!(!crate::slot::room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
+    assert!(!crate::slot::room(&cfg, "claude", false));
     meter.windows.get_mut("five_hour").unwrap().used = 6.0;
     meter
         .record(cfg.meters.as_ref().unwrap(), "claude")
@@ -108,7 +96,7 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
         "proj why says the fresh meter's release the drain is about to make"
     );
     assert!(
-        crate::slot::room(&cfg, crate::engine::Engine::Claude, false),
+        crate::slot::room(&cfg, "claude", false),
         "next scheduling pass releases the held queue"
     );
     let job = Job::new(&cfg, "held");
@@ -223,15 +211,7 @@ fn a_fresh_meter_never_shows_an_owner_pause_as_room() {
     )
     .unwrap();
     assert!(out_metered(&cfg).is_some());
-    assert!(!crate::slot::seen_room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
-    assert!(!crate::slot::room(
-        &cfg,
-        crate::engine::Engine::Claude,
-        false
-    ));
+    assert!(!crate::slot::seen_room(&cfg, "claude", false));
+    assert!(!crate::slot::room(&cfg, "claude", false));
     assert!(out(&cfg).is_some(), "only the owner ends an owner pause");
 }

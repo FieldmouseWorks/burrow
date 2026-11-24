@@ -11,10 +11,9 @@
 //! malformed, future or stale reading proves neither: the first engine runs
 //! as it stands, and no turn is moved onto an engine it can't vouch for.
 
-use super::Engine;
+use super::{credit, parse_engine};
 use crate::config::Config;
 use crate::usage::login::Run;
-use burrow_engine_anthropic::api;
 use burrow_settings::roles::Route;
 
 /// What a route asks of each engine.
@@ -54,8 +53,8 @@ pub(crate) fn pick<E: Copy>(first: E, over: &[(f64, E)], meters: &impl Meters<E>
 }
 
 /// The machine's per-engine meters and holds for one turn: each engine's own
-/// meter snapshot (`<engine>.json`) and per-engine hold, plus `claude-api`'s
-/// credit meter and key check, and whether the turn is sandboxed.
+/// meter snapshot (`<engine>.json`) and per-engine hold, plus the credit meter
+/// for credit-metered engines, and whether the turn is sandboxed.
 pub(crate) struct Live<'a> {
     pub cfg: &'a Config,
     pub sandboxed: bool,
@@ -70,10 +69,10 @@ impl Live<'_> {
         crate::usage::out_metered_for(self.cfg, &run).is_some()
     }
 
-    /// A key the credit's runs can launch with: none in a sandbox, and
-    /// none missing, unreadable or empty ([`api::key`]).
+    /// A readable credential file for a credit-metered engine: none in a
+    /// sandbox, and none missing, unreadable or empty.
     fn keyed(&self) -> bool {
-        !self.sandboxed && api::key(self.cfg.claude_api_key_file.as_deref()).is_ok()
+        !self.sandboxed && credit::has_key(self.cfg.claude_api_key_file.as_deref())
     }
 
     fn reading(&self, engine: &str) -> Option<burrow_usage_reset::meter::Snapshot> {
@@ -90,9 +89,9 @@ impl Meters<&str> for Live<'_> {
         if self.held(engine) {
             return true;
         }
-        if engine == burrow_settings::credit::ENGINE {
+        if self.cfg.uses_credit_meter(engine) {
             return !self.keyed()
-                || api::short(
+                || credit::short(
                     self.cfg.credit_file().as_deref(),
                     &self.cfg.jobs,
                     pct,
@@ -106,27 +105,17 @@ impl Meters<&str> for Live<'_> {
         if self.held(engine) {
             return false;
         }
-        if engine == burrow_settings::credit::ENGINE {
+        if self.cfg.uses_credit_meter(engine) {
             return self.keyed()
-                && api::room(self.cfg.credit_file().as_deref(), &self.cfg.jobs, self.now);
+                && credit::room(self.cfg.credit_file().as_deref(), &self.cfg.jobs, self.now);
         }
         self.reading(engine).is_some_and(|m| m.room())
     }
 }
 
-impl Meters<Engine> for Live<'_> {
-    fn short(&self, engine: Engine, pct: f64) -> bool {
-        Meters::<&str>::short(self, engine.name(), pct)
-    }
-
-    fn room(&self, engine: Engine) -> bool {
-        Meters::<&str>::room(self, engine.name())
-    }
-}
-
 /// The engine name `route` selects now using arbitrary engine-name meters,
-/// starting from `from` when pinned on the route.
-#[cfg(test)]
+/// starting from `from` when pinned on the route: a pin the route doesn't name
+/// runs alone.
 pub(crate) fn pick_names<'a>(
     route: &'a Route,
     from: Option<&'a str>,
@@ -145,27 +134,20 @@ pub(crate) fn pick_names<'a>(
     pick(chain[0], &over, meters)
 }
 
-/// The engine ROUTE runs a turn on now, starting from `from` when the turn
-/// is pinned to an engine on it: a pin the route doesn't name runs alone.
-pub(crate) fn engine(
-    route: &Route,
-    from: Option<Engine>,
-    meters: &impl Meters<Engine>,
-) -> Result<Engine, String> {
-    let mut chain = route
-        .engines()
-        .map(Engine::parse)
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut pcts: Vec<f64> = route.over.iter().map(|h| h.pct).collect();
-    if let Some(pin) = from {
-        let Some(at) = chain.iter().position(|e| *e == pin) else {
-            return Ok(pin);
-        };
-        chain.drain(..at);
-        pcts.drain(..at);
+/// The engine ROUTE runs a turn on now, validating every engine name along the
+/// route and starting from `from` when pinned on it.
+pub(crate) fn engine<'a>(
+    route: &'a Route,
+    from: Option<&'a str>,
+    meters: &impl Meters<&'a str>,
+) -> Result<String, String> {
+    for name in route.engines() {
+        parse_engine(name)?;
     }
-    let over: Vec<(f64, Engine)> = pcts.into_iter().zip(chain[1..].iter().copied()).collect();
-    Ok(pick(chain[0], &over, meters))
+    if let Some(pin) = from {
+        parse_engine(pin)?;
+    }
+    Ok(pick_names(route, from, meters).to_owned())
 }
 
 #[cfg(test)]

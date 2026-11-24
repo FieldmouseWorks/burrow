@@ -38,10 +38,7 @@ fn sandbox_files_cannot_authorize_recovery_or_change_retained_identity() {
     // substitute another execution identity or App during a retained resume.
     fs::write(job.path("engine"), "other").unwrap();
     fs::write(job.turn("1", "engine"), "other").unwrap();
-    assert_eq!(
-        engine::choice(&r.cfg, &job).unwrap().engine,
-        engine::Engine::Claude
-    );
+    assert_eq!(engine::choice(&r.cfg, &job).unwrap().engine, "claude");
 }
 
 #[test]

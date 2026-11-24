@@ -242,13 +242,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
             && read(&e.path()).as_deref() == Some(pid.to_string().as_str())
     });
     let stream = job.turn_file(n, TurnFile::Jsonl);
-    let turn_engine = Identity::load(job, n)
-        .ok()
-        .flatten()
-        .map_or(engine::Engine::Claude, |i| i.choice.engine);
-    let said = engine::last_result(&stream, 0)
-        .and_then(|last| engine::refused_file(turn_engine, &last, &stream, 0, crate::now()))
-        .map(|(_, said)| said);
+    let said = engine::refused_file(&stream, 0).map(|(_, said)| said);
     // A legacy parent can be preempted after refusal but before it publishes
     // its place. Publication after reset must not turn that retained refusal
     // into fresh work that can bypass the draining cohort.

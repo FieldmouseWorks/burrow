@@ -69,8 +69,7 @@ fn fresh_meter_runs_the_held_turn_and_closes_its_notice() {
 // the free slot past them, as its own --unstick turn does.
 #[test]
 fn a_sandboxs_turn_takes_a_slot_past_this_machines_login_hold() {
-    use crate::engine::Engine;
-    use burrow_engine_anthropic::claude::LOGGED_OUT;
+    use crate::usage::login::LOGGED_OUT;
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);
     let cfg = config(&jobs, 1);
@@ -81,8 +80,8 @@ fn a_sandboxs_turn_takes_a_slot_past_this_machines_login_hold() {
     assert_eq!(took(&jobs, "here"), None, "the login hold holds it");
     // Room for a sandbox's turn, with the one here in line, and none for
     // another here.
-    assert!(crate::slot::room(&cfg, Engine::Claude, true));
-    assert!(!crate::slot::room(&cfg, Engine::Claude, false));
+    assert!(crate::slot::room(&cfg, "claude", true));
+    assert!(!crate::slot::room(&cfg, "claude", false));
     fs::create_dir_all(jobs.join("vm")).unwrap();
     fs::write(jobs.join("vm/agent"), "web-ab12\n").unwrap();
     let _vm = waiter(&jobs, &tmp, "vm", 1);

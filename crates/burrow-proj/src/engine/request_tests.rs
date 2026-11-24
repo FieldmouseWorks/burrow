@@ -150,7 +150,7 @@ fn a_jobs_own_writes_never_change_what_it_runs_as() {
 fn host_authorized_changes_and_machine_settings_still_apply() {
     let mut f = fixture();
     let new = crate::cmd::New {
-        engine: Some(Engine::Claude),
+        engine: Some("claude".into()),
         local_work: true,
         ..Default::default()
     };
@@ -161,7 +161,10 @@ fn host_authorized_changes_and_machine_settings_still_apply() {
     // The job drops its label's pin itself: nothing changes.
     fs::remove_file(job.path("engine")).unwrap();
     crate::cmd::reply(&f.cfg, &id, "next", false, None).unwrap();
-    assert_eq!(Request::load(&job).unwrap().engine, Some(Engine::Claude));
+    assert_eq!(
+        Request::load(&job).unwrap().engine.as_deref(),
+        Some("claude")
+    );
     // The inbox maps its label to a role: that role's model from now on,
     // as the machine's roles file has it on each turn.
     Request::enroll(&job, "wide".into()).unwrap();
@@ -174,8 +177,8 @@ fn host_authorized_changes_and_machine_settings_still_apply() {
     crate::cmd::reply(&f.cfg, &id, "once more", false, None).unwrap();
     let c = choice(&f.cfg, &job).unwrap();
     assert_eq!(
-        (c.engine, c.model.as_deref(), c.effort.as_deref()),
-        (Engine::Claude, Some("chosen"), Some("high"))
+        (c.engine.as_str(), c.model.as_deref(), c.effort.as_deref()),
+        ("claude", Some("chosen"), Some("high"))
     );
 }
 

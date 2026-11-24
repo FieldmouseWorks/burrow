@@ -757,10 +757,7 @@ fn unstick_preflight_bypasses_ordinary_triage_admission() {
         let job = crate::job::Job::new(&b.cfg, &id);
         assert!(job.path("unstick").exists());
         assert_eq!(read(&job.path("role")).as_deref(), Some("planner"));
-        assert_eq!(
-            crate::engine::choice(&b.cfg, &job).unwrap().engine.name(),
-            engine
-        );
+        assert_eq!(crate::engine::choice(&b.cfg, &job).unwrap().engine, engine);
     }
 }
 

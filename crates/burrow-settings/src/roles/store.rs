@@ -3,7 +3,9 @@
 //! a generation that predates them still reads its overlay after a
 //! rollback.
 
-use super::{InForce, Offer, Roles, Setups, active, apply, default_offers, status, valid_setup};
+use super::{
+    InForce, Offer, Roles, Setups, active, apply, default_offers_for, status, valid_setup,
+};
 use crate::{Config, live, now};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -113,7 +115,7 @@ impl Config {
     pub fn role_view(&self) -> Result<View, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        let in_force = doc.routing.in_force(&doc.offers)?;
+        let in_force = doc.routing.in_force_for(&doc.offers, &self.engines)?;
         Ok(View {
             in_force,
             set: (
@@ -141,7 +143,7 @@ impl Config {
     pub fn engines(&self) -> Result<String, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        doc.routing.in_force(&doc.offers)?;
+        doc.routing.in_force_for(&doc.offers, &self.engines)?;
         let active = active(&doc.routing, &doc.setups);
         Ok(status(active.as_deref(), &doc.routing, &doc.setups))
     }
@@ -195,7 +197,13 @@ impl Config {
             args,
             |doc: &mut Document| {
                 self.ready(doc, true)?;
-                let answer = apply(&mut doc.routing, &mut doc.offers, &mut doc.setups, words)?;
+                let answer = apply(
+                    &mut doc.routing,
+                    &mut doc.offers,
+                    &mut doc.setups,
+                    &self.engines,
+                    words,
+                )?;
                 // With no migration source configured this is a fresh store.
                 // Its first accepted mutation establishes the complete state;
                 // a later import must not resurrect values it deliberately lacks.
@@ -222,7 +230,7 @@ impl Config {
                 if doc.migrated.is_some() {
                     return Ok(None);
                 }
-                let mut offers = default_offers();
+                let mut offers = default_offers_for(&self.engines);
                 for (engine, offer) in from.offers {
                     let have = offers.entry(engine).or_default();
                     for m in offer.models {
@@ -237,7 +245,7 @@ impl Config {
                     }
                 }
                 let routing = from.routing;
-                routing.in_force(&offers)?;
+                routing.in_force_for(&offers, &self.engines)?;
                 let setups = from.setups;
                 for (name, setup) in &setups.saved {
                     if !valid_setup(name) {
@@ -248,7 +256,7 @@ impl Config {
                         .map_err(|e| format!("setup {name}: {e}"))?;
                 }
                 // Only what differs from the declared default is set.
-                let declared = default_offers();
+                let declared = default_offers_for(&self.engines);
                 offers.retain(|engine, offer| declared.get(engine) != Some(offer));
                 for (receipt, answer) in from.receipts {
                     let key = crate::receipt_key(Path::new(&receipt))?;

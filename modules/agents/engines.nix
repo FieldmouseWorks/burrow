@@ -111,7 +111,7 @@ in
         let names = lib.attrNames config.burrow.agents.engines;
         in if lib.length names == 1 then lib.head names else null;
       defaultText = lib.literalMD "the one engine, when there's exactly one";
-      description = "The engine `agent new` starts a sandbox for when it's given no `--engine` (as `proj run --vm` gives none).";
+      description = "The engine `agent new` starts a sandbox for when it's given no `--engine` (`proj run --vm` gives the engine its job's route picks).";
     };
   };
 }

@@ -135,7 +135,7 @@ fn inbox_rig() -> (tempfile::TempDir, Config, PathBuf) {
         owner: Some("sam".into()),
         skip: Vec::new(),
         at_once: 2,
-        drain: Some(crate::engine::Engine::Claude),
+        drain: Some("claude".into()),
         drain_jobs: 1,
     });
     fs::create_dir_all(&inbox.state).unwrap();

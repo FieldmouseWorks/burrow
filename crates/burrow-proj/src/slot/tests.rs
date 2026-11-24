@@ -149,15 +149,7 @@ esac
         if what.starts_with("paused-") {
             cfg.settings.as_mut().unwrap().allowed.clear();
             fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
-            super::take_engine(
-                &cfg,
-                &id,
-                "1",
-                Class::Normal,
-                true,
-                crate::engine::Engine::Claude,
-            )
-            .unwrap_err();
+            super::take_engine(&cfg, &id, "1", Class::Normal, true, "claude").unwrap_err();
         } else if what == "hand-over" {
             take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
         } else {

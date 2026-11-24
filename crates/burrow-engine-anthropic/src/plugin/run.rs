@@ -56,6 +56,19 @@ pub fn execute(
     env: &dyn Fn(&str) -> Option<String>,
     now: i64,
 ) -> JobOutcome {
+    execute_with_stream(config, grants, spec, env, now, &mut |_| {})
+}
+
+/// [`execute`], forwarding each complete stdout line from Claude Code to
+/// `on_line` in real time as it arrives.
+pub fn execute_with_stream(
+    config: &PluginConfig,
+    grants: &command::Grants,
+    spec: &JobSpec<'_>,
+    env: &dyn Fn(&str) -> Option<String>,
+    now: i64,
+    on_line: &mut dyn FnMut(&str),
+) -> JobOutcome {
     if !spec.workdir.is_dir() {
         return JobOutcome::Failed {
             session: None,
@@ -76,7 +89,7 @@ pub fn execute(
     let cred_var = config.credential_env();
     let cred_value = env(cred_var).filter(|v| !v.trim().is_empty());
 
-    if config.mode == Mode::Claude && cred_value.is_none() {
+    if config.mode == Mode::Claude && !config.host_mode && cred_value.is_none() {
         return JobOutcome::Refused {
             session: None,
             refusal: Refusal {
@@ -91,38 +104,69 @@ pub fn execute(
     // Admitted by the credit, when one is metered, only now that nothing
     // but starting it is left: its reservation, recorded in the meter's
     // ledger, is taken back below if it never starts.
+    let ledger_stream = config
+        .host_mode
+        .then(|| env("PROJ_CREDIT_LEDGER_FILE"))
+        .flatten()
+        .filter(|s| !s.is_empty());
     let reservation = match spec.credit {
-        Some(credit) if config.mode == Mode::ClaudeApi => match api::reserve(
-            Some(&credit.credit_file),
-            &credit.jobs_dir,
-            now,
-            spec.max_budget_usd,
-        ) {
-            Ok(r) => Some(r),
-            Err(refused) => {
-                return JobOutcome::Refused {
-                    session: None,
-                    refusal: Refusal {
-                        kind: RefusalKind::CreditExhausted,
-                        reason: refused.to_string(),
-                        resets_at: None,
-                    },
-                    usage: JobUsage::default(),
-                };
+        Some(credit) if config.mode == Mode::ClaudeApi => {
+            let reserved = match ledger_stream.as_deref() {
+                Some(path) => api::reserve_in_stream(
+                    Some(&credit.credit_file),
+                    &credit.jobs_dir,
+                    Path::new(path),
+                    now,
+                    spec.max_budget_usd,
+                    spec.model,
+                ),
+                None => api::reserve(
+                    Some(&credit.credit_file),
+                    &credit.jobs_dir,
+                    now,
+                    spec.max_budget_usd,
+                ),
+            };
+            match reserved {
+                Ok(r) => Some(r),
+                Err(refused) => {
+                    return JobOutcome::Refused {
+                        session: None,
+                        refusal: Refusal {
+                            kind: RefusalKind::CreditExhausted,
+                            reason: refused.to_string(),
+                            resets_at: None,
+                        },
+                        usage: JobUsage::default(),
+                    };
+                }
             }
-        },
+        }
         _ => None,
     };
     let budget = match &reservation {
         Some(r) => Some(r.budget),
         None => spec.max_budget_usd,
     };
+    let append_system_prompt = {
+        let dynamic = config
+            .host_mode
+            .then(|| env("PROJ_APPEND_SYSTEM_PROMPT"))
+            .flatten()
+            .filter(|s| !s.is_empty());
+        match (&config.append_system_prompt, dynamic) {
+            (Some(base), Some(extra)) => Some(format!("{base}\n\n{extra}")),
+            (Some(base), None) => Some(base.clone()),
+            (None, Some(extra)) => Some(extra),
+            (None, None) => None,
+        }
+    };
     let mut extra_args = command::run_args(&command::RunArgs {
         model: spec.model.map(str::to_owned),
         effort: spec.effort.map(str::to_owned),
         session: resume_session.clone(),
         max_budget_usd: budget,
-        append_system_prompt: config.append_system_prompt.clone(),
+        append_system_prompt,
     });
     if fork_session {
         extra_args.push("--fork-session".to_owned());
@@ -217,7 +261,13 @@ pub fn execute(
     drop(key_guard);
 
     let mut out = Vec::new();
-    let run_result = drive_child(&mut child, spec.prompt.as_bytes(), &mut signals, &mut out);
+    let run_result = drive_child(
+        &mut child,
+        spec.prompt.as_bytes(),
+        &mut signals,
+        &mut out,
+        on_line,
+    );
     kill_harness_group(&mut child, shared_group, self_pid);
     // Its cost, as far as its stream got, into the ledger the credit's
     // meter reads, however the run ended. One that can't be written stays
@@ -330,6 +380,7 @@ fn drive_child(
     prompt: &[u8],
     signals: &mut Signals,
     out: &mut Vec<u8>,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<Finished, DriverError> {
     let mut stdin = child.stdin.take();
     if let Some(pipe) = &stdin {
@@ -350,7 +401,16 @@ fn drive_child(
     let mut err = Vec::new();
     let mut out_done = false;
     let mut err_done = false;
+    let mut emitted = 0usize;
     let mut status: Option<(ExitStatus, Instant)> = None;
+
+    let flush_lines = |buf: &[u8], emitted: &mut usize, on_line: &mut dyn FnMut(&str)| {
+        while let Some(rel) = buf[*emitted..].iter().position(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(&buf[*emitted..*emitted + rel]);
+            on_line(line.trim_end_matches('\r'));
+            *emitted += rel + 1;
+        }
+    };
 
     loop {
         if signals.pending().next().is_some() {
@@ -379,6 +439,7 @@ fn drive_child(
 
         if !out_done {
             out_done = read_chunk(&mut stdout, out, MAX_STDOUT_BYTES, "stdout")?;
+            flush_lines(out, &mut emitted, on_line);
         }
         if !err_done {
             err_done = read_chunk(&mut stderr, &mut err, MAX_STDERR_BYTES, "stderr")?;
@@ -400,6 +461,13 @@ fn drive_child(
         {
             if !out_done {
                 let _ = read_chunk(&mut stdout, out, MAX_STDOUT_BYTES, "stdout")?;
+            }
+            flush_lines(out, &mut emitted, on_line);
+            if emitted < out.len() {
+                let tail = String::from_utf8_lossy(&out[emitted..]);
+                if !tail.is_empty() {
+                    on_line(tail.trim_end_matches('\r'));
+                }
             }
             if !err_done {
                 let _ = read_chunk(&mut stderr, &mut err, MAX_STDERR_BYTES, "stderr")?;

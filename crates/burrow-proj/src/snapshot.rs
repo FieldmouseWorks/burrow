@@ -31,7 +31,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::engine::Engine;
 use crate::host_jobs::View;
 use crate::job::Job;
 use crate::pick::demoted;
@@ -173,7 +172,7 @@ pub struct Holder {
     /// lead, pipeline, steward, first, normal or unstick: what took a shared
     /// slot, as it says.
     pub class: Option<String>,
-    pub engine: Option<Engine>,
+    pub engine: Option<String>,
     /// None: the engine's own.
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -281,7 +280,7 @@ pub struct Pipeline {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Triage {
     /// The engine ready issues are handed to; none hands none on.
-    pub drain: Option<Engine>,
+    pub drain: Option<String>,
     pub drain_jobs: usize,
     pub sorting_at_once: usize,
     /// Issues waiting for sorting admission or verdict application, each with why.
@@ -577,7 +576,8 @@ pub(crate) fn job_slot(
             issue: facts.link.clone().or(issue),
             role: read(&job.file(JobFile::Role)).filter(|r| !r.is_empty()),
             class: None,
-            engine: read(&job.turn_file(n, TurnFile::Engine)).and_then(|e| Engine::parse(&e).ok()),
+            engine: read(&job.turn_file(n, TurnFile::Engine))
+                .and_then(|e| crate::engine::parse_engine(&e).ok()),
             model: read(&job.turn_file(n, TurnFile::Model)).filter(|m| !m.is_empty()),
             effort: read(&job.turn_file(n, TurnFile::Effort)).filter(|e| !e.is_empty()),
             awaits: facts.awaits.iter().map(|(t, _)| t.clone()).collect(),
@@ -699,7 +699,7 @@ fn holds(cfg: &Config) -> Holds {
             .as_ref()
             .and_then(|i| i.triage.as_ref())
             .map(|t| Triage {
-                drain: t.drain,
+                drain: t.drain.clone(),
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
                 waiting: crate::inbox::record::sorting_waits(cfg),

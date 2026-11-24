@@ -49,7 +49,7 @@ fn full() -> Snapshot {
         issue: Some("https://github.com/sam/box/issues/7".into()),
         role: Some("inbox".into()),
         class: Some("lead".into()),
-        engine: Some(Engine::Claude),
+        engine: Some("claude".into()),
         model: Some("small".into()),
         effort: Some("high".into()),
         awaits: vec!["sam/box#8".into()],

@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 use crate::config::{Config, tests::example};
 
@@ -14,12 +16,12 @@ fn partial_first_id_is_kept_and_resumed() {
         r#"{"type":"system","subtype":"init","session_id":"first"}"#,
     )
     .unwrap();
-    let mut said = Said::new(&job, "1", 0);
+    let mut said = Said::new(&job, "1", 0, "claude");
     said.look(false);
     assert!(!said.named);
     said.look(true);
     assert!(said.named && !said.answered);
-    assert_eq!(resume(&job, Engine::Claude).as_deref(), Some("first"));
+    assert_eq!(resume_for(&job, "claude").as_deref(), Some("first"));
     assert_eq!(read(&job.path("session")).as_deref(), Some("first"));
     assert!(stream_names_session(&stream, 0));
     assert!(!stream_names_session(
@@ -57,7 +59,7 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
             last_result(&stream, from).unwrap()["result"],
             "Which release?"
         );
-        let mut said = Said::new(&job, "1", from);
+        let mut said = Said::new(&job, "1", from, "claude");
         said.look(true);
         assert!(said.named && said.answered);
     }
@@ -85,31 +87,46 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
     fs::write(job.path("prompt.2"), "continue the conversation").unwrap();
     // The conversation is lost: the next turn starts a new one, handed
     // what it missed.
-    for lost in [
-        job.path("session"),
-        job.file(crate::record::JobFile::SessionOf(Engine::Claude)),
-    ] {
+    for lost in [job.path("session"), job.session_file("claude")] {
         let _ = fs::remove_file(lost);
     }
-    assert_eq!(resume(&job, Engine::Claude), None);
-    let prompt = crate::engine::first_prompt(&job, "2", Engine::Claude).unwrap();
+    assert_eq!(resume_for(&job, "claude"), None);
+    let prompt = crate::engine::first_prompt(&job, "2", "claude").unwrap();
     // Handoffs retain the terminal answer rather than the bulk progress.
     assert!(
         fs::read_to_string(prompt)
             .unwrap()
             .contains("Which release?")
     );
-    file.write_all(b"{\"type\":\"system\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"seven_day\",\"resetsAt\":1234567890}}\n{\"type\":\"result\",\"is_error\":true,\"api_error\":\"usage_limit_reached\",\"result\":\"plan is spent\"}\n").unwrap();
+    file.write_all(b"{\"type\":\"burrow.refusal\",\"kind\":\"usage_limit\",\"reason\":\"plan is spent\",\"resets_at\":1234567890}\n{\"type\":\"result\",\"is_error\":true,\"result\":\"plan is spent\"}\n").unwrap();
     file.flush().unwrap();
     assert_eq!(
         crate::state_reads::copy(&stream, &mut std::io::sink()).unwrap(),
         fs::metadata(&stream).unwrap().len()
     );
-    let last = last_result(&stream, offset).unwrap();
     assert_eq!(
-        crate::engine::refused_file(Engine::Claude, &last, &stream, offset, 0)
-            .unwrap()
-            .0,
-        Some(1234567890)
+        crate::engine::refused_file(&stream, offset).unwrap(),
+        (Some(1234567890), "plan is spent".to_owned())
     );
+}
+
+/// A result record is one whatever its JSON spacing, so the watcher sees the
+/// turn answered (and the linger cut can stop what it left); a record of
+/// another type that merely says "result" isn't one.
+#[test]
+fn a_result_is_seen_whatever_its_json_spacing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = dir.path().into();
+    let job = Job::new(&cfg, "job");
+    fs::create_dir(&job.dir).unwrap();
+    let other =
+        r#"{"type":"user","content":[{"type":"tool_result","content":"result"}],"result":"x"}"#;
+    assert!(result_of(other).is_none());
+    let spaced = r#"{ "type"  :  "result" , "is_error" : false , "result" : "done" }"#;
+    assert_eq!(result_of(spaced).unwrap()["result"], "done");
+    fs::write(job.turn("1", "jsonl"), format!("{other}\n{spaced}\n")).unwrap();
+    let mut said = Said::new(&job, "1", 0, "claude");
+    said.look(true);
+    assert!(said.answered);
 }

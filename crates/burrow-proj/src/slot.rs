@@ -44,7 +44,6 @@ use std::thread::sleep;
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::Config;
-use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::record::{JobFile, TurnFile, TurnMarker};
@@ -387,13 +386,12 @@ pub fn take_engine(
     n: &str,
     given: Class,
     may_hand_over: bool,
-    engine: Engine,
+    _engine: &str,
 ) -> io::Result<File> {
     crate::waits::rewatch_later(cfg, id);
-    match engine {
-        // One line for both: a hold lets the API's turns by (usage::login).
-        Engine::Claude | Engine::ClaudeApi => take(cfg, id, n, given, may_hand_over),
-    }
+    // One shared line across engine plugins: per-engine holds gate each run
+    // independently via `usage::login::run_of`.
+    take(cfg, id, n, given, may_hand_over)
 }
 
 /// Wait in line for a slot, then hold it: the slot is this process's until

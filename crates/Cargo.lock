@@ -871,7 +871,6 @@ name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
  "boon",
- "burrow-engine-anthropic",
  "burrow-events",
  "burrow-github",
  "burrow-grants",
@@ -883,6 +882,7 @@ dependencies = [
  "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
+ "conary-core",
  "gh-token",
  "jiff 1.0.1",
  "pulldown-cmark",
@@ -1200,7 +1200,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=5c38d564f03fd798bfdc079886e5864865183b98#5c38d564f03fd798bfdc079886e5864865183b98"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=2eb05812a8c1be6fa39524b3732d4722d66f98e8#2eb05812a8c1be6fa39524b3732d4722d66f98e8"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1217,7 +1217,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=5c38d564f03fd798bfdc079886e5864865183b98#5c38d564f03fd798bfdc079886e5864865183b98"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=2eb05812a8c1be6fa39524b3732d4722d66f98e8#2eb05812a8c1be6fa39524b3732d4722d66f98e8"
 dependencies = [
  "base64 0.23.1",
  "conary-core",

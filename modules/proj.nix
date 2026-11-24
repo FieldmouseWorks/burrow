@@ -44,6 +44,87 @@ let
     settings = config.burrow.settings.effective;
   });
 
+  creditFile = "${stateDir}/settings/overlay.credit.json";
+  anthropicCfg = config.burrow.claude;
+  apiModels = if anthropicCfg.api.models != null then anthropicCfg.api.models else anthropicCfg.plugin.models;
+  apiDefaultModel = if anthropicCfg.api.defaultModel != null then anthropicCfg.api.defaultModel else anthropicCfg.plugin.defaultModel;
+  apiDefaultEffort = if anthropicCfg.api.defaultEffort != null then anthropicCfg.api.defaultEffort else anthropicCfg.plugin.defaultEffort;
+  apiKeyFile = anthropicCfg.api.resolvedKeyFile;
+  hostClaudePlugin = import ./engines/anthropic/plugin.nix {
+    inherit (inputs) self;
+    inherit pkgs lib;
+    mode = "claude";
+    hostMode = true;
+    program = lib.getExe' anthropicCfg.package "claude";
+    models = anthropicCfg.plugin.models;
+    defaultModel = anthropicCfg.plugin.defaultModel;
+    defaultEffort = anthropicCfg.plugin.defaultEffort;
+    appendSystemPrompt = anthropicCfg.plugin.appendSystemPrompt;
+  };
+  hostClaudeApiPlugin = import ./engines/anthropic/plugin.nix {
+    inherit (inputs) self;
+    inherit pkgs lib apiKeyFile;
+    mode = "claude-api";
+    hostMode = true;
+    program = lib.getExe' anthropicCfg.package "claude";
+    models = apiModels;
+    defaultModel = apiDefaultModel;
+    defaultEffort = apiDefaultEffort;
+    apiBaseUrl = anthropicCfg.api.baseUrl;
+    maxBudgetUsd = anthropicCfg.api.maxBudgetUsd;
+    credit = {
+      inherit creditFile;
+      jobsDir = cfg.jobsDir;
+    };
+    appendSystemPrompt = anthropicCfg.plugin.appendSystemPrompt;
+  };
+  # Sandbox-only engine plugins (wired from burrow.agents.engines.<name>.plugin,
+  # whose contract says they run only inside that engine's sandbox). Listed in
+  # `plugins` so a `--vm` turn can run them inside its sandbox over `agent sh`,
+  # and carried with their owner-approved `capabilities` in `sandboxPlugins` so
+  # host turns refuse them without running them and `--vm` turns enforce the
+  # same `burrow-grants` capability boundary before launch.
+  sandboxOnlyEngines = lib.filterAttrs (
+    name: e: (e.plugin or null) != null && name != "claude" && name != "claude-api"
+  ) (config.burrow.agents.engines or { });
+  sandboxOnlyPlugins = lib.mapAttrs (_: e: lib.getExe e.plugin) sandboxOnlyEngines;
+  sandboxPluginCapabilities = lib.mapAttrs (_: e: e.capabilities or [ ]) sandboxOnlyEngines;
+  # The engines wired here, which burrow.proj.plugins only adds to: one of
+  # its names replacing them (claude-api's credit and key, an engine's
+  # sandbox build) is refused by an assertion below.
+  wiredPlugins = sandboxOnlyPlugins // {
+    claude = lib.getExe hostClaudePlugin;
+    "claude-api" = lib.getExe hostClaudeApiPlugin;
+  };
+  replacedPlugins = lib.attrNames (builtins.intersectAttrs wiredPlugins cfg.plugins);
+  # Extra plugins in `burrow.proj.plugins` run on the host; prove in a pure,
+  # networkless Nix build sandbox that each declares a valid `describe` reply
+  # and does NOT require a sandbox (`Sandbox::Needs`), so a sandbox-required
+  # plugin can never execute on the host service user at turn time.
+  verifyHostPlugin =
+    name: pkg:
+    pkgs.runCommand "proj-host-plugin-${name}"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        exe=${lib.escapeShellArg (lib.getExe pkg)}
+        out_json=$(printf '{"contract":"conary-plugin/v5","kind":"describe"}\n' | "$exe") \
+          || { echo "burrow.proj.plugins.${name}: describe failed in pure build sandbox" >&2; exit 1; }
+        printf '%s' "$out_json" | jq -e --arg engine ${lib.escapeShellArg name} '
+          .contract == "conary-plugin/v1"
+          and .by.engine == $engine
+          and ((.capabilities.sandbox // "none") != "needs")
+        ' >/dev/null || {
+          echo "burrow.proj.plugins.${name}: plugin requires a sandbox (Sandbox::Needs) or failed describe validation; wire sandbox plugins under burrow.agents.engines.${name}.plugin instead." >&2
+          exit 1
+        }
+        mkdir -p "$out/bin"
+        ln -s "$exe" "$out/bin/${name}"
+      '';
+  extraHostPlugins = lib.mapAttrs (name: pkg: "${verifyHostPlugin name pkg}/bin/${name}") cfg.plugins;
+  hostPlugins = wiredPlugins // extraHostPlugins;
+
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
@@ -79,7 +160,10 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
-    claudeApiKeyFile = cfg.claudeApi.keyFile;
+    # The key the host plugin is given, so route readiness sees it too.
+    claudeApiKeyFile = apiKeyFile;
+    plugins = hostPlugins;
+    sandboxPlugins = sandboxPluginCapabilities;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
@@ -225,11 +309,22 @@ in
       description = ''
         A file holding only the Anthropic API key the `claude-api` engine
         runs on, readable by the jobs' user and kept out of the store (a
-        sops-nix secret, say). proj opens it for that engine's runs alone and
-        hands it to Claude Code on a descriptor; no other turn sees it, and
-        every other turn starts with no API credential at all. Null refuses
-        every `claude-api` launch. The credit it spends is metered by
+        sops-nix secret, say). The `claude-api` engine plugin opens it for
+        that engine's runs alone; no other turn sees it, and every other
+        turn starts with no API credential at all. Null refuses every
+        `claude-api` launch. The credit it spends is metered by
         `proj.apiCredit` (docs/settings.md).
+      '';
+    };
+    plugins = lib.mkOption {
+      type = lib.types.attrsOf lib.types.package;
+      default = { };
+      description = ''
+        Additional Conary `conary-plugin v5` (`job`) engine plugin packages
+        available to host `proj` turns, keyed by engine name. Built-in
+        Anthropic plugins (`claude`, `claude-api`) and enabled engine plugins
+        registered in `burrow.agents.engines` are wired automatically, and
+        this may not name one of them.
       '';
     };
     jobsDir = lib.mkOption {
@@ -418,7 +513,7 @@ in
         answers go back as comments and their replies there continue it
       '';
       labels = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.enum [ "claude" "claude-api" ]);
+        type = lib.types.attrsOf (lib.types.strMatching "[a-z0-9][a-z0-9-]*");
         default = { claude = "claude"; };
         description = "Issue labels and the engine each starts. Each label is created in each repo.";
       };
@@ -504,7 +599,7 @@ in
           description = "Sorting jobs at once, across every repo. Each waits in line behind work someone asked for.";
         };
         drain = lib.mkOption {
-          type = lib.types.nullOr (lib.types.enum [ "claude" "claude-api" ]);
+          type = lib.types.nullOr (lib.types.strMatching "[a-z0-9][a-z0-9-]*");
           default = null;
           example = "claude";
           description = ''
@@ -530,6 +625,9 @@ in
     } {
       assertion = !cfg.inbox.planning || !cfg.inbox.vm;
       message = "burrow.proj.inbox.planning runs its planner jobs on the host; it cannot run inside an agent VM.";
+    } {
+      assertion = replacedPlugins == [ ];
+      message = "burrow.proj.plugins adds engines; ${lib.concatStringsSep ", " replacedPlugins} already has its plugin wired (claude and claude-api, or burrow.agents.engines), which it would replace.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package ];
