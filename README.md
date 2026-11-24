@@ -1,13 +1,16 @@
 # burrow
 
-NixOS modules for a machine you run with coding agents. Your agents get the
-whole box, with no permission prompts, because everything they can do is either
-undone automatically or is one of the few one-way doors that still asks.
+NixOS modules for a machine you run with coding agents. The host operator
+agent gets the whole box, with no permission prompts, because everything it can
+do is either undone automatically or is one of the few one-way doors that still
+asks; headless project work can run in per-engine microVM sandboxes with only
+declared capabilities.
 
 It's the generic half of a real box: an interactive operator session you can
 reach from anywhere, which changes the system itself and hands project work to
-headless agent jobs across modular engine plugins (`anthropic`, `antigravity`,
-or any Conary `conary-plugin v5` engine plugin).
+headless agent jobs inside each project or in isolated microVMs, built around
+modular engine surfaces (`anthropic`, `antigravity`, or any Conary
+`conary-plugin v5` engine plugin).
 
 MIT licensed. Status: in daily use on one machine; options may still move.
 
@@ -26,16 +29,17 @@ remote data, force-pushing `main`) still asks.
 
 You work through an interactive operator agent session on the box. It changes
 the machine through the machine's own flake checkout, and hands project work to
-headless agent jobs inside each project (`proj`), routed across configured
-engine plugins (`anthropic`, `antigravity`, or custom plugins) via live
-settings, or to a microVM when a task should be fenced off (`agents`). Work
+headless agent jobs inside each project (`proj`), routed across the engines
+`proj` supports (`claude` and `claude-api` today, with `antigravity` and custom
+`conary-plugin v5` plugins joining as `#668` lands) via live settings, or to a
+microVM when a task should be fenced off (`agents`). Work
 lands as pull requests: an AI reviewer reads each one through its GitHub
 connector, the steward (`autoland`) has agent jobs fix every finding and red
 check, and merges once the head's own change is reviewed clean and the head is
 green. A merge to the machine's flake goes live through `HOST-update`, behind
 the dead man's switch (`switch`) and a health check, and the same pipeline
-keeps the flake's inputs, engine release manifests and every repo's
-dependencies current (`updates`). Work starts within seconds of a GitHub
+keeps the flake's inputs, Claude Code (when `claudeManifest` is configured) and
+every repo's dependencies current (`updates`). Work starts within seconds of a GitHub
 webhook or an event on the box (`events`); the watchdog and the dispatcher
 (`watchdog`, `dispatch`) notice what has stopped moving, and you hear only
 about what needs you, one issue per problem (`notify`).
@@ -129,9 +133,9 @@ Each has an entry below, and each can be imported on its own.
   An unconfirmed switch always blocks a trial.
 - **`updates`** (`burrow.updates`): Everything current, unattended.
   `HOST-update` (on each push to the flake's main or a watched input, and
-  hourly for nixpkgs and optional engine manifests such as Claude Code) bumps
-  the flake's inputs and configured manifests, builds, runs your VM tests,
-  switches with the dead man's switch,
+  hourly for nixpkgs and, when `claudeManifest` is configured, Claude Code)
+  bumps the flake's inputs and Claude Code manifest, builds, runs your VM
+  tests, switches with the dead man's switch,
   compares health checks before and after (`HOST-health`), confirms and pushes
   to main (as a PR the merge train lands, when the flake's repo has its train
   on); anything that breaks reverts and goes to an agent job. A failed VM test
@@ -785,8 +789,9 @@ locking the machine to one vendor.
   and `antigravity` ([modules/engines/antigravity.nix](modules/engines/antigravity.nix))
   wire isolated engine surfaces, credentials, egress proxies and packaged
   plugins into `burrow.agents.engines`; live `proj settings` routes roles
-  across configured engines; and `lib.engineConformance` checks any plugin
-  inside its sandbox against what its `describe` declares.
+  across the engines `proj` currently executes (`claude` and `claude-api`); and
+  `lib.engineConformance` checks any plugin inside its sandbox against what its
+  `describe` declares.
 - **Still in progress:** finishing the generic plugin runner across every
   `proj` role and `burrow-judge`, installing plugins through the live settings
   door under pinned-hash trust rules
