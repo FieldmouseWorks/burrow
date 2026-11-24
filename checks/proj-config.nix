@@ -16,10 +16,21 @@
     # reads (proj.json's claudeApiKeyFile), as the host plugin is given it.
     # A sandbox-only plugin wired in burrow.agents.engines is recorded in
     # proj.json's sandboxPlugins so host turns refuse it without running it.
+    # An extra host plugin in burrow.proj.plugins is verified at build time
+    # in a pure sandbox to prove it does not declare Sandbox::Needs.
+    hostExtraPlugin = pkgs.writeShellScriptBin "extra-host-plugin" ''
+      cat >/dev/null
+      printf '{"contract":"conary-plugin/v1","by":{"engine":"extra-host"},"versions":["conary-plugin/v5"],"v2_kinds":["job"],"models":[],"capabilities":{"sandbox":"none","network":true,"devices":[],"mcp":false},"meters":[]}\n'
+    '';
+    sandboxExtraPlugin = pkgs.writeShellScriptBin "extra-vm-plugin" ''
+      cat >/dev/null
+      printf '{"contract":"conary-plugin/v1","by":{"engine":"extra-vm"},"versions":["conary-plugin/v5"],"v2_kinds":["job"],"models":[],"capabilities":{"sandbox":"needs","network":true,"devices":[],"mcp":false},"meters":[]}\n'
+    '';
     keyed = self.nixosConfigurations.example.extendModules {
       modules = [
         {
           burrow.claude.api.keyFile = "/run/keys/anthropic-api";
+          burrow.proj.plugins.extra-host = hostExtraPlugin;
           burrow.agents.engines.sandboxed = {
             proxyPort = 3199;
             plugin = pkgs.hello;
@@ -66,6 +77,12 @@
       || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
     jq -e '.sandboxPlugins.sandboxed == ["workspace"] and (.sandboxPlugins | has("claude") | not)' "$conf" >/dev/null \
       || { echo "proj.json's sandboxPlugins missed sandboxed capabilities or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
+    jq -e '.plugins["extra-host"] | endswith("/bin/extra-host")' "$conf" >/dev/null \
+      || { echo "proj.json missed verified extra-host plugin: $(jq .plugins "$conf")"; exit 1; }
+    if printf '{"contract":"conary-plugin/v5","kind":"describe"}\n' | ${sandboxExtraPlugin}/bin/extra-vm-plugin | jq -e '(.capabilities.sandbox // "none") != "needs"' >/dev/null; then
+      echo "extra-vm-plugin unexpectedly passed host-plugin sandbox check"
+      exit 1
+    fi
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

@@ -247,7 +247,7 @@ pub(super) fn run_describe(
 
 /// Build the `timeout(1)` command for `describe`: inside `agent` over
 /// `agent sh` for a sandboxed turn (so sandbox plugins never execute on the
-/// host), or directly on the host for a host turn.
+/// host), or directly on the host with a scrubbed environment for a host turn.
 fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Command {
     let mut cmd = Command::new(&cfg.tools.timeout);
     let timeout = if agent.is_some() {
@@ -258,6 +258,13 @@ fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Co
     cmd.args(["-k", "10s", timeout]);
     if let Some(agent) = agent {
         cmd.args(["agent", "sh", agent]);
+    } else {
+        // Offline `describe` on the host never needs the service user's
+        // tokens, home directory, or working tree.
+        cmd.env_clear().current_dir("/");
+        if let Some(path) = std::env::var_os("PATH") {
+            cmd.env("PATH", path);
+        }
     }
     cmd.arg(plugin_path)
         .stdin(Stdio::piped())

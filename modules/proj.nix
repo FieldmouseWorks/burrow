@@ -97,7 +97,33 @@ let
     "claude-api" = lib.getExe hostClaudeApiPlugin;
   };
   replacedPlugins = lib.attrNames (builtins.intersectAttrs wiredPlugins cfg.plugins);
-  hostPlugins = wiredPlugins // lib.mapAttrs (_: lib.getExe) cfg.plugins;
+  # Extra plugins in `burrow.proj.plugins` run on the host; prove in a pure,
+  # networkless Nix build sandbox that each declares a valid `describe` reply
+  # and does NOT require a sandbox (`Sandbox::Needs`), so a sandbox-required
+  # plugin can never execute on the host service user at turn time.
+  verifyHostPlugin =
+    name: pkg:
+    pkgs.runCommand "proj-host-plugin-${name}"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        exe=${lib.escapeShellArg (lib.getExe pkg)}
+        out_json=$(printf '{"contract":"conary-plugin/v5","kind":"describe"}\n' | "$exe") \
+          || { echo "burrow.proj.plugins.${name}: describe failed in pure build sandbox" >&2; exit 1; }
+        printf '%s' "$out_json" | jq -e --arg engine ${lib.escapeShellArg name} '
+          .contract == "conary-plugin/v1"
+          and .by.engine == $engine
+          and ((.capabilities.sandbox // "none") != "needs")
+        ' >/dev/null || {
+          echo "burrow.proj.plugins.${name}: plugin requires a sandbox (Sandbox::Needs) or failed describe validation; wire sandbox plugins under burrow.agents.engines.${name}.plugin instead." >&2
+          exit 1
+        }
+        mkdir -p "$out/bin"
+        ln -s "$exe" "$out/bin/${name}"
+      '';
+  extraHostPlugins = lib.mapAttrs (name: pkg: "${verifyHostPlugin name pkg}/bin/${name}") cfg.plugins;
+  hostPlugins = wiredPlugins // extraHostPlugins;
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;

@@ -585,3 +585,28 @@ fn a_plugin_whose_background_child_inherits_pipes_does_not_hang_finish() {
         "answered despite lingering child"
     );
 }
+
+/// Host `describe` runs with a scrubbed environment (`env_clear` + `PATH`
+/// alone, cwd `/`) so offline capability negotiation never exposes host
+/// service-user tokens or files.
+#[test]
+fn host_describe_scrubs_service_user_environment() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, _) = setup(&tmp);
+    let desc = tmp.path().join("scrub-desc.json");
+    fs::write(&desc, describe_json("scrub", vec![], vec![])).unwrap();
+    let seen = tmp.path().join("scrub-env");
+    let plugin = tmp.path().join("scrub-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nprintf 'home=%s\\ncwd=%s\\n' \"${{HOME:-}}\" \"$(pwd)\" > {}\ncat {}\n",
+            seen.display(),
+            desc.display()
+        ),
+    );
+    cfg.plugins.insert("scrub".into(), plugin.clone());
+    describe(&cfg, &plugin, "scrub", None).unwrap();
+    let body = fs::read_to_string(&seen).unwrap();
+    assert_eq!(body, "home=\ncwd=/\n", "host describe leaked env: {body}");
+}
