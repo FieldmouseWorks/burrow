@@ -793,13 +793,14 @@ locking the machine to one vendor.
   ([burrow#668](https://github.com/FieldmouseWorks/burrow/issues/668)), and
   making the PR review role (currently Codex through its GitHub connector)
   swappable through the same plugin contract.
-- **How to add a new engine:** start from
-  [docs/engines.md](docs/engines.md) for the capability, grant and sandbox
-  rules, [crates/burrow-example-plugin](crates/burrow-example-plugin) for a
-  minimal `conary-plugin v5` plugin, and
-  [modules/engines/antigravity.nix](modules/engines/antigravity.nix) for a
-  complete standalone Nix surface, then verify it with
-  `lib.engineConformance` (see [Checks](#checks) below).
+- **How to add a new engine:** follow
+  [docs/adding-an-engine.md](docs/adding-an-engine.md) for the end-to-end
+  step-by-step guide (wire contract, Nix module template, conformance check,
+  and invariants) — laid out so you can point your own agent at this repo to
+  build and verify a plugin for any provider. It builds on
+  [docs/engines.md](docs/engines.md),
+  [crates/burrow-example-plugin](crates/burrow-example-plugin), and
+  [modules/engines/antigravity.nix](modules/engines/antigravity.nix).
 
 ## Checks
 
