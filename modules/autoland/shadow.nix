@@ -121,6 +121,7 @@ let
         // lib.mapAttrs (_: c: { Run = [ settings.bash "-c" c ]; }) rc.proofRuns
         // lib.mapAttrs (_: a: { Build = a; }) rc.proofBuilds;
       trusted = producers proofs;
+      people = lib.filter (a: !bot a) cfg.authors;
     in {
       # Whose PRs are the steward's authors': its people, and the bots
       # (their REST logins) whose PRs it lands too.
@@ -157,7 +158,12 @@ let
         # The flow's own account: review-settled, the conary/train status and
         # its answers are read only from it.
         flow_authors = [ stewardLogin ];
-        verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
+        # Whose sealed judge and major verdicts count: the steward's App and,
+        # where there's a machinery App, its bot (which renovate-sweep's jobs
+        # and the judge producer post as); without one, the machine user's own
+        # GitHub login, one of `people`, as the steward's `ours` reads it.
+        verdict_authors = [ stewardLogin ]
+          ++ (if settings.machineryLogin != null then [ settings.machineryLogin ] else people);
         # No job engine's commits go to a judge on their own: there are no
         # Codex jobs. One by none of the bots' addresses is someone editing a
         # dependency update, as the steward reads a PR's commits (touches.py,
@@ -172,7 +178,7 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
-        people = lib.filter (a: !bot a) cfg.authors;
+        inherit people;
         require_ci = rc.requireCi;
         inherit proofs;
         settle_delay = minutes rc.settleDelay;
