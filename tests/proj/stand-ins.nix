@@ -45,6 +45,10 @@
     esac
     args=$*
     echo "$args" >/tmp/args
+    # A resumed run carries on the session it was given, as Claude Code's
+    # does: the plugin holds a continuation to the one it asked for.
+    session=s
+    case " $args " in *" --resume "*) session=''${args#*--resume }; session=''${session%% *} ;; esac
     echo "''${ENABLE_CLAUDEAI_MCP_SERVERS-unset}" >/tmp/connectors
     init() { echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$1\"}"; }
     case $prompt in
@@ -165,7 +169,7 @@
       # the token gh would be given.
       *showenv*) prompt="socket=''${GH_TOKEN_SOCKET-none} count=''${GIT_CONFIG_COUNT-none} token=''${GH_TOKEN-none}" ;;
     esac
-    ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
+    ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" --arg s "$session" '{type: "result", session_id: $s, result: $r, is_error: false}'
   '';
   # HOST-notify, as far as its callers can tell: each call's words, a line
   # each (its body's lines joined), in /tmp/notices; every notice got through
