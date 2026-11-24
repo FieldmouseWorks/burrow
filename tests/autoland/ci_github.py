@@ -40,6 +40,10 @@ elif "/actions/runs/" in path:
             status, body = 201, {}
     else:
         body = info
+elif "/issues/" in path:
+    assert method == "GET", (method, path)
+    got = data["issues"].get(path)
+    status, body = (200, got) if got else (404, {"message": "Not Found"})
 elif "/compare/" in path:
     base = urllib.parse.unquote(path.split("/compare/", 1)[1].split("...", 1)[0])
     fork = data["forks"].pop(0) if data["forks"] else data["fork"].get(base, data["fork"]["v"])

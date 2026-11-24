@@ -119,7 +119,7 @@ UPKEEP_RUN = f"{tmp}/upkeep-run"
 with open(UPKEEP_RUN, "w") as f:
     f.write(f"""#!/bin/sh
 [ "$2" = commits ] && PATH={shlex.quote(COMPARE_BIN)}:$PATH
-[ "$2" = ci ] && PATH={shlex.quote(tmp + "/ci-bin")}:$PATH
+case "$2" in ci|tracked) PATH={shlex.quote(tmp + "/ci-bin")}:$PATH ;; esac
 exec {shlex.quote(UPKEEP)} "$@"
 """)
 os.chmod(UPKEEP_RUN, 0o755)
@@ -349,6 +349,7 @@ ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless 
 RERUNS = []  # the workflow runs (by id) the steward ran again
 RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
 RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt 1, cancelled, unless set
+ISSUES = {}  # an issue's or PR's REST path (repos/O/R/issues/N) to what GitHub says of it: a 404 unless set
 
 
 # The CI owner runs as compiled Rust, against an HTTP transport fixture.
@@ -362,7 +363,9 @@ os.environ["CI_FIXTURE"] = CI_FIXTURE
 
 
 def ci_upkeep(*args, **kw):
-    if args[0] != "ci":
+    """The CI owner's words (ci, and tracked, which reruns through its
+    door), on the fixture."""
+    if args[0] not in ("ci", "tracked"):
         return REAL_UPKEEP(*args, **kw)
 
     def error(e):
@@ -372,13 +375,16 @@ def ci_upkeep(*args, **kw):
 
     data = {"runs": RUN_INFO, "failures": {k: error(v) for k, v in RERUN_FAILS.items()},
             "annotations": {k: error(v) if isinstance(v, Exception) else v for k, v in ANNOTATIONS.items()},
-            "fork": FORK, "forks": FORKS, "reruns": [], "asked": [],
+            "fork": FORK, "forks": FORKS, "reruns": [], "asked": [], "issues": ISSUES,
             "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
     with open(CI_FIXTURE, "w") as f:
         json.dump(data, f)
     # The PR as the steward's query fetches it: no field it doesn't ask for.
     asked = json.loads(kw["input"])
-    kw["input"] = json.dumps({**asked, "pr": shape(asked["pr"])})
+    if args[0] == "tracked":
+        kw["input"] = json.dumps({**asked, "ci": {**asked["ci"], "pr": shape(asked["ci"]["pr"])}})
+    else:
+        kw["input"] = json.dumps({**asked, "pr": shape(asked["pr"])})
     old = C.CFG["upkeep"]
     C.CFG["upkeep"] = upkeep_config(f"{tmp}/ci-config.json")
     try:

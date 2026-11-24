@@ -169,6 +169,17 @@ def ci_state(pr, proofs=(), moved=None, repo=None, recover=False):
     return got["state"], got["names"], got["docs"]
 
 
+def tracked(pr, tracker, proofs, moved, repo):
+    """What the Rust owner (crates/burrow-upkeep/src/tracked.rs) says of a
+    head whose fix job found its red check's cause outside the PR, tracked
+    by `tracker` (OWNER/REPO#N): open; or, once it's closed, each red run
+    from before that asked to run again (through the CI owner's one rerun
+    door), going, refused, or run since and red on its own."""
+    return C.upkeep("tracked", repo, input=json.dumps({"tracker": tracker, "ci": {
+        "pr": pr, "proofs": list(proofs), "moved": list(moved) if moved is not None else None,
+        "remote": True, "recover": False}}))["tracked"]
+
+
 def our_status(pr, context=CONTEXT):
     """The steward's own status on the head: its context (or the train's,
     which cn posts as its App), posted by its App. Anyone who can push can

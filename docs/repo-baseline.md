@@ -179,7 +179,15 @@ root only.
    PR whose body links the Claude session that opened it, since that session
    is fixing them itself. A job whose fix belongs in another repo makes it
    there and ends its turn with `proj await` on that PR: the PR waits on it,
-   as on a hold, until proj resumes the job to bring the fix in.
+   as on a hold, until proj resumes the job to bring the fix in. A red
+   check whose cause lies outside the PR (the machine's, another repo's)
+   goes the same way with no push: the job finds or files the issue that
+   tracks it, names it in its answers (`tracker`) and awaits it, then runs
+   the red check's whole run again once proj resumes it. A head whose job
+   named one gets no second job: it's pending on that tracker, and once
+   the tracker closes the steward runs each red run from before then
+   again through the CI owner's rerun door (burrow-upkeep's `tracked`).
+   A red after that is the head's own, and a job takes it.
 4. Codex looks again at each push, and the steward asks it to (through the
    owner's door, as in step 2) when every finding was answered without one,
    until it finds nothing on the head. A look that isn't asked for, or

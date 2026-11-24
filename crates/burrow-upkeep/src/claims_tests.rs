@@ -205,7 +205,8 @@ fn a_job_thats_over_is_answered_for_once() {
             jid: "job-1".into(),
             kind: "handed".into(),
             outcome: "moved",
-            why: Some("feat moved on to de738d4af162, which isn't the job's push".into())
+            why: Some("feat moved on to de738d4af162, which isn't the job's push".into()),
+            tracker: None,
         }]
     );
     // GitHub didn't answer: kept, to go again.
