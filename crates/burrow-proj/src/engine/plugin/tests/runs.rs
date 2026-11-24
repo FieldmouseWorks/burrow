@@ -17,7 +17,7 @@ fn recording_plugin(tmp: &TempDir, cfg: &mut Config, engine: &str, sandbox: Sand
     burrow_test::executable(
         &plugin,
         format!(
-            "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ntouch {}\nexit 1\n",
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ntouch {}\nexit 1\n",
             desc.display(),
             ran.display()
         ),
@@ -132,7 +132,7 @@ fn only_the_credits_engine_runs_on_the_credit_whatever_a_plugin_declares() {
         burrow_test::executable(
             &plugin,
             format!(
-                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\nprintf '%s' \"${{PROJ_CREDIT_LEDGER_FILE:-none}}\" > {}\nexit 1\n",
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\nprintf '%s' \"${{PROJ_CREDIT_LEDGER_FILE:-none}}\" > {}\nexit 1\n",
                 desc.display(),
                 ledger.display()
             ),
@@ -189,7 +189,7 @@ fn a_run_without_a_response_fails_unless_it_was_cut_after_its_answer() {
         burrow_test::executable(
             &plugin,
             format!(
-                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 0\n",
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 0\n",
                 desc.display(),
                 said.display()
             ),
@@ -261,7 +261,7 @@ fn a_failed_run_answers_only_with_an_error_unless_it_was_cut() {
         burrow_test::executable(
             &plugin,
             format!(
-                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
                 desc.display(),
                 said.display()
             ),
@@ -311,7 +311,7 @@ fn a_refused_or_failed_runs_usage_is_kept_for_its_turns_accounting() {
         burrow_test::executable(
             &plugin,
             format!(
-                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
                 desc.display(),
                 said_path.display()
             ),

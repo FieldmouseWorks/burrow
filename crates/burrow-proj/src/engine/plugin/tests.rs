@@ -28,7 +28,7 @@ fn setup(tmp: &TempDir) -> (Config, PathBuf) {
     let wrapper = tmp.path().join("proj-self");
     burrow_test::executable(
         &wrapper,
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [ \"$1\" = \"_plugin\" ]; then\n  shift\n  exec \"$1\"\nfi\nexit 2\n",
+        "#!/bin/sh\nset -euo pipefail\nif [ \"$1\" = \"_plugin\" ]; then\n  shift\n  exec \"$1\"\nfi\nexit 2\n",
     );
     cfg.me = wrapper;
     let project = cfg.projects.join("demo");
@@ -166,7 +166,7 @@ fn third_party_conary_v5_plugin_runs_fresh_continue_usage_and_next_ask() {
 
     let plugin = tmp.path().join("custom-engine-plugin");
     let script = format!(
-        r#"#!/usr/bin/env bash
+        r#"#!/bin/sh
 set -euo pipefail
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then
@@ -271,7 +271,7 @@ fn plugin_rejects_mismatched_engine_identity_and_provenance() {
     let bad_id = tmp.path().join("bad-id-plugin");
     burrow_test::executable(
         &bad_id,
-        format!("#!/usr/bin/env bash\ncat {}\n", bad_desc.display()),
+        format!("#!/bin/sh\ncat {}\n", bad_desc.display()),
     );
     cfg.plugins.insert("expected-engine".into(), bad_id);
     let err = describe(&cfg, &cfg.plugins["expected-engine"], "expected-engine").unwrap_err();
@@ -311,7 +311,7 @@ fn plugin_rejects_mismatched_engine_identity_and_provenance() {
     burrow_test::executable(
         &bad_prov,
         format!(
-            "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; else cat {}; fi\n",
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; else cat {}; fi\n",
             prov_desc.display(),
             prov_resp.display()
         ),
@@ -351,7 +351,7 @@ fn structured_stderr_refusals_classify_without_provider_strings() {
     burrow_test::executable(
         &plugin,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 set -euo pipefail
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then
@@ -468,7 +468,7 @@ fn stand_in_sandbox(tmp: &TempDir, cfg: &mut Config) -> (PathBuf, PathBuf) {
     burrow_test::executable(
         &agent,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 set -euo pipefail
 printf '%s\n' "$*" >> {calls}
 case "$1" in
@@ -484,7 +484,7 @@ exit 97
     burrow_test::executable(
         &timeout,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 set -euo pipefail
 shift 3
 if [ "$1" = agent ]; then shift; exec {agent} "$@"; fi
@@ -532,7 +532,7 @@ fn sandboxed_turn_runs_its_plugin_in_the_jobs_sandbox_with_the_turns_context() {
     burrow_test::executable(
         &plugin,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 set -euo pipefail
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
@@ -637,7 +637,7 @@ fn sandboxed_turn_on_a_credit_metered_plugin_is_refused_before_it_runs() {
     burrow_test::executable(
         &plugin,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
 touch {ran}
@@ -704,7 +704,7 @@ fn host_turn_on_a_plugin_that_needs_a_sandbox_is_refused_before_it_runs() {
     burrow_test::executable(
         &plugin,
         format!(
-            r#"#!/usr/bin/env bash
+            r#"#!/bin/sh
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
 touch {ran}
@@ -756,7 +756,7 @@ fn describe_reads_a_plugin_that_says_more_on_stderr_than_a_pipe_holds() {
     burrow_test::executable(
         &plugin,
         format!(
-            "#!/usr/bin/env bash\ncat >/dev/null\nhead -c 1000000 /dev/zero | tr '\\0' x >&2\ncat {}\n",
+            "#!/bin/sh\ncat >/dev/null\nhead -c 1000000 /dev/zero | tr '\\0' x >&2\ncat {}\n",
             desc_path.display()
         ),
     );
@@ -817,7 +817,7 @@ fn reported_usage_goes_into_a_streamed_result_that_carries_none() {
         burrow_test::executable(
             &plugin,
             format!(
-                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {desc}; exit 0; fi\ncat {said} >&2\ncat {resp}\n",
+                "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {desc}; exit 0; fi\ncat {said} >&2\ncat {resp}\n",
                 desc = desc_path.display(),
                 said = said.display(),
                 resp = resp_path.display(),
