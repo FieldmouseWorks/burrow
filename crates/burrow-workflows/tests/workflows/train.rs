@@ -334,14 +334,10 @@ fn the_train_gate_is_the_whole_gate_from_mains_copy() {
         "${{ needs.train-route.outputs.train != 'true' }}"
     );
     assert!(train["with"].get("negative").is_none());
-    // So is flaky, until main's copy has the input: one it doesn't know
-    // fails the whole run.
     assert_eq!(check["with"]["flaky"], true);
-    assert!(train["with"].get("flaky").is_none());
     let mut with = check["with"].clone();
     let w = with.as_mapping_mut().unwrap();
     w.remove("negative");
-    w.remove("flaky");
     w.insert("pr-gate".into(), false.into());
     assert_eq!(train["with"], with);
     // The four legs, and the agents check skipped only where it always was.
