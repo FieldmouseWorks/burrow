@@ -601,3 +601,68 @@ fn usage_groups_normalized_failover_runs_by_invocation_engine_keeping_turn_count
         "{got}"
     );
 }
+
+#[test]
+fn normalized_turn_usage_records_per_invocation_models_without_stamping_final_model_onto_earlier_runs()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let job = tmp.path().join("rerouted");
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("1.started"), "100").unwrap();
+    fs::write(job.join("1.engine"), "claude-api").unwrap();
+
+    // Run 0: claude invocation with its own model recorded on burrow.run.
+    // Run 1: claude invocation whose model comes from the stream's system/init record.
+    // Run 2: claude invocation whose model is unknown (neither marker nor stream names one).
+    // Run 3: final claude-api invocation after failover, whose model comes from the final turn choice.
+    let lines = [
+        json!({"type":"burrow.run","at":100,"engine":"claude","model":"model-a"}),
+        json!({"type":"result","session_id":"s1","total_cost_usd":0.25,"usage":{"input_tokens":50,"output_tokens":10}}),
+        json!({"type":"burrow.run","at":105,"engine":"claude"}),
+        json!({"type":"system","subtype":"init","session_id":"s1","model":"model-stream"}),
+        json!({"type":"result","session_id":"s1","total_cost_usd":0.40,"usage":{"input_tokens":30,"output_tokens":5}}),
+        json!({"type":"burrow.run","at":110,"engine":"claude"}),
+        json!({"type":"result","session_id":"s1","subtype":"error_during_execution","total_cost_usd":0,"usage":{"input_tokens":0}}),
+        json!({"type":"burrow.run","at":120,"engine":"claude-api","budget":5_000_000}),
+        json!({"type":"result","session_id":"s1","total_cost_usd":0.85,"usage":{"input_tokens":90,"output_tokens":20}}),
+    ];
+    let stream = lines
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(job.join("1.jsonl"), stream).unwrap();
+
+    let norm = crate::usage_record::TurnUsage::from_job_turn(
+        &job,
+        "rerouted",
+        1,
+        "claude-api",
+        Some("model-b".into()),
+        100,
+    )
+    .unwrap();
+    assert_eq!(norm.engine, "claude-api");
+    assert_eq!(norm.model.as_deref(), Some("model-b"));
+    assert_eq!(norm.runs.len(), 4);
+    assert_eq!(norm.runs[0].engine, "claude");
+    assert_eq!(
+        norm.runs[0].model.as_deref(),
+        Some("model-a"),
+        "earlier invocation must keep its own recorded marker model"
+    );
+    assert_eq!(norm.runs[1].engine, "claude");
+    assert_eq!(
+        norm.runs[1].model.as_deref(),
+        Some("model-stream"),
+        "earlier invocation must keep its own stream-reported model"
+    );
+    assert_eq!(norm.runs[2].engine, "claude");
+    assert_eq!(
+        norm.runs[2].model, None,
+        "earlier invocation with unknown model must not inherit the final engine's model"
+    );
+    assert_eq!(norm.runs[3].engine, "claude-api");
+    assert_eq!(norm.runs[3].model.as_deref(), Some("model-b"));
+}

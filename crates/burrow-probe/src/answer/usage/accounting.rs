@@ -39,6 +39,8 @@ pub struct Invocation {
     /// The engine the run was on, when its marker says (an older one
     /// doesn't: its turn's engine is its own).
     pub engine: Option<String>,
+    /// The model used for this invocation, when recorded by the host marker or stream.
+    pub model: Option<String>,
     pub session: Option<String>,
     pub tokens: [u64; 4],
     pub tokens_partial: bool,
@@ -152,12 +154,22 @@ pub fn decode(
                     at: v["at"].as_i64(),
                     budget: v["budget"].as_i64(),
                     engine: v["engine"].as_str().map(str::to_owned),
+                    model: v["model"]
+                        .as_str()
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_owned),
                     ..Invocation::default()
                 });
             }
             run.active = true;
             if kind == "system" {
                 run.initialized = true;
+                if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+                    let inv = report.invocation();
+                    if inv.model.is_none() {
+                        inv.model = Some(m.to_owned());
+                    }
+                }
             }
         }
         if let Some(id) = v["session_id"].as_str() {
@@ -165,6 +177,12 @@ pub fn decode(
         }
         if kind == "assistant" {
             run.active = true;
+            if let Some(m) = v["message"]["model"].as_str().filter(|m| !m.is_empty()) {
+                let inv = report.invocation();
+                if inv.model.is_none() {
+                    inv.model = Some(m.to_owned());
+                }
+            }
             if let Some(id) = v["message"]["id"].as_str() {
                 let known = run.messages.entry(id.into()).or_insert([0; 4]);
                 for (old, new) in known

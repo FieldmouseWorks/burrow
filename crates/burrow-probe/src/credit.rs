@@ -50,11 +50,27 @@ pub const ENGINE_RUNS: &str = ".engine-runs";
 /// micro-dollars (`--max-budget-usd`), which the meter holds until its cost
 /// is in.
 pub fn marker(at: i64, engine: &str, budget: Option<i64>) -> String {
+    marker_with_model(at, engine, budget, None)
+}
+
+/// [`marker`], also recording the configured `model` when known so rerouted
+/// turns keep each invocation's own model in normalized usage records.
+pub fn marker_with_model(
+    at: i64,
+    engine: &str,
+    budget: Option<i64>,
+    model: Option<&str>,
+) -> String {
     let engine = Value::from(engine);
-    match budget {
-        Some(b) => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine},"budget":{b}}}"#),
-        None => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine}}}"#),
+    let mut out = format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine}"#);
+    if let Some(b) = budget {
+        out.push_str(&format!(r#","budget":{b}"#));
     }
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        out.push_str(&format!(r#","model":{}"#, Value::from(m)));
+    }
+    out.push('}');
+    out
 }
 
 /// The engines whose turns stream Claude Code's records, and so share a

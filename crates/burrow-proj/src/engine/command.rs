@@ -106,7 +106,14 @@ pub fn spawn(
             ])
             .args(&args)
             .stdin(crate::state_reads::open(prompt)?);
-        return job.start_run(n, crate::now(), || c.spawn());
+        return job.start_budgeted_run(
+            n,
+            crate::now(),
+            Engine::Claude,
+            None,
+            choice.model.as_deref(),
+            || c.spawn(),
+        );
     }
     // Every run on the credit, its first and each retry, only once it's
     // admitted, with what it has room for as its budget (burrow-engine-anthropic).
@@ -188,7 +195,14 @@ pub fn spawn(
         .env("PROJ_APP_ENV", app_env);
     // The marker, with the budget, is written before the admission's lock
     // goes: the next admission's meter counts this run at it.
-    let child = job.start_budgeted_run(n, crate::now(), choice.engine, budget, || c.spawn());
+    let child = job.start_budgeted_run(
+        n,
+        crate::now(),
+        choice.engine,
+        budget,
+        choice.model.as_deref(),
+        || c.spawn(),
+    );
     drop(admission);
     child
 }

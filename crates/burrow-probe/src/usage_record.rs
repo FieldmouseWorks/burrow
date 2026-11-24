@@ -181,6 +181,7 @@ impl TurnUsage {
                 at: Some(run.started_at),
                 budget: run.budget_micros,
                 engine: Some(run.engine.clone()),
+                model: run.model.clone(),
                 session: run.session.clone(),
                 tokens,
                 tokens_partial: run.tokens_partial,
@@ -250,16 +251,23 @@ impl TurnUsage {
             .unwrap_or(fallback_started);
         let recs = jsonl_records(&dir, turn);
         let report = decode(recs.into_iter(), &mut sessions, &format!("{job_id}/{turn}"));
+        let total_runs = report.invocations.len();
         let runs = report
             .invocations
             .into_iter()
-            .map(|inv| {
+            .enumerate()
+            .map(|(idx, inv)| {
                 let run_engine = inv.engine.unwrap_or_else(|| engine.to_owned());
+                let run_model = inv.model.or_else(|| {
+                    (idx + 1 == total_runs && run_engine == engine)
+                        .then(|| model.clone())
+                        .flatten()
+                });
                 let cost_usd = (!inv.cost_partial || inv.cost > 0.0).then_some(inv.cost);
                 RunUsage {
                     engine: run_engine,
                     started_at: inv.at.unwrap_or(started),
-                    model: model.clone(),
+                    model: run_model,
                     session: inv.session,
                     budget_micros: inv.budget,
                     input_tokens: inv.tokens[0],
