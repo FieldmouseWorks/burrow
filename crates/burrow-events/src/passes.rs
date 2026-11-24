@@ -156,9 +156,12 @@ impl<'a> Yields<'a> {
     }
 
     /// Whether a pass that fell due at `since` waits (None: only for a
-    /// pass that runs).
+    /// pass that runs): for `first`'s that fell due by then, or one of
+    /// `behind`'s that fell due before it.
     fn held(&self, since: Option<f64>) -> bool {
-        self.first.is_some_and(|f| f.ahead(since)) || self.behind.iter().any(|b| b.running())
+        self.first.is_some_and(|f| f.ahead(since))
+            || self.behind.iter().any(|b| b.running())
+            || since.zip(self.until(now())).is_some_and(|(s, u)| u < s)
     }
 
     /// When the first of `behind`'s waiting passes fell due: none of this
@@ -533,6 +536,51 @@ mod tests {
                 "autoland@sam-b.service",
                 "autoland-continue@sam-y.service",
                 "autoland@sam-c.service",
+            ]
+        );
+    }
+
+    // A batch the line yielded to took goes back, keeping its place, when a
+    // yielder's pass that fell due before the rest of it comes in while one
+    // of it runs (a wake-up booked for a time gone by, say).
+    #[test]
+    fn batch_gives_way() {
+        use std::rc::Rc;
+
+        let (_dir, mut steward, mut fake) = setup();
+        steward.wake = None;
+        let cont = Handler {
+            unit: "autoland-continue".into(),
+            ..steward.clone()
+        };
+        let t = crate::now() - 1000.0;
+        let first = Line::default();
+        let line = Rc::new(Line::default());
+        first.event(Pass::repo("sam/a"), t);
+        first.event(Pass::repo("sam/b"), t + 100.0);
+        let woken = line.clone();
+        fake.hook = Some(Box::new(move |unit| {
+            if unit == "autoland@sam-a.service" {
+                woken.event(Pass::repo("sam/x"), t + 50.0);
+            }
+        }));
+        let ahead = Yields {
+            first: Some(&first),
+            ..ALONE
+        };
+        let behind = Yields {
+            behind: vec![&*line],
+            ..ALONE
+        };
+        serve("autoland", &steward, &first, &behind, &fake, true, || {});
+        serve("continue", &cont, &line, &ahead, &fake, true, || {});
+        serve("autoland", &steward, &first, &behind, &fake, true, || {});
+        assert_eq!(
+            *fake.started.borrow(),
+            [
+                "autoland@sam-a.service",
+                "autoland-continue@sam-x.service",
+                "autoland@sam-b.service",
             ]
         );
     }
