@@ -69,9 +69,8 @@ let
       publicKey = keys.judge;
     };
   };
-  # The stuck role's job plugin beside the fix plugin. Conary's flow config
-  # names no `job` plugin until FP11 (Conary#422), so its loader refuses
-  # the file, as below, and so would a machine's build with it on.
+  # The stuck role's job plugin beside the fix plugin, which Conary's flow
+  # config takes since FP11 (Conary#422).
   jobbed = machine {
     imports = [ controlled ];
     burrow.autoland.plugins.fix.enable = true;
@@ -223,14 +222,9 @@ in pkgs.runCommand "autoland-flow-plugins-check" { nativeBuildInputs = [ pkgs.jq
   jq -e '.roles == {fix: "${jobbed.burrow.autoland.plugins.fix.role}", job: "${jobbed.burrow.autoland.plugins.job.role}"}' ${manifest jobbed} >/dev/null \
     || fail "the job kind isn't rendered on the stuck role: $(cat ${manifest jobbed})"
   jq -e 'has("execution") | not' $jobbed >/dev/null || fail "a base holds a role's choice: $(jq -c .execution $jobbed)"
-  # Until Conary's flow config takes `plugins.job` (FP11), its loader
-  # refuses the file, so a machine with the job plugin on fails its build
-  # rather than every pass once live.
-  if ${flowFiles} flow $jobbed; then
-    fail "Conary's flow::Config now takes plugins.job: check here that it loads instead (SJ, FP11)"
-  fi
-  jq -c 'del(.plugins.job)' $jobbed > unjobbed.json
-  ${flowFiles} flow unjobbed.json || fail "the flow config with the job plugin on is refused for more than its job key"
+  # Conary's flow config takes `plugins.job` (FP11): the rendered file
+  # loads as it is.
+  ${flowFiles} flow $jobbed || fail "Conary's flow::Config refuses the config with the job plugin on"
 
   # A producer trusted for no check fails the build that renders it.
   grep -q "names no check" ${untrusted}/testBuildFailure.log \

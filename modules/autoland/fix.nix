@@ -95,8 +95,8 @@ in
   options.burrow.autoland.plugins.job = {
     enable = lib.mkEnableOption ''
       the stuck role's `job` plugin, which the fix broker serves: the flow
-      hands a PR it can't settle to the stuck role as a proj job. Off until
-      Conary's flow sends it (FP11); it needs burrow.ledger.controllerUser,
+      hands a PR it can't settle to the stuck role as a proj job (Conary's
+      FP11). Off by default; it needs burrow.ledger.controllerUser,
       and burrow.github.machinery's App, which a stuck-role job opens a PR's
       follow-up issue as'';
 
