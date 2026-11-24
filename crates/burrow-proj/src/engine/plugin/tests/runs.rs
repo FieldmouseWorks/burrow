@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use super::super::launch::placed;
 use super::*;
 
-/// A plugin that records whether its job ran, after answering `describe`.
+/// A plugin that records any invocation (including `describe`).
 fn recording_plugin(tmp: &TempDir, cfg: &mut Config, engine: &str, sandbox: Sandbox) -> PathBuf {
     let desc = tmp.path().join(format!("{engine}-desc.json"));
     fs::write(&desc, describe_json_with(engine, vec![], vec![], sandbox)).unwrap();
@@ -17,13 +17,44 @@ fn recording_plugin(tmp: &TempDir, cfg: &mut Config, engine: &str, sandbox: Sand
     burrow_test::executable(
         &plugin,
         format!(
-            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ntouch {}\nexit 1\n",
-            desc.display(),
-            ran.display()
+            "#!/bin/sh\ntouch {}\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\nexit 1\n",
+            ran.display(),
+            desc.display()
         ),
     );
     cfg.plugins.insert(engine.into(), plugin);
     ran
+}
+
+/// A sandbox-only plugin (wired from `burrow.agents.engines`) is refused on
+/// a host turn before its executable ever runs, even for `describe`.
+#[test]
+fn host_turn_on_a_sandbox_only_plugin_is_refused_without_executing_it() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let ran = recording_plugin(&tmp, &mut cfg, "vm-only", Sandbox::Needs);
+    cfg.sandbox_plugins.insert("vm-only".into());
+    let job = make_job(&cfg, &project, "job-host-vm-only");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Run on the host\n").unwrap();
+    let choice = Choice {
+        engine: "vm-only".into(),
+        model: None,
+        effort: None,
+    };
+    let refused = match spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("sandbox-only plugin started on the host"),
+    };
+    assert_eq!(refused.kind, RefusalKind::Misplaced);
+    assert!(!refused.kind.holds_the_engine());
+    assert!(
+        !ran.exists(),
+        "sandbox-only plugin must not execute on the host, even for describe"
+    );
 }
 
 /// A sandbox has the login and hosts of the engine it was made for alone: a

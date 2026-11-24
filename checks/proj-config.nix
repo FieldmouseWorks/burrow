@@ -14,8 +14,18 @@
       builtins.all (author: author.id != inbox.config.burrow.github.machineApp.accountId) authors;
     # A key set only as burrow.claude.api.keyFile is the one route readiness
     # reads (proj.json's claudeApiKeyFile), as the host plugin is given it.
+    # A sandbox-only plugin wired in burrow.agents.engines is recorded in
+    # proj.json's sandboxPlugins so host turns refuse it without running it.
     keyed = self.nixosConfigurations.example.extendModules {
-      modules = [ { burrow.claude.api.keyFile = "/run/keys/anthropic-api"; } ];
+      modules = [
+        {
+          burrow.claude.api.keyFile = "/run/keys/anthropic-api";
+          burrow.agents.engines.sandboxed = {
+            proxyPort = 3199;
+            plugin = pkgs.hello;
+          };
+        }
+      ];
     };
     # burrow.proj.plugins only adds engines: naming a wired one (claude-api,
     # whose wrapper holds the credit and its key) fails an assertion.
@@ -53,6 +63,8 @@
     conf=$(sed -n 's/.*export PROJ_CONFIG=\([^ ]*\) .*/\1/p' ${keyed.config.burrow.tools.proj}/bin/proj | head -n 1)
     jq -e '.claudeApiKeyFile == "/run/keys/anthropic-api"' "$conf" >/dev/null \
       || { echo "proj.json's claudeApiKeyFile isn't the resolved key: $(jq .claudeApiKeyFile "$conf")"; exit 1; }
+    jq -e '(.sandboxPlugins | index("sandboxed")) != null and (.sandboxPlugins | index("claude")) == null' "$conf" >/dev/null \
+      || { echo "proj.json's sandboxPlugins missed sandboxed or included claude: $(jq .sandboxPlugins "$conf")"; exit 1; }
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

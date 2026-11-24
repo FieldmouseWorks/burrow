@@ -271,7 +271,13 @@ fn plugin_rejects_mismatched_engine_identity_and_provenance() {
     let bad_id = tmp.path().join("bad-id-plugin");
     burrow_test::executable(&bad_id, format!("#!/bin/sh\ncat {}\n", bad_desc.display()));
     cfg.plugins.insert("expected-engine".into(), bad_id);
-    let err = describe(&cfg, &cfg.plugins["expected-engine"], "expected-engine").unwrap_err();
+    let err = describe(
+        &cfg,
+        &cfg.plugins["expected-engine"],
+        "expected-engine",
+        None,
+    )
+    .unwrap_err();
     assert!(err.contains("reported engine identity"), "{err}");
 
     // Case 2: `job` returns executed model different from negotiated model.
@@ -581,10 +587,20 @@ cat {turn}
     assert_eq!(res.last.unwrap()["result"], "answered in the sandbox");
 
     let agent_calls = fs::read_to_string(&calls).unwrap();
-    let first = agent_calls.lines().next().unwrap();
+    let call_lines: Vec<&str> = agent_calls.lines().collect();
     assert!(
-        first.starts_with("sh demo-4 env ") && first.ends_with(&plugin.display().to_string()),
-        "the plugin runs in the job's own sandbox: {first}"
+        call_lines.len() >= 2,
+        "expected both describe and job to run inside the sandbox: {agent_calls}"
+    );
+    assert_eq!(
+        call_lines[0],
+        format!("sh demo-4 {}", plugin.display()),
+        "describe negotiates inside the job's own sandbox, not on the host"
+    );
+    let second = call_lines[1];
+    assert!(
+        second.starts_with("sh demo-4 env ") && second.ends_with(&plugin.display().to_string()),
+        "the plugin runs in the job's own sandbox: {second}"
     );
     let seen = fs::read_to_string(&seen).unwrap();
     assert!(
@@ -635,9 +651,9 @@ fn sandboxed_turn_on_a_credit_metered_plugin_is_refused_before_it_runs() {
         &plugin,
         format!(
             r#"#!/bin/sh
+touch {ran}
 req="$(cat)"
 if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
-touch {ran}
 exit 1
 "#,
             desc = desc_path.display(),
@@ -759,7 +775,7 @@ fn describe_reads_a_plugin_that_says_more_on_stderr_than_a_pipe_holds() {
     );
     cfg.plugins.insert("chatty".into(), plugin);
     let started = std::time::Instant::now();
-    let described = describe(&cfg, &cfg.plugins["chatty"], "chatty").unwrap();
+    let described = describe(&cfg, &cfg.plugins["chatty"], "chatty", None).unwrap();
     assert_eq!(described.version, 5);
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }

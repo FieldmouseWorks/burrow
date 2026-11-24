@@ -33,8 +33,6 @@ mod launch;
 
 /// Maximum `describe` or `job` stdout response size (32 MiB).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-/// Maximum `describe` wall-clock timeout in seconds.
-const DESCRIBE_TIMEOUT_SECS: &str = "30s";
 
 /// Negotiated metadata returned by a plugin's `describe` call.
 #[derive(Clone, Debug)]
@@ -189,28 +187,7 @@ pub struct RunResult {
 }
 
 /// Why [`spawn`] started nothing.
-#[derive(Debug)]
-pub enum SpawnError {
-    /// The turn may not run on this engine where it is: the route takes it
-    /// on as it does a run the plugin refused.
-    Refused(PluginRefusal),
-    Failed(String),
-}
-
-impl From<String> for SpawnError {
-    fn from(e: String) -> Self {
-        Self::Failed(e)
-    }
-}
-
-impl std::fmt::Display for SpawnError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused(r) => f.write_str(&r.reason),
-            Self::Failed(e) => f.write_str(e),
-        }
-    }
-}
+pub use launch::SpawnError;
 
 /// A live running plugin subprocess, together with its stdio threads and
 /// negotiated contract state for post-exit provenance verification.
@@ -226,17 +203,19 @@ pub struct Running {
     stderr_handle: Option<JoinHandle<CollectedStderr>>,
 }
 
-/// Call `describe` on `plugin_path` and verify `conary-plugin` contract
-/// compliance, stable `by.engine` identity, `Kind::Job` support, and `Offers`.
-pub fn describe(cfg: &Config, plugin_path: &Path, engine: &str) -> Result<Described, String> {
+/// Call `describe` on `plugin_path` (inside `agent` over `agent sh` for a
+/// sandboxed turn, or directly on the host for a host turn) and verify
+/// `conary-plugin` contract compliance, stable `by.engine` identity,
+/// `Kind::Job` support, and `Offers`.
+pub fn describe(
+    cfg: &Config,
+    plugin_path: &Path,
+    engine: &str,
+    agent: Option<&str>,
+) -> Result<Described, String> {
     let req_bytes = serde_json::to_vec(&Request::describe())
         .map_err(|e| format!("failed to encode describe request: {e}"))?;
-    let mut cmd = Command::new(&cfg.tools.timeout);
-    cmd.args(["-k", "10s", DESCRIBE_TIMEOUT_SECS])
-        .arg(plugin_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut cmd = launch::describe_command(cfg, plugin_path, agent);
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "couldn't start {engine} plugin {}: {e}",
@@ -401,10 +380,19 @@ pub fn spawn(
         .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?;
 
     let request_record = crate::job::Request::load(job)?;
-    // The plugin a sandboxed turn runs is this same executable (the sandbox
-    // shares the host's store), so its describe is this one.
-    let mut described = describe(cfg, plugin_path, &choice.engine)?;
     let uses_credit = cfg.uses_credit_meter(&choice.engine);
+    let sandbox_only = cfg.sandbox_plugins.contains(&choice.engine);
+    launch::before_describe(
+        agent,
+        request_record.agent_engine.as_deref(),
+        &choice.engine,
+        uses_credit,
+        sandbox_only,
+    )
+    .map_err(SpawnError::Refused)?;
+    // Negotiate `describe` inside the job's sandbox for `--vm` turns so
+    // sandbox plugins never execute on the host.
+    let mut described = describe(cfg, plugin_path, &choice.engine, agent)?;
     launch::placed(
         agent,
         request_record.agent_engine.as_deref(),

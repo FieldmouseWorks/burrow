@@ -1,6 +1,6 @@
 //! proj's config, as modules/proj.nix writes it: PROJ_CONFIG names the file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -137,6 +137,11 @@ pub struct Config {
     /// inside its sandbox (engine/plugin/launch.rs).
     #[serde(default)]
     pub plugins: BTreeMap<String, PathBuf>,
+    /// Engines in `plugins` that may only run inside a sandbox (wired from
+    /// `burrow.agents.engines.<name>.plugin`): a host turn refuses them before
+    /// executing their plugin executable, even for `describe`.
+    #[serde(default)]
+    pub sandbox_plugins: BTreeSet<String>,
     /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).

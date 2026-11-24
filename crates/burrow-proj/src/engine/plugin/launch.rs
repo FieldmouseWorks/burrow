@@ -11,7 +11,7 @@
 //! `agent fetch`.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::{Described, PluginRefusal, RefusalKind};
 use crate::config::Config;
@@ -20,16 +20,45 @@ use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 use crate::scratch;
 
-/// Whether `engine` may run where the turn is, checked before anything of
-/// it runs; a refusal when it can't, which the turn's route takes on (it
-/// holds nothing, so the turn ends refused unless the route now runs it
-/// elsewhere).
-pub(super) fn placed(
+/// Maximum wall-clock timeout for a host `describe` call.
+const DESCRIBE_TIMEOUT_SECS: &str = "30s";
+/// Maximum wall-clock timeout for a sandboxed `describe` call (allows a stopped
+/// microVM to boot over `agent sh`).
+const SANDBOX_DESCRIBE_TIMEOUT_SECS: &str = "180s";
+
+/// Why [`super::spawn`] started nothing.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// The turn may not run on this engine where it is: the route takes it
+    /// on as it does a run the plugin refused.
+    Refused(PluginRefusal),
+    Failed(String),
+}
+
+impl From<String> for SpawnError {
+    fn from(e: String) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(r) => f.write_str(&r.reason),
+            Self::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Placement checks that can refuse a turn **before** executing the plugin at
+/// all (even for `describe`): a sandbox made for another engine, a credit
+/// engine inside a sandbox, or a sandbox-only engine on the host.
+pub(super) fn before_describe(
     agent: Option<&str>,
     sandbox_engine: Option<&str>,
     engine: &str,
     credit: bool,
-    described: &Described,
+    sandbox_only: bool,
 ) -> Result<(), PluginRefusal> {
     let refused = |kind, reason: String| {
         Err(PluginRefusal {
@@ -60,10 +89,9 @@ pub(super) fn placed(
                 "{engine} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there"
             ),
         ),
-        // An engine that declares it needs a sandbox (it may run with its
-        // own permissions bypassed, trusting the VM as the boundary) never
-        // runs on the host.
-        None if described.needs_sandbox() => refused(
+        // A plugin wired from `burrow.agents.engines` may only run inside its
+        // sandbox: refuse it on the host before ever launching its executable.
+        None if sandbox_only => refused(
             RefusalKind::Misplaced,
             format!(
                 "{engine} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there"
@@ -71,6 +99,46 @@ pub(super) fn placed(
         ),
         _ => Ok(()),
     }
+}
+
+/// Build the `timeout(1)` command for `describe`: inside `agent` over
+/// `agent sh` for a sandboxed turn (so sandbox plugins never execute on the
+/// host), or directly on the host for a host turn.
+pub(super) fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Command {
+    let mut cmd = Command::new(&cfg.tools.timeout);
+    let timeout = if agent.is_some() {
+        SANDBOX_DESCRIBE_TIMEOUT_SECS
+    } else {
+        DESCRIBE_TIMEOUT_SECS
+    };
+    cmd.args(["-k", "10s", timeout]);
+    if let Some(agent) = agent {
+        cmd.args(["agent", "sh", agent]);
+    }
+    cmd.arg(plugin_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+/// Whether `engine` may run where the turn is, checked after `describe` as
+/// well; a refusal when it can't, which the turn's route takes on (it holds
+/// nothing, so the turn ends refused unless the route now runs it elsewhere).
+pub(super) fn placed(
+    agent: Option<&str>,
+    sandbox_engine: Option<&str>,
+    engine: &str,
+    credit: bool,
+    described: &Described,
+) -> Result<(), PluginRefusal> {
+    before_describe(
+        agent,
+        sandbox_engine,
+        engine,
+        credit,
+        described.needs_sandbox(),
+    )
 }
 
 /// Run `plugin` inside the job's sandbox `agent`, with what the turn tells
