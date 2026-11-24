@@ -2,7 +2,7 @@
 
 A flaky test fails some runs and passes others on the same code. Rerunning the
 whole gate until it's green wastes the run and hides the flake; skipping the
-test by hand loses it. So a gate gives a failed test one more try, a Claude
+test by hand loses it. So a gate gives a failed test one more try, an agent
 job fixes what flaked, and a flake nobody fixed blocks again, with nobody in
 the loop.
 
@@ -16,7 +16,7 @@ the loop.
    as any test's does.
 4. The steward (`autoland`,
    [burrow-upkeep](../crates/burrow-upkeep/src/flaky.rs)) hands the issue
-   to a Claude job, which finds the cause and opens a PR that says
+   to an agent job, which finds the cause and opens a PR that says
    `Closes #N`. Merged, it closes the issue. The job is the project's, not
    the pipeline's, and has hours (`flaky.jobTimeoutMinutes`). One still open
    a day after its job ends goes to the pipeline's stuck issue; at once, when
