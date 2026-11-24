@@ -124,8 +124,12 @@ struct PendingRecommendation {
     // clears those. New declarations can reject residue from another turn.
     #[serde(default)]
     turn: String,
+    /// The question an engine's own `Next::Ask` put, where the turn's answer
+    /// may not carry it: the owner's question text leads with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question: Option<String>,
 }
-pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
+fn pending_ask(job: &Job) -> Result<Option<PendingRecommendation>, String> {
     let state = |path: &std::path::Path| {
         crate::github_quota::state(path).map_err(|e| format!("{:?}", e.say))
     };
@@ -139,7 +143,10 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     if !pending.turn.is_empty() && job.turns().as_deref() != Some(pending.turn.as_str()) {
         return Ok(None);
     }
-    Ok(Some(pending.recommendation))
+    Ok(Some(pending))
+}
+pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
+    Ok(pending_ask(job)?.map(|p| p.recommendation))
 }
 
 /// The end marker commits the active declaration; only asks keep a pending
@@ -163,14 +170,27 @@ pub(crate) fn clear_declaration(job: &Job) -> Result<(), String> {
     crate::state_reads::remove_durable(job.file(JobFile::EndNext)).map_err(|e| e.to_string())
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
+    record_asking(job, recommendation, None)
+}
+/// [`record`], with the question the engine itself put (`Next::Ask`).
+pub(crate) fn record_asking(
+    job: &Job,
+    recommendation: &Recommendation,
+    question: Option<&str>,
+) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
         return Err(USAGE.into());
     }
+    let question = question
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(|q| q.chars().take(16000).collect());
     swap(
         job.file(JobFile::AskNext),
         &serde_json::to_string(&PendingRecommendation {
             recommendation: recommendation.clone(),
             turn: job.turns().unwrap_or_default(),
+            question,
         })
         .map_err(|e| e.to_string())?,
     )
@@ -179,7 +199,11 @@ pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), S
 pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     if end == "ask" {
         ensure(job)?;
-        let mut recommendation = pending(job)?.ok_or(USAGE)?;
+        let PendingRecommendation {
+            mut recommendation,
+            question,
+            ..
+        } = pending_ask(job)?.ok_or(USAGE)?;
         let prior = about::open(job)?;
         if prior.as_ref().is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
@@ -212,6 +236,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
                         .to_owned()
                 })
                 .unwrap_or_default();
+            let text = asked(question.as_deref(), text);
             swap(
                 host_path(job, "question-text"),
                 burrow_probe::scrub::scrub(&text)
@@ -415,6 +440,22 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
     lines
 }
 
+/// The owner's question text: the engine's own question first (a notice
+/// shows only its start), then the turn's answer, unless that already opens
+/// with it.
+fn asked(question: Option<&str>, answer: String) -> String {
+    match question {
+        Some(q) if !answer.trim_start().starts_with(q) => {
+            if answer.trim().is_empty() {
+                q.to_owned()
+            } else {
+                format!("{q}\n\n{answer}")
+            }
+        }
+        _ => answer,
+    }
+}
+
 fn summary(text: &str) -> String {
     burrow_probe::scrub::scrub(text)
         .as_str()
@@ -432,6 +473,20 @@ pub(crate) mod about_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_question_text_leads_with_the_engines_own_question_once() {
+        let answer = || "Summary of the work.".to_owned();
+        assert_eq!(
+            asked(Some("Ship plan B?"), answer()),
+            "Ship plan B?\n\nSummary of the work."
+        );
+        assert_eq!(
+            asked(Some("Ship plan B?"), "Ship plan B? Here's why.".into()),
+            "Ship plan B? Here's why."
+        );
+        assert_eq!(asked(Some("Ship plan B?"), String::new()), "Ship plan B?");
+        assert_eq!(asked(None, answer()), "Summary of the work.");
+    }
     fn fixture() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();

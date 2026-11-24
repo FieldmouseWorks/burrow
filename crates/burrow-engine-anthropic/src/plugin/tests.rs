@@ -70,6 +70,24 @@ fn describe_reports_runtime_config_and_needs_sandbox() {
     }
 }
 
+/// A host-mode `proj` wrapper runs on the host, where no sandbox is given:
+/// it declares none, so proj's host launch (which refuses an engine that
+/// needs one) runs it.
+#[test]
+fn describe_in_host_mode_declares_no_sandbox() {
+    for mode in [Mode::Claude, Mode::ClaudeApi] {
+        let cfg = PluginConfig {
+            host_mode: true,
+            ..sample_config(mode)
+        };
+        let res = handle_request(&cfg, &Request::describe(), &|_| None, 0);
+        let Answer::Describe { capabilities, .. } = res.response.expect("describe").answer else {
+            panic!("expected describe");
+        };
+        assert_eq!(capabilities.expect("capabilities").sandbox, Sandbox::None);
+    }
+}
+
 #[test]
 fn config_validation_rejects_bad_defaults_and_nonpositive_budget() {
     let mut cfg = sample_config(Mode::Claude);

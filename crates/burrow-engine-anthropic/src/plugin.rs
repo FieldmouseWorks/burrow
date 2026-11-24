@@ -43,8 +43,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Optional capability overrides in [`PluginConfig`]. `sandbox` is always
-/// [`Sandbox::Needs`] because this plugin runs in burrow's shared sandbox.
+/// Optional capability overrides in [`PluginConfig`]. `sandbox` isn't one:
+/// it follows the mode ([`PluginConfig::capabilities`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeclaredCapabilities {
@@ -193,11 +193,17 @@ impl PluginConfig {
             .unwrap_or_else(|| self.mode.default_credential_env())
     }
 
-    /// Capabilities declared by `describe`: always [`Sandbox::Needs`].
+    /// Capabilities declared by `describe`: [`Sandbox::Needs`] in burrow's
+    /// shared sandbox, and [`Sandbox::None`] for a host-mode `proj` wrapper,
+    /// which runs on the host under its managed permissions and guard.
     pub fn capabilities(&self) -> Capabilities {
         let declared = self.capabilities.clone().unwrap_or_default();
         Capabilities {
-            sandbox: Sandbox::Needs,
+            sandbox: if self.host_mode {
+                Sandbox::None
+            } else {
+                Sandbox::Needs
+            },
             network: declared.network,
             devices: declared.devices,
             mcp: declared.mcp,

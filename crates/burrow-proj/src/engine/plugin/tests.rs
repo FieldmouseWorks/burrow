@@ -15,6 +15,7 @@ use crate::record::{JobFile, TurnFile};
 fn setup(tmp: &TempDir) -> (Config, PathBuf) {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.projects = tmp.path().join("projects");
+    cfg.host_state = Some(tmp.path().join("host-state"));
     cfg.jobs = tmp.path().join("jobs");
     cfg.scratch = tmp.path().join("scratch");
     cfg.tools.bash = "bash".into();
@@ -48,7 +49,17 @@ fn make_job<'a>(cfg: &'a Config, project: &Path, id: &'a str) -> Job<'a> {
     job
 }
 
+/// What a plugin that runs on the host declares (`Sandbox::None`).
 fn describe_json(engine: &str, models: Vec<Model>, meters: Vec<String>) -> String {
+    describe_json_with(engine, models, meters, Sandbox::None)
+}
+
+fn describe_json_with(
+    engine: &str,
+    models: Vec<Model>,
+    meters: Vec<String>,
+    sandbox: Sandbox,
+) -> String {
     let response = Response {
         contract: CONTRACT_V1.into(),
         by: Identity {
@@ -65,7 +76,7 @@ fn describe_json(engine: &str, models: Vec<Model>, meters: Vec<String>) -> Strin
                 network: true,
                 mcp: false,
                 devices: vec![],
-                sandbox: Sandbox::Needs,
+                sandbox,
             }),
             meters,
         },
@@ -208,6 +219,14 @@ fi
     assert_eq!(
         crate::read(&job.file(JobFile::EndNext)).as_deref(),
         Some("ask")
+    );
+    // The owner's question leads with the question the plugin put, not
+    // only the turn's summary (`N.result`, as the turn writes it).
+    fs::write(job.turn_file("1", TurnFile::Result), "First turn answer\n").unwrap();
+    crate::ask::finish(&cfg, &job, "ask").unwrap();
+    assert_eq!(
+        fs::read_to_string(crate::ask::host_path(&job, "question-text")).unwrap(),
+        "Continue with plan B?\n\nFirst turn answer"
     );
 
     // Turn 2: continuation context passes previous session ID.
@@ -488,7 +507,11 @@ fn sandboxed_turn_runs_its_plugin_in_the_jobs_sandbox_with_the_turns_context() {
     let seen = tmp.path().join("seen-env");
     let desc_path = tmp.path().join("desc.json");
     let turn_path = tmp.path().join("turn.json");
-    fs::write(&desc_path, describe_json("vm-engine", vec![], vec![])).unwrap();
+    fs::write(
+        &desc_path,
+        describe_json_with("vm-engine", vec![], vec![], Sandbox::Needs),
+    )
+    .unwrap();
     fs::write(
         &turn_path,
         job_json(
@@ -604,7 +627,7 @@ fn sandboxed_turn_on_a_credit_metered_plugin_is_refused_before_it_runs() {
     let desc_path = tmp.path().join("desc.json");
     fs::write(
         &desc_path,
-        describe_json("metered", vec![], vec!["credit".into()]),
+        describe_json_with("metered", vec![], vec!["credit".into()], Sandbox::Needs),
     )
     .unwrap();
     let ran = tmp.path().join("ran");
@@ -653,6 +676,62 @@ exit 1
     assert_eq!(refused.kind, RefusalKind::CreditExhausted);
     assert!(!ran.exists(), "the plugin's job ran");
     assert!(!calls.exists(), "the sandbox was reached");
+    assert!(!job.turn_file("1", TurnFile::Started).exists());
+    assert_eq!(
+        fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap(),
+        ""
+    );
+}
+
+/// An engine that declares it needs a sandbox (one that bypasses its own
+/// permissions, trusting the VM) never runs on the host: a host turn on it is
+/// refused before its job starts, so the turn's route takes it on. The same
+/// engine in a sandbox runs (`sandboxed_turn_runs_its_plugin_...`).
+#[test]
+fn host_turn_on_a_plugin_that_needs_a_sandbox_is_refused_before_it_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let desc_path = tmp.path().join("desc.json");
+    fs::write(
+        &desc_path,
+        describe_json_with("vm-only", vec![], vec![], Sandbox::Needs),
+    )
+    .unwrap();
+    let ran = tmp.path().join("ran");
+    let plugin = tmp.path().join("vm-only-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            r#"#!/usr/bin/env bash
+req="$(cat)"
+if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
+touch {ran}
+exit 1
+"#,
+            desc = desc_path.display(),
+            ran = ran.display(),
+        ),
+    );
+    cfg.plugins.insert("vm-only".into(), plugin);
+
+    let job = make_job(&cfg, &project, "job-vm-only");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Run on the host\n").unwrap();
+    let choice = Choice {
+        engine: "vm-only".into(),
+        model: None,
+        effort: None,
+    };
+
+    let refused = match spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("a plugin that needs a sandbox started on the host"),
+    };
+    assert_eq!(refused.kind, RefusalKind::SandboxRequired);
+    assert!(!ran.exists(), "the plugin's job ran");
     assert!(!job.turn_file("1", TurnFile::Started).exists());
     assert_eq!(
         fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap(),

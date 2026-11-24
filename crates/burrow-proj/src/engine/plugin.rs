@@ -48,6 +48,11 @@ impl Described {
     pub fn uses_credit(&self) -> bool {
         self.negotiated.offers.meters.iter().any(|m| m == "credit")
     }
+
+    /// The engine declares that the deployment must give it a sandbox.
+    pub fn needs_sandbox(&self) -> bool {
+        self.negotiated.offers.capabilities.sandbox == conary_core::plugin::Sandbox::Needs
+    }
 }
 
 /// Structured refusal kind reported by an engine plugin on stderr.
@@ -59,6 +64,9 @@ pub enum RefusalKind {
     ApiKeyRejected,
     BudgetExhausted,
     CreditExhausted,
+    /// The engine declares `Sandbox::Needs` and the turn would run on the
+    /// host: it doesn't run there.
+    SandboxRequired,
 }
 
 /// Structured refusal reported by an engine plugin on stderr.
@@ -350,6 +358,20 @@ pub fn spawn(
             kind: RefusalKind::CreditExhausted,
             reason: format!(
                 "{} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there",
+                choice.engine
+            ),
+            resets_at: None,
+        }));
+    }
+    // An engine that declares it needs a sandbox (it may run with its own
+    // permissions bypassed, trusting the VM as the boundary) never runs on
+    // the host: only a sandboxed turn gives it one, and the turn's route
+    // takes it on as it does a refused run.
+    if agent.is_none() && described.needs_sandbox() {
+        return Err(SpawnError::Refused(PluginRefusal {
+            kind: RefusalKind::SandboxRequired,
+            reason: format!(
+                "{} needs a sandbox, which a turn on the host doesn't give it, so it doesn't run there",
                 choice.engine
             ),
             resets_at: None,
@@ -677,6 +699,7 @@ impl Running {
                             RefusalKind::ApiKeyRejected => "api_key_rejected",
                             RefusalKind::BudgetExhausted => "budget_exhausted",
                             RefusalKind::CreditExhausted => "credit_exhausted",
+                            RefusalKind::SandboxRequired => "sandbox_required",
                         },
                         "reason": refusal.reason,
                         "resets_at": refusal.resets_at,
@@ -820,14 +843,16 @@ fn apply_protocol_next(cfg: &Config, job: &Job, next: &Next) {
             }
         }
         Next::Ask {
-            default, one_way, ..
+            question,
+            default,
+            one_way,
         } => {
             let rec = crate::ask::Recommendation {
                 default: default.clone(),
                 one_way: *one_way,
                 about: None,
             };
-            if crate::ask::record(job, &rec).is_ok() {
+            if crate::ask::record_asking(job, &rec, Some(question)).is_ok() {
                 let _ = fs::remove_file(job.file(JobFile::AwaitNext));
                 let _ = crate::ask::declare(job, "ask");
             }

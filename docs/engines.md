@@ -184,7 +184,10 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   ([`engine/plugin/launch.rs`](../crates/burrow-proj/src/engine/plugin/launch.rs)),
   where the guest's `proj` declares its next step, its session carries to
   the next turn and its work stays for `agent fetch`; an engine metered by a
-  credit is refused there, since the credit is admitted on the host.
+  credit is refused there, since the credit is admitted on the host. The
+  other way round, an engine whose `describe` says it needs a sandbox is
+  refused on the host (the host-mode `claude` and `claude-api` wrappers
+  declare none), and either refusal moves the turn along its route.
 
 ### 2. Per-engine usage holds, meters and accounting
 

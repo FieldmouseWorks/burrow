@@ -597,6 +597,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     RefusalKind::CreditExhausted
                         | RefusalKind::BudgetExhausted
                         | RefusalKind::ApiKeyRejected
+                        | RefusalKind::SandboxRequired
                 ) =>
             {
                 if let Some((next, same_conv)) = moved(&choice)? {
