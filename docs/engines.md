@@ -241,9 +241,9 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   hosts. Host sessions still rely on `/etc/claude-code/managed-settings.json`
   and Claude Code's `PreToolUse` hook; a non-Claude CLI will not read those
   files or fire that hook format. Still Claude-shaped in `burrow.agents`:
-  `agent claude`, the host model settings `agent new` copies into a VM's
-  `~/.claude`, and `proj run --vm`, which runs Claude in the default
-  engine's VM.
+  `agent claude` and the host model settings `agent new` copies into a VM's
+  `~/.claude`. (`proj run --vm` now makes its sandbox for the engine the
+  job's route picks and runs that engine's plugin there.)
 - **Target:**
   - **Sandbox path (default for new engines):**
     [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. `proj`

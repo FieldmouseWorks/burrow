@@ -524,23 +524,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         write(JobFile::Since, &format!("{t}\n"))?;
     }
     if new.vm {
-        // The sandbox is made for the engine the job's route runs it on, in
-        // a sandbox, now, and its turns keep to that engine.
-        let engine = crate::engine::for_sandbox(cfg, &request, &identity)
-            .map_err(|e| Fail::new(1, format!("proj: {e}")))?;
-        let out = File::create(job.file(JobFile::Agent))
-            .map_err(|e| io_fail(&job.file(JobFile::Agent), e))?;
-        let s = Command::new("agent")
-            .args(["new", p, "--engine", &engine])
-            .stdout(out)
-            .status()
-            .map_err(|e| Fail::new(1, format!("proj: agent: {e}")))?;
-        if !s.success() {
-            return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
-        }
-        request.agent = read(&job.file(JobFile::Agent)).filter(|a| !a.is_empty());
-        request.agent_engine = Some(engine);
-        request.save(&job).map_err(|e| Fail::new(1, e))?;
+        sandbox(cfg, "agent", &job, p, &mut request, &identity)?;
     }
     let given = if let Some(source) = &new.task_source {
         write(JobFile::TaskSource, source)?;
@@ -559,6 +543,34 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     .map_err(|e| Fail::new(1, e))?;
     start(cfg, &id, &given, new.first).map_err(|e| Fail::new(1, e))?;
     Ok(id)
+}
+
+/// Make `job`'s sandbox with `agent` (the controller) for the engine the
+/// job's route runs a sandboxed turn on now, and record both on its request:
+/// its turns keep to that engine, the only one with a login and hosts there.
+fn sandbox(
+    cfg: &Config,
+    agent: &str,
+    job: &Job,
+    project: &str,
+    request: &mut crate::job::Request,
+    identity: &crate::policy::Identity,
+) -> Result<(), Fail> {
+    let engine = crate::engine::for_sandbox(cfg, request, identity)
+        .map_err(|e| Fail::new(1, format!("proj: {e}")))?;
+    let out = File::create(job.file(JobFile::Agent))
+        .map_err(|e| io_fail(&job.file(JobFile::Agent), e))?;
+    let s = Command::new(agent)
+        .args(["new", project, "--engine", &engine])
+        .stdout(out)
+        .status()
+        .map_err(|e| Fail::new(1, format!("proj: agent: {e}")))?;
+    if !s.success() {
+        return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
+    }
+    request.agent = read(&job.file(JobFile::Agent)).filter(|a| !a.is_empty());
+    request.agent_engine = Some(engine);
+    request.save(job).map_err(|e| Fail::new(1, e))
 }
 
 /// The job's next turn, continuing its conversation with the message. With
