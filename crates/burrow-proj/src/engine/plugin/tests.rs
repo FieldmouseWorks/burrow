@@ -344,7 +344,7 @@ fn structured_stderr_refusals_classify_without_provider_strings() {
     let desc_path = tmp.path().join("metered-desc.json");
     fs::write(
         &desc_path,
-        describe_json("metered-engine", vec![], vec!["credit".into()]),
+        describe_json("claude-api", vec![], vec!["credit".into()]),
     )
     .unwrap();
     let plugin = tmp.path().join("refusing-plugin");
@@ -377,13 +377,13 @@ esac
             desc = desc_path.display()
         ),
     );
-    cfg.plugins.insert("metered-engine".into(), plugin);
+    cfg.plugins.insert("claude-api".into(), plugin);
 
     let job = make_job(&cfg, &project, "job-refuse");
     let waitdir = job.turn_file("1", TurnFile::Waits);
     fs::create_dir_all(&waitdir).unwrap();
     let choice = Choice {
-        engine: "metered-engine".into(),
+        engine: "claude-api".into(),
         model: None,
         effort: None,
     };
@@ -629,11 +629,11 @@ fn sandboxed_turn_on_a_credit_metered_plugin_is_refused_before_it_runs() {
     let desc_path = tmp.path().join("desc.json");
     fs::write(
         &desc_path,
-        describe_json_with("metered", vec![], vec!["credit".into()], Sandbox::Needs),
+        describe_json_with("claude-api", vec![], vec!["credit".into()], Sandbox::Needs),
     )
     .unwrap();
     let ran = tmp.path().join("ran");
-    let plugin = tmp.path().join("metered-plugin");
+    let plugin = tmp.path().join("claude-api-plugin");
     burrow_test::executable(
         &plugin,
         format!(
@@ -647,15 +647,15 @@ exit 1
             ran = ran.display(),
         ),
     );
-    cfg.plugins.insert("metered".into(), plugin);
+    cfg.plugins.insert("claude-api".into(), plugin);
 
-    let job = make_job(&cfg, &project, "job-metered");
+    let job = make_job(&cfg, &project, "job-claude-api");
     let waitdir = job.turn_file("1", TurnFile::Waits);
     fs::create_dir_all(&waitdir).unwrap();
     let prompt = job.prompt("1");
     fs::write(&prompt, "Spend\n").unwrap();
     let choice = Choice {
-        engine: "metered".into(),
+        engine: "claude-api".into(),
         model: None,
         effort: None,
     };

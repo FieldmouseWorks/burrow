@@ -183,8 +183,10 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   job's own sandbox over `agent sh`
   ([`engine/plugin/launch.rs`](../crates/burrow-proj/src/engine/plugin/launch.rs)),
   where the guest's `proj` declares its next step, its session carries to
-  the next turn and its work stays for `agent fetch`; an engine metered by a
-  credit is refused there, since the credit is admitted on the host. The
+  the next turn and its work stays for `agent fetch`; the engine on the
+  credit (`claude-api`, the one `proj.apiCredit` meters, as
+  `Config::uses_credit_meter` decides for its runs and its route alike) is
+  refused there, since the credit is admitted on the host. The
   sandbox is made for the engine the job's route runs a sandboxed turn on
   (`agent new --engine`), which is the only engine with a login and hosts
   there, so every turn of the job keeps to that engine, and a turn on any

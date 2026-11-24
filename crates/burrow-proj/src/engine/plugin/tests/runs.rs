@@ -78,35 +78,91 @@ fn a_sandboxed_turn_on_another_engine_than_its_sandboxs_is_refused_before_it_run
 /// Every place a turn can be, and what may run there.
 #[test]
 fn an_engine_runs_only_where_the_turn_can_give_it_what_it_needs() {
-    let described = |sandbox, meters: Vec<String>| {
+    let described = |sandbox| {
         parse_describe(
             "e",
-            describe_json_with("e", vec![], meters, sandbox).as_bytes(),
+            describe_json_with("e", vec![], vec![], sandbox).as_bytes(),
         )
         .unwrap()
     };
-    let needs = described(Sandbox::Needs, vec![]);
-    let plain = described(Sandbox::None, vec![]);
-    let credit = described(Sandbox::None, vec!["credit".into()]);
+    let needs = described(Sandbox::Needs);
+    let plain = described(Sandbox::None);
     let kind = |r: Result<(), PluginRefusal>| r.err().map(|r| r.kind);
     // On the host: only an engine that needs a sandbox is refused.
     assert_eq!(
-        kind(placed(None, None, "e", &needs)),
+        kind(placed(None, None, "e", false, &needs)),
         Some(RefusalKind::Misplaced)
     );
-    assert_eq!(kind(placed(None, None, "e", &plain)), None);
+    assert_eq!(kind(placed(None, None, "e", false, &plain)), None);
+    assert_eq!(kind(placed(None, None, "e", true, &plain)), None);
     // In the sandbox made for it, or one from before that was kept.
-    assert_eq!(kind(placed(Some("vm"), Some("e"), "e", &needs)), None);
-    assert_eq!(kind(placed(Some("vm"), None, "e", &needs)), None);
-    // In a sandbox made for another engine, and on a credit in any.
     assert_eq!(
-        kind(placed(Some("vm"), Some("other"), "e", &needs)),
+        kind(placed(Some("vm"), Some("e"), "e", false, &needs)),
+        None
+    );
+    assert_eq!(kind(placed(Some("vm"), None, "e", false, &needs)), None);
+    // In a sandbox made for another engine, and on the credit in any.
+    assert_eq!(
+        kind(placed(Some("vm"), Some("other"), "e", false, &needs)),
         Some(RefusalKind::Misplaced)
     );
     assert_eq!(
-        kind(placed(Some("vm"), Some("e"), "e", &credit)),
+        kind(placed(Some("vm"), Some("e"), "e", true, &plain)),
         Some(RefusalKind::CreditExhausted)
     );
+}
+
+/// Whether a run is on the credit is the machine's one decision
+/// (`Config::uses_credit_meter`), the same as its route and admission read:
+/// `claude-api` is admitted through the credit's ledger whatever its
+/// `describe` lists, and a plugin naming a `credit` meter is an ordinary run.
+#[test]
+fn only_the_credits_engine_runs_on_the_credit_whatever_a_plugin_declares() {
+    for (engine, meters, on_credit) in [
+        ("claude-api", vec![], true),
+        ("custom", vec!["credit".to_owned()], false),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (mut cfg, project) = setup(&tmp);
+        assert_eq!(cfg.uses_credit_meter(engine), on_credit);
+        let desc = tmp.path().join("desc.json");
+        fs::write(&desc, describe_json(engine, vec![], meters)).unwrap();
+        let ledger = tmp.path().join("ledger");
+        let plugin = tmp.path().join("plugin");
+        burrow_test::executable(
+            &plugin,
+            format!(
+                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\nprintf '%s' \"${{PROJ_CREDIT_LEDGER_FILE:-none}}\" > {}\nexit 1\n",
+                desc.display(),
+                ledger.display()
+            ),
+        );
+        cfg.plugins.insert(engine.into(), plugin);
+        let job = make_job(&cfg, &project, "job-credit");
+        let waitdir = job.turn_file("1", TurnFile::Waits);
+        fs::create_dir_all(&waitdir).unwrap();
+        let prompt = job.prompt("1");
+        fs::write(&prompt, "Spend\n").unwrap();
+        let choice = Choice {
+            engine: engine.into(),
+            model: None,
+            effort: None,
+        };
+        let mut running =
+            spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+        let status = running.child.take().unwrap().wait().unwrap();
+        let _ = running.finish(status, false, &cfg, &job, "1", 0);
+        let given = fs::read_to_string(&ledger).unwrap();
+        assert_eq!(given != "none", on_credit, "{engine}: {given}");
+        // An ordinary run is marked started as it starts; a credit's run
+        // marks itself once the ledger admits it, which this one never did.
+        let stream = fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap();
+        assert_eq!(
+            stream.contains("burrow.run"),
+            !on_credit,
+            "{engine}: {stream}"
+        );
+    }
 }
 
 /// A run that exits 0 without a response proved none of what the protocol

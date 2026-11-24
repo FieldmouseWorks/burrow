@@ -28,6 +28,7 @@ pub(super) fn placed(
     agent: Option<&str>,
     sandbox_engine: Option<&str>,
     engine: &str,
+    credit: bool,
     described: &Described,
 ) -> Result<(), PluginRefusal> {
     let refused = |kind, reason: String| {
@@ -53,7 +54,7 @@ pub(super) fn placed(
         }
         // A credit is admitted and spent through its ledger on the host,
         // which a sandbox's root guest is never given.
-        Some(_) if described.uses_credit() => refused(
+        Some(_) if credit => refused(
             RefusalKind::CreditExhausted,
             format!(
                 "{engine} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there"

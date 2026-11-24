@@ -45,10 +45,6 @@ pub struct Described {
 }
 
 impl Described {
-    pub fn uses_credit(&self) -> bool {
-        self.negotiated.offers.meters.iter().any(|m| m == "credit")
-    }
-
     /// The engine declares that the deployment must give it a sandbox.
     pub fn needs_sandbox(&self) -> bool {
         self.negotiated.offers.capabilities.sandbox == conary_core::plugin::Sandbox::Needs
@@ -397,10 +393,12 @@ pub fn spawn(
     // The plugin a sandboxed turn runs is this same executable (the sandbox
     // shares the host's store), so its describe is this one.
     let mut described = describe(cfg, plugin_path, &choice.engine)?;
+    let uses_credit = cfg.uses_credit_meter(&choice.engine);
     launch::placed(
         agent,
         request_record.agent_engine.as_deref(),
         &choice.engine,
+        uses_credit,
         &described,
     )
     .map_err(SpawnError::Refused)?;
@@ -489,14 +487,13 @@ pub fn spawn(
         Some(agent) => launch::sandboxed(&mut cmd, job, n, agent, must, plugin_path),
         None => {
             launch::host(&mut cmd, cfg, job, n, waitdir, must, app_env, plugin_path);
-            if described.uses_credit() {
+            if uses_credit {
                 cmd.env("PROJ_CREDIT_LEDGER_FILE", &stream_path);
             }
         }
     }
 
     let started_at = crate::now();
-    let uses_credit = described.uses_credit();
     let mut child = if uses_credit {
         // Credit-metered plugins write their own atomic budgeted `burrow.run`
         // marker under `.credit.lock` once admitted; avoid writing a duplicate

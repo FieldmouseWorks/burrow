@@ -137,10 +137,6 @@ pub struct Config {
     /// inside its sandbox (engine/plugin/launch.rs).
     #[serde(default)]
     pub plugins: BTreeMap<String, PathBuf>,
-    /// Additional engine names metered by `proj.apiCredit` (beyond the
-    /// schema's default `burrow_settings::credit::ENGINE`).
-    #[serde(default)]
-    pub credit_engines: Vec<String>,
     /// Root-owned heavy slot directory; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).
@@ -269,9 +265,13 @@ impl Config {
             .map(burrow_settings::Config::credit_file)
     }
 
-    /// Whether `engine` is metered by `proj.apiCredit`.
+    /// Whether `engine` runs on `proj.apiCredit`: the one place that's
+    /// decided, for its route readiness, admission and slots as for its runs
+    /// (the ledger it's admitted through, the sandbox it can't run in). The
+    /// credit is `claude-api`'s, with its key; a plugin's `describe` naming a
+    /// `credit` meter makes no other engine run on it.
     pub(crate) fn uses_credit_meter(&self, engine: &str) -> bool {
-        engine == burrow_settings::credit::ENGINE || self.credit_engines.iter().any(|e| e == engine)
+        engine == burrow_settings::credit::ENGINE
     }
 
     pub fn paused(&self, repo: &str) -> bool {
