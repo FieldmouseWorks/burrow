@@ -751,8 +751,9 @@ fn transferred_retries_trickle_at_natural_expiry_too() {
     pass(&r.cfg).unwrap();
     let path = r.cfg.jobs.join(usage::FILE);
     let mut spent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    spent["until"] = (crate::now() + 2).into();
+    spent["holds"]["claude"]["until"] = (crate::now() + 2).into();
     fs::write(path, serde_json::to_vec(&spent).unwrap()).unwrap();
+    let _ = fs::remove_file(r.cfg.jobs.join(usage::LEGACY_FILE));
     until(|| took(&r.cfg) == 2);
     sleep(Duration::from_secs(3));
     assert_eq!(took(&r.cfg), 2);

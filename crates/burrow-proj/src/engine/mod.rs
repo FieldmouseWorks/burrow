@@ -18,7 +18,7 @@ pub use burrow_engine_anthropic::stream::{
     stream_session,
 };
 pub use command::{LONG, NEXT, exec_claude, spawn};
-pub use handoff::first_prompt;
+pub use handoff::{first_prompt, first_prompt_for};
 pub use stream::{Said, stream_tail};
 
 #[derive(
@@ -147,18 +147,23 @@ pub(crate) fn resolve(
     Ok(choice)
 }
 
-/// Where the job's route runs its turn now, when that moves the turn from
-/// `from` to another engine of the same conversation: what a run refused
-/// for usage, or for the credit, takes before it runs again. A move to
-/// another conversation is a new turn's to make, with its handoff
-/// ([`first_prompt`]), never a retry's.
+/// Conversation key for any engine name: `claude` and `claude-api` share the
+/// `claude` conversation; every other engine has a conversation of its own.
+pub fn conversation_of(engine: &str) -> &str {
+    match engine {
+        "claude" | burrow_settings::credit::ENGINE => "claude",
+        other => other,
+    }
+}
+
+/// Where the job's route runs its turn now when a refusal moves it from `from`
+/// to another engine with room. Moves within a shared conversation resume
+/// directly; moves across different conversations rebuild the handoff prompt
+/// in `turn.rs`.
 pub(crate) fn reroute(cfg: &Config, job: &Job, from: &Choice) -> Result<Option<Choice>, String> {
     let request = crate::job::Request::load(job)?;
     let next = requested(cfg, job, &request, request.engine.map(Engine::name))?;
-    Ok(
-        (next.engine != from.engine && next.engine.conversation() == from.engine.conversation())
-            .then_some(next),
-    )
+    Ok((next.engine != from.engine).then_some(next))
 }
 
 pub fn refused(

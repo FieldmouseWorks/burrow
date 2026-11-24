@@ -211,7 +211,7 @@ const SETUPS: Kind = Kind::Record(&[
     },
 ]);
 const STAMP: Kind = Kind::Count { min: 0 };
-const HOLD: Kind = Kind::Maybe(&Kind::Record(&[
+const HOLD: Kind = Kind::Record(&[
     Field {
         name: "until",
         kind: &STAMP,
@@ -228,7 +228,8 @@ const HOLD: Kind = Kind::Maybe(&Kind::Record(&[
         name: "reason",
         kind: &Kind::Text,
     },
-]));
+]);
+const HOLDS: Kind = Kind::Map(&HOLD);
 
 const CREDIT: Kind = Kind::Maybe(&Kind::Record(&[
     Field {
@@ -574,11 +575,11 @@ pub static SETTINGS: &[Setting] = &[
         "The expiring API credit the claude-api engine spends (settings credit BUDGET RENEWS MONTHLY RESERVE, or off): budgetUsd is its balance at since (when it was set), renews the UTC day it expires and renews to monthlyUsd, again each month from that day, and reserveUsd is never spent. The engine has room while spent + reserve < budget and today's spend < (budget - spent before today) / UTC days left, today included. Null, or a value or turn cost that can't be read, is no room.",
     ),
     live(
-        "proj.usageHold",
-        &HOLD,
-        "null",
-        ".usage.json",
-        "The usage hold in force: no turn on the plan (claude) takes a slot until it ends, and no claude-api turn either while it is the owner's pause. Null for none.",
+        "proj.usageHolds",
+        &HOLDS,
+        "{}",
+        ".usage-holds.json",
+        "Active usage and login holds keyed by engine name (* for an owner pause over every engine): no turn on a held engine takes a slot until its hold ends. Empty object for none.",
     ),
 ];
 
@@ -754,9 +755,11 @@ mod tests {
 
     #[test]
     fn kinds_take_their_values_and_refuse_others() {
-        assert!(HOLD.check(&Value::Null).is_ok());
+        assert!(HOLDS.check(&json!({})).is_ok());
+        assert!(HOLDS.check(&Value::Null).is_err());
         let hold = json!({"until": 9, "since": 1, "owner": true, "reason": "r"});
         assert!(HOLD.check(&hold).is_ok());
+        assert!(HOLDS.check(&json!({"claude": hold, "*": hold})).is_ok());
         let err = HOLD
             .check(&json!({"until": 9, "since": 1, "owner": true}))
             .unwrap_err();

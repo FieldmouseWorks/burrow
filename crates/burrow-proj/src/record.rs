@@ -585,11 +585,13 @@ fn limits(job: &Job, state: &str, facts: Option<&Facts>) -> Vec<Wait> {
         let reset = (state == "queued")
             .then(|| facts.spent.as_ref().map(|s| s.release()))
             .flatten();
-        if matches!(state, "queued" | "running")
-            && let Some(release) = usage::last_release(job.cfg)
-            && job.engine_label(&facts.turn) == "Claude"
-        {
-            held.push(Wait::Released(release));
+        if matches!(state, "queued" | "running") {
+            let engine_name = read(&job.turn_file(&facts.turn, TurnFile::Engine))
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| usage::DEFAULT_ENGINE.to_owned());
+            if let Some(release) = usage::last_release_for(job.cfg, &engine_name) {
+                held.push(Wait::Released(release));
+            }
         }
         if let Some(reset) = reset {
             let engine = job.engine_label(&facts.turn);
@@ -666,15 +668,17 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
         } else {
             crate::github_quota::reset(job, &n)
         },
-        // The plan's hold, unless it lets this job's turn by: an API run is
-        // held by the owner's pause alone (usage/login.rs).
-        spent: usage::kept(job.cfg).filter(|s| {
+        // The hold applying to this job's engine (or a global owner pause).
+        spent: {
             let run = usage::login::run_of(job.cfg, job.id);
-            s.holds_run(usage::login::Run {
-                sandboxed: false,
-                ..run
-            })
-        }),
+            usage::kept_for(
+                job.cfg,
+                &usage::login::Run {
+                    sandboxed: false,
+                    ..run
+                },
+            )
+        },
         turn: n,
         state: state.to_owned(),
     })

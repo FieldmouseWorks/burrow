@@ -290,7 +290,7 @@ fn meter(m: &Meter, at: i64) -> Markup {
 fn engine_meter(m: &EngineMeter, at: i64) -> Markup {
     html! {
         div.meter {
-            h3 { (m.engine.name()) }
+            h3 { @if m.engine == "*" { "all engines" } @else { (m.engine) } }
             @if let Some(r) = &m.reading {
                 (window("5 hours", &r.five_hour, at))
                 (window("week", &r.weekly, at))

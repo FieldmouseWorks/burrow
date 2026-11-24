@@ -163,6 +163,8 @@ pub enum TurnFile {
     Started,
     Stderr,
     Timeout,
+    /// Normalized per-turn/per-run usage and cost record (`N.usage.json`).
+    Usage,
     Waits,
     Withdrawable,
 }
@@ -208,6 +210,7 @@ impl TurnFile {
             TurnFile::Started => "started",
             TurnFile::Stderr => "stderr",
             TurnFile::Timeout => "timeout",
+            TurnFile::Usage => "usage.json",
             TurnFile::Waits => "waits",
             TurnFile::Withdrawable => "withdrawable",
         }

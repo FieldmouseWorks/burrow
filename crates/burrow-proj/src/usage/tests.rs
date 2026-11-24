@@ -3,7 +3,7 @@
 // until the reset, the owner told once, and back with the next run that
 // isn't refused.
 
-use std::fs;
+use std::fs::{self, File};
 
 use serde_json::json;
 
@@ -113,7 +113,7 @@ fn out_of_usage_till_it_resets_and_told_once() {
     let open = told(&d);
     assert_eq!(open.len(), 1);
     assert!(
-        open[0].starts_with("open proj-usage Claude is out of usage until "),
+        open[0].starts_with("open proj-usage-claude Claude is out of usage until "),
         "{open:?}"
     );
     // Every turn running is refused too: told once, and out till the latest
@@ -135,10 +135,11 @@ fn out_of_usage_till_it_resets_and_told_once() {
     keep(&cfg, &old).unwrap();
     remind(&cfg);
     assert_eq!(told(&d).len(), 2);
-    assert!(told(&d)[1].starts_with("open proj-usage"));
+    assert!(told(&d)[1].starts_with("open proj-usage-claude"));
     // A reset unsaid, or already past: an hour on.
     back(&cfg, None);
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
     assert_eq!(
         record(&cfg, "web-4", None, SAID, t).unwrap().until,
         t + UNSAID
@@ -171,7 +172,10 @@ fn back_with_a_run_that_started_after_it() {
     assert!(kept(&cfg).unwrap().back.is_some());
     assert_eq!(
         told(&d)[1..],
-        ["close proj-usage Claude has usage again, and proj's jobs are running.".to_owned()]
+        [
+            "close proj-usage-claude Claude has usage again, and proj's jobs are running."
+                .to_owned()
+        ]
     );
     let again = record(&cfg, "web-2", Some(t + 9000), SAID, t + 2).unwrap();
     assert_eq!(
@@ -266,6 +270,7 @@ fn back_only_with_a_run_after_the_last_refusal() {
     // Its reset passed, no run having ended it, and a run is refused again:
     // out once more, told so, and only a run after that ends it.
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
     record(&cfg, "web-4", Some(t + 100), SAID, t).unwrap();
     let s = record(&cfg, "web-5", Some(t + 7200), SAID, t + 200).unwrap();
     assert_eq!((s.at, s.refused(), s.until), (t, t + 200, t + 7200));
@@ -283,7 +288,7 @@ fn a_record_from_before_last() {
     let (_d, cfg) = rig();
     let t = now();
     fs::write(
-        cfg.jobs.join(FILE),
+        cfg.jobs.join(LEGACY_FILE),
         format!(
             r#"{{"until":{},"said":"x","job":"web-1","at":{t},"told":{t}}}"#,
             t + 60
@@ -412,6 +417,7 @@ fn every_change_kicks_the_watchdog_and_proj_watch() {
     let mut alone = cfg.clone();
     alone.waits = None;
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
     record(&alone, "web-4", Some(t + 7200), SAID, t).unwrap();
     assert_eq!(kicked(&d), ["/kick/proj-watch".to_owned()]);
 }
@@ -458,7 +464,12 @@ fn an_earlier_projs_resets_are_the_hold_now() {
     let mut released = kept(&cfg).unwrap();
     released.back = Some(t - 3);
     keep(&cfg, &released).unwrap();
-    fs::write(cfg.jobs.join(RELEASED), format!("{}\n", t - 3)).unwrap();
+    fs::write(
+        cfg.jobs.join(RELEASED),
+        json!({"claude": t - 3}).to_string(),
+    )
+    .unwrap();
+    fs::write(cfg.jobs.join(LEGACY_RELEASED), format!("{}\n", t - 3)).unwrap();
     fs::write(cfg.jobs.join("web-3/1.outcome"), "error\n").unwrap();
     let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs((t - 5) as u64);
     fs::File::options()
@@ -547,6 +558,7 @@ fn lifecycle_can_read_actual_release_past_the_notice() {
     let actual = kept(&cfg).unwrap().release();
     assert_eq!(last_release(&cfg), Some(actual));
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(LEGACY_FILE));
     assert_eq!(last_release(&cfg), Some(actual));
 }
 
@@ -708,7 +720,12 @@ fn the_owners_release_after_a_settled_hold_moves_the_release_on() {
     let mut s = kept(&cfg).unwrap();
     s.back = Some(t - 800);
     keep(&cfg, &s).unwrap();
-    fs::write(cfg.jobs.join(RELEASED), format!("{}\n", t - 800)).unwrap();
+    fs::write(
+        cfg.jobs.join(RELEASED),
+        json!({"claude": t - 800}).to_string(),
+    )
+    .unwrap();
+    fs::write(cfg.jobs.join(LEGACY_RELEASED), format!("{}\n", t - 800)).unwrap();
     fs::write(d.path().join("pending"), "").unwrap();
     kicked(&d);
     back(&cfg, None);
@@ -741,7 +758,9 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     let t = now();
     let raw = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
     let original = Spent {
+        engine: DEFAULT_ENGINE.into(),
         owner: false,
+        login: false,
         until: t + 7200,
         said: raw.into(),
         job: "web-1".into(),
@@ -751,12 +770,20 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
         told: t - RETELL,
         last: Some(t - 5),
     };
-    // Simulate the previous binary's disk record, bypassing record().
-    fs::write(
-        cfg.jobs.join(FILE),
-        serde_json::to_string(&original).unwrap(),
-    )
-    .unwrap();
+    // Simulate the previous binary's legacy flat disk record, bypassing record().
+    let legacy = |s: &Spent| {
+        json!({
+            "until": s.until,
+            "said": s.said,
+            "job": s.job,
+            "at": s.at,
+            "back": s.back,
+            "told": s.told,
+            "last": s.last,
+        })
+        .to_string()
+    };
+    fs::write(cfg.jobs.join(LEGACY_FILE), legacy(&original)).unwrap();
     let mut expected = original.clone();
     expected.said = "Claude reached its weekly allowance".into();
     assert_eq!(kept(&cfg), Some(expected.clone()));
@@ -797,11 +824,8 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     // Released historical holds retain release bookkeeping as well.
     let mut released = original;
     released.back = Some(t - 1);
-    fs::write(
-        cfg.jobs.join(FILE),
-        serde_json::to_string(&released).unwrap(),
-    )
-    .unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(FILE));
+    fs::write(cfg.jobs.join(LEGACY_FILE), legacy(&released)).unwrap();
     let loaded = kept(&cfg).unwrap();
     assert_eq!(
         (loaded.back, loaded.release(), loaded.last),
@@ -843,3 +867,4 @@ fn a_reminder_waits_out_a_moments_hold_and_not_a_stalled_one() {
 
 mod admission;
 mod meter;
+mod per_engine;

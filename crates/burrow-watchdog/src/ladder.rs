@@ -346,22 +346,32 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 }
 
 /// When proj says the machine is out of Claude usage (`proj usage`): when it
-/// resets, and proj's line on it. None when it isn't, or proj can't say.
+/// resets, and proj's line on it. Accepts both the per-engine map
+/// (`{"engines": {"claude": ..., "*": ...}}`) and the legacy flat record.
 fn out_of_usage(world: &dyn World, now: f64) -> Option<(f64, String)> {
     let (ok, out) = world.proj(&["usage"]);
-    // One JSON record a line: Claude's hold, then any `{"github": ..}` meters,
-    // which say nothing about Claude and are skipped.
-    let v: serde_json::Value = out
-        .lines()
-        .filter(|_| ok)
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .find(|v| v.get("until").is_some())?;
-    let until = v["until"].as_f64().filter(|&t| t > now)?;
-    let said = v["said"].as_str().unwrap_or_default();
-    Some((
-        until,
-        format!("Claude is out of usage until {} (\"{said}\")", day(until)),
-    ))
+    if !ok {
+        return None;
+    }
+    for line in out.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let hold = v
+            .get("engines")
+            .and_then(|e| e.get("*").or_else(|| e.get("claude")))
+            .or_else(|| v.get("until").map(|_| &v));
+        if let Some(h) = hold
+            && let Some(until) = h["until"].as_f64().filter(|&t| t > now)
+        {
+            let said = h["said"].as_str().unwrap_or_default();
+            return Some((
+                until,
+                format!("Claude is out of usage until {} (\"{said}\")", day(until)),
+            ));
+        }
+    }
+    None
 }
 
 /// The job's id, when one could start. Its end kicks the next pass, which

@@ -1,104 +1,125 @@
-//! The hold's words when it's Claude Code's login that's gone, not its
-//! usage (`burrow_engine_anthropic::claude::LOGGED_OUT`): it resets at no time, only
-//! when someone logs in again, so the owner is told to, and the hold is a
-//! try at a time (usage.rs UNSAID) until a run answers.
+//! Per-engine run identity (`Run`), expired-login hold scoping, and login/failover
+//! wording.
 //!
-//! And whose runs it holds. A login is a credential, so it holds only the
-//! runs that share it: a sandbox runs on its own token
-//! (burrow.agents.engines.claude.credentialFile), not this machine's login,
-//! so a sandbox's expired token holds no turn here ([`holds_machine`]), and this machine's
-//! expired login holds no sandbox's turn ([`Spent::holds_run`]): it still
-//! takes a slot ([`out_for`]), routes as if nothing held it, and its answer
-//! proves nothing of the login here. A limit is the plan's, which every
-//! token shares, so it holds them all, as the owner's pause does.
-//!
-//! The `claude-api` engine runs on neither: its key bills the API credit,
-//! which neither the plan's limits nor its login touch, so no hold but the
-//! owner's pause holds its runs ([`Run::api`]). The credit's own room is its
-//! admission's (engine/api.rs).
+//! A hold belongs to one engine (or `*` for a global owner pause): a quota or
+//! login refusal on engine A never blocks engine B. Within one engine, a host
+//! login expiry holds only host runs of that engine, leaving sandbox runs (which
+//! carry their own `credentialFile`) free to run; quota limits and owner pauses
+//! hold all runs of that engine.
 
-use super::{CLOSED, Spent, out, policy, when};
+use super::store::{ALL_ENGINES, DEFAULT_ENGINE, Spent};
+use super::{out_for as usage_out_for, policy, when};
 use crate::config::Config;
 
-/// Whether the hold recorded as saying `said` is an expired login's.
+/// Whether the refusal text `said` matches Claude's expired-login sentinel.
 pub(crate) fn is(said: &str) -> bool {
     said == burrow_engine_anthropic::claude::LOGGED_OUT
 }
 
-/// A run a hold may hold: where it runs, and on which credential.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A run a hold may apply to: which engine it runs on, and whether it runs in
+/// a sandbox (with its own credential rather than this machine's host login).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// In a sandbox, on its own token, rather than this machine's login.
+    pub engine: String,
     pub sandboxed: bool,
-    /// On the API credit's key (the `claude-api` engine), not the plan.
-    pub api: bool,
+}
+
+impl Default for Run {
+    fn default() -> Self {
+        Self::new(DEFAULT_ENGINE, false)
+    }
 }
 
 impl Run {
-    /// A run on the plan, in a sandbox (`sandboxed`) or here.
-    pub(crate) fn plan(sandboxed: bool) -> Self {
+    pub fn new(engine: impl Into<String>, sandboxed: bool) -> Self {
         Self {
+            engine: engine.into(),
             sandboxed,
-            api: false,
         }
+    }
+
+    /// A run on the default (`claude`) engine, in a sandbox or on the host.
+    pub(crate) fn plan(sandboxed: bool) -> Self {
+        Self::new(DEFAULT_ENGINE, sandboxed)
     }
 }
 
 impl Spent {
-    /// Whether it holds `run`: the owner's pause holds every run; the plan's
-    /// limits and this machine's login hold no API run.
-    pub fn holds_run(&self, run: Run) -> bool {
-        self.owner || (!run.api && (!run.sandboxed || !is(&self.said)))
+    /// Whether this hold blocks `run`:
+    /// - a global owner pause (`*`) blocks every engine;
+    /// - a hold on another engine never blocks `run`;
+    /// - a per-engine owner pause or usage limit blocks every run of that engine;
+    /// - an expired host login blocks only host (non-sandboxed) runs of that engine.
+    pub fn holds_run(&self, run: &Run) -> bool {
+        let key = if self.engine.is_empty() {
+            DEFAULT_ENGINE
+        } else {
+            self.engine.as_str()
+        };
+        if key == ALL_ENGINES {
+            return true;
+        }
+        if key != run.engine {
+            return false;
+        }
+        self.owner || !run.sandboxed || !self.is_login()
     }
 }
 
-/// The hold `run` waits on now: for what admits or routes one run, where
-/// [`out`] is the machine's.
-pub(crate) fn out_for(cfg: &Config, run: Run) -> Option<Spent> {
-    out(cfg).filter(|s| s.holds_run(run))
+/// The active hold blocking `run` now, if any.
+pub(crate) fn out_for(cfg: &Config, run: &Run) -> Option<Spent> {
+    usage_out_for(cfg, run)
 }
 
-/// The run job `id`'s turn would be: in a sandbox as its request says, and
-/// on the engine its turn's protected identity names (a turn with none yet
-/// is taken for one on the plan, which every hold holds).
+/// The run job `id`'s current turn represents, read strictly from host-owned
+/// execution identity and request records (never guest-writable job files).
 pub(crate) fn run_of(cfg: &Config, id: &str) -> Run {
     let job = crate::job::Job::new(cfg, id);
-    let api = job.turns().is_some_and(|n| {
-        crate::retry::Identity::load(&job, &n)
-            .is_ok_and(|i| i.is_some_and(|i| i.choice.engine == crate::engine::Engine::ClaudeApi))
-    });
+    let engine = job
+        .turns()
+        .and_then(|n| {
+            crate::retry::Identity::load(&job, &n)
+                .ok()
+                .flatten()
+                .map(|i| i.choice.engine.name().to_owned())
+        })
+        .or_else(|| {
+            crate::job::Request::peek(&job)
+                .ok()
+                .and_then(|r| r.engine.map(|e| e.name().to_owned()))
+        })
+        .unwrap_or_else(|| DEFAULT_ENGINE.to_owned());
     Run {
+        engine,
         sandboxed: sandboxed(cfg, id),
-        api,
     }
 }
 
-/// Whether job `id` runs in a sandbox, as its starter's request says (the
-/// job's own files don't count): one that can't be read is taken for one
-/// here, which every hold holds.
+/// Whether job `id` runs in a sandbox, from its host-owned request record.
 pub(crate) fn sandboxed(cfg: &Config, id: &str) -> bool {
     crate::job::Request::peek(&crate::job::Job::new(cfg, id)).is_ok_and(|r| r.agent.is_some())
 }
 
-/// Whether a turn refused on `said` holds the machine: a sandbox's
-/// expired token holds no turn here, and logging in here doesn't renew it,
-/// so it ends that turn alone ([`SANDBOX`]).
+/// Whether a turn refused on `said` holds the host engine: a sandbox's expired
+/// token belongs only to that sandbox, never to this machine's host login.
 pub(crate) fn holds_machine(said: &str, sandboxed: bool) -> bool {
     !(sandboxed && is(said))
 }
 
-/// What a retry keeps as said when its run's refusal (`said`) moved the turn
-/// to `engine` ([`crate::engine::reroute`]): not a wait for usage to come
-/// back, so its next run is told the move instead ([`resumed`]).
-pub(crate) fn moved(engine: crate::engine::Engine, said: &str) -> String {
-    format!("{MOVED}{}: {said}", engine.name())
+/// Encode an engine reroute (within the same conversation or across conversations).
+pub(crate) fn moved_to(engine: &str, same_conversation: bool, said: &str) -> String {
+    let prefix = if same_conversation {
+        MOVED
+    } else {
+        MOVED_CROSS
+    };
+    format!("{prefix}{engine}: {said}")
 }
 
 const MOVED: &str = "moved to ";
+const MOVED_CROSS: &str = "handed off to ";
 
-/// What a turn refused on `said` is told when it runs again, before its
-/// prompt: what it was refused for, and that it's back, or where the turn
-/// moved to.
+/// What a refused turn is told when its retry starts.
 pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
     if is(said) {
         return RESUMED.to_owned();
@@ -108,49 +129,80 @@ pub(crate) fn resumed(cfg: &Config, said: &str) -> String {
             "Your last run was refused before it finished ({why}), so this turn carries on on {engine}, the same Claude Code in the same conversation. Carry on from where you left off: see what had already finished before you run anything again. What you were asked this turn:"
         );
     }
+    if let Some((engine, why)) = said
+        .strip_prefix(MOVED_CROSS)
+        .and_then(|m| m.split_once(": "))
+    {
+        return format!(
+            "Your last run was refused before it finished ({why}), so this turn carries on on {engine} in a fresh conversation. Carry on from where you left off: see what had already finished before you run anything again. What you were asked this turn:"
+        );
+    }
     format!("{}\n\n{said}. {}", crate::turn::SPENT, policy(cfg))
 }
 
-const LOG_IN: &str = "run `claude` as the user proj runs as, then `/login`";
+const CLAUDE_LOG_IN: &str = "run `claude` as the user proj runs as, then `/login`";
 
-pub(super) fn line(until: i64) -> String {
-    format!(
-        "Claude Code's login here expired: no Claude turn here starts until someone logs in again ({LOG_IN}), though a sandbox's, on its own token, still does; the next try is at {}",
-        when(until)
-    )
-}
-
-pub(super) const TITLE: &str = "Claude Code's login expired: log in again on this machine";
-
-pub(super) fn body(s: &Spent) -> String {
-    format!(
-        "Since {}, Claude Code can't authenticate here, so it refuses every Claude job that runs here. Job {} was the first.\n\n\
-         Log in again on this machine: {LOG_IN}.\n\n\
-         proj starts no Claude turn here meanwhile, and tries one again at {}; a sandbox's (proj run --vm) runs on its own token, and still starts. \
-         The turns that were refused wait in line and run again once it's back, by themselves, \
-         and the stall watchdog holds what waits on them. \
-         This closes once a job here runs again.",
-        when(s.at),
-        s.job,
-        when(s.until),
-    )
-}
-
-/// The owner's notice's close: what's back.
-pub(super) fn closed(s: &Spent) -> &'static str {
-    if !s.owner && is(&s.said) {
-        "Claude Code is logged in again, and proj's jobs are running."
+pub(super) fn line_for(engine: &str, until: i64) -> String {
+    if engine == DEFAULT_ENGINE {
+        format!(
+            "Claude Code's login here expired: no Claude turn here starts until someone logs in again ({CLAUDE_LOG_IN}), though a sandbox's, on its own token, still does; the next try is at {}",
+            when(until)
+        )
     } else {
-        CLOSED
+        format!(
+            "{engine}'s login here expired: no {engine} turn here starts until someone logs in again for {engine}, though a sandbox's, on its own credential, still does; the next try is at {}",
+            when(until)
+        )
     }
 }
 
-/// What a sandbox's turn refused for it ends saying: its token, not this
-/// machine's login, is what's gone ([`holds_machine`]).
+pub(super) fn title_for(engine: &str) -> String {
+    if engine == DEFAULT_ENGINE {
+        "Claude Code's login expired: log in again on this machine".to_owned()
+    } else {
+        format!("{engine}'s login expired: log in again on this machine")
+    }
+}
+
+pub(super) fn body_for(engine: &str, s: &Spent) -> String {
+    if engine == DEFAULT_ENGINE {
+        format!(
+            "Since {}, Claude Code can't authenticate here, so it refuses every Claude job that runs here. Job {} was the first.\n\n\
+             Log in again on this machine: {CLAUDE_LOG_IN}.\n\n\
+             proj starts no Claude turn here meanwhile, and tries one again at {}; a sandbox's (proj run --vm) runs on its own token, and still starts. \
+             The turns that were refused wait in line and run again once it's back, by themselves, \
+             and the stall watchdog holds what waits on them. \
+             This closes once a job here runs again.",
+            when(s.at),
+            s.job,
+            when(s.until),
+        )
+    } else {
+        format!(
+            "Since {}, {engine} can't authenticate here, so it refuses every {engine} job that runs here. Job {} was the first.\n\n\
+             Re-authenticate {engine} on this machine as the user proj runs as.\n\n\
+             proj starts no {engine} turn here meanwhile, and tries one again at {}; other engines and sandbox runs still start. \
+             The turns that were refused wait in line and run again once it's back, by themselves, \
+             and the stall watchdog holds what waits on them. \
+             This closes once a {engine} job here runs again.",
+            when(s.at),
+            s.job,
+            when(s.until),
+        )
+    }
+}
+
+pub(super) fn closed_for(engine: &str) -> String {
+    if engine == DEFAULT_ENGINE {
+        "Claude Code is logged in again, and proj's jobs are running.".to_owned()
+    } else {
+        format!("{engine} is logged in again, and proj's jobs are running.")
+    }
+}
+
+/// What a sandbox's turn refused for expired auth ends saying.
 pub(crate) const SANDBOX: &str = "Claude Code couldn't authenticate in the sandbox: its token (burrow.agents.engines.claude.credentialFile, from `claude setup-token`) expired or was revoked; make a new one and run the job again";
 
-/// What a run refused for it is told in the next, once it's back, before
-/// the turn's prompt.
 const RESUMED: &str = "Your last run was refused before it finished: Claude Code's login on this machine had expired, and every Claude job here waited until someone logged in again. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What you were asked this turn:";
 
 #[cfg(test)]

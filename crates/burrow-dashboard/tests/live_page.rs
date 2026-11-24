@@ -72,3 +72,26 @@ fn a_stale_reading_says_it_is_too_old() {
     let snap: Snapshot = serde_json::from_value(fixture).unwrap();
     assert!(page(&snap).contains("too old to move a turn"));
 }
+
+#[test]
+fn multiple_engine_meters_and_independent_holds_render() {
+    let mut fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    fixture["meters"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "engine": "antigravity",
+            "reading": null,
+            "hold": {
+                "owner": false,
+                "since": 1762850000,
+                "until": 1762860000,
+                "reason": "antigravity quota reached"
+            }
+        }));
+    let snap: Snapshot = serde_json::from_value(fixture).unwrap();
+    let html = page(&snap);
+    assert!(html.contains("<h3>claude</h3>"), "{html}");
+    assert!(html.contains("<h3>antigravity</h3>"), "{html}");
+    assert!(html.contains("antigravity quota reached"), "{html}");
+}

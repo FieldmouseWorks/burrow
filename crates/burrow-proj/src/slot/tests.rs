@@ -851,10 +851,16 @@ fn a_turn_under_way_isnt_handed_over() {
 fn out_of_usage(jobs: &Path) {
     let until = now() + 3600;
     fs::write(
-        jobs.join(crate::usage::FILE),
+        jobs.join(crate::usage::LEGACY_FILE),
         format!(r#"{{"until": {until}, "said": "You've hit your monthly spend limit", "job": "x", "at": 1}}"#),
     )
     .unwrap();
+}
+
+/// Clear both the v2 hold store and its legacy mirror.
+fn clear_usage(jobs: &Path) {
+    let _ = fs::remove_file(jobs.join(crate::usage::FILE));
+    let _ = fs::remove_file(jobs.join(crate::usage::LEGACY_FILE));
 }
 
 // Out of usage, no turn takes a slot, free as it is; back, it does.
@@ -867,7 +873,7 @@ fn out_of_usage_no_turn_takes_a_slot() {
     sleep(Duration::from_secs(4));
     assert_eq!(took(&jobs, "w0"), None);
     assert_eq!(in_queue(&jobs), 1, "it keeps its place in line");
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    clear_usage(&jobs);
     until("w0 takes its slot", || took(&jobs, "w0").is_some());
 }
 
@@ -896,7 +902,7 @@ fn an_unstick_turn_waiting_on_its_slot_waits_out_a_refusal() {
     sleep(Duration::from_secs(4));
     assert_eq!(took(&jobs, "u"), None);
     assert!(!jobs.join("u/1.slot").exists());
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    clear_usage(&jobs);
     until("u takes its slot", || took(&jobs, "u").is_some());
 }
 

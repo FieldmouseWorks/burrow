@@ -20,6 +20,7 @@ pub mod credit;
 pub mod pass;
 pub mod query;
 pub mod scrub;
+pub mod usage_record;
 
 use std::path::PathBuf;
 

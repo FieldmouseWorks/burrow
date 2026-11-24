@@ -8,26 +8,29 @@ impl Job<'_> {
     /// back only this attempt, preserving earlier invocations and their start.
     /// After a successful spawn there are no fallible recording operations.
     /// The run is the subscription's (`claude`, as a sandbox's always is).
+    #[cfg(test)]
     pub(crate) fn start_run<T>(
         &self,
         n: &str,
         at: i64,
         start: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
-        self.start_budgeted_run(n, at, crate::engine::Engine::Claude, None, start)
+        self.start_budgeted_run(n, at, crate::engine::Engine::Claude, None, None, start)
     }
 
     /// [`Self::start_run`] on `engine`, its marker saying which (a turn's
     /// runs may be on both Claude engines, when its route moves it, and the
-    /// credit's meter charges each run by its own) and the most the run may
-    /// spend in micro-dollars when it has a budget (a `claude-api` run's
-    /// admission, engine/api.rs), which the meter holds until its cost is in.
+    /// credit's meter charges each run by its own), the configured `model`
+    /// when set, and the most the run may spend in micro-dollars when it has
+    /// a budget (a `claude-api` run's admission, engine/api.rs), which the
+    /// meter holds until its cost is in.
     pub(crate) fn start_budgeted_run<T>(
         &self,
         n: &str,
         at: i64,
         engine: crate::engine::Engine,
         budget: Option<i64>,
+        model: Option<&str>,
         start: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
         let dir = Dir::open(&self.dir)?;
@@ -50,7 +53,7 @@ impl Job<'_> {
             writeln!(
                 stream,
                 "{}",
-                burrow_probe::credit::marker(at, engine.name(), budget)
+                burrow_probe::credit::marker_with_model(at, engine.name(), budget, model)
             )?;
             start()
         })();

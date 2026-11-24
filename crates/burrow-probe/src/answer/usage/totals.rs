@@ -14,6 +14,8 @@ struct Tally {
     tokens_partial: u64,
     /// Turns whose engine's stream isn't priced here.
     unread: u64,
+    /// True once at least one priced turn or invocation contributed to this row.
+    priced: bool,
 }
 
 impl Tally {
@@ -24,6 +26,7 @@ impl Tally {
         }
         self.cost += other.cost;
         self.unread += other.unread;
+        self.priced |= other.priced;
         self.missing.extend(other.missing.iter().cloned());
         self.recovered.extend(other.recovered.iter().cloned());
         self.tokens_partial += other.tokens_partial;
@@ -36,6 +39,7 @@ impl Tally {
                 tokens: r.tokens,
                 cost: r.cost,
                 unread: 0,
+                priced: true,
                 missing: r.missing.clone(),
                 recovered: r.recovered.clone(),
                 tokens_partial: u64::from(r.tokens_partial),
@@ -49,9 +53,9 @@ impl Tally {
     }
 
     /// The row's cells after its key: tokens and cost read `-` where no
-    /// turn of it was priced.
+    /// turn or invocation of it was priced.
     fn cells(&self) -> [String; 11] {
-        let none = self.unread == self.turns;
+        let none = !self.priced;
         let n = |v: u64| if none { "-".into() } else { v.to_string() };
         [
             self.turns.to_string(),
@@ -80,17 +84,62 @@ impl Tally {
 #[derive(Default)]
 pub struct Totals {
     rows: BTreeMap<(String, String, String), Tally>,
+    partial_turns: u64,
 }
 
 const ALL: &str = "all";
 
 impl Totals {
-    /// One turn: its stream's report, or None when its engine's isn't read.
+    /// One turn: its report, or None when its engine's usage isn't read.
+    /// When a turn has per-invocation engines (e.g. after route failover),
+    /// each invocation's tokens and cost are attributed to its own engine
+    /// while the turn count remains on `engine`.
     pub fn add(&mut self, engine: &str, role: &str, project: &str, report: Option<&Report>) {
-        self.rows
-            .entry((engine.into(), role.into(), project.into()))
-            .or_default()
-            .add(&Tally::turn(report));
+        let Some(report) = report else {
+            self.rows
+                .entry((engine.into(), role.into(), project.into()))
+                .or_default()
+                .add(&Tally::turn(None));
+            return;
+        };
+        if report.tokens_partial {
+            self.partial_turns += 1;
+        }
+        if report.invocations.is_empty() {
+            self.rows
+                .entry((engine.into(), role.into(), project.into()))
+                .or_default()
+                .add(&Tally::turn(Some(report)));
+            return;
+        }
+        let mut by_engine: BTreeMap<&str, Tally> = BTreeMap::new();
+        for inv in &report.invocations {
+            let inv_engine = inv
+                .engine
+                .as_deref()
+                .filter(|e| !e.trim().is_empty())
+                .unwrap_or(engine);
+            let entry = by_engine.entry(inv_engine).or_default();
+            entry.priced = true;
+            for (sum, val) in entry.tokens.iter_mut().zip(inv.tokens) {
+                *sum += val;
+            }
+            entry.cost += inv.cost;
+            entry.missing.extend(inv.missing.iter().cloned());
+            entry.recovered.extend(inv.recovered.iter().cloned());
+            if inv.tokens_partial {
+                entry.tokens_partial = 1;
+            }
+        }
+        let turn_entry = by_engine.entry(engine).or_default();
+        turn_entry.turns = 1;
+        turn_entry.priced = true;
+        for (inv_engine, tally) in by_engine {
+            self.rows
+                .entry((inv_engine.into(), role.into(), project.into()))
+                .or_default()
+                .add(&tally);
+        }
     }
 
     /// The table, totals first: by engine, by engine and role, by engine and
@@ -112,7 +161,7 @@ impl Totals {
         let outside = whole.recovered.difference(&whole.missing).count();
         let mut out = format!(
             "Cost: ${:.2} recorded over {} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; {} turns whose engine's cost and tokens aren't read.\nTokens: {} turns with partial counts (output counts completed runs only).\n",
-            whole.cost, whole.turns, whole.unread, whole.tokens_partial
+            whole.cost, whole.turns, whole.unread, self.partial_turns
         );
         out += "Columns: missing-runs excludes recovered cost; recovered-runs matches gaps in selected turns; outside-span counts recovered gaps outside selected turns; partial-tokens counts turns with incomplete tokens. Unread turns have unknown cost and tokens.\n";
         let head = [

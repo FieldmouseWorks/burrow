@@ -50,11 +50,27 @@ pub const ENGINE_RUNS: &str = ".engine-runs";
 /// micro-dollars (`--max-budget-usd`), which the meter holds until its cost
 /// is in.
 pub fn marker(at: i64, engine: &str, budget: Option<i64>) -> String {
+    marker_with_model(at, engine, budget, None)
+}
+
+/// [`marker`], also recording the configured `model` when known so rerouted
+/// turns keep each invocation's own model in normalized usage records.
+pub fn marker_with_model(
+    at: i64,
+    engine: &str,
+    budget: Option<i64>,
+    model: Option<&str>,
+) -> String {
     let engine = Value::from(engine);
-    match budget {
-        Some(b) => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine},"budget":{b}}}"#),
-        None => format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine}}}"#),
+    let mut out = format!(r#"{{"type":"burrow.run","at":{at},"engine":{engine}"#);
+    if let Some(b) = budget {
+        out.push_str(&format!(r#","budget":{b}"#));
     }
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        out.push_str(&format!(r#","model":{}"#, Value::from(m)));
+    }
+    out.push('}');
+    out
 }
 
 /// The engines whose turns stream Claude Code's records, and so share a
@@ -149,21 +165,39 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         .names()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter_map(|name| name.to_str()?.strip_suffix(".jsonl")?.parse().ok())
+        .filter_map(|name| {
+            let s = name.to_str()?;
+            s.strip_suffix(crate::usage_record::SUFFIX)
+                .or_else(|| s.strip_suffix(".jsonl"))?
+                .parse()
+                .ok()
+        })
         .collect();
     turns.sort_unstable();
+    turns.dedup();
     let mut engines = BTreeMap::new();
+    let mut normalized = BTreeMap::new();
     // Each turn's engine, and the one its runs from before markers named
     // theirs ran on: the engine it was on before it moved onto the credit,
     // if it did.
     let mut older = BTreeMap::new();
     for n in &turns {
-        let engine = text(dir, &format!("{n}.engine"))?.unwrap_or_else(|| "claude".into());
+        let usage = crate::usage_record::TurnUsage::load(dir, *n)?;
+        let engine = text(dir, &format!("{n}.engine"))?
+            .or_else(|| usage.as_ref().map(|u| u.engine.clone()))
+            .unwrap_or_else(|| "claude".into());
         let before = text(dir, &format!("{n}.{}", credit::ENGINE_BEFORE))?;
         older.insert(*n, before.as_deref().unwrap_or(&engine) == ENGINE);
         engines.insert(*n, engine);
+        if let Some(usage) = usage {
+            normalized.insert(*n, usage);
+        }
     }
-    if !engines.values().any(|e| e == ENGINE) {
+    let has_credit = engines.values().any(|e| e == ENGINE)
+        || normalized
+            .values()
+            .any(|u| u.runs.iter().any(|r| r.engine == ENGINE));
+    if !has_credit {
         return Ok(());
     }
     // Every Claude Code turn in order, through one set of sessions: cost is
@@ -171,6 +205,15 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
     let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
     let mut decoded: Vec<(u64, bool, Report)> = Vec::new();
     for n in turns {
+        let fallback = format!("{label}/{n}");
+        if let Some(usage) = normalized.remove(&n) {
+            if usage.runs.is_empty() {
+                continue;
+            }
+            let report = usage.to_report(&mut sessions, &fallback);
+            decoded.push((n, older[&n], report));
+            continue;
+        }
         let engine = &engines[&n];
         if !claude_stream(engine) {
             continue;
@@ -181,7 +224,7 @@ fn job(dir: &Dir, label: &str, from: i64, ledger: &mut Ledger) -> Result<(), Str
         if records.is_empty() {
             continue;
         }
-        let report = decode(records.into_iter(), &mut sessions, &format!("{label}/{n}"));
+        let report = decode(records.into_iter(), &mut sessions, &fallback);
         decoded.push((n, older[&n], report));
     }
     let recovered: BTreeSet<&String> = decoded.iter().flat_map(|(_, _, r)| &r.recovered).collect();
