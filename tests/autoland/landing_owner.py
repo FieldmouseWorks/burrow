@@ -58,7 +58,7 @@ def a_pass(kick):
             (S.T, "step", note("train")), (S.step, "handle", note("handle")),
             (S, "branches", note("branches")), (S, "upkeep", note("upkeep")),
             (C, "taken", lambda *a: None), (C, "poke", lambda *a: None),
-            (C, "coverage", lambda rs, done: {"repos": {r["repo"]: {"covered": r in done} for r in rs}}),
+            (C, "coverage", lambda rs: {"repos": {r["repo"]: {} for r in rs}}),
         ):
             stack.enter_context(patch.object(obj, name, fn))
         S.run_pass(kick)
@@ -82,6 +82,13 @@ for holding in (("conaryd", None), ("conaryd", "steward"), ("steward", "conaryd"
         reached = a_pass(kick)
         assert reached == ["upkeep"], (holding, kick, reached)
         assert "sam/r" not in C.WAKE, (holding, kick, C.WAKE)
+    # Its PRs land all the same: renovate-sweep is told conaryd lands them,
+    # or the one a handover goes to, never nothing.
+    lands = C.coverage([{"repo": "sam/r", "default": "main"}])["repos"]["sam/r"]["lands"]
+    assert lands == (holding[1] or holding[0]), (holding, lands)
+# And one whose record can't be read: nobody knows who lands it.
+C.CFG["settings"] = {"command": "false", "config": "/nonexistent"}
+assert C.coverage([{"repo": "sam/r", "default": "main"}])["repos"]["sam/r"]["lands"] is None
 
 # And every landing write refuses on its own, whatever reaches it.
 C.CFG["settings"] = landing("conaryd")

@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory() as tmp:
         conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {'ci': {'name': 'waiting: CI'}}},
         watch={'kick': 'watchdog', 'escalated': f'{tmp}/escalated.json'},
+        defaults={'proofBuilds': {}, 'proofRuns': {}, 'proofJobs': {}}, repos={},
     )))
     os.environ['AUTOLAND_CONFIG'] = str(cfg)
     import common as C
@@ -48,9 +49,8 @@ with tempfile.TemporaryDirectory() as tmp:
         else:
             W.NOTED[repo][W.key_of(repo, pr)] = W.item(repo, pr, 'CI', 120, f'autoland/{repo}', pr['headRefOid'])
 
-    def coverage(repos, covered):
-        done = {r['repo'] for r in covered}
-        return {'at': C.NOW, 'repos': {r['repo']: {'covered': r['repo'] in done} for r in repos}}
+    def landing(repo):
+        return {'owner': 'steward', 'to': None, 'generation': 0}
 
     def train(repo):
         if repo == 'sam/b':
@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (S, 'branches', lambda repo, *a, **k: branches.append(repo)),
             (S, 'upkeep', lambda *a: None),
             (C, 'follow_renames', lambda names: None), (C, 'taken', lambda *a: None),
-            (C, 'coverage', coverage), (C, 'poke', lambda *a: None),
+            (C, 'landing', landing), (C, 'poke', lambda *a: None),
         ):
             stack.enter_context(patch.object(obj, name, value))
         # The production monotonic clock is virtual: this checks the real
@@ -94,6 +94,10 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert turn == 0
             if turn == 0:
                 assert len(handled) == 3, ('the pass ignored its work budget', handled)
+                # Who lands each repo, the ones the yielded batch hasn't
+                # reached or left partway included: not how far it got.
+                landed = {r: v['lands'] for r, v in C.load('repos.json', {})['repos'].items()}
+                assert landed == dict.fromkeys(('sam/a', 'sam/b', 'sam/c'), 'steward'), landed
                 assert trains == branches == ['sam/a'], (trains, branches)
                 assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
                 assert C.load('digest-repos.json', {})['sam/c'][0][2] == 'untouched'
@@ -105,7 +109,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert handled == expected, (handled, expected)
         assert trains == branches == ['sam/a', 'sam/b', 'sam/c'], (trains, branches)
         assert hooks == [repos], hooks
-        assert all(x['covered'] for x in C.load('repos.json', {})['repos'].values())
+        assert all(x['lands'] == 'steward' for x in C.load('repos.json', {})['repos'].values())
         assert C.load('digest-repos.json', {})['sam/a'][0][0] == 'Owner'
         assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
         assert len(publications) == 4

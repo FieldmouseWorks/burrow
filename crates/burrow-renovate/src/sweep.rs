@@ -56,6 +56,7 @@ mod scan;
 mod seal;
 mod steward;
 mod task;
+mod visits;
 mod wake;
 
 pub use config::{App, Config, Tools};
@@ -145,21 +146,16 @@ impl Config {
             renovate,
             limits,
         };
-        let steward = Steward::read(self.covered.as_deref());
+        let steward = Steward::read(self.steward.as_deref());
         let mut pass = Pass::default();
-        for project in projects(&self.projects) {
-            let Some(repo) = self.origin(&self.projects.join(&project)) else {
-                continue;
-            };
-            // A hidden folder counts only when it's named for its repo
-            // (o/.github in .github).
-            let own = repo.split_once('/').map_or("", |(_, own)| own);
-            if project.starts_with('.') && project.to_lowercase() != own.to_lowercase() {
-                continue;
-            }
-            if only.is_some_and(|only| only.to_lowercase() != repo.to_lowercase()) {
-                continue;
-            }
+        let clones = projects(&self.projects)
+            .into_iter()
+            .filter_map(|project| {
+                let repo = self.origin(&self.projects.join(&project))?;
+                Some((project, repo))
+            })
+            .collect();
+        for (project, repo) in visits::visits(clones, only) {
             self.repo(&project, &repo, &who, &steward, &mut pass);
         }
         // The notices list every repo's: one repo's pass leaves them be.
@@ -256,7 +252,9 @@ impl Config {
     }
 
     /// The majors waiting on the owner, in one notice: the held ones apart
-    /// from the ok ones in repos no steward merges in. And the security
+    /// from the ok ones in repos nothing lands. One that doesn't merge
+    /// where the steward or conaryd lands it is stuck there, not the
+    /// owner's (the steward's stalls are the stall watchdog's). And the security
     /// fixes stuck a day.
     fn notices(&self, pass: &mut Pass) {
         let held = pass.held.trim_end_matches('\n');
@@ -269,7 +267,7 @@ impl Config {
         }
         if !ready.is_empty() {
             parts.push(format!(
-                "A Claude job read these and cleared them, and their CI is green, but the autoland steward doesn't cover their repos, so nothing merges them:\n{ready}"
+                "A Claude job read these and cleared them, and their CI is green, but nothing lands their repos' PRs (neither the autoland steward nor conaryd has them), so nothing merges them:\n{ready}"
             ));
         }
         let majors = if parts.is_empty() {
@@ -530,7 +528,7 @@ impl Sweep<'_> {
         } else if major
             && verdict == "ok"
             && !on_hold
-            && !self.info.covered
+            && self.info.landing == steward::Landing::Nobody
             && red == 0
             && pending == 0
         {
