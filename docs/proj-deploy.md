@@ -5,12 +5,15 @@ The shared usage record (`proj.usageHolds`'s file, named in the
 JSON (`{"version": 2, "holds": {...}}`) alongside per-engine `.usage-holds.released`
 and `.usage-holds.admission` maps. Under the shared `jobs/.usage.lock`, writes
 mirror any `claude` or global `*` hold into the legacy `.usage.json`,
-`.usage.released`, and `.usage.admission` files in strict pre-change formats so
-retained pre-change `proj` turns running across a deploy keep parsing them
-cleanly, observe newly set Claude or global holds, cannot clear active owner
-pauses early, and persist any later refusal for the new binary to merge. Reads
-also accept pre-deploy `.usage-owner-*` metadata and `ADMISSION_REF` references
-during cutover.
+`.usage.released`, and `.usage.admission` files in strict pre-change formats
+(including a `.usage-owner-*` metadata file published before `.usage.json` for
+active global `*` owner pauses so retained pre-change `claude-api` turns also
+observe `owner = true`, cleaned up once settled). Retained pre-change `proj`
+turns running across a deploy therefore keep parsing them cleanly, observe newly
+set Claude or global holds across both plan and API runs, cannot clear active
+owner pauses early, and persist any later refusal for the new binary to merge.
+Reads also accept pre-deploy `.usage-owner-*` metadata and `ADMISSION_REF`
+references during cutover.
 
 A release first stages its nanosecond cutoff in `.usage.admission`. The
 compatible record's `job` reference encodes the precise cutoff and commits it

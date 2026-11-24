@@ -140,7 +140,9 @@ fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only()
     assert_eq!(loaded_owner.engine, ALL_ENGINES);
     assert_eq!(loaded_owner.said, "legacy owner pause");
 
-    // 3. New writes always use v2 per-engine JSON in `.usage-holds.json` and create no `.usage-owner-*` sidecars.
+    // 3. New writes keep v2 per-engine JSON in `.usage-holds.json` (without owner sidecar
+    // references in the v2 record), mirror active global `*` pauses with `.usage-owner-*`
+    // in `.usage.json` so retained pre-change API turns stay blocked, and clean them on settle.
     hold(&cfg, t + 1200, "v2 pause").unwrap();
     fs::remove_file(cfg.jobs.join(owner_ref)).unwrap();
     let raw: serde_json::Value =
@@ -148,16 +150,31 @@ fn legacy_single_hold_and_owner_metadata_read_cleanly_while_writes_use_v2_only()
     assert_eq!(raw["version"], 2);
     assert_eq!(raw["holds"]["*"]["owner"], true);
     assert_eq!(raw["holds"]["*"]["said"], "v2 pause");
+    assert_eq!(raw["holds"]["*"]["job"], "owner");
+    let legacy_raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(cfg.jobs.join(LEGACY_FILE)).unwrap()).unwrap();
+    let mirror_job = legacy_raw["job"].as_str().unwrap();
+    assert!(
+        mirror_job.starts_with(".usage-owner-"),
+        "active global pause legacy mirror must reference .usage-owner-* for retained API turns"
+    );
+    assert!(cfg.jobs.join(mirror_job).exists());
+    back(&cfg, None);
+    assert!(out(&cfg).is_none());
+    let released = kept(&cfg).unwrap();
+    settle(
+        &cfg,
+        released.clone(),
+        released.release() + cfg.stall_queued() + 1,
+    );
     let has_owner_sidecar = fs::read_dir(&cfg.jobs)
         .unwrap()
         .filter_map(Result::ok)
         .any(|e| e.file_name().to_string_lossy().starts_with(".usage-owner-"));
     assert!(
         !has_owner_sidecar,
-        "v2 write path must not create legacy owner sidecars"
+        "settled holds must clean up legacy owner mirror sidecars"
     );
-    back(&cfg, None);
-    assert!(out(&cfg).is_none());
 }
 
 #[test]

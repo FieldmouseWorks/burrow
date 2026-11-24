@@ -232,17 +232,47 @@ fn normalize_loaded(engine: &str, s: &mut Spent) {
     }
 }
 
+/// Deterministic `.usage-owner-<hex>` metadata filename for an active global `*`
+/// owner pause so retained pre-change `proj` readers recognize `owner = true`
+/// (blocking `claude-api` runs as well as `claude` runs) and `project_legacy`
+/// remains pure and time-independent.
+fn legacy_owner_mirror_name(s: &Spent) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s
+        .until
+        .to_le_bytes()
+        .into_iter()
+        .chain(s.at.to_le_bytes())
+        .chain(s.said.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{LEGACY_OWNER}{hash:016x}")
+}
+
 /// Pure, time-independent projection of `store`'s `claude`/global hold into the
 /// strict 7-field `LegacySpent` format read by retained pre-change `proj` turns.
 /// Active owner pauses set `last = until - 1` so an early successful old turn
 /// cannot clear them while a post-deadline refusal at `>= until` still registers.
+/// Active global `*` owner pauses also point `job` at a `.usage-owner-<hex>`
+/// metadata file so retained pre-change readers set `owner = true` and hold
+/// `claude-api` turns too; a `claude`-only owner pause keeps `job` plain so
+/// retained `claude-api` turns stay free.
 fn project_legacy(store: &Store) -> Option<LegacySpent> {
-    let pick = store
-        .holds
-        .get(ALL_ENGINES)
-        .filter(|s| s.back.is_none())
-        .or_else(|| store.holds.get(DEFAULT_ENGINE))
-        .or_else(|| store.holds.get(ALL_ENGINES))?;
+    let (global_active_owner, pick) =
+        if let Some(global) = store.holds.get(ALL_ENGINES).filter(|s| s.back.is_none()) {
+            (global.owner, global)
+        } else if let Some(claude) = store.holds.get(DEFAULT_ENGINE) {
+            (false, claude)
+        } else {
+            (false, store.holds.get(ALL_ENGINES)?)
+        };
+    let job = if global_active_owner {
+        legacy_owner_mirror_name(pick)
+    } else {
+        pick.job.clone()
+    };
     let last = if pick.owner && pick.back.is_none() {
         Some(pick.until.saturating_sub(1).max(pick.at))
     } else {
@@ -251,7 +281,7 @@ fn project_legacy(store: &Store) -> Option<LegacySpent> {
     Some(LegacySpent {
         until: pick.until,
         said: pick.said.clone(),
-        job: pick.job.clone(),
+        job,
         at: pick.at,
         back: pick.back,
         admission: None,
@@ -443,6 +473,19 @@ fn remove_if_present(path: &std::path::Path, label: &str) -> Result<(), String> 
     }
 }
 
+fn cleanup_legacy_owner_mirrors(cfg: &Config) {
+    let Ok(entries) = fs::read_dir(&cfg.jobs) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if legacy_owner_ref(&name) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Write the per-engine store atomically to `jobs/.usage-holds.json` (or remove it
 /// when empty), then mirror any `claude` or `*` state to `jobs/.usage.json` in
 /// strict pre-change `LegacySpent` format for retained deploy turns.
@@ -461,10 +504,21 @@ pub(crate) fn write_store(cfg: &Config, store: &Store) -> Result<(), String> {
 
     let legacy_path = cfg.jobs.join(LEGACY_FILE);
     match project_legacy(store) {
-        None => remove_if_present(&legacy_path, LEGACY_FILE),
+        None => {
+            remove_if_present(&legacy_path, LEGACY_FILE)?;
+            if store.holds.is_empty() {
+                cleanup_legacy_owner_mirrors(cfg);
+            }
+            Ok(())
+        }
         Some(legacy) => {
             let text =
                 serde_json::to_string(&legacy).map_err(|e| format!("proj: {LEGACY_FILE}: {e}"))?;
+            if legacy_owner_ref(&legacy.job) {
+                let meta_path = cfg.jobs.join(&legacy.job);
+                swap(&meta_path, &format!("{text}\n"))
+                    .map_err(|e| format!("proj: {}: {e}", legacy.job))?;
+            }
             swap(&legacy_path, &format!("{text}\n"))
                 .map_err(|e| format!("proj: {LEGACY_FILE}: {e}"))
         }

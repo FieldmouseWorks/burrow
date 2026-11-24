@@ -369,3 +369,71 @@ fn retained_legacy_process_sees_holds_and_persists_refusals_during_deploy() {
         "owner pause mirror must fence early back() from retained old turns"
     );
 }
+
+/// Exact pre-change `read()` + `holds_run()` semantics from `origin/main`:
+/// sets `owner = true` only when `.usage.json`'s `job` references a valid
+/// `.usage-owner-*` metadata file whose deadline is past `refused()`.
+fn pre_change_read(cfg: &Config) -> Option<(PreChangeSpent, bool)> {
+    let raw: PreChangeSpent =
+        serde_json::from_slice(&fs::read(cfg.jobs.join(".usage.json")).ok()?).unwrap();
+    let refused = raw.last.unwrap_or(raw.at);
+    if raw
+        .job
+        .strip_prefix(".usage-owner-")
+        .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        let mut meta: PreChangeSpent =
+            serde_json::from_slice(&fs::read(cfg.jobs.join(&raw.job)).unwrap()).unwrap();
+        if refused < meta.until {
+            meta.told = raw.told;
+            meta.back = raw.back;
+            return Some((meta, true));
+        }
+    }
+    Some((raw, false))
+}
+
+fn pre_change_holds_run(spent: &PreChangeSpent, owner: bool, api: bool, at: i64) -> bool {
+    spent.back.is_none() && spent.until > at && (owner || !api)
+}
+
+#[test]
+fn retained_legacy_api_turn_honors_mirrored_global_owner_pause_but_not_claude_only_pause() {
+    let (_d, cfg) = rig();
+    let t = now();
+
+    // Global `*` owner pause: pre-change reader must see `owner == true` and
+    // block BOTH `claude` and `claude-api` runs.
+    hold_for(&cfg, ALL_ENGINES, t + 7200, "global maintenance").unwrap();
+    let (spent, owner) =
+        pre_change_read(&cfg).expect("global owner pause must be readable by pre-change binary");
+    assert!(
+        owner,
+        "pre-change reader must recognize mirrored global `*` pause as owner=true"
+    );
+    assert_eq!(spent.said, "global maintenance");
+    assert!(pre_change_holds_run(&spent, owner, false, t));
+    assert!(
+        pre_change_holds_run(&spent, owner, true, t),
+        "pre-change claude-api run must be blocked by mirrored global `*` owner pause"
+    );
+
+    // Release global pause -> pre-change reader sees hold ended for both engines.
+    back_for(&cfg, Some(ALL_ENGINES), None);
+    let (released, released_owner) = pre_change_read(&cfg).unwrap();
+    assert!(!pre_change_holds_run(&released, released_owner, false, t));
+    assert!(!pre_change_holds_run(&released, released_owner, true, t));
+
+    // Claude-only owner pause: pre-change reader blocks `claude`, NOT `claude-api`.
+    hold_for(&cfg, "claude", t + 5400, "claude only pause").unwrap();
+    let (cl_spent, cl_owner) = pre_change_read(&cfg).unwrap();
+    assert!(
+        !cl_owner,
+        "claude-only pause must not set global owner=true in legacy mirror"
+    );
+    assert!(pre_change_holds_run(&cl_spent, cl_owner, false, t));
+    assert!(
+        !pre_change_holds_run(&cl_spent, cl_owner, true, t),
+        "pre-change claude-api run must stay free during a claude-only pause"
+    );
+}
