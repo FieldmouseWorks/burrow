@@ -83,10 +83,15 @@ let
       config.burrow.agents.engines or { }
     )
   );
-  hostPlugins = extraHostPlugins // {
+  # The engines wired here, which burrow.proj.plugins only adds to: one of
+  # its names replacing them (claude-api's credit and key, an engine's
+  # sandbox build) is refused by an assertion below.
+  wiredPlugins = extraHostPlugins // {
     claude = lib.getExe hostClaudePlugin;
     "claude-api" = lib.getExe hostClaudeApiPlugin;
-  } // lib.mapAttrs (_: lib.getExe) cfg.plugins;
+  };
+  replacedPlugins = lib.attrNames (builtins.intersectAttrs wiredPlugins cfg.plugins);
+  hostPlugins = wiredPlugins // lib.mapAttrs (_: lib.getExe) cfg.plugins;
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
@@ -285,7 +290,8 @@ in
         Additional Conary `conary-plugin v5` (`job`) engine plugin packages
         available to host `proj` turns, keyed by engine name. Built-in
         Anthropic plugins (`claude`, `claude-api`) and enabled engine plugins
-        registered in `burrow.agents.engines` are wired automatically.
+        registered in `burrow.agents.engines` are wired automatically, and
+        this may not name one of them.
       '';
     };
     jobsDir = lib.mkOption {
@@ -586,6 +592,9 @@ in
     } {
       assertion = !cfg.inbox.planning || !cfg.inbox.vm;
       message = "burrow.proj.inbox.planning runs its planner jobs on the host; it cannot run inside an agent VM.";
+    } {
+      assertion = replacedPlugins == [ ];
+      message = "burrow.proj.plugins adds engines; ${lib.concatStringsSep ", " replacedPlugins} already has its plugin wired (claude and claude-api, or burrow.agents.engines), which it would replace.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package ];

@@ -17,11 +17,18 @@
     keyed = self.nixosConfigurations.example.extendModules {
       modules = [ { burrow.claude.api.keyFile = "/run/keys/anthropic-api"; } ];
     };
+    # burrow.proj.plugins only adds engines: naming a wired one (claude-api,
+    # whose wrapper holds the credit and its key) fails an assertion.
+    replaced = self.nixosConfigurations.example.extendModules {
+      modules = [ { burrow.proj.plugins.claude-api = pkgs.hello; } ];
+    };
+    refused = builtins.filter (a: !a.assertion) replaced.config.assertions;
     injected = inbox.config.burrow.proj.inbox.authors ++ [ {
       login = "renamed-machinery";
       id = inbox.config.burrow.github.machineApp.accountId;
     } ];
   in
+  assert builtins.any (a: pkgs.lib.hasInfix "burrow.proj.plugins adds engines; claude-api" a.message) refused;
   assert inbox.config.systemd.services.burrow-engines-door.serviceConfig.User == inbox.config.burrow.user;
   assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
   assert inbox.config.burrow.events.handlers.engines.repos == [ "sam/homelab" ];
