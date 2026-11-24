@@ -126,11 +126,13 @@ pub fn check_yields(handlers: &BTreeMap<String, Handler>) -> Result<(), String> 
 }
 
 /// What holds a handler's passes off: `first`, the line it yields to, while
-/// that one has a pass running or due, and each of `behind`, the lines
-/// yielding to it, while one of theirs runs. They share a lock, and a pass
-/// started beside one that holds it would only come back every GAP until
-/// that one ended. A pass of `behind`'s merely due holds nothing off, so
-/// neither waits for the other for good.
+/// that one has a pass running or one that fell due before its own, and
+/// each of `behind`, the lines yielding to it, while one of theirs runs.
+/// They share a lock, and a pass started beside one that holds it would
+/// only come back every GAP until that one ended. Nor does a line start a
+/// pass that fell due after one of `behind`'s that waits: the two go in
+/// the order their passes fell due (`first`'s first on a tie), so neither
+/// waits for more than the passes booked ahead of its own.
 #[derive(Default)]
 pub struct Yields<'a> {
     pub first: Option<&'a Line>,
@@ -153,8 +155,19 @@ impl<'a> Yields<'a> {
         }
     }
 
-    fn held(&self) -> bool {
-        self.first.is_some_and(|f| f.busy(now())) || self.behind.iter().any(|b| b.running())
+    /// Whether a pass that fell due at `since` waits (None: only for a
+    /// pass that runs).
+    fn held(&self, since: Option<f64>) -> bool {
+        self.first.is_some_and(|f| f.ahead(since)) || self.behind.iter().any(|b| b.running())
+    }
+
+    /// When the first of `behind`'s waiting passes fell due: none of this
+    /// handler's that fell due after it starts before it.
+    fn until(&self, now: f64) -> Option<f64> {
+        self.behind
+            .iter()
+            .filter_map(|b| b.since(now))
+            .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))))
     }
 }
 
@@ -173,13 +186,14 @@ pub fn serve(
         line.wakes(&booked(wake));
     }
     loop {
-        if once && yields.held() {
+        if once && yields.held(line.since(now())) {
             return;
         }
-        if !once && line.hold(|| yields.held()) {
+        if !once && line.hold(|| yields.held(line.since(now()))) {
             continue;
         }
-        let (ready, wait) = line.take(now());
+        let at = now();
+        let (ready, wait) = line.take(at, yields.until(at));
         let started = !ready.is_empty();
         let mut ready = ready.into_iter();
         while let Some((pass, scope)) = ready.next() {
@@ -192,6 +206,8 @@ pub fn serve(
             {
                 eprintln!("{name}: {pass} skipped: conaryd lands it");
                 line.done(&pass, true, now());
+                // A line held for it hears it's gone.
+                refresh();
                 continue;
             }
             let unit = h.unit(&pass);
@@ -202,15 +218,16 @@ pub fn serve(
                 units.start(&unit);
             }
             // Yielding is at every pass's start: the line it yields to may
-            // have got work while the one before ran (or one yielding to it
-            // started a pass). What hasn't started goes back, as it was, for
-            // once that line is idle.
-            if yields.held() {
-                let at = now();
-                line.untake(&pass, &scope, at);
-                for (pass, scope) in ready.by_ref() {
-                    line.untake(&pass, &scope, at);
+            // have got work due before this pass while the one before ran
+            // (or one yielding to it started a pass). What hasn't started
+            // goes back, as it was, keeping its place in line, and the
+            // other line hears it waits.
+            if yields.held(line.taken_since(&pass)) {
+                line.untake(&pass);
+                for (pass, _) in ready.by_ref() {
+                    line.untake(&pass);
                 }
+                refresh();
                 break;
             }
             match &scope {
@@ -367,7 +384,8 @@ mod tests {
     }
 
     // A handler that yields to another starts nothing while that one has a
-    // pass due or running, and its own pass once that one is idle.
+    // pass running or due before its own (a tie goes to that one), and its
+    // own pass once that one is idle.
     #[test]
     fn yields() {
         let (_dir, mut h, fake) = setup();
@@ -381,7 +399,7 @@ mod tests {
         };
         serve("continue", &h, &line, &yields, &fake, true, || {});
         assert!(fake.started.borrow().is_empty());
-        let (ready, _) = first.take(crate::now());
+        let (ready, _) = first.take(crate::now(), None);
         assert_eq!(ready.len(), 1);
         serve("continue", &h, &line, &yields, &fake, true, || {});
         assert!(fake.started.borrow().is_empty(), "its pass is running");
@@ -421,7 +439,7 @@ mod tests {
         assert_eq!(line.issues()[&Pass::repo("sam/b")].1, [7].into());
         serve("continue", &h, &line, &yields, &fake, true, || {});
         assert_eq!(fake.started.borrow().len(), 1, "still held off");
-        let (ready, _) = first.take(crate::now());
+        let (ready, _) = first.take(crate::now(), None);
         for (pass, _) in ready {
             first.done(&pass, true, crate::now());
         }
@@ -434,20 +452,21 @@ mod tests {
                 "autoland-continue.service"
             ]
         );
-        assert!(!line.busy(crate::now()), "every pass taken is done");
+        assert!(!line.running(), "every pass taken is done");
+        assert_eq!(line.since(crate::now()), None, "and none waits");
     }
 
     // The handler yielded to waits out a yielder's pass that runs, which
     // holds their shared lock, rather than start one that would only find
-    // it held and come back every GAP; a yielder's pass merely due holds it
-    // off not at all.
+    // it held and come back every GAP; a yielder's pass due after its own
+    // holds it off not at all.
     #[test]
     fn waits_out_a_yielder() {
         let (_dir, h, fake) = setup();
         let (line, behind) = (Line::default(), Line::default());
         line.event(Pass::Full, -100.0);
         behind.event(Pass::Full, -100.0);
-        let (ready, _) = behind.take(crate::now());
+        let (ready, _) = behind.take(crate::now(), None);
         assert_eq!(ready.len(), 1);
         let yields = Yields {
             behind: vec![&behind],
@@ -459,6 +478,63 @@ mod tests {
         behind.event(Pass::Full, -100.0);
         serve("autoland", &h, &line, &yields, &fake, true, || {});
         assert_eq!(*fake.started.borrow(), ["autoland.service"]);
+    }
+
+    // The two lines go in the order their passes fell due. A yielder's pass
+    // waits for the passes of the line it yields to that fell due before it,
+    // and no more: passes that come due on that line while one of its own
+    // runs wait their turn behind it, and that line starts none of them
+    // meanwhile. A batch the yielder took goes on until a pass due before
+    // the rest of it comes in, then gives way to that one alone.
+    #[test]
+    fn yields_in_turn() {
+        use std::rc::Rc;
+
+        let (_dir, mut steward, mut fake) = setup();
+        steward.wake = None;
+        let cont = Handler {
+            unit: "autoland-continue".into(),
+            ..steward.clone()
+        };
+        // Times a pass fell due, in order (epoch seconds: a pass never ran
+        // falls due no sooner than one GAP after 0).
+        let t = crate::now() - 1000.0;
+        let first = Rc::new(Line::default());
+        let line = Line::default();
+        first.event(Pass::repo("sam/a"), t);
+        line.event(Pass::repo("sam/x"), t + 100.0);
+        line.event(Pass::repo("sam/y"), t + 200.0);
+        // While the steward's pass over sam/a runs, two more come due: one
+        // between the continuations' two, one after both.
+        let kicked = first.clone();
+        fake.hook = Some(Box::new(move |unit| {
+            if unit == "autoland@sam-a.service" {
+                kicked.event(Pass::repo("sam/b"), t + 150.0);
+                kicked.event(Pass::repo("sam/c"), t + 250.0);
+            }
+        }));
+        let ahead = Yields {
+            first: Some(&first),
+            ..ALONE
+        };
+        let behind = Yields {
+            behind: vec![&line],
+            ..ALONE
+        };
+        for _ in 0..3 {
+            serve("autoland", &steward, &first, &behind, &fake, true, || {});
+            serve("continue", &cont, &line, &ahead, &fake, true, || {});
+        }
+        assert_eq!(
+            *fake.started.borrow(),
+            [
+                "autoland@sam-a.service",
+                "autoland-continue@sam-x.service",
+                "autoland@sam-b.service",
+                "autoland-continue@sam-y.service",
+                "autoland@sam-c.service",
+            ]
+        );
     }
 
     // Yielding goes one step, to a handler there is: none holds another off
@@ -574,7 +650,7 @@ mod tests {
                     (source.to_owned(), Line::default()),
                     (target.to_owned(), Line::default()),
                 ]));
-                assert!(lines[target].take(crate::now()).0.is_empty());
+                assert!(lines[target].take(crate::now(), None).0.is_empty());
                 lines[source].event(Pass::Full, -100.0);
                 serve(
                     source,
@@ -598,7 +674,7 @@ mod tests {
                 );
                 assert_eq!(
                     lines[target]
-                        .take(crate::now())
+                        .take(crate::now(), None)
                         .0
                         .into_iter()
                         .map(|(p, _)| p)
@@ -620,10 +696,10 @@ mod tests {
                     true,
                     || {},
                 );
-                assert_eq!(recovered.take(future + 599.0).0, []);
+                assert_eq!(recovered.take(future + 599.0, None).0, []);
                 assert_eq!(
                     recovered
-                        .take(future + 600.0)
+                        .take(future + 600.0, None)
                         .0
                         .into_iter()
                         .map(|(p, _)| p)

@@ -73,8 +73,33 @@ struct State {
     /// Something came in since the last take: the wait after it returns at
     /// once instead of sleeping through what it missed.
     news: bool,
-    /// Passes taken and not yet done.
-    running: usize,
+    /// Passes taken and not yet done, each with what its take removed, so
+    /// one that doesn't start goes back as it was.
+    taken: HashMap<Pass, Took>,
+}
+
+/// What a take removed for one pass, and when the pass fell due.
+struct Took {
+    due: Option<f64>,
+    issues: Option<(f64, BTreeSet<u64>)>,
+    last: Option<f64>,
+    since: f64,
+}
+
+impl State {
+    /// When a pass booked for `at` can start: once its GAP since its last
+    /// start is served too. That's when it falls due.
+    fn ready_at(&self, gap: f64, pass: &Pass, at: f64) -> f64 {
+        at.max(self.last.get(pass).copied().unwrap_or(0.0) + gap)
+    }
+
+    /// When each booking falls due.
+    fn falls_due(&self, gap: f64) -> impl Iterator<Item = f64> + '_ {
+        self.due
+            .iter()
+            .chain(self.issues.iter().map(|(p, (at, _))| (p, at)))
+            .map(move |(p, &at)| self.ready_at(gap, p, at))
+    }
 }
 
 pub struct Line {
@@ -156,70 +181,107 @@ impl Line {
     /// steward's yields after a slice and resumes), so it never stands in
     /// for one, and however often it's due, a repo's pass waits for no more
     /// than the passes this take starts.
-    pub fn take(&self, now: f64) -> (Vec<(Pass, Scope)>, Option<f64>) {
+    ///
+    /// `until`: none that fell due after it starts (a pass of a handler
+    /// yielding to this one waits from then, and goes first). Those don't
+    /// count towards the next one due either: news ends the wait for them.
+    pub fn take(&self, now: f64, until: Option<f64>) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
         let gap = self.gap;
-        let ready_at = |s: &State, pass: &Pass, at: f64| {
-            at.max(s.last.get(pass).copied().unwrap_or(0.0) + gap)
-        };
+        let by = until.map_or(now, |u| u.min(now));
         let passes: BTreeSet<Pass> = s.due.keys().chain(s.issues.keys()).cloned().collect();
         let mut ready: Vec<(Pass, Scope)> = passes
             .into_iter()
             .filter_map(|p| {
-                if s.due.get(&p).is_some_and(|&at| ready_at(&s, &p, at) <= now) {
+                if s.due
+                    .get(&p)
+                    .is_some_and(|&at| s.ready_at(gap, &p, at) <= by)
+                {
                     Some((p, Scope::All))
                 } else {
                     let (at, ns) = s.issues.get(&p)?;
-                    (ready_at(&s, &p, *at) <= now).then(|| (p, Scope::Issues(ns.clone())))
+                    (s.ready_at(gap, &p, *at) <= by).then(|| (p, Scope::Issues(ns.clone())))
                 }
             })
             .collect();
         ready.sort_by_key(|(p, _)| *p == Pass::Full);
         for (pass, scope) in &ready {
-            if *scope == Scope::All {
-                s.due.remove(pass);
-            }
-            s.issues.remove(pass);
-            s.last.insert(pass.clone(), now);
+            let due = if *scope == Scope::All {
+                s.due.remove(pass)
+            } else {
+                None
+            };
+            let issues = s.issues.remove(pass);
+            let since = due
+                .iter()
+                .chain(issues.as_ref().map(|(at, _)| at))
+                .map(|&at| s.ready_at(gap, pass, at))
+                .fold(f64::INFINITY, f64::min);
+            let last = s.last.insert(pass.clone(), now);
+            s.taken.insert(
+                pass.clone(),
+                Took {
+                    due,
+                    issues,
+                    last,
+                    since,
+                },
+            );
         }
-        s.running += ready.len();
         let next = s
-            .due
-            .iter()
-            .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
-            .map(|(p, &at)| ready_at(&s, p, at))
+            .falls_due(gap)
+            .filter(|&at| at > now)
             .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))));
         (ready, next.map(|at| at - now))
     }
 
     /// A pass taken that didn't start (its handler yielded first) goes
-    /// back: due now, with what it was to look at, and ready as soon as
-    /// the line is free again, its GAP already served.
-    pub fn untake(&self, pass: &Pass, scope: &Scope, now: f64) {
+    /// back as it was: due when it fell due, with what it was to look at,
+    /// so it keeps its place in line.
+    pub fn untake(&self, pass: &Pass) {
         let mut s = self.lock();
-        s.running = s.running.saturating_sub(1);
-        match scope {
-            Scope::All => Self::book(&mut s, pass.clone(), now),
-            Scope::Issues(ns) => {
-                let (due, all) = s
-                    .issues
-                    .entry(pass.clone())
-                    .or_insert((now, BTreeSet::new()));
-                *due = due.min(now);
-                all.extend(ns);
-            }
+        let Some(took) = s.taken.remove(pass) else {
+            return;
+        };
+        if let Some(at) = took.due {
+            Self::book(&mut s, pass.clone(), at);
         }
-        s.last.insert(pass.clone(), now - self.gap);
+        if let Some((at, ns)) = took.issues {
+            let (due, all) = s
+                .issues
+                .entry(pass.clone())
+                .or_insert((at, BTreeSet::new()));
+            *due = due.min(at);
+            all.extend(ns);
+        }
+        match took.last {
+            Some(last) => s.last.insert(pass.clone(), last),
+            None => s.last.remove(pass),
+        };
     }
 
-    /// Whether a pass is running, or due by now: a handler that yields to
-    /// this one (`yieldTo`) starts none of its own meanwhile.
-    pub fn busy(&self, now: f64) -> bool {
+    /// When the first of this line's passes waiting by `now` fell due: a
+    /// handler this one yields to (`yieldTo`) starts none that fell due
+    /// after it meanwhile.
+    pub fn since(&self, now: f64) -> Option<f64> {
         let s = self.lock();
-        s.running > 0
-            || s.due.values().any(|&at| at <= now)
-            || s.issues.values().any(|&(at, _)| at <= now)
+        s.falls_due(self.gap)
+            .filter(|&at| at <= now)
+            .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))))
+    }
+
+    /// When a pass taken fell due.
+    pub fn taken_since(&self, pass: &Pass) -> Option<f64> {
+        self.lock().taken.get(pass).map(|t| t.since)
+    }
+
+    /// Whether a pass of this line runs, or one fell due by `since` (a
+    /// yielding handler's pass that fell due then waits for them, and for
+    /// no pass due after it).
+    pub fn ahead(&self, since: Option<f64>) -> bool {
+        let s = self.lock();
+        !s.taken.is_empty() || since.is_some_and(|t| s.falls_due(self.gap).any(|at| at <= t))
     }
 
     /// A pass ended. One that failed (or never started) runs again a minute
@@ -228,7 +290,7 @@ impl Line {
     /// more. Returns when it runs again.
     pub fn done(&self, pass: &Pass, ok: bool, now: f64) -> Option<f64> {
         let mut s = self.lock();
-        s.running = s.running.saturating_sub(1);
+        s.taken.remove(pass);
         if ok {
             s.fails.remove(pass);
             return None;
@@ -245,7 +307,7 @@ impl Line {
     /// (`yieldTo`) waits it out, since the two share a lock, and one started
     /// beside it would only find the lock held and come back every GAP.
     pub fn running(&self) -> bool {
-        self.lock().running > 0
+        !self.lock().taken.is_empty()
     }
 
     /// Hear news: two lines where one yields to the other hear each of the
@@ -256,10 +318,10 @@ impl Line {
     }
 
     /// Whether `held` says another line holds this one off now (the one it
-    /// yields to, busy, or one yielding to it, running); if so, wait for
-    /// news (one of that line's passes ending, say). The news is cleared
-    /// before `held` is asked, so a pass ending after that is never slept
-    /// through.
+    /// yields to, with a pass running or due first, or one yielding to it,
+    /// running); if so, wait for news (one of that line's passes ending,
+    /// say). The news is cleared before `held` is asked, so a pass ending
+    /// after that is never slept through.
     pub fn hold(&self, held: impl FnOnce() -> bool) -> bool {
         self.lock().news = false;
         let held = held();
@@ -318,7 +380,7 @@ mod tests {
 
     /// The passes that start now, every one looking at everything.
     fn took(line: &Line, now: f64) -> (Vec<Pass>, Option<f64>) {
-        let (ready, next) = line.take(now);
+        let (ready, next) = line.take(now, None);
         let passes = ready
             .into_iter()
             .map(|(p, scope)| {
@@ -424,25 +486,64 @@ mod tests {
         }
     }
 
-    // A handler that yields to this line holds off while one of its passes
-    // runs or is due, and not once it has none; the one it yields to waits
-    // out only a pass of the yielder's that runs.
+    // A pass of a handler that yields to this line, due since a time,
+    // waits for one of this line's that runs, or fell due by then (its GAP
+    // served too), and for none due after it.
     #[test]
-    fn busy_while_due_or_running() {
+    fn ahead_while_due_first_or_running() {
         let line = Line::default();
-        assert!(!line.busy(100.0));
+        assert!(!line.ahead(Some(100.0)));
         line.wakes(&booked(json!({"sam/r": 200})));
-        assert!(!line.busy(199.0));
-        assert!(line.busy(200.0));
+        assert!(!line.ahead(Some(199.0)), "due after it");
+        assert!(line.ahead(Some(200.0)));
+        assert!(!line.ahead(None), "nothing runs");
         assert!(!line.running(), "due isn't running");
         assert_eq!(took(&line, 200.0).0, vec![r("sam/r")]);
-        assert!(line.busy(200.0), "its pass is running");
+        assert!(line.ahead(None), "its pass is running");
         assert!(line.running());
         line.done(&r("sam/r"), true, 300.0);
-        assert!(!line.busy(300.0));
+        assert!(!line.ahead(Some(300.0)));
         assert!(!line.running());
-        line.issue(r("sam/r"), 7, 300.0);
-        assert!(line.busy(300.0 + DEBOUNCE));
+        line.issue(r("sam/r"), 7, 210.0);
+        assert!(!line.ahead(Some(219.0)), "its GAP isn't served yet");
+        assert!(line.ahead(Some(220.0)));
+        assert_eq!(line.since(300.0), Some(220.0));
+        assert_eq!(line.since(219.0), None);
+    }
+
+    // A take that waits for a yielder's pass due at `until` starts none
+    // that fell due after it, and doesn't wake for them either; one taken
+    // that doesn't start goes back as it was, keeping its place.
+    #[test]
+    fn until_and_untake() {
+        let line = Line::default();
+        line.event(r("sam/a"), 100.0);
+        line.event(r("sam/b"), 110.0);
+        line.issue(r("sam/c"), 7, 110.0);
+        line.wakes(&booked(json!({"sam/d": 200})));
+        let (ready, next) = line.take(120.0, Some(105.0));
+        assert_eq!(ready, vec![(r("sam/a"), Scope::All)]);
+        assert_eq!(next, Some(80.0), "only sam/d's is ahead");
+        assert_eq!(line.since(120.0), Some(115.0));
+        assert_eq!(line.taken_since(&r("sam/a")), Some(105.0));
+        line.untake(&r("sam/a"));
+        assert!(!line.running());
+        assert_eq!(line.since(120.0), Some(105.0), "it keeps its place");
+        let (ready, _) = line.take(120.0, None);
+        assert_eq!(
+            ready,
+            vec![
+                (r("sam/a"), Scope::All),
+                (r("sam/b"), Scope::All),
+                (r("sam/c"), Scope::Issues([7].into()))
+            ]
+        );
+        line.untake(&r("sam/c"));
+        assert_eq!(line.issues()[&r("sam/c")], (115.0, [7].into()));
+        assert_eq!(
+            line.take(121.0, None).0,
+            vec![(r("sam/c"), Scope::Issues([7].into()))]
+        );
     }
 
     // A line held off by another sleeps until news comes, and isn't held
@@ -452,12 +553,12 @@ mod tests {
         let first = Arc::new(Line::default());
         let line = Arc::new(Line::default());
         line.event(r("sam/r"), 0.0);
-        assert!(!line.hold(|| first.busy(100.0)));
+        assert!(!line.hold(|| first.ahead(Some(100.0))));
         first.event(r("sam/q"), 0.0);
         line.event(r("sam/r"), 1.0);
         let waiting = {
             let (first, line) = (first.clone(), line.clone());
-            thread::spawn(move || line.hold(|| first.busy(100.0)))
+            thread::spawn(move || line.hold(|| first.ahead(Some(100.0))))
         };
         thread::sleep(Duration::from_millis(200));
         assert!(!waiting.is_finished(), "old news ended the hold");
@@ -550,24 +651,27 @@ mod tests {
         line.issue(r("sam/r"), 7, 100.0);
         line.issue(r("Sam/R"), 9, 102.0);
         line.issue(r("sam/q"), 7, 102.0);
-        assert_eq!(line.take(104.0), (vec![], Some(1.0)));
+        assert_eq!(line.take(104.0, None), (vec![], Some(1.0)));
         assert_eq!(
-            line.take(105.0),
+            line.take(105.0, None),
             (vec![(r("sam/r"), Scope::Issues([7, 9].into()))], Some(2.0))
         );
         assert_eq!(line.due(), due(&[(r("sam/r"), 500.0)]));
         assert_eq!(
-            line.take(107.0).0,
+            line.take(107.0, None).0,
             vec![(r("sam/q"), Scope::Issues([7].into()))]
         );
         line.issue(r("sam/r"), 3, 200.0);
         line.event(r("sam/r"), 200.0);
-        assert_eq!(line.take(205.0), (vec![(r("sam/r"), Scope::All)], None));
+        assert_eq!(
+            line.take(205.0, None),
+            (vec![(r("sam/r"), Scope::All)], None)
+        );
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 4, 300.0);
         line.event(Pass::Full, 300.0);
         assert_eq!(
-            line.take(305.0),
+            line.take(305.0, None),
             (
                 vec![
                     (r("sam/r"), Scope::Issues([4].into())),
@@ -579,7 +683,7 @@ mod tests {
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 5, 400.0);
         assert_eq!(
-            line.take(405.0).0,
+            line.take(405.0, None).0,
             vec![(r("sam/r"), Scope::Issues([5].into()))]
         );
         line.done(&r("sam/r"), false, 406.0);
