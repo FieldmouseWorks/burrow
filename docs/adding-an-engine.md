@@ -62,9 +62,7 @@ response:
   - Declare any usage `meters` (for example `["quota"]`).
 - **`Task::Job`:**
   - Read `repo`, `workdir`, `prompt`, `model`, `effort`, and
-    `execution.context` (`Fresh` or `Continue { session }`), plus optional
-    `PROJ_APPEND_SYSTEM_PROMPT` and `PROJ_STREAM_EVENTS=1` from the
-    environment.
+    `execution.context` (`Fresh` or `Continue { session }`).
   - Deliver credentials strictly from the isolated engine secret (an
     environment variable or a private file inside an isolated `HOME` / config
     directory — never from interactive desktop or host user logins).
@@ -72,17 +70,14 @@ response:
     hung child processes cannot hold a job slot indefinitely.
   - Return `Answer::Job` with a valid summary, `next` declaration, and
     matching `by` / `execution` / `negotiated` provenance.
-- **Structured stderr diagnostics (when `PROJ_STREAM_EVENTS=1`):**
-  Emit one JSON object per line on stderr so `proj` tracks live activity,
-  session resumption, usage accounting, and per-engine holds without any
-  provider-specific parsing in `burrow-proj`:
-  - `{"event":"stream",...}` — live output chunks
-  - `{"event":"session","session_id":"..."}` — native session ID for
-    `Context::Continue`
-  - `{"event":"activity"}` — heartbeat while working
-  - `{"event":"usage","session":"...","usage":{...}}` — token/cost accounting
-  - `{"event":"refusal","kind":"usage_limit"|"login_expired"|"api_key_rejected"|"budget_exhausted"|"credit_exhausted","reason":"...","resets_at":...}`
-  - `{"event":"error","message":"..."}`
+- **Structured stderr diagnostics:**
+  Emit structured JSON lines on stderr following `DiagnosticEvent` in
+  [crates/burrow-engine-anthropic/src/plugin.rs](../crates/burrow-engine-anthropic/src/plugin.rs)
+  (`usage`, nested `refusal`, and `error` events carrying `engine`, optional
+  `session`, and normalized usage/refusal payloads) so callers can record
+  accounting and refusal reasons without provider-specific parsing in core
+  crates (live `proj` consumption of these diagnostics lands with
+  [#745](https://github.com/FieldmouseWorks/burrow/issues/745)).
 
 ## 2. Add the NixOS module (`modules/engines/<name>.nix`)
 
@@ -133,7 +128,7 @@ cargo fmt --manifest-path crates/Cargo.toml --all -- --check
 cargo clippy --manifest-path crates/Cargo.toml -p burrow-engine-<name> --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml -p burrow-engine-<name>
 nix build --no-link .#checks.x86_64-linux.standalone-<name>
-nix build --no-link .#checks.x86_64-linux.agents.entries.conformance-<name>   # needs /dev/kvm
+nix build --no-link .#checks.x86_64-linux.agents   # includes conformance-<name>; needs /dev/kvm
 nix build --no-link .#checks.x86_64-linux.guidance
 ```
 
