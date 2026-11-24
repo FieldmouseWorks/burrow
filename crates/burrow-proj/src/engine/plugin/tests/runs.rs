@@ -375,3 +375,61 @@ fn a_refused_or_failed_runs_usage_is_kept_for_its_turns_accounting() {
         assert_eq!(run.cost_usd, Some(0.4), "{said}");
     }
 }
+
+/// A plugin that spawns a background child inheriting stdout/stderr and then
+/// exits must not hang `Running::finish` waiting for EOF on those pipes.
+#[test]
+fn a_plugin_whose_background_child_inherits_pipes_does_not_hang_finish() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let desc = tmp.path().join("desc.json");
+    let turn = tmp.path().join("turn.json");
+    fs::write(&desc, describe_json("leaker", vec![], vec![])).unwrap();
+    fs::write(
+        &turn,
+        job_json(
+            "leaker",
+            "sess-leaker",
+            Context::Fresh,
+            None,
+            None,
+            "answered despite lingering child",
+            Next::Done,
+        ),
+    )
+    .unwrap();
+    let plugin = tmp.path().join("leaker-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then\n  sleep 60 &\n  cat {}\n  exit 0\nfi\nsleep 60 &\ncat {}\nexit 0\n",
+            desc.display(),
+            turn.display()
+        ),
+    );
+    cfg.plugins.insert("leaker".into(), plugin);
+    let job = make_job(&cfg, &project, "job-leaker");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Leak a child\n").unwrap();
+    let choice = Choice {
+        engine: "leaker".into(),
+        model: None,
+        effort: None,
+    };
+    let start = std::time::Instant::now();
+    let mut running = spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    let res = running.finish(status, false, &cfg, &job, "1", 0);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "finish hung waiting on lingering child: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(res.rc, 0);
+    assert_eq!(
+        res.last.expect("result recorded")["result"],
+        "answered despite lingering child"
+    );
+}

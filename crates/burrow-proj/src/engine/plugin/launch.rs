@@ -10,10 +10,16 @@
 //! continued turn find its session, and does the work stay for
 //! `agent fetch`.
 
+use std::io::{self, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
-use super::{Described, PluginRefusal, RefusalKind};
+use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
+
+use super::{Described, MAX_RESPONSE_BYTES, PluginRefusal, RefusalKind};
 use crate::config::Config;
 use crate::engine::command::{host_instructions, sandbox_instructions};
 use crate::job::Job;
@@ -101,10 +107,107 @@ pub(super) fn before_describe(
     }
 }
 
+/// Place `cmd` in a new process group of its own (`pgid == child.id()`) so
+/// [`reap_group`] can terminate any lingering descendants that inherited its
+/// stdout/stderr pipes after the wrapper exits.
+pub(super) fn isolate_group(cmd: &mut Command) {
+    cmd.process_group(0);
+}
+
+/// Terminate any surviving descendants in process group `pgid` after the
+/// leader has exited, so pipe reader threads never block indefinitely on an
+/// inherited descriptor. Returns immediately when no process remains.
+pub(super) fn reap_group(pgid: u32) {
+    let Some(pid) = i32::try_from(pgid).ok().and_then(Pid::from_raw) else {
+        return;
+    };
+    if test_kill_process_group(pid).is_err() {
+        return;
+    }
+    let _ = kill_process_group(pid, Signal::TERM);
+    for _ in 0..20 {
+        if test_kill_process_group(pid).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = kill_process_group(pid, Signal::KILL);
+}
+
+/// Run `describe` on `plugin_path` (inside `agent` over `agent sh` for a
+/// sandboxed turn, or on the host for a host turn), draining stdout/stderr
+/// concurrently and reaping any lingering descendants in its process group
+/// before joining readers.
+pub(super) fn run_describe(
+    cfg: &Config,
+    plugin_path: &Path,
+    engine: &str,
+    agent: Option<&str>,
+    req_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut cmd = describe_command(cfg, plugin_path, agent);
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "couldn't start {engine} plugin {}: {e}",
+            plugin_path.display()
+        )
+    })?;
+    let pgid = child.id();
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin
+            .write_all(req_bytes)
+            .and_then(|()| stdin.write_all(b"\n"));
+    }
+    let stdout_handle = child.stdout.take().map(|out| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            out.take(MAX_RESPONSE_BYTES as u64 + 1)
+                .read_to_end(&mut buf)?;
+            Ok::<_, io::Error>(buf)
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        thread::spawn(move || {
+            let mut kept = Vec::new();
+            let _ = (&mut err).take(64 * 1024).read_to_end(&mut kept);
+            let _ = io::copy(&mut err, &mut io::sink());
+            kept
+        })
+    });
+    let status = child
+        .wait()
+        .map_err(|e| format!("{engine} plugin describe wait failed: {e}"))?;
+    reap_group(pgid);
+    let stdout = match stdout_handle {
+        Some(h) => h
+            .join()
+            .map_err(|_| format!("{engine} plugin describe stdout reader panicked"))?
+            .map_err(|e| format!("{engine} plugin describe stdout read failed: {e}"))?,
+        None => Vec::new(),
+    };
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            format!("{engine} plugin describe exited unsuccessfully ({status})")
+        } else {
+            format!("{engine} plugin describe failed: {detail}")
+        });
+    }
+    if stdout.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "{engine} plugin describe response exceeded size cap"
+        ));
+    }
+    Ok(stdout)
+}
+
 /// Build the `timeout(1)` command for `describe`: inside `agent` over
 /// `agent sh` for a sandboxed turn (so sandbox plugins never execute on the
 /// host), or directly on the host for a host turn.
-pub(super) fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Command {
+fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Command {
     let mut cmd = Command::new(&cfg.tools.timeout);
     let timeout = if agent.is_some() {
         SANDBOX_DESCRIBE_TIMEOUT_SECS
@@ -119,6 +222,7 @@ pub(super) fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    isolate_group(&mut cmd);
     cmd
 }
 

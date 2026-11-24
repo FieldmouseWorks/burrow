@@ -193,6 +193,7 @@ pub use launch::SpawnError;
 /// negotiated contract state for post-exit provenance verification.
 pub struct Running {
     pub child: Option<Child>,
+    pgid: u32,
     described: Described,
     execution: Execution,
     choice: Choice,
@@ -215,53 +216,7 @@ pub fn describe(
 ) -> Result<Described, String> {
     let req_bytes = serde_json::to_vec(&Request::describe())
         .map_err(|e| format!("failed to encode describe request: {e}"))?;
-    let mut cmd = launch::describe_command(cfg, plugin_path, agent);
-    let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "couldn't start {engine} plugin {}: {e}",
-            plugin_path.display()
-        )
-    })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin
-            .write_all(&req_bytes)
-            .and_then(|()| stdin.write_all(b"\n"));
-    }
-    // Its stderr drains as stdout is read, past what's kept, so a plugin that
-    // says more there than a pipe holds never blocks its answer.
-    let stderr_handle = child.stderr.take().map(|mut err| {
-        std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            let _ = (&mut err).take(64 * 1024).read_to_end(&mut kept);
-            let _ = std::io::copy(&mut err, &mut std::io::sink());
-            kept
-        })
-    });
-    let mut stdout = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        out.take(MAX_RESPONSE_BYTES as u64 + 1)
-            .read_to_end(&mut stdout)
-            .map_err(|e| format!("{engine} plugin describe stdout read failed: {e}"))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("{engine} plugin describe wait failed: {e}"))?;
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
-        return Err(if detail.is_empty() {
-            format!("{engine} plugin describe exited unsuccessfully ({status})")
-        } else {
-            format!("{engine} plugin describe failed: {detail}")
-        });
-    }
-    if stdout.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "{engine} plugin describe response exceeded size cap"
-        ));
-    }
+    let stdout = launch::run_describe(cfg, plugin_path, engine, agent, &req_bytes)?;
     parse_describe(engine, &stdout)
 }
 
@@ -491,6 +446,7 @@ pub fn spawn(
             }
         }
     }
+    launch::isolate_group(&mut cmd);
 
     let started_at = crate::now();
     let mut child = if uses_credit {
@@ -510,6 +466,7 @@ pub fn spawn(
         )
         .map_err(|e| format!("couldn't start {} plugin: {e}", choice.engine))?
     };
+    let pgid = child.id();
 
     let stdin_handle = child.stdin.take().map(|mut stdin| {
         thread::spawn(move || {
@@ -535,6 +492,7 @@ pub fn spawn(
 
     Ok(Running {
         child: Some(child),
+        pgid,
         described,
         execution,
         choice: choice.clone(),
@@ -674,6 +632,9 @@ impl Running {
         n: &str,
         from: u64,
     ) -> RunResult {
+        // Reap any lingering descendants in the plugin's process group before
+        // joining stdio readers so inherited pipe FDs cannot hold finish open.
+        launch::reap_group(self.pgid);
         if let Some(h) = self.stdin_handle.take() {
             let _ = h.join();
         }
