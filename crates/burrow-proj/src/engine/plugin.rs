@@ -107,6 +107,17 @@ pub struct PluginUsage {
 }
 
 impl PluginUsage {
+    /// Whether it says anything was spent: a run refused before it started
+    /// reports none, and its stream stays as it was.
+    fn spent(&self) -> bool {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_read_input_tokens
+            + self.cache_creation_input_tokens
+            > 0
+            || self.total_cost_usd.is_some_and(|c| c > 0.0)
+    }
+
     /// Give a result record this usage, as the turn's accounting reads it,
     /// where the record carries none of its own: its own always wins.
     fn stamp(&self, record: &mut Value) {
@@ -684,7 +695,7 @@ impl Running {
             .and_then(|h| h.join().ok())
             .and_then(Result::ok)
             .unwrap_or_default();
-        let stderr = self
+        let mut stderr = self
             .stderr_handle
             .take()
             .and_then(|h| h.join().ok())
@@ -708,7 +719,7 @@ impl Running {
             stream::record_session(job, &self.choice.engine, sid);
         }
 
-        if let Some(refusal) = stderr.refusal {
+        if let Some(refusal) = stderr.refusal.take() {
             // Persist normalized refusal record for deploy-overlap checkpoint
             // recovery (`retry.rs`) when this run already wrote to `N.jsonl`.
             if stream_len > from {
@@ -730,6 +741,7 @@ impl Running {
                     .to_string(),
                 );
             }
+            self.keep_usage(&stream_path, from, &stderr);
             return RunResult {
                 last: stream::last_result(&stream_path, from),
                 refusal: Some(refusal),
@@ -821,13 +833,30 @@ impl Running {
         // OOM-killed run still triggers OOM retry or records `failed`; only an
         // error it streamed stays, which ends the turn as one, and a cut run,
         // stopped after its answer, keeps that answer.
-        if let Some(err) = stderr.error {
+        self.keep_usage(&stream_path, from, &stderr);
+        if let Some(err) = &stderr.error {
             eprintln!("proj: {} plugin error: {err}", self.choice.engine);
         }
         RunResult {
             last: stream::last_result(&stream_path, from).filter(|l| cut || stream::is_error(l)),
             refusal: None,
             rc,
+        }
+    }
+
+    /// What a refused or failed run reported spending goes where its turn's
+    /// accounting reads it, without making the run an answer.
+    fn keep_usage(&self, stream_path: &Path, from: u64, stderr: &CollectedStderr) {
+        let Some(u) = stderr.usage.as_ref().filter(|u| u.spent()) else {
+            return;
+        };
+        if let Err(e) =
+            stream::keep_usage(stream_path, from, stderr.session.as_deref(), |r| u.stamp(r))
+        {
+            eprintln!(
+                "proj: {} plugin's usage couldn't be kept: {e}",
+                self.choice.engine
+            );
         }
     }
 

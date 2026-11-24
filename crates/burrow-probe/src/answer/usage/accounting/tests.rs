@@ -151,3 +151,20 @@ fn recovery_tracks_every_gap_including_appended_runs_and_separate_jobs() {
     let other = decode(vec![crash()].into_iter(), &mut BTreeMap::new(), "job-b/2");
     assert!(other.missing.is_disjoint(&second.recovered));
 }
+
+/// A refused or failed run's usage, kept on a `burrow.usage` record of its
+/// own, counts as a result's: its tokens and its cost.
+#[test]
+fn a_runs_usage_record_counts_as_a_results() {
+    let mut sessions = BTreeMap::new();
+    let mut usage = result(40, 0.25);
+    usage["type"] = json!("burrow.usage");
+    let report = decode(
+        vec![json!({"type":"burrow.run"}), usage].into_iter(),
+        &mut sessions,
+        "1",
+    );
+    assert_eq!(report.tokens, [40, 3, 2, 1]);
+    assert_eq!(report.cost, 0.25);
+    assert!(!report.tokens_partial && !report.cost_partial);
+}

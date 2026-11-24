@@ -195,7 +195,10 @@ pub fn decode(
                 }
             }
         }
-        if kind == "result" {
+        // A refused or failed run's usage comes on a `burrow.usage` record
+        // of its own (burrow-proj's engine/stream.rs): counted as a
+        // result's, never an answer.
+        if kind == "result" || kind == "burrow.usage" {
             any = true;
             let tokens = FIELDS.map(|k| v["usage"][k].as_u64().unwrap_or(0));
             let cost = v["total_cost_usd"].as_f64();

@@ -286,3 +286,61 @@ fn a_failed_run_answers_only_with_an_error_unless_it_was_cut() {
         assert_eq!(res.last.is_some(), kept, "{streamed} cut={cut}");
     }
 }
+
+/// What a refused or failed run reports spending reaches its turn's usage
+/// record, without the run becoming an answer: on a record of its own when it
+/// streamed no result, in the result it streamed when that carries none.
+#[test]
+fn a_refused_or_failed_runs_usage_is_kept_for_its_turns_accounting() {
+    let refusal = r#"{"event":"refusal","refusal":{"kind":"usage_limit","reason":"out"},"usage":{"input_tokens":70,"output_tokens":5,"total_cost_usd":0.4}}"#;
+    let error = r#"{"event":"error","error":"broke","usage":{"input_tokens":70,"output_tokens":5,"total_cost_usd":0.4}}"#;
+    let streamed = serde_json::json!({"event": "stream",
+        "line": r#"{"type":"result","is_error":true,"result":"broke"}"#})
+    .to_string();
+    for (said, answered) in [
+        (refusal.to_owned(), false),
+        (format!("{streamed}\n{error}"), true),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (mut cfg, project) = setup(&tmp);
+        let desc = tmp.path().join("desc.json");
+        fs::write(&desc, describe_json("spender", vec![], vec![])).unwrap();
+        let said_path = tmp.path().join("said.jsonl");
+        fs::write(&said_path, format!("{said}\n")).unwrap();
+        let plugin = tmp.path().join("spender-plugin");
+        burrow_test::executable(
+            &plugin,
+            format!(
+                "#!/usr/bin/env bash\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {}; exit 0; fi\ncat {} >&2\nexit 3\n",
+                desc.display(),
+                said_path.display()
+            ),
+        );
+        cfg.plugins.insert("spender".into(), plugin);
+        let job = make_job(&cfg, &project, "job-spender");
+        let waitdir = job.turn_file("1", TurnFile::Waits);
+        fs::create_dir_all(&waitdir).unwrap();
+        let prompt = job.prompt("1");
+        fs::write(&prompt, "Spend\n").unwrap();
+        let choice = Choice {
+            engine: "spender".into(),
+            model: None,
+            effort: None,
+        };
+        let mut running =
+            spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+        let status = running.child.take().unwrap().wait().unwrap();
+        let res = running.finish(status, false, &cfg, &job, "1", 0);
+        assert_eq!(res.last.is_some(), answered, "{said}");
+        if let Some(last) = &res.last {
+            assert!(stream::is_error(last), "{last}");
+        }
+        let record = burrow_probe::usage_record::TurnUsage::from_job_turn(
+            &job.dir, job.id, 1, "spender", None, 0,
+        )
+        .unwrap();
+        let run = record.runs.last().expect("the run is recorded");
+        assert_eq!((run.input_tokens, run.output_tokens), (70, 5), "{said}");
+        assert_eq!(run.cost_usd, Some(0.4), "{said}");
+    }
+}

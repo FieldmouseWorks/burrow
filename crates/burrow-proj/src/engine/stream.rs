@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use serde_json::Value;
@@ -144,6 +144,29 @@ pub fn amend_last_result(
         });
     }
     crate::state_reads::write(stream, out)
+}
+
+/// Keep usage a run (from `from`) reported apart from its stream, as
+/// `stamp` gives it, where the turn's accounting reads it: in the run's last
+/// result where that carries none, and with no result to carry it, on a
+/// `burrow.usage` record of its own, which the accounting counts as a
+/// result's usage and nothing takes for an answer.
+pub fn keep_usage(
+    stream: &Path,
+    from: u64,
+    session: Option<&str>,
+    stamp: impl FnOnce(&mut Value),
+) -> io::Result<()> {
+    if last_result(stream, from).is_some() {
+        return amend_last_result(stream, from, stamp);
+    }
+    let mut record = serde_json::json!({"type": "burrow.usage"});
+    if let Some(session) = session {
+        record["session_id"] = Value::from(session);
+    }
+    stamp(&mut record);
+    let mut file = crate::state_reads::append(stream)?;
+    writeln!(file, "{record}")
 }
 
 /// Read a normalized `burrow.refusal` record (or legacy pre-deploy rate-limit
