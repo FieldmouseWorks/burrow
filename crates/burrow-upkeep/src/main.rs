@@ -80,11 +80,13 @@ const USAGE: &str = "usage:
       a rate limit's reset, as JSON on stdout
   burrow-upkeep CONFIG tracked OWNER/REPO --now SECONDS [--dry]
       a head whose fix job found its red check's cause outside the PR; a
-      JSON object on stdin gives what tracks it (tracker, OWNER/REPO#N) and
-      the head's CI as `ci` is asked (ci): whether the tracker is open, and
-      once it's closed, each red check's run that last started before it
-      closed asked to run again whole; what was asked, what's going, what
-      GitHub refused and what ran since, as JSON on stdout
+      JSON object on stdin gives what tracks it (tracker, OWNER/REPO#N):
+      whether it's open, when it closed, or that GitHub has none, as the
+      App on the tracker's owner reads it; given also when it closed
+      (closed) and the head's CI as `ci` is asked (ci), each red check's
+      run that last started before then asked to run again whole: what was
+      asked, what's going, what GitHub refused and what ran since, as JSON
+      on stdout
   burrow-upkeep CONFIG commits OWNER/REPO --now SECONDS [--dry]
       a PR's commits, every one on its head since it left its base, read
       whole from GitHub's compare a page at a time; a JSON object on stdin

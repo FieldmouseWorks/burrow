@@ -138,13 +138,14 @@ class Actions:
         no tracker by that name): the head goes to a job as any other."""
         got = tracked(self.pr, tracker, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
         if got["open"]:
-            self.settle("pending", f"{desc}; its Claude job found the cause outside the PR, tracked in {tracker}: "
-                        "run again once that closes", stage=S.FIX, wait=waits.HOLD)
+            # The tracker first: a status is cut at 140 characters.
+            self.settle("pending", f"Waiting on {tracker}, the cause its Claude job found outside the PR, to close; {desc}",
+                        stage=S.FIX, wait=waits.HOLD)
             return True
         if got["reran"] or got["going"]:
             ran = "asked to run again" if got["reran"] else "running again"
             log(f"{self.tag}: {tracker} closed: red runs {', '.join(got['reran'] + got['going'])} {ran}")
-            self.settle("pending", f"{desc}; {tracker}, its cause, closed: its red check is {ran}", stage=S.FIX)
+            self.settle("pending", f"{tracker}, its cause, closed: its red check is {ran}; {desc}", stage=S.FIX)
             return True
         # GitHub won't run it again (a run past its rerun window, say): a
         # job can push a head whose CI runs afresh.

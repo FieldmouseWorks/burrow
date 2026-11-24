@@ -376,14 +376,16 @@ def ci_upkeep(*args, **kw):
     data = {"runs": RUN_INFO, "failures": {k: error(v) for k, v in RERUN_FAILS.items()},
             "annotations": {k: error(v) if isinstance(v, Exception) else v for k, v in ANNOTATIONS.items()},
             "fork": FORK, "forks": FORKS, "reruns": [], "asked": [], "issues": ISSUES,
-            "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
+            # The App on the owner it acts for, as gh_env hands it over.
+            "app": C.token(C._for[-1] if C._for else args[1].split("/")[0].lower())
+            if kw.get("as_app", True) and not C.DRY else None}
     with open(CI_FIXTURE, "w") as f:
         json.dump(data, f)
     # The PR as the steward's query fetches it: no field it doesn't ask for.
     asked = json.loads(kw["input"])
-    if args[0] == "tracked":
+    if "ci" in asked:
         kw["input"] = json.dumps({**asked, "ci": {**asked["ci"], "pr": shape(asked["ci"]["pr"])}})
-    else:
+    elif "pr" in asked:
         kw["input"] = json.dumps({**asked, "pr": shape(asked["pr"])})
     old = C.CFG["upkeep"]
     C.CFG["upkeep"] = upkeep_config(f"{tmp}/ci-config.json")

@@ -1,10 +1,13 @@
-//! A tracked cause outside the PR: open, nothing is run again; closed, each
-//! red run from before it closed is, once, and one since is the head's.
+//! A tracked cause outside the PR: read first, as its own owner; open,
+//! nothing is run again; closed, each red run from before it closed is,
+//! once, and one since is the head's.
 
 use serde_json::{Value, json};
 
 use super::*;
 use crate::testing::{Hub, States, answer, config, look};
+
+const CLOSED: &str = "2026-11-23T12:00:00Z";
 
 fn check_run(name: &str, id: u64, run: u64, conclusion: &str) -> Value {
     json!({"__typename": "CheckRun", "name": name, "databaseId": id, "status": "COMPLETED", "conclusion": conclusion,
@@ -12,17 +15,26 @@ fn check_run(name: &str, id: u64, run: u64, conclusion: &str) -> Value {
             "workflowRun": {"databaseId": run, "workflow": {"id": format!("w{run}"), "name": "CI"}}}})
 }
 
+fn read(tracker: &str) -> Ask {
+    Ask {
+        tracker: tracker.into(),
+        closed: None,
+        ci: None,
+    }
+}
+
 fn asked(tracker: &str, checks: Vec<Value>) -> Ask {
     Ask {
         tracker: tracker.into(),
-        ci: ci::Ask {
+        closed: Some(crate::ts(CLOSED).unwrap()),
+        ci: Some(ci::Ask {
             pr: json!({"number": 5, "headRefOid": "a".repeat(40), "baseRefName": "main", "commits": {"nodes": [{"commit": {
             "statusCheckRollup": {"contexts": {"nodes": checks}}}}]}}),
             proofs: vec![],
             moved: None,
             remote: true,
             recover: false,
-        },
+        }),
     }
 }
 
@@ -48,8 +60,6 @@ fn posts(hub: &Hub) -> Vec<&str> {
         .collect()
 }
 
-const CLOSED: &str = "2026-11-23T12:00:00Z";
-
 #[test]
 fn an_open_tracker_runs_nothing_again() {
     let mut hub = Hub::default();
@@ -58,11 +68,7 @@ fn an_open_tracker_runs_nothing_again() {
         "repos/sam/infra/issues/7$",
         answer(200, json!({"state": "open", "closed_at": null})),
     );
-    let a = asked(
-        "sam/infra#7",
-        vec![check_run("train / negative", 11, 70, "FAILURE")],
-    );
-    let got = seen(&mut hub, &a, false).unwrap();
+    let got = seen(&mut hub, &read("sam/infra#7"), false).unwrap();
     assert_eq!(
         got,
         Tracked {
@@ -75,11 +81,20 @@ fn an_open_tracker_runs_nothing_again() {
 
 #[test]
 fn a_closed_tracker_runs_each_red_run_from_before_it_again_whole() {
+    let closed = crate::ts(CLOSED).unwrap();
     let mut hub = Hub::default();
     hub.on(
         "GET",
         "repos/sam/infra/issues/7$",
         answer(200, json!({"state": "closed", "closed_at": CLOSED})),
+    );
+    let got = seen(&mut hub, &read("sam/infra#7"), false).unwrap();
+    assert_eq!(
+        got,
+        Tracked {
+            closed: Some(closed),
+            ..Tracked::default()
+        }
     );
     // Run 70 failed before it closed, run 71 since (a rerun's own verdict),
     // run 72 is going (a rerun asked already), run 73 passed.
@@ -117,6 +132,7 @@ fn a_closed_tracker_runs_each_red_run_from_before_it_again_whole() {
     assert_eq!(
         got,
         Tracked {
+            closed: Some(closed),
             reran: vec!["70".into()],
             going: vec!["72".into()],
             since: vec!["71".into()],
@@ -144,17 +160,29 @@ fn a_closed_tracker_runs_each_red_run_from_before_it_again_whole() {
 #[test]
 fn a_tracker_github_has_none_of_is_nothing_to_wait_on() {
     let mut hub = Hub::default();
+    for gone in [404, 410] {
+        hub.on(
+            "GET",
+            "repos/sam/infra/issues/7$",
+            answer(gone, json!({"message": "Not Found"})),
+        );
+        let got = seen(&mut hub, &read("sam/infra#7"), false).unwrap();
+        assert!(!got.open && got.unknown.is_some(), "{gone}: {got:?}");
+    }
+    let got = seen(&mut Hub::default(), &read("infra#7"), false).unwrap();
+    assert!(!got.open && got.unknown.is_some(), "{got:?}");
+    // Any other no isn't GitHub saying there's none: the word fails, and
+    // the head goes to no job on it.
     hub.on(
         "GET",
         "repos/sam/infra/issues/7$",
-        answer(404, json!({"message": "Not Found"})),
+        answer(401, json!({"message": "Bad credentials"})),
     );
-    let a = asked("sam/infra#7", vec![check_run("lint", 11, 70, "FAILURE")]);
-    let got = seen(&mut hub, &a, false).unwrap();
-    assert!(
-        !got.open && got.unknown.is_some() && posts(&hub).is_empty(),
-        "{got:?}"
-    );
-    let got = seen(&mut Hub::default(), &asked("infra#7", vec![]), false).unwrap();
-    assert!(!got.open && got.unknown.is_some(), "{got:?}");
+    assert!(seen(&mut hub, &read("sam/infra#7"), false).is_err());
+    // Nor are its red runs seen to before it's read closed.
+    let a = Ask {
+        closed: None,
+        ..asked("sam/infra#7", vec![])
+    };
+    assert!(seen(&mut hub, &a, false).is_err());
 }

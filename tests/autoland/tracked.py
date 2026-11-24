@@ -97,7 +97,7 @@ run(red, 7400)
 for t in (7500, 9000, 20000):
     status, digest = run(red, t)
     assert JOBS == [] and RERUNS == [] and digest == [], (t, JOBS, RERUNS, digest)
-    assert "state=pending" in status and f"tracked in {TRACKER}" in status, (t, status)
+    assert "state=pending" in status and f"description=Waiting on {TRACKER}, the cause" in status, (t, status)
 print("a cause outside the PR, open: ok")
 
 # It closes: the red run, from before it closed, is asked to run again
@@ -118,6 +118,37 @@ status, _ = run(red, 31000)
 assert RERUNS == ["70"] and len(JOBS) == 1 and "a Claude job has it" in status, (RERUNS, JOBS, status)
 assert "redFixedTracker" not in pr_state(), pr_state()
 print("red again after it closed: ok")
+
+# A tracker in another owner's repo (the machine's, private) is read as the
+# App on that owner, which can see it; the head's runs, as the PR's owner's.
+AS = []  # who each `tracked` went as, and whether it was the runs' turn
+inner = C.upkeep
+
+
+def upkeep(*args, **kw):
+    if args[0] == "tracked":
+        AS.append((C._for[-1], "ci" in json.loads(kw["input"])))
+    return inner(*args, **kw)
+
+
+C.upkeep, kept_owners = upkeep, C.CFG["owners"]
+C.CFG["owners"] = ["sam", "Kin"]
+fresh_pr_state()
+STATES.clear()
+ISSUES["repos/kin/infra/issues/7"] = {"state": "open", "closed_at": None}
+run(red, 0)
+run(red, 7200)
+leaves(next(iter(pr_state()["answering"])), {**MACHINE, "tracker": "kin/infra#7"})
+for t in (7300, 7400, 7500):
+    status, _ = run(red, t)
+assert AS == [("kin", False)] and "Waiting on kin/infra#7" in status and JOBS == [], (AS, status, JOBS)
+ISSUES["repos/kin/infra/issues/7"] = {"state": "closed", "closed_at": "2026-10-24T08:00:00Z"}
+RUN_INFO["70"] = {"run_attempt": 1, "status": "completed", "conclusion": "failure", "run_started_at": "2026-10-24T00:01:00Z"}
+RERUNS.clear()
+run(red, 30000)
+assert AS[1:] == [("kin", False), ("sam", True)] and RERUNS == ["70"], (AS, RERUNS)
+C.upkeep, C.CFG["owners"] = inner, kept_owners
+print("a tracker of another owner's: ok")
 
 ISSUES.clear()
 RUN_INFO.clear()
