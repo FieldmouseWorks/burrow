@@ -1,0 +1,20 @@
+--- a/lib/modules/manager/cargo/artifacts.ts
++++ b/lib/modules/manager/cargo/artifacts.ts
+@@ -192,11 +192,14 @@
+       regEx(/error: package ID specification/).test(err.stderr)
+     ) {
+       const versions = extractLockFileContentVersions(newCargoLockContent);
++      // Build metadata (toml's `1.2.2+spec-1.1.0`) is in the lock file's
++      // version but not in newVersion (`1.2.2`), and semver ignores it.
++      const core = (v: string): string => v.replace(regEx(/\+.*$/), '');
+       const newUpdatedDeps = updatedDeps.filter(
+         (dep) =>
+-          !coerceArray(versions?.get(dep.packageName!)).includes(
+-            dep.newVersion!,
+-          ),
++          !coerceArray(versions?.get(dep.packageName!))
++            .map(core)
++            .includes(core(dep.newVersion!)),
+       );
+ 
+       if (newUpdatedDeps.length < updatedDeps.length) {
