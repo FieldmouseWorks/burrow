@@ -4,7 +4,7 @@ use super::*;
 fn its_config_is_every_setting_and_only_those() {
     let config = serde_json::json!({
         "name": "renovate-sweep", "state": "/s/renovate-sweep", "projects": "/p", "owner": "Sam",
-        "settled": "review-settled", "covered": "/s/autoland/repos.json",
+        "settled": "review-settled", "steward": "/s/autoland/repos.json",
         "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200, "held": ["hold", "needs-owner"],
         "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
                   "lockWait": "/b/lock-wait"},
@@ -15,10 +15,10 @@ fn its_config_is_every_setting_and_only_those() {
     assert_eq!(cfg.renovate_run, 7200);
     let mut user = config.clone();
     user["app"] = Value::Null;
-    user["covered"] = Value::Null;
+    user["steward"] = Value::Null;
     user["renovate"] = Value::Null;
     let cfg: Config = serde_json::from_value(user).unwrap();
-    assert!(cfg.app.is_none() && cfg.covered.is_none() && cfg.renovate.is_none());
+    assert!(cfg.app.is_none() && cfg.steward.is_none() && cfg.renovate.is_none());
     let mut more = config.clone();
     more["stray"] = 1.into();
     assert!(serde_json::from_value::<Config>(more).is_err());

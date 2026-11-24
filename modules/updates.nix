@@ -330,8 +330,9 @@ let
     projects = config.burrow.projectsDir;
     owner = config.burrow.owner;
     settled = vars.SETTLED;
-    # The repos the steward covers, as it last found them; none without it.
-    covered = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else null;
+    # The steward's list of its repos (who lands each, its proofs); none
+    # without it.
+    steward = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else null;
     # The App the jobs it starts act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };

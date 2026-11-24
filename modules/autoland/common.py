@@ -973,12 +973,15 @@ def machine(rc):
             "its comment on the PR names it, or the newest whose build.json is this PR's.") for c, cmd in runs.items()}}
 
 
-def coverage(repos, covered):
+def coverage(repos):
     """repos.json, for renovate-sweep, and when: every repo the steward has,
-    with its proofs and how each runs (machine), and whether this pass saw
-    to its PRs."""
-    done = {r["repo"] for r in covered}
-    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "covered": r["repo"] in done}
+    with its proofs and how each runs (machine), and who lands its PRs as
+    the landing record has it (lands: the one a handover goes to, else its
+    owner; None while it can't be read). How far a pass got isn't in it."""
+    def lands(repo):
+        holding = landing(repo)
+        return holding and (holding["to"] or holding["owner"])
+    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "lands": lands(r["repo"])}
                                  for r in repos}}
 
 

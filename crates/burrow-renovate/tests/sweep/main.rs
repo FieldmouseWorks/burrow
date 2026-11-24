@@ -174,7 +174,7 @@ struct Machine {
     /// Renovate's own bot, as REST spells it, when it acts as an App.
     renovate: Option<&'static str>,
     /// The steward's repos.json, once there's one.
-    covered: Option<PathBuf>,
+    steward: Option<PathBuf>,
 }
 
 /// One sweep: what it exited with and said, the jobs it started and the
@@ -262,7 +262,7 @@ impl Machine {
             root,
             app: None,
             renovate: None,
-            covered: None,
+            steward: None,
         };
         m.project("r", "https://github.com/sam/r.git");
         fs::create_dir(m.path("state")).unwrap();
@@ -330,20 +330,27 @@ impl Machine {
         marked(by, &marker(n, v, base, &mac(n, v, base)))
     }
 
-    /// The steward's repos.json, written `age` seconds ago: the repos it
-    /// covers, and the ones whose last pass failed, each with `proofs`.
-    fn covered(&mut self, repos: &[&str], failed: &[&str], age: u64, proofs: Value) {
+    /// The steward's repos.json, written `age` seconds ago: its repos,
+    /// each with what it says of it besides `proofs` (who lands it).
+    fn steward(&mut self, repos: &[(&str, Value)], age: u64, proofs: Value) {
         let mut listed = serde_json::Map::new();
-        for r in repos {
-            listed.insert(r.to_string(), json!({"covered": true, "proofs": proofs}));
-        }
-        for r in failed {
-            listed.insert(r.to_string(), json!({"covered": false, "proofs": proofs}));
+        for (r, said) in repos {
+            let mut entry = json!({"proofs": proofs});
+            for (k, v) in said.as_object().unwrap() {
+                entry[k] = v.clone();
+            }
+            listed.insert(r.to_string(), entry);
         }
         let path = self.path("repos.json");
         let at = now() - age;
         fs::write(&path, json!({"at": at, "repos": listed}).to_string()).unwrap();
-        self.covered = Some(path);
+        self.steward = Some(path);
+    }
+
+    /// The steward lands each of `repos`, as of now.
+    fn landed(&mut self, repos: &[&str], proofs: Value) {
+        let repos: Vec<_> = repos.iter().map(|r| (*r, lands("steward"))).collect();
+        self.steward(&repos, 0, proofs);
     }
 
     fn config(&self) -> PathBuf {
@@ -353,7 +360,7 @@ impl Machine {
             .map(|(name, bot)| json!({"name": name, "bot": bot}));
         let config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
-            "owner": "Sam", "settled": "review-settled", "covered": self.covered, "app": app,
+            "owner": "Sam", "settled": "review-settled", "steward": self.steward, "app": app,
             "renovate": self.renovate,
             "renovateRun": 7200, "held": ["hold", "needs-owner"],
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
@@ -480,6 +487,12 @@ fn refresh(n: u64, title: &str) -> Value {
         "startedAt": "2099-01-01T00:00:00Z",
     }));
     p
+}
+
+/// What the steward says of a repo it lands by `who` (null: its record
+/// couldn't be read).
+fn lands(who: &str) -> Value {
+    json!({ "lands": if who.is_empty() { Value::Null } else { who.into() } })
 }
 
 fn now() -> u64 {

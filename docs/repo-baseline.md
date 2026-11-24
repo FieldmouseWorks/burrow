@@ -301,8 +301,10 @@ any other PR.
 Apart from CODEOWNERS, `.github/` isn't one-way. A Renovate
 major merges once its CI is green and renovate-sweep's job has given it an
 ok verdict for that head; a security fix merges on green CI alone, a major
-one too. An ok major in a repo the steward doesn't cover is listed for the
-owner, since nothing else merges it.
+one too. An ok major in a repo nothing lands (neither the steward nor
+conaryd has it) is listed for the owner, since nothing else merges it; one
+the steward or conaryd lands that doesn't merge is stuck there, the stall
+watchdog's.
 
 ## Files (a Claude job, once)
 

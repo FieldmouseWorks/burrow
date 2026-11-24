@@ -21,9 +21,9 @@ pub struct Config {
     pub owner: String,
     /// The autoland steward's own commit status, which isn't CI.
     pub settled: String,
-    /// The repos the steward covers, as it last found them (its
-    /// repos.json): none without it.
-    pub covered: Option<PathBuf>,
+    /// The autoland steward's list of its repos (its repos.json): who
+    /// lands each, and its proofs. None without a steward.
+    pub steward: Option<PathBuf>,
     /// The machine's own App, when the jobs act as it.
     pub app: Option<App>,
     /// Who Renovate comments as, as REST spells it: its own App's bot

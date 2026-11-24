@@ -58,7 +58,7 @@ def a_pass(kick):
             (S.T, "step", note("train")), (S.step, "handle", note("handle")),
             (S, "branches", note("branches")), (S, "upkeep", note("upkeep")),
             (C, "taken", lambda *a: None), (C, "poke", lambda *a: None),
-            (C, "coverage", lambda rs, done: {"repos": {r["repo"]: {"covered": r in done} for r in rs}}),
+            (C, "coverage", lambda rs: {"repos": {r["repo"]: {} for r in rs}}),
         ):
             stack.enter_context(patch.object(obj, name, fn))
         S.run_pass(kick)
