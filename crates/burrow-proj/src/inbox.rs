@@ -385,7 +385,7 @@ impl Pass<'_> {
 
     /// A machine role picks the engine itself; the owner role only tunes the
     /// model, so an authors' issue still runs on its label's engine.
-    fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
+    fn routing(&self, issue: &Value) -> (Option<String>, Option<String>) {
         match self.machine_role(issue) {
             Some(role) => (Some(role), None),
             None => (self.inbox.owner_role.clone(), self.engine(issue)),
@@ -414,7 +414,7 @@ impl Pass<'_> {
     }
 
     /// The engine its label selects; the first, by name, when it has more.
-    fn engine(&self, issue: &Value) -> Option<crate::engine::Engine> {
+    fn engine(&self, issue: &Value) -> Option<String> {
         let labels = issue["labels"].as_array()?;
         self.inbox
             .labels
@@ -424,7 +424,7 @@ impl Pass<'_> {
                     .iter()
                     .any(|l| l["name"].as_str() == Some(name.as_str()))
             })
-            .map(|(_, engine)| *engine)
+            .map(|(_, engine)| engine.clone())
             .next()
     }
 
@@ -581,8 +581,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 .arg("--description")
                 .arg(format!(
                     "Hands the issue to {} on {} (proj-inbox)",
-                    engine.name(),
-                    self.inbox.host
+                    engine, self.inbox.host
                 ))
                 .stdout(Stdio::null())
                 .status()

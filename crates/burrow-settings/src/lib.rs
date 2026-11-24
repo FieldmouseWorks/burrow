@@ -34,6 +34,11 @@ pub struct Config {
     /// has a flow configuration for (burrow.landing.conaryd).
     #[serde(default)]
     pub conaryd: Vec<String>,
+    /// Configured engine plugin names on this machine (from Nix engine plugin
+    /// definitions). Empty falls back to the schema's declared defaults plus
+    /// any engine registered via `offer`.
+    #[serde(default)]
+    pub engines: Vec<String>,
 }
 
 /// A scheduling decision and its next change without another external event.

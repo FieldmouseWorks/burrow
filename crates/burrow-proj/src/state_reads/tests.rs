@@ -152,7 +152,7 @@ fn configured_app_environment_may_be_a_system_symlink_without_allowing_job_symli
 
 #[test]
 fn recording_a_choice_never_follows_job_state_links_and_reports_failures() {
-    use crate::engine::{Choice, Engine};
+    use crate::engine::Choice;
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
@@ -161,12 +161,12 @@ fn recording_a_choice_never_follows_job_state_links_and_reports_failures() {
     fs::create_dir_all(&dir).unwrap();
     let job = Job::new(&cfg, "j");
     let set = Choice {
-        engine: Engine::Claude,
+        engine: "claude".into(),
         model: Some("m".into()),
         effort: Some("e".into()),
     };
     let unset = Choice {
-        engine: Engine::Claude,
+        engine: "claude".into(),
         model: None,
         effort: None,
     };

@@ -30,6 +30,8 @@ pub enum Kind {
     Date,
     /// One of these words.
     OneOf(&'static [&'static str]),
+    /// An engine plugin name (`^[a-z0-9][a-z0-9-]*$`), never retired `codex`.
+    Engine,
     /// A GitHub repository, OWNER/NAME.
     Repo,
     /// The kind, or null for none.
@@ -144,7 +146,7 @@ const REPOS: Kind = Kind::List(&Kind::Repo);
 const LANDING_OWNER: Kind = Kind::OneOf(&["steward", "conaryd"]);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
-const ENGINE: Kind = Kind::OneOf(crate::roles::ENGINES);
+const ENGINE: Kind = Kind::Engine;
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
 const HOPS: Kind = Kind::Omitted(&Kind::List(&Kind::Record(&[
@@ -594,6 +596,12 @@ impl Kind {
             Kind::Usd => json!({"type": "number", "minimum": 0}),
             Kind::Date => json!({"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}),
             Kind::OneOf(words) => json!({"enum": words}),
+            // As `check` takes it: the syntax, never a retired engine.
+            Kind::Engine => json!({
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "not": {"enum": crate::roles::RETIRED_ENGINES},
+            }),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
             Kind::Omitted(kind) => kind.schema(),
@@ -634,6 +642,11 @@ impl Kind {
             }
             (Kind::Date, Value::String(s)) if crate::credit::Day::parse(s).is_some() => Ok(()),
             (Kind::OneOf(words), Value::String(s)) if words.contains(&s.as_str()) => Ok(()),
+            (Kind::Engine, Value::String(s))
+                if crate::roles::valid_engine_name(s) && !crate::roles::retired_engine(s) =>
+            {
+                Ok(())
+            }
             (Kind::Repo, Value::String(s)) if repo(s) => Ok(()),
             (Kind::Maybe(_), Value::Null) => Ok(()),
             (Kind::Maybe(kind), v) => kind.check(v),
@@ -668,6 +681,7 @@ impl Kind {
             Kind::Usd => "dollars, 0 or more, to the cent".into(),
             Kind::Date => "a YYYY-MM-DD date".into(),
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
+            Kind::Engine => "an engine plugin name ([a-z0-9][a-z0-9-]*)".into(),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),
             Kind::Omitted(kind) => kind.describe(),
@@ -753,6 +767,23 @@ mod tests {
         }
     }
 
+    /// The exported schema refuses what `check` refuses of an engine name:
+    /// a retired engine as well as bad syntax.
+    #[test]
+    fn the_engine_schema_excludes_what_check_refuses() {
+        let schema = Kind::Engine.schema();
+        for retired in crate::roles::RETIRED_ENGINES {
+            assert!(Kind::Engine.check(&json!(retired)).is_err());
+            assert!(
+                schema["not"]["enum"]
+                    .as_array()
+                    .is_some_and(|e| e.contains(&json!(retired))),
+                "{schema}"
+            );
+        }
+        assert!(Kind::Engine.check(&json!("claude")).is_ok());
+    }
+
     #[test]
     fn kinds_take_their_values_and_refuse_others() {
         assert!(HOLDS.check(&json!({})).is_ok());
@@ -783,15 +814,23 @@ mod tests {
             assert!(err.starts_with(&format!("{field}: ")), "{err}");
         }
         assert!(DRAIN.check(&json!("claude")).is_ok());
-        assert!(DRAIN.check(&json!("gemini")).is_err());
+        assert!(DRAIN.check(&json!("antigravity")).is_ok());
+        assert!(DRAIN.check(&json!("third-plugin")).is_ok());
+        assert!(DRAIN.check(&json!("codex")).is_err());
+        assert!(DRAIN.check(&json!("BadEngine")).is_err());
         assert!(SLOTS.check(&json!(0)).is_err());
         let err = MODELS
             .check(&json!({"fix claude": {"model": "m", "effort": 3}}))
             .unwrap_err();
         assert!(err.starts_with("fix claude: effort: "), "{err}");
         assert!(ROLES.check(&json!({"fix": {"engine": "claude"}})).is_ok());
+        assert!(
+            ROLES
+                .check(&json!({"fix": {"engine": "antigravity"}}))
+                .is_ok()
+        );
         let err = ROLES
-            .check(&json!({"fix": {"engine": "gemini"}}))
+            .check(&json!({"fix": {"engine": "Bad Engine"}}))
             .unwrap_err();
         assert!(err.starts_with("fix: engine: "), "{err}");
     }

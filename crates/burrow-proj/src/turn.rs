@@ -4,39 +4,37 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
-use crate::engine::{self, Engine, LONG, NEXT, answer, is_error};
+use crate::engine::{self, LONG, NEXT, RefusalKind, SpawnError, answer, is_error};
 use crate::job::{Job, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
 use crate::record::{JobFile, Marker, TurnFile, TurnMarker, deadline};
 use crate::waits::{rewatch, rewatch_later};
 use crate::{Fail, filled, nanos, now, now_nanos, read, scratch, slot, systemd, usage};
-use burrow_engine_anthropic::api;
 use watch::Run;
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
 /// The answer a turn's runs already gave, if the last of them answered
-/// without an error: what a retry the credit won't admit leaves it.
+/// without an error: what a retry a metered plugin won't admit leaves it.
 fn answered(stream: &Path) -> Option<serde_json::Value> {
     engine::last_result(stream, 0).filter(|l| !is_error(l))
 }
 
-/// A turn the credit refused ends there, the refusal its result and outcome:
-/// no hold on any other turn, and no run again (`burrow_engine_anthropic::api`).
-fn api_refused(job: &Job, n: &str, refused: &api::Refused, outcome: &dyn Fn(&str)) -> Fail {
-    let text = refused.to_string();
+/// A turn refused for credit, budget, or key ends there, the refusal its
+/// result and outcome: no hold on any other turn, and no run again.
+fn turn_refused(job: &Job, n: &str, text: &str, outcome: &dyn Fn(&str)) -> Fail {
     eprintln!("proj: {text}");
     let _ = crate::state_reads::write(job.turn_file(n, TurnFile::Result), format!("{text}\n"));
-    outcome(&text);
+    outcome(text);
     Fail::quiet(1)
 }
 
@@ -385,11 +383,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     };
     // Both initial waits and retained retries follow the deployed scheduler.
     // A retry checkpoint makes that handover resume this turn in place.
-    let take = |hand_over: bool, engine: Engine| {
+    let take = |hand_over: bool, engine: &str| {
         slot::take_engine(cfg, id, &n, given, hand_over, engine)
             .map_err(|e| Fail::new(1, format!("proj: {e}")))
     };
-    let mut held = Some(take(true, choice.engine)?);
+    let mut held = Some(take(true, &choice.engine)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
     kick(cfg, lines(&job.file(JobFile::Kick)));
@@ -423,7 +421,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     }
     // What it's asked, after what its engine's conversation missed of the
     // job, if it moved here from another engine (engine/handoff.rs).
-    let mut first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+    let mut first = engine::first_prompt(&job, &n, &choice.engine).map_err(|e| {
         Fail::new(
             1,
             format!(
@@ -455,7 +453,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // is stopped, which ends all of it, and the next run's `agent sh` starts
     // it again, its clone and home as they were.
     let mut wait_again =
-        |said: &str, engine: Engine, base_prompt: &Path| -> Result<Option<PathBuf>, Fail> {
+        |said: &str, engine: &str, base_prompt: &Path| -> Result<Option<PathBuf>, Fail> {
             if !(reap() && agent.as_deref().is_none_or(|a| stopped("agent", a))) {
                 return Ok(None);
             }
@@ -490,14 +488,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         let Some(next) = engine::reroute(cfg, &job, from).map_err(|e| Fail::new(1, e))? else {
             return Ok(None);
         };
-        let same_conv = next.engine.conversation() == from.engine.conversation();
+        let same_conv =
+            engine::conversation_of(&next.engine) == engine::conversation_of(&from.engine);
         crate::retry::Identity::reroute(&job, &n, &next).map_err(|e| Fail::new(1, e))?;
         job.record_choice(&n, &next)
             .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
         eprintln!(
             "proj: the turn moves from {} to {}",
-            from.engine.name(),
-            next.engine.name()
+            from.engine, next.engine
         );
         Ok(Some((next, same_conv)))
     };
@@ -521,7 +519,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 break (None, 1);
             }
         };
-        let child = match engine::spawn(
+        let (run, cut, ran) = match engine::spawn(
             cfg,
             &job,
             &n,
@@ -532,67 +530,43 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             &app_env,
             &choice,
         ) {
-            Ok(c) => c,
-            Err(e) => {
-                drop(bridge);
-                if let Some(refused) = api::Refused::of(&e) {
-                    // The credit had no room after all (another run took
-                    // it first): the route takes the turn on, nothing run.
-                    if let Some((next, same_conv)) = moved(&choice)? {
-                        choice = next;
-                        if !same_conv {
-                            first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
-                                Fail::new(
-                                    1,
-                                    format!(
-                                        "proj: {}: {e}",
-                                        job.turn_file(&n, TurnFile::Handoff).display()
-                                    ),
-                                )
-                            })?;
-                            prompt = first.clone();
-                        }
-                        let run = usage::login::Run::new(choice.engine.name(), agent.is_some());
-                        // Back on an engine that's held: it waits for it,
-                        // as a run refused there would.
-                        let Some(spent) = usage::login::out_for(cfg, &run) else {
-                            continue;
-                        };
-                        match wait_again(&spent.said, choice.engine, &first)? {
-                            Some(p) => {
-                                prompt = p;
-                                continue;
-                            }
-                            None => break (None, 1),
-                        }
-                    }
-                    // A retry the credit won't admit (to say what comes
-                    // next, say) leaves the turn the answer it has.
-                    if let Some(answered) = answered(&stream) {
-                        eprintln!("proj: {refused}: the turn ends with its last answer");
-                        break (Some(answered), 0);
-                    }
-                    record_turn_usage(&job, &n, &choice, started);
-                    return Err(api_refused(&job, &n, refused, &outcome));
+            Ok(mut running) => {
+                let child = running.child.take().expect("plugin child spawned");
+                let (status, cut) = Run {
+                    cfg,
+                    job: &job,
+                    n: &n,
+                    engine: &choice.engine,
+                    waitdir: &waitdir,
+                    quiet,
                 }
-                eprintln!("proj: couldn't start {}: {e}", choice.engine.name());
+                .watch(child, from);
+                drop(bridge);
+                (running.finish(status, cut, cfg, &job, &n, from), cut, true)
+            }
+            // Refused before it started: nothing ran, and the route takes
+            // the turn on as it does a run the plugin refused.
+            Err(SpawnError::Refused(refusal)) => {
+                drop(bridge);
+                let run = engine::RunResult {
+                    last: None,
+                    refusal: Some(refusal),
+                    rc: 1,
+                };
+                (run, false, false)
+            }
+            Err(SpawnError::Failed(e)) => {
+                drop(bridge);
+                eprintln!("proj: couldn't start {}: {e}", choice.engine);
                 break (None, 1);
             }
         };
-        let (status, cut) = Run {
-            cfg,
-            job: &job,
-            n: &n,
-            waitdir: &waitdir,
-            quiet,
-        }
-        .watch(child, from);
-        drop(bridge);
-        let rc = code(status);
+        let rc = run.rc;
+        let last = run.last;
         let oomed = oom_kills() > ooms;
-        let last = engine::last_result(&stream, from);
         let declaration_error = agent
             .as_deref()
+            .filter(|_| ran)
             .and_then(|a| crate::guest::collect(cfg, &job, &n, a).err());
         // The turn's next run, in the same conversation and slot, is told
         // `text`, kept in its N.KIND.
@@ -615,71 +589,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             crate::waits::rewatch_all(cfg);
             return Ok(());
         }
-        // Refused by the API (its key, its credit, its budget): the credit's
-        // own, which holds no other turn (`burrow_engine_anthropic::api`). The route may take
-        // the turn on once it's short.
-        if choice.engine == Engine::ClaudeApi
-            && let Some(refused) = last
-                .as_ref()
-                .and_then(|l| api::refusal_file(l, &stream, from))
-        {
-            if let Some((next, same_conv)) = moved(&choice)? {
-                choice = next;
-                if !same_conv {
-                    first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
-                        Fail::new(
-                            1,
-                            format!(
-                                "proj: {}: {e}",
-                                job.turn_file(&n, TurnFile::Handoff).display()
-                            ),
-                        )
-                    })?;
-                }
-                let said =
-                    usage::login::moved_to(choice.engine.name(), same_conv, &refused.to_string());
-                if let Some(p) = wait_again(&said, choice.engine, &first)? {
-                    prompt = p;
-                    continue;
-                }
-                eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
-            }
-            record_turn_usage(&job, &n, &choice, started);
-            return Err(api_refused(&job, &n, &refused, &outcome));
-        }
-        // Refused because this engine's usage or login is spent: hold only this
-        // engine until reset (usage.rs), leaving other engines free, and follow
-        // the role's route to any next engine with room.
-        let refusal = last
-            .as_ref()
-            .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
-        if let Some((_, said)) = &refusal
-            && !usage::login::holds_machine(said, agent.is_some())
-        {
-            record_turn_usage(&job, &n, &choice, started);
-            let _ = crate::state_reads::write(
-                job.turn_file(&n, TurnFile::Result),
-                format!("{}\n", usage::login::SANDBOX),
-            );
-            outcome(usage::login::SANDBOX);
-            return Err(Fail::quiet(1));
-        }
-        match refusal {
-            Some((until, said)) => {
-                let spent =
-                    match usage::record_for(cfg, choice.engine.name(), id, until, &said, now()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("{e}: so the turn ends here, refused");
-                            break (last, rc);
-                        }
-                    };
-                eprintln!("proj: {}", usage::line(&spent));
-                let mut said = said;
+        // Structured refusal reported by the engine plugin on stderr.
+        match run.refusal {
+            Some(refusal) if !refusal.kind.holds_the_engine() => {
                 if let Some((next, same_conv)) = moved(&choice)? {
                     choice = next;
                     if !same_conv {
-                        first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+                        first = engine::first_prompt(&job, &n, &choice.engine).map_err(|e| {
                             Fail::new(
                                 1,
                                 format!(
@@ -689,16 +605,98 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                             )
                         })?;
                     }
-                    said = usage::login::moved_to(choice.engine.name(), same_conv, &said);
+                    if last.is_none() {
+                        if !same_conv {
+                            prompt = first.clone();
+                        }
+                        let run_id = usage::login::Run::new(&choice.engine, agent.is_some());
+                        let Some(spent) = usage::login::out_for(cfg, &run_id) else {
+                            continue;
+                        };
+                        match wait_again(&spent.said, &choice.engine, &first)? {
+                            Some(p) => {
+                                prompt = p;
+                                continue;
+                            }
+                            None => break (None, 1),
+                        }
+                    }
+                    let said = usage::login::moved_to(&choice.engine, same_conv, &refusal.reason);
+                    if let Some(p) = wait_again(&said, &choice.engine, &first)? {
+                        prompt = p;
+                        continue;
+                    }
+                    eprintln!(
+                        "proj: what the refused run left wouldn't stop, so the turn ends here"
+                    );
                 }
-                if let Some(p) = wait_again(&said, choice.engine, &first)? {
+                if last.is_none()
+                    && let Some(answered) = answered(&stream)
+                {
+                    eprintln!(
+                        "proj: {}: the turn ends with its last answer",
+                        refusal.reason
+                    );
+                    break (Some(answered), 0);
+                }
+                record_turn_usage(&job, &n, &choice, started);
+                return Err(turn_refused(&job, &n, &refusal.reason, &outcome));
+            }
+            Some(refusal) => {
+                if refusal.kind == RefusalKind::LoginExpired && agent.is_some() {
+                    record_turn_usage(&job, &n, &choice, started);
+                    let msg = usage::login::sandbox_message(&choice.engine);
+                    let _ = crate::state_reads::write(
+                        job.turn_file(&n, TurnFile::Result),
+                        format!("{msg}\n"),
+                    );
+                    outcome(&msg);
+                    return Err(Fail::quiet(1));
+                }
+                let recorded = if refusal.kind == RefusalKind::LoginExpired {
+                    usage::record_login(cfg, &choice.engine, id, &refusal.reason, now())
+                } else {
+                    usage::record_for(
+                        cfg,
+                        &choice.engine,
+                        id,
+                        refusal.resets_at,
+                        &refusal.reason,
+                        now(),
+                    )
+                };
+                let spent = match recorded {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{e}: so the turn ends here, refused");
+                        break (last, rc);
+                    }
+                };
+                eprintln!("proj: {}", usage::line(&spent));
+                let mut said = refusal.reason;
+                if let Some((next, same_conv)) = moved(&choice)? {
+                    choice = next;
+                    if !same_conv {
+                        first = engine::first_prompt(&job, &n, &choice.engine).map_err(|e| {
+                            Fail::new(
+                                1,
+                                format!(
+                                    "proj: {}: {e}",
+                                    job.turn_file(&n, TurnFile::Handoff).display()
+                                ),
+                            )
+                        })?;
+                    }
+                    said = usage::login::moved_to(&choice.engine, same_conv, &said);
+                }
+                if let Some(p) = wait_again(&said, &choice.engine, &first)? {
                     prompt = p;
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
             None if last.is_some() => {
-                usage::answered_for(cfg, choice.engine.name(), started, agent.is_some())
+                usage::answered_for(cfg, &choice.engine, started, agent.is_some())
             }
             None => {}
         }
@@ -837,7 +835,7 @@ fn record_turn_usage(job: &Job, n: &str, choice: &engine::Choice, fallback_start
         &job.dir,
         job.id,
         turn_num,
-        choice.engine.name(),
+        &choice.engine,
         choice.model.clone(),
         fallback_started,
     ) {
@@ -872,15 +870,6 @@ fn touch(path: &Path) {
     if let Ok(f) = crate::state_reads::append(path) {
         let _ = f.set_modified(SystemTime::now());
     }
-}
-
-/// An exit status as the shell has it: 128 and the signal for a run a
-/// signal ended.
-fn code(status: ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
 /// Whether sandbox `id`'s VM, and so everything a run left in it, is

@@ -163,29 +163,37 @@ CLI) currently hits five places where burrow still assumes Claude Code:
 
 ### 1. Closed engine lists and built-in `proj` execution
 
-- **Today:** `burrow_settings::roles::ENGINES`,
-  `burrow_proj::engine::Engine`, `modules/proj.nix`'s inbox label enum, and
-  `crates/burrow-proj/state.schema.json` enumerate a closed set of built-in
-  engines (`claude`, `claude-api`).
-  Claude Code's CLI flags, stream JSONL parsing, refusal classification and
-  `claude-api` admission now live in
-  [`crates/burrow-engine-anthropic`](../crates/burrow-engine-anthropic/src/lib.rs);
-  [`engine/command.rs`](../crates/burrow-proj/src/engine/command.rs) and
-  [`engine/stream.rs`](../crates/burrow-proj/src/engine/stream.rs) still
-  dispatch through `burrow-proj`'s built-in `Engine` enum until `#745` replaces
-  it.
-- **Target:** Replace the closed enum and per-engine branches with the Conary
-  `job` plugin contract: each engine is an executable plugin that answers
-  `describe` (models, efforts, capabilities, meters), passes
-  `cn plugin check`, renders capability grants into its own CLI/env,
-  normalizes stream output into `(session, result, error, usage)`, classifies
-  refusals, and isolates its own credentials.
-- **Tracked by:** [#668](https://github.com/FieldmouseWorks/burrow/issues/668)
-  and its children
-  [#744](https://github.com/FieldmouseWorks/burrow/issues/744),
-  [#745](https://github.com/FieldmouseWorks/burrow/issues/745), planned at
-  `proj` stage 8 ([proj-design.md](proj-design.md#the-stages),
-  [#983](https://github.com/FieldmouseWorks/burrow/issues/983)).
+- **Done (#745):** `burrow_settings::roles::ENGINES`,
+  `burrow_proj::engine::Engine`, `modules/proj.nix`'s closed inbox label enum,
+  and all provider-specific execution/stream-parsing/refusal paths in
+  `burrow-proj` are gone, and `burrow-proj` no longer depends on
+  `burrow-engine-anthropic`. Every `proj` role executes through Conary's
+  `conary-plugin v5` (`job`) protocol
+  ([`engine/plugin.rs`](../crates/burrow-proj/src/engine/plugin.rs)):
+  `describe` negotiates the contract, stable `by.engine` identity, offered
+  models/efforts, capabilities and meters; `Task::Job` runs with v5
+  `Execution`/`Negotiated` provenance verification; and generic stderr
+  diagnostics (`stream`, `session`, `activity`, `usage`, `refusal`, `error`)
+  supply live progress, normalized usage and refusal classification without
+  provider-specific code in `burrow-proj`. `burrow.proj` wires the plugin
+  executables (`claude`, `claude-api`, any enabled engine plugin in
+  `burrow.agents.engines`, and `burrow.proj.plugins`) and `burrow-settings`
+  validates engine names dynamically against configured and offered engine
+  plugins. A `proj run --vm` job's turn runs the same plugin inside the
+  job's own sandbox over `agent sh`
+  ([`engine/plugin/launch.rs`](../crates/burrow-proj/src/engine/plugin/launch.rs)),
+  where the guest's `proj` declares its next step, its session carries to
+  the next turn and its work stays for `agent fetch`; the engine on the
+  credit (`claude-api`, the one `proj.apiCredit` meters, as
+  `Config::uses_credit_meter` decides for its runs and its route alike) is
+  refused there, since the credit is admitted on the host. The
+  sandbox is made for the engine the job's route runs a sandboxed turn on
+  (`agent new --engine`), which is the only engine with a login and hosts
+  there, so every turn of the job keeps to that engine, and a turn on any
+  other is refused. The other way round, an engine whose `describe` says it
+  needs a sandbox is refused on the host (the host-mode `claude` and
+  `claude-api` wrappers declare none). These refusals hold no engine, so
+  the turn ends refused unless its route now runs it elsewhere.
 
 ### 2. Per-engine usage holds, meters and accounting
 
@@ -235,9 +243,9 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   hosts. Host sessions still rely on `/etc/claude-code/managed-settings.json`
   and Claude Code's `PreToolUse` hook; a non-Claude CLI will not read those
   files or fire that hook format. Still Claude-shaped in `burrow.agents`:
-  `agent claude`, the host model settings `agent new` copies into a VM's
-  `~/.claude`, and `proj run --vm`, which runs Claude in the default
-  engine's VM.
+  `agent claude` and the host model settings `agent new` copies into a VM's
+  `~/.claude`. (`proj run --vm` now makes its sandbox for the engine the
+  job's route picks and runs that engine's plugin there.)
 - **Target:**
   - **Sandbox path (default for new engines):**
     [A plugin's sandbox](#a-plugins-sandbox) enforces its grants. `proj`

@@ -6,8 +6,9 @@
 //! such as the probe and `proj status`: a job may write those, and nothing
 //! proj runs it as follows them.
 use super::Job;
+use crate::engine::parse_engine;
+use crate::read;
 use crate::record::JobFile;
-use crate::{engine::Engine, read};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -50,10 +51,17 @@ fn stage(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Request {
     pub project: String,
-    pub engine: Option<Engine>,
+    #[serde(default, deserialize_with = "crate::engine::deserialize_opt_engine")]
+    pub engine: Option<String>,
     pub role: Option<String>,
     pub app: Option<String>,
     pub agent: Option<String>,
+    /// The engine its sandbox was made for (`agent new --engine`), which
+    /// every turn in it runs on: the sandbox has that engine's login and
+    /// hosts alone. None without a sandbox, or for one made before it was
+    /// kept, whose turns run as they always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_engine: Option<String>,
     pub owned: bool,
 }
 
@@ -134,10 +142,11 @@ impl Request {
         let named = |key| read(key).filter(|s: &String| !s.is_empty());
         Ok(Self {
             project: read("project").unwrap_or_default(),
-            engine: named("engine").map(|e| Engine::parse(&e)).transpose()?,
+            engine: named("engine").map(|e| parse_engine(&e)).transpose()?,
             role: named("role"),
             app: named("app"),
             agent: named("agent"),
+            agent_engine: None,
             owned: read("owned").is_some(),
         })
     }
@@ -179,10 +188,7 @@ impl Request {
                 "project".to_owned(),
                 (!self.project.is_empty()).then(|| self.project.clone()),
             ),
-            (
-                "engine".to_owned(),
-                self.engine.map(|e| e.name().to_owned()),
-            ),
+            ("engine".to_owned(), self.engine.clone()),
             ("role".to_owned(), some(&self.role)),
             ("app".to_owned(), some(&self.app)),
             ("agent".to_owned(), some(&self.agent)),
@@ -209,7 +215,7 @@ impl Request {
                 self.agent.as_ref().map(|a| format!("{a}\n")),
             ),
             (JobFile::App, self.app.as_ref().map(|a| format!("{a}\n"))),
-            (JobFile::Engine, self.engine.map(|e| e.name().to_owned())),
+            (JobFile::Engine, self.engine.clone()),
             (JobFile::Owned, self.owned.then(String::new)),
             (
                 JobFile::Project,

@@ -79,6 +79,7 @@ fn kind_type(kind: &Kind) -> String {
         Kind::Percent | Kind::Usd => "number".into(),
         Kind::Date => "date".into(),
         Kind::OneOf(_) => "word".into(),
+        Kind::Engine => "engine".into(),
         Kind::Repo => "repository".into(),
         Kind::Maybe(kind) => format!("{} or null", kind_type(kind)),
         Kind::Omitted(kind) => format!("{}, optional", kind_type(kind)),
@@ -106,6 +107,14 @@ fn allowed(kind: &Kind) -> String {
         Kind::Date => "`YYYY-MM-DD`".into(),
         Kind::Text | Kind::Object => "any".into(),
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
+        Kind::Engine => format!(
+            "`[a-z0-9][a-z0-9-]*` (configured engine plugin), never {}",
+            crate::roles::RETIRED_ENGINES
+                .iter()
+                .map(|w| code(w))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Kind::Repo => "`OWNER/NAME`".into(),
         Kind::Maybe(kind) => format!("{}, or `null`", allowed(kind)),
         Kind::Omitted(kind) => format!("{}, or left out", allowed(kind)),

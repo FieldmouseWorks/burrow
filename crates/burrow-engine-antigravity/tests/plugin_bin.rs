@@ -411,3 +411,89 @@ exit 1
     assert!(!stderr.contains("ya29.bin-oauth-secret-access"), "{stderr}");
     assert!(stderr.contains("[redacted]"), "{stderr}");
 }
+
+/// What the runner tells the engine for the turn (`PROJ_APPEND_SYSTEM_PROMPT`)
+/// follows the task in the prompt the CLI is given, and a run whose runner
+/// streams events says it's at work while the CLI, whose output comes only
+/// at its end, runs; a runner that doesn't stream hears nothing of it.
+#[test]
+fn a_job_gets_the_turns_instructions_and_says_its_at_work_while_the_cli_runs() {
+    for streams in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let given = dir.path().join("stdin.txt");
+        let fixture = write_executable(
+            dir.path(),
+            "ag-slow",
+            &format!(
+                "#!/bin/sh\ncat > \"{}\"\nsleep 3\nprintf '{{\"type\":\"result\",\"conversation_id\":\"slow-1\",\"result\":\"done\"}}\\n'\n",
+                given.display()
+            ),
+        );
+        let cfg = Config {
+            binary: fixture,
+            models: sample_models(),
+            default_model: Some("test-model".to_owned()),
+            activity_secs: 1,
+            ..Config::default()
+        };
+        let cfg_path = dir.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        let req = Request {
+            contract: CONTRACT.to_owned(),
+            execution: Some(Execution {
+                choice: None,
+                context: Context::Fresh,
+            }),
+            negotiated: Some(Negotiated {
+                by: Identity {
+                    engine: ENGINE.to_owned(),
+                    session: None,
+                },
+                offers: cfg.offers(),
+            }),
+            task: Task::Job {
+                repo: "owner/demo".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                prompt: "do the task".to_owned(),
+                model: None,
+                effort: None,
+            },
+        };
+        let mut command = Command::new(burrow_test::program!("burrow-engine-antigravity"));
+        command
+            .arg(&cfg_path)
+            .env("PROJ_APPEND_SYSTEM_PROMPT", "End by running proj done.")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if streams {
+            command.env("PROJ_STREAM_EVENTS", "1");
+        } else {
+            command.env_remove("PROJ_STREAM_EVENTS");
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&req).unwrap())
+            .unwrap();
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stderr: {stderr}");
+        assert_eq!(
+            fs::read_to_string(&given).unwrap(),
+            "do the task\n\nEnd by running proj done."
+        );
+        let said = stderr
+            .lines()
+            .filter(|l| *l == r#"{"event":"activity"}"#)
+            .count();
+        if streams {
+            assert!(said >= 2, "{said} activity events in a 3s run: {stderr}");
+        } else {
+            assert_eq!(said, 0, "{stderr}");
+        }
+    }
+}

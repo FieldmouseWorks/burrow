@@ -60,21 +60,6 @@
     "jobs"
   ],
   "$defs": {
-    "Engine": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "claude"
-          ]
-        },
-        {
-          "description": "The same Claude Code, on the API credit's key instead of the\nsubscription's login (`burrow_engine_anthropic::api`).",
-          "type": "string",
-          "const": "claude-api"
-        }
-      ]
-    },
     "EngineMeter": {
       "description": "One engine's meter and hold (`engine` is an engine name, or `*` for a global owner pause).",
       "type": "object",
@@ -188,13 +173,9 @@
           ]
         },
         "engine": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Engine"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "issue": {
@@ -637,13 +618,9 @@
       "properties": {
         "drain": {
           "description": "The engine ready issues are handed to; none hands none on.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Engine"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "drainJobs": {

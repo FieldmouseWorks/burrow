@@ -52,7 +52,7 @@ pub(super) fn run(dir: &Path) -> Result<BTreeMap<String, String>, String> {
         op.result = done.result.or(op.result);
     }
     if op.result.is_none() {
-        let from = read(dir)?;
+        let from = read(dir, &[])?;
         from.setups
             .saved
             .get(&op.destination)

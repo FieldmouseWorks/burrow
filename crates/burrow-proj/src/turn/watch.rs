@@ -22,6 +22,7 @@ pub(super) struct Run<'a> {
     pub(super) cfg: &'a Config,
     pub(super) job: &'a Job<'a>,
     pub(super) n: &'a str,
+    pub(super) engine: &'a str,
     pub(super) waitdir: &'a Path,
     /// Nanoseconds its stream may say nothing before it's stuck; 0 for no limit.
     pub(super) quiet: i64,
@@ -30,13 +31,13 @@ pub(super) struct Run<'a> {
 impl Run<'_> {
     /// Until the run is over: its exit status, and whether its answer cut
     /// it short. The answer ends the turn: a few seconds to exit by itself,
-    /// then Claude and whatever it left in the background are stopped (the
+    /// then the engine and whatever it left in the background are stopped (the
     /// unit takes the rest when the turn ends), and the slot goes with them.
     /// Meanwhile its clock is read once a second, sooner when its deadline
     /// is closer ([`Clock`]).
     pub(super) fn watch(&self, mut child: Child, from: u64) -> (ExitStatus, bool) {
         let pid = Pid::from_child(&child);
-        let mut said = Said::new(self.job, self.n, from);
+        let mut said = Said::new(self.job, self.n, from, self.engine);
         let mut answered: Option<Instant> = None;
         let mut cut = false;
         let mut clock = Clock {

@@ -10,10 +10,15 @@ use serde_json::Value;
 
 /// Normalized terminal records let the job lifecycle and log reader share outcomes.
 pub fn result_of(line: &str) -> Option<Value> {
-    if !line.contains(r#""type":"result""#) {
+    // A cheap look before parsing, whatever the record's spacing: its type's
+    // value is the string "result" wherever it sits.
+    if !line.contains(r#""result""#) {
         return None;
     }
     let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("result") {
+        return None;
+    }
     let said = match v.get("result") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => false,
         Some(Value::String(s)) => !s.is_empty(),

@@ -741,19 +741,18 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
 
 #[test]
 fn unstick_children_keep_admission_execution_and_sequence() {
-    use crate::engine::Engine;
     for kind in ["generated", "reused", "nested", "offered"] {
         {
-            let engine = Engine::Claude;
+            let engine = "claude";
             let (mut b, mut parent, mut list) = parent_fixture();
             let dir = b.path("settings");
-            crate::config::tests::routes(&mut b.cfg, &dir, &format!("stuck {}", engine.name()));
+            crate::config::tests::routes(&mut b.cfg, &dir, &format!("stuck {engine}"));
             b.cfg.projects = b.path("projects");
             fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
             b.cfg.tools.systemd_run = "true".into();
             b.cfg.tools.systemctl = "false".into();
             let inbox = b.cfg.inbox.as_mut().unwrap();
-            inbox.triage.as_mut().unwrap().drain = Some(engine);
+            inbox.triage.as_mut().unwrap().drain = Some(engine.to_owned());
             let label = inbox.unstick_label.clone();
             parent["labels"] = json!([{"name":"tracker"},{"name":label}]);
             fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
@@ -822,17 +821,15 @@ fn unstick_children_keep_admission_execution_and_sequence() {
             b.pass().note_ready("sam/box", &[child.clone()]).unwrap();
             b.pass().drain().unwrap();
             assert!(
-                b.log().contains(&format!(
-                    "issues/{target}/labels -f labels[]={}",
-                    engine.name()
-                )),
+                b.log()
+                    .contains(&format!("issues/{target}/labels -f labels[]={engine}")),
                 "{kind}/{engine:?}: {}",
                 b.log()
             );
             child["labels"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({"name":engine.name()}));
+                .push(json!({"name":engine}));
             fs::write(
                 b.path(&format!("repos_sam_box_issues_{target}")),
                 child.to_string(),

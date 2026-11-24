@@ -295,6 +295,18 @@ in
         '';
       };
 
+      resolvedKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        readOnly = true;
+        internal = true;
+        default = apiKeyFile;
+        description = ''
+          The key file `claude-api` uses, `keyFile` or its fallback: the one
+          place it's resolved, for the sandbox, the host plugin and proj's
+          route readiness alike.
+        '';
+      };
+
       baseUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;

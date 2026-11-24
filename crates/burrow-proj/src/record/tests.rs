@@ -363,7 +363,7 @@ fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
     let cfg = rig(tmp.path(), true);
     let j = job(&cfg, "j");
     let choice = crate::engine::Choice {
-        engine: crate::engine::Engine::Claude,
+        engine: "claude".into(),
         model: Some("a-model".into()),
         effort: Some("high".into()),
     };
@@ -384,7 +384,7 @@ fn why_json_says_what_the_latest_turn_ran_on_and_its_session() {
     j.record_choice(
         "1",
         &crate::engine::Choice {
-            engine: crate::engine::Engine::Claude,
+            engine: "claude".into(),
             model: None,
             effort: None,
         },
@@ -422,7 +422,7 @@ fn a_queued_api_turn_waits_on_no_plan_hold() {
     let plan = job(&cfg, "plan");
     let api = job(&cfg, "api");
     let choice = crate::engine::Choice {
-        engine: crate::engine::Engine::ClaudeApi,
+        engine: "claude-api".into(),
         ..crate::engine::Choice::default()
     };
     crate::retry::Identity::capture_choice(&api, "1", &choice).unwrap();

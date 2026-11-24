@@ -671,3 +671,88 @@ fn imports_collapse_identical_receipt_aliases_and_refuse_conflicting_answers() {
         }
     }
 }
+
+#[test]
+fn configured_and_offered_plugin_engines_route_without_a_closed_allowlist() {
+    let (_d, cfg) = rig();
+    // Offering a new engine plugin makes it routable, tunable, and savable.
+    set(&cfg, "offer antigravity models ag-fast ag-deep").unwrap();
+    set(&cfg, "offer antigravity efforts low high").unwrap();
+    set(&cfg, "offer third-plugin models third-m").unwrap();
+    set(&cfg, "offer third-plugin efforts medium").unwrap();
+    set(
+        &cfg,
+        "role * claude over 80 antigravity over 90 third-plugin",
+    )
+    .unwrap();
+    set(&cfg, "model fix antigravity ag-deep high").unwrap();
+    set(&cfg, "model triage third-plugin third-m medium").unwrap();
+    set(&cfg, "engines save multi").unwrap();
+    set(&cfg, "role * claude").unwrap();
+    set(&cfg, "engines use multi").unwrap();
+    let force = cfg.roles().unwrap();
+    assert_eq!(
+        force.route("fix", None).engines().collect::<Vec<_>>(),
+        ["claude", "antigravity", "third-plugin"]
+    );
+    assert_eq!(
+        force.tuning("fix", None, "antigravity"),
+        Tuning {
+            model: Some("ag-deep".into()),
+            effort: Some("high".into()),
+        }
+    );
+    assert_eq!(
+        force.tuning("triage", None, "third-plugin"),
+        Tuning {
+            model: Some("third-m".into()),
+            effort: Some("medium".into()),
+        }
+    );
+    // Unconfigured/unoffered engines and retired codex are still refused.
+    for bad in [
+        "role fix gemini",
+        "role fix codex",
+        "offer codex models m",
+        "offer BadName models m",
+    ] {
+        assert!(set(&cfg, bad).is_err(), "{bad}");
+    }
+    // No closed ENGINES allowlist remains in roles.rs.
+    let roles_src = fs::read_to_string(burrow_test::manifest_dir!().join("src/roles.rs")).unwrap();
+    assert!(
+        !roles_src.contains("pub const ENGINES"),
+        "closed ENGINES allowlist must be deleted"
+    );
+}
+
+#[test]
+fn removed_configured_plugin_rejects_persisted_route_and_allows_recovery() {
+    let (_d, mut cfg) = rig();
+    cfg.engines = vec!["claude".into(), "claude-api".into(), "antigravity".into()];
+    set(&cfg, "offer antigravity models ag-m").unwrap();
+    set(&cfg, "offer antigravity efforts high").unwrap();
+    set(&cfg, "role fix antigravity").unwrap();
+    set(&cfg, "model fix antigravity ag-m high").unwrap();
+    set(&cfg, "engines save ag-setup").unwrap();
+    assert!(cfg.role_view().is_ok());
+
+    // After the custom plugin is removed from machine config, its persisted
+    // proj.engineOffers entry must not keep it routable.
+    cfg.engines = vec!["claude".into(), "claude-api".into()];
+    let err = cfg.role_view().unwrap_err();
+    assert!(err.contains("unknown engine antigravity"), "{err}");
+    assert!(cfg.engines().is_err());
+    assert!(set(&cfg, "role triage antigravity").is_err());
+    assert!(set(&cfg, "engines use ag-setup").is_err());
+
+    // Operators can still clear the stale route and tuning via the settings
+    // door, after which role_view succeeds and drops the unconfigured offer.
+    set(&cfg, "role fix claude").unwrap();
+    let err = cfg.role_view().unwrap_err();
+    assert!(err.contains("unknown engine antigravity"), "{err}");
+    set(&cfg, "model fix antigravity unset").unwrap();
+    let view = cfg.role_view().unwrap();
+    assert!(!view.in_force.offers.contains_key("antigravity"));
+    assert_eq!(view.in_force.route("fix", None).engine, "claude");
+}

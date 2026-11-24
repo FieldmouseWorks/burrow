@@ -85,7 +85,7 @@ pub enum Wait {
     /// Claude's usage, which the machine was out of till then.
     Released(i64),
     /// An engine's usage, resetting then.
-    Usage { engine: &'static str, reset: i64 },
+    Usage { engine: String, reset: i64 },
 }
 
 impl Wait {

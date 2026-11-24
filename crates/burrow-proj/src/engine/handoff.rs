@@ -10,10 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-#[cfg(test)]
-use super::stream::resume;
 use super::stream::resume_for;
-use super::{Engine, answer, conversation_of, stream_names_session};
+use super::{answer, conversation_of, stream_names_session};
 use crate::record::TurnFile;
 use crate::{job::Job, read};
 
@@ -66,8 +64,8 @@ fn cut(text: &str, whole: &str) -> String {
 /// The prompt turn `n` starts with on `engine`: its own `prompt.N`, or, when
 /// that engine's conversation missed some of the job, `N.handoff`, those
 /// turns and then this one's prompt.
-pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathBuf> {
-    first_prompt_for(job, n, engine.name())
+pub fn first_prompt(job: &Job, n: &str, engine: &str) -> std::io::Result<PathBuf> {
+    first_prompt_for(job, n, engine)
 }
 
 /// Engine-name version of [`first_prompt`], supporting cross-engine handoff
@@ -137,13 +135,13 @@ mod tests {
 
         /// Turn `n` ran on `engine` (None: before engines were chosen),
         /// asked `asked`, in its conversation, and answered `said`.
-        fn ran(&self, n: u64, engine: Option<Engine>, asked: &str, said: &str) {
+        fn ran(&self, n: u64, engine: Option<&str>, asked: &str, said: &str) {
             let job = self.job();
             let n = n.to_string();
             fs::write(job.path(&format!("prompt.{n}")), format!("{asked}\n")).unwrap();
-            let engine_name = engine.unwrap_or(Engine::Claude).name();
+            let engine_name = engine.unwrap_or("claude");
             if let Some(e) = engine {
-                fs::write(job.turn(&n, "engine"), e.name()).unwrap();
+                fs::write(job.turn(&n, "engine"), e).unwrap();
             }
             let stream = format!(
                 "{}\n{}\n",
@@ -160,11 +158,11 @@ mod tests {
         }
 
         /// Turn `n` is about to start on `engine`, asked `asked`: what it's given.
-        fn starts(&self, n: u64, engine: Engine, asked: &str) -> String {
+        fn starts(&self, n: u64, engine: &str, asked: &str) -> String {
             let job = self.job();
             let n = n.to_string();
             fs::write(job.path(&format!("prompt.{n}")), format!("{asked}\n")).unwrap();
-            fs::write(job.turn(&n, "engine"), engine.name()).unwrap();
+            fs::write(job.turn(&n, "engine"), engine).unwrap();
             fs::read_to_string(first_prompt(&job, &n, engine).unwrap()).unwrap()
         }
     }
@@ -175,12 +173,12 @@ mod tests {
     #[test]
     fn the_claude_engines_share_one_conversation() {
         let t = Turns::new();
-        t.ran(1, Some(Engine::Claude), "the brief", "first answer");
+        t.ran(1, Some("claude"), "the brief", "first answer");
         assert_eq!(
-            resume(&t.job(), Engine::ClaudeApi).as_deref(),
+            resume_for(&t.job(), "claude-api").as_deref(),
             Some("claude-session")
         );
-        assert_eq!(t.starts(2, Engine::ClaudeApi, "a reply"), "a reply\n");
+        assert_eq!(t.starts(2, "claude-api", "a reply"), "a reply\n");
         // Its stream names the session as Claude's (stream.rs), so the next
         // turn back on the subscription has seen it too.
         let job = t.job();
@@ -190,15 +188,15 @@ mod tests {
             serde_json::json!({"type": "result", "is_error": false, "result": "second"}),
         );
         fs::write(job.turn("2", "jsonl"), stream).unwrap();
-        assert_eq!(t.starts(3, Engine::Claude, "carry on"), "carry on\n");
+        assert_eq!(t.starts(3, "claude", "carry on"), "carry on\n");
     }
 
     #[test]
     fn the_same_engine_carries_on_in_its_own_conversation() {
         let t = Turns::new();
-        assert_eq!(t.starts(1, Engine::Claude, "the brief"), "the brief\n");
-        t.ran(1, Some(Engine::Claude), "the brief", "first answer");
-        assert_eq!(t.starts(2, Engine::Claude, "a reply"), "a reply\n");
+        assert_eq!(t.starts(1, "claude", "the brief"), "the brief\n");
+        t.ran(1, Some("claude"), "the brief", "first answer");
+        assert_eq!(t.starts(2, "claude", "a reply"), "a reply\n");
     }
 
     #[test]
@@ -207,11 +205,7 @@ mod tests {
             ("the brief", "started on it"),
             ("the owner says: use the other crate", "switched crates"),
         ]);
-        let given = t.starts(
-            3,
-            Engine::Claude,
-            "PR #9 changed: checks finished. Carry on.",
-        );
+        let given = t.starts(3, "claude", "PR #9 changed: checks finished. Carry on.");
         assert!(
             given.starts_with("This job began before this conversation"),
             "{given}"
@@ -233,7 +227,7 @@ mod tests {
     fn t_lost(turns: &[(&str, &str)]) -> Turns {
         let t = Turns::new();
         for (n, (asked, said)) in turns.iter().enumerate() {
-            t.ran(n as u64 + 1, Some(Engine::Claude), asked, said);
+            t.ran(n as u64 + 1, Some("claude"), asked, said);
         }
         let job = t.job();
         fs::remove_file(job.path("session.claude")).unwrap();
@@ -245,7 +239,7 @@ mod tests {
     fn turns_from_before_engines_were_claudes() {
         let t = Turns::new();
         t.ran(1, None, "the brief", "an old answer");
-        assert_eq!(t.starts(2, Engine::Claude, "a reply"), "a reply\n");
+        assert_eq!(t.starts(2, "claude", "a reply"), "a reply\n");
     }
 
     #[test]
@@ -274,7 +268,7 @@ mod tests {
         {
             let said = format!("began{}done", "y".repeat(KEEP * 2));
             let t = t_lost(&[(&long("the brief"), &said), (&long("the reply"), "replied")]);
-            let given = t.starts(3, Engine::Claude, "carry on");
+            let given = t.starts(3, "claude", "carry on");
             for what in ["the brief", "the reply"] {
                 assert!(given.contains(&long(what)), "{what} cut from the handoff");
             }

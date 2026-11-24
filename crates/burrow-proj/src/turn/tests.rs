@@ -54,18 +54,15 @@ fn no_idle_never_goes_quiet() {
 /// outcome, in words that name the credit, not the plan's usage.
 #[test]
 fn an_api_refusal_ends_the_turn_in_its_own_words() {
-    use super::{Config, Job, api_refused};
+    use super::{Config, Job, turn_refused};
     let dir = tempfile::tempdir().unwrap();
     let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
     cfg.jobs = dir.path().join("jobs");
     let job = Job::new(&cfg, "job");
     fs::create_dir_all(&job.dir).unwrap();
     let told = std::cell::RefCell::new(String::new());
-    let refused = burrow_engine_anthropic::api::Refused::new(
-        "its credit has no room: today's allowance spent",
-    );
-    api_refused(&job, "1", &refused, &|t| told.borrow_mut().push_str(t));
     let said = "claude-api refused: its credit has no room: today's allowance spent";
+    turn_refused(&job, "1", said, &|t| told.borrow_mut().push_str(t));
     assert_eq!(*told.borrow(), said);
     assert_eq!(
         fs::read_to_string(job.turn("1", "result")).unwrap(),

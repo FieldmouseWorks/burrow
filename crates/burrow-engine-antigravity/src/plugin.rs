@@ -9,6 +9,22 @@ use conary_core::plugin::{
 
 use crate::cli::{Invocation, run_invocation};
 use crate::config::{Config, ENGINE, Effort};
+use crate::normalize::{Refusal, RunError, Usage};
+
+/// Exit codes aligned with burrow's Conary plugin diagnostics contract.
+pub const EXIT_OK: u8 = 0;
+pub const EXIT_FAILURE: u8 = 1;
+pub const EXIT_REFUSED_USAGE: u8 = 2;
+pub const EXIT_REFUSED_AUTH: u8 = 3;
+
+/// Structured outcome for stdio invocation: stdout response (when successful),
+/// structured JSON diagnostic event for stderr, and exit code.
+#[derive(Debug)]
+pub struct PluginResult {
+    pub response: Option<Response>,
+    pub diagnostic: Option<serde_json::Value>,
+    pub exit_code: u8,
+}
 
 /// Deterministic nonblank session reported for offline conformance fixtures.
 const CONFORMANCE_SESSION: &str = "antigravity-conformance";
@@ -52,9 +68,144 @@ pub fn is_conformance_job(task: &Task) -> bool {
     })
 }
 
+/// What a runner tells the engine for the turn (burrow-proj's
+/// `PROJ_APPEND_SYSTEM_PROMPT`: how to declare its next step, and where a
+/// sandbox records it) follows the task in a job's prompt, since Antigravity
+/// has no system prompt of its own. Conary's conformance fixture, matched on
+/// its exact prompt, is left as it is.
+pub fn add_instructions(request: &mut Request, instructions: Option<&str>) {
+    let Some(extra) = instructions.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if is_conformance_job(&request.task) {
+        return;
+    }
+    if let Task::Job { prompt, .. } = &mut request.task {
+        prompt.push_str("\n\n");
+        prompt.push_str(extra);
+    }
+}
+
 /// Answer one Conary plugin request without external cancellation.
 pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
     answer_cancellable(config, request, &|| false)
+}
+
+/// Answer one Conary plugin request and return structured diagnostics + exit code
+/// for stdio callers (`burrow-proj`, `conaryd`).
+pub fn handle_request(config: &Config, request: &Request, stop: &dyn Fn() -> bool) -> PluginResult {
+    match answer_detailed(config, request, stop) {
+        Ok((response, usage)) => {
+            let diagnostic = usage.map(|u| usage_event(response.by.session.as_deref(), &u));
+            PluginResult {
+                response: Some(response),
+                diagnostic,
+                exit_code: EXIT_OK,
+            }
+        }
+        Err(err) => match *err {
+            DetailedError::Refusal {
+                session,
+                refusal,
+                usage,
+            } => {
+                let reason = RunError::Refusal(refusal.clone()).to_string();
+                let (kind, resets_at, exit_code) = match refusal {
+                    Refusal::Quota { reset_at, .. } => {
+                        ("usage_limit", reset_at, EXIT_REFUSED_USAGE)
+                    }
+                    Refusal::Login { .. } => ("login_expired", None, EXIT_REFUSED_AUTH),
+                };
+                PluginResult {
+                    response: None,
+                    diagnostic: Some(serde_json::json!({
+                        "event": "refusal",
+                        "engine": ENGINE,
+                        "session": session,
+                        "refusal": {
+                            "kind": kind,
+                            "reason": reason,
+                            "resets_at": resets_at,
+                        },
+                        "usage": usage_json(usage.as_ref()),
+                    })),
+                    exit_code,
+                }
+            }
+            DetailedError::Other {
+                session,
+                error,
+                usage,
+            } => PluginResult {
+                response: None,
+                diagnostic: Some(serde_json::json!({
+                    "event": "error",
+                    "engine": ENGINE,
+                    "session": session,
+                    "error": error,
+                    "usage": usage.as_ref().map(|u| usage_json(Some(u))),
+                })),
+                exit_code: EXIT_FAILURE,
+            },
+        },
+    }
+}
+
+fn usage_json(usage: Option<&Usage>) -> serde_json::Value {
+    match usage {
+        Some(u) => serde_json::json!({
+            "input_tokens": u.input_tokens.unwrap_or(0),
+            "output_tokens": u.output_tokens.unwrap_or(0),
+            "cache_read_input_tokens": u.cache_read_tokens.unwrap_or(0),
+            "cache_creation_input_tokens": u.cache_write_tokens.unwrap_or(0),
+            "total_cost_usd": u.cost_usd,
+        }),
+        None => serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }),
+    }
+}
+
+fn usage_event(session: Option<&str>, usage: &Usage) -> serde_json::Value {
+    serde_json::json!({
+        "event": "usage",
+        "engine": ENGINE,
+        "session": session,
+        "usage": usage_json(Some(usage)),
+    })
+}
+
+enum DetailedError {
+    Refusal {
+        session: Option<String>,
+        refusal: Refusal,
+        usage: Option<Usage>,
+    },
+    Other {
+        session: Option<String>,
+        error: String,
+        usage: Option<Usage>,
+    },
+}
+
+impl DetailedError {
+    fn other(error: String) -> Box<Self> {
+        Box::new(Self::Other {
+            session: None,
+            error,
+            usage: None,
+        })
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Refusal { refusal, .. } => RunError::Refusal(refusal).to_string(),
+            Self::Other { error, .. } => error,
+        }
+    }
 }
 
 /// Answer one Conary plugin request, aborting and killing the child process
@@ -64,10 +215,20 @@ pub fn answer_cancellable(
     request: &Request,
     stop: &dyn Fn() -> bool,
 ) -> Result<Response, String> {
-    config.validate()?;
+    answer_detailed(config, request, stop)
+        .map(|(response, _)| response)
+        .map_err(|e| e.message())
+}
+
+fn answer_detailed(
+    config: &Config,
+    request: &Request,
+    stop: &dyn Fn() -> bool,
+) -> Result<(Response, Option<Usage>), Box<DetailedError>> {
+    config.validate().map_err(DetailedError::other)?;
 
     match &request.task {
-        Task::Describe => Ok(describe(config)),
+        Task::Describe => Ok((describe(config), None)),
         Task::Job {
             workdir,
             prompt,
@@ -76,18 +237,21 @@ pub fn answer_cancellable(
             ..
         } => {
             let ver = version(&request.contract)
-                .ok_or_else(|| format!("unsupported plugin contract {:?}", request.contract))?;
+                .ok_or_else(|| format!("unsupported plugin contract {:?}", request.contract))
+                .map_err(DetailedError::other)?;
             if ver < 2 {
-                return Err("the job kind requires conary-plugin v2 or newer".to_owned());
+                return Err(DetailedError::other(
+                    "the job kind requires conary-plugin v2 or newer".to_owned(),
+                ));
             }
 
             let offers = match &request.negotiated {
                 Some(neg) => {
                     if neg.by.engine != ENGINE {
-                        return Err(format!(
+                        return Err(DetailedError::other(format!(
                             "negotiated engine {:?} does not match {ENGINE:?}",
                             neg.by.engine
-                        ));
+                        )));
                     }
                     neg.offers.clone()
                 }
@@ -100,7 +264,8 @@ pub fn answer_cancellable(
                 request,
                 model.as_deref(),
                 effort.as_deref(),
-            )?;
+            )
+            .map_err(DetailedError::other)?;
 
             let context = request
                 .execution
@@ -113,37 +278,46 @@ pub fn answer_cancellable(
                     Context::Continue { session } => session.clone(),
                     Context::Fresh => CONFORMANCE_SESSION.to_owned(),
                     Context::Fork { .. } => {
-                        return Err("antigravity plugin does not support fork context".to_owned());
+                        return Err(DetailedError::other(
+                            "antigravity plugin does not support fork context".to_owned(),
+                        ));
                     }
                 };
-                return Ok(Response {
-                    contract: request.contract.clone(),
-                    by: Identity {
-                        engine: ENGINE.to_owned(),
-                        session: Some(session),
+                return Ok((
+                    Response {
+                        contract: request.contract.clone(),
+                        by: Identity {
+                            engine: ENGINE.to_owned(),
+                            session: Some(session),
+                        },
+                        execution: (ver >= 3).then(|| Executed {
+                            model: resolved_model,
+                            effort: resolved_effort.map(|e| e.as_str().to_owned()),
+                            context,
+                        }),
+                        answer: Answer::Job {
+                            summary: "antigravity conformance fixture: finished".to_owned(),
+                            next: Next::Done,
+                        },
                     },
-                    execution: (ver >= 3).then(|| Executed {
-                        model: resolved_model,
-                        effort: resolved_effort.map(|e| e.as_str().to_owned()),
-                        context,
-                    }),
-                    answer: Answer::Job {
-                        summary: "antigravity conformance fixture: finished".to_owned(),
-                        next: Next::Done,
-                    },
-                });
+                    None,
+                ));
             }
 
             let conversation = match &context {
                 Context::Fresh => None,
                 Context::Continue { session } => {
                     if session.trim().is_empty() {
-                        return Err("continue context requires a nonblank session id".to_owned());
+                        return Err(DetailedError::other(
+                            "continue context requires a nonblank session id".to_owned(),
+                        ));
                     }
                     Some(session.clone())
                 }
                 Context::Fork { .. } => {
-                    return Err("antigravity plugin does not support fork context".to_owned());
+                    return Err(DetailedError::other(
+                        "antigravity plugin does not support fork context".to_owned(),
+                    ));
                 }
             };
 
@@ -158,14 +332,29 @@ pub fn answer_cancellable(
             let turn = run_invocation(config, &invocation, stop);
 
             if let Some(err) = turn.error {
-                return Err(err.to_string());
+                return match err {
+                    RunError::Refusal(refusal) => Err(Box::new(DetailedError::Refusal {
+                        session: turn.session,
+                        refusal,
+                        usage: turn.usage,
+                    })),
+                    other => Err(Box::new(DetailedError::Other {
+                        session: turn.session,
+                        error: other.to_string(),
+                        usage: turn.usage,
+                    })),
+                };
             }
 
             let session = match (&conversation, turn.session) {
                 (Some(expected), Some(actual)) if actual != *expected => {
-                    return Err(format!(
-                        "antigravity changed continuation session from {expected:?} to {actual:?}"
-                    ));
+                    return Err(Box::new(DetailedError::Other {
+                        session: Some(actual.clone()),
+                        error: format!(
+                            "antigravity changed continuation session from {expected:?} to {actual:?}"
+                        ),
+                        usage: turn.usage,
+                    }));
                 }
                 (Some(expected), _) => Some(expected.clone()),
                 (None, actual) => actual,
@@ -174,7 +363,13 @@ pub fn answer_cancellable(
             let summary = turn
                 .result
                 .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "antigravity returned an empty job summary".to_owned())?;
+                .ok_or_else(|| {
+                    Box::new(DetailedError::Other {
+                        session: session.clone(),
+                        error: "antigravity returned an empty job summary".to_owned(),
+                        usage: turn.usage.clone(),
+                    })
+                })?;
 
             let executed = (ver >= 3).then(|| Executed {
                 model: resolved_model,
@@ -182,20 +377,25 @@ pub fn answer_cancellable(
                 context,
             });
 
-            Ok(Response {
-                contract: request.contract.clone(),
-                by: Identity {
-                    engine: ENGINE.to_owned(),
-                    session,
+            Ok((
+                Response {
+                    contract: request.contract.clone(),
+                    by: Identity {
+                        engine: ENGINE.to_owned(),
+                        session,
+                    },
+                    execution: executed,
+                    answer: Answer::Job {
+                        summary,
+                        next: Next::Done,
+                    },
                 },
-                execution: executed,
-                answer: Answer::Job {
-                    summary,
-                    next: Next::Done,
-                },
-            })
+                turn.usage,
+            ))
         }
-        _ => Err("antigravity plugin serves describe and job requests alone".to_owned()),
+        _ => Err(DetailedError::other(
+            "antigravity plugin serves describe and job requests alone".to_owned(),
+        )),
     }
 }
 

@@ -1,6 +1,6 @@
 use super::{
     Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer, run,
-    since_time, start, start_job,
+    sandbox, since_time, start, start_job,
 };
 
 #[test]
@@ -485,3 +485,49 @@ fn question_state_follows_resume_source_and_only_successful_starts() {
 
 #[path = "tests/shared.rs"]
 mod shared;
+
+/// A `--vm` job's sandbox is made for the engine its route runs a sandboxed
+/// turn on (`agent new PROJECT --engine E`), and its request records both
+/// the sandbox and that engine, which its turns then keep to.
+#[test]
+fn a_jobs_sandbox_is_made_for_its_routed_engine_and_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg: crate::config::Config =
+        serde_json::from_value(crate::config::tests::example()).unwrap();
+    cfg.jobs = tmp.path().join("jobs");
+    cfg.host_state = Some(tmp.path().join("host"));
+    crate::config::tests::set(&mut cfg, tmp.path(), &["role work claude-api"]);
+    let calls = tmp.path().join("agent-calls");
+    let agent = tmp.path().join("agent");
+    burrow_test::executable(
+        &agent,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\necho web-7\n",
+            calls.display()
+        ),
+    );
+    let job = Job::new(&cfg, "web-job");
+    fs::create_dir_all(&job.dir).unwrap();
+    let mut request = crate::job::Request {
+        project: "/projects/web".into(),
+        role: Some("work".into()),
+        ..Default::default()
+    };
+    request.save(&job).unwrap();
+    sandbox(
+        &cfg,
+        agent.to_str().unwrap(),
+        &job,
+        "web",
+        &mut request,
+        &crate::policy::Identity::Local,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap(),
+        "new web --engine claude-api\n"
+    );
+    let recorded = crate::job::Request::load(&job).unwrap();
+    assert_eq!(recorded.agent.as_deref(), Some("web-7"));
+    assert_eq!(recorded.agent_engine.as_deref(), Some("claude-api"));
+}
