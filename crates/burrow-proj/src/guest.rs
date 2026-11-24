@@ -78,7 +78,7 @@ pub(crate) fn collect(cfg: &Config, job: &Job, n: &str, agent: &str) -> Result<(
     collect_with(cfg, job, n, agent, "agent", remaining)
 }
 
-fn collect_with(
+pub(crate) fn collect_with(
     cfg: &Config,
     job: &Job,
     n: &str,

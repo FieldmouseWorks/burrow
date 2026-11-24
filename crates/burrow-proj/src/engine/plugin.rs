@@ -23,12 +23,13 @@ use conary_core::plugin::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::command::{host_instructions, sandbox_instructions};
 use super::{Choice, capabilities, machine, stream};
 use crate::config::Config;
 use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 use crate::scratch;
+
+mod launch;
 
 /// Maximum `describe` or `job` stdout response size (32 MiB).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -133,6 +134,30 @@ pub struct RunResult {
     pub last: Option<Value>,
     pub refusal: Option<PluginRefusal>,
     pub rc: i32,
+}
+
+/// Why [`spawn`] started nothing.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// The turn may not run on this engine where it is: the route takes it
+    /// on as it does a run the plugin refused.
+    Refused(PluginRefusal),
+    Failed(String),
+}
+
+impl From<String> for SpawnError {
+    fn from(e: String) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(r) => f.write_str(&r.reason),
+            Self::Failed(e) => f.write_str(e),
+        }
+    }
 }
 
 /// A live running plugin subprocess, together with its stdio threads and
@@ -295,7 +320,8 @@ fn resolve_model_effort(
     }
 }
 
-/// Start one `conary-plugin v5` (`job`) run for `job` turn `n`.
+/// Start one `conary-plugin v5` (`job`) run for `job` turn `n`: on the host,
+/// or, given its sandbox (`agent`), inside that sandbox ([`launch`]).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     cfg: &Config,
@@ -307,17 +333,28 @@ pub fn spawn(
     must: bool,
     app_env: &str,
     choice: &Choice,
-) -> Result<Running, String> {
-    let sandboxed = agent.is_some();
-    let plugin_path = cfg.plugin_for(&choice.engine, sandboxed).ok_or_else(|| {
-        if sandboxed {
-            format!("no sandbox engine plugin configured for {}", choice.engine)
-        } else {
-            format!("no engine plugin configured for {}", choice.engine)
-        }
-    })?;
+) -> Result<Running, SpawnError> {
+    let plugin_path = cfg
+        .plugins
+        .get(&choice.engine)
+        .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?;
 
+    // The plugin a sandboxed turn runs is this same executable (the sandbox
+    // shares the host's store), so its describe is this one.
     let mut described = describe(cfg, plugin_path, &choice.engine)?;
+    // A credit is admitted and spent through its ledger on the host, which a
+    // sandbox's root guest is never given: a credit-metered engine doesn't
+    // run in a sandbox, and the turn's route takes it on.
+    if agent.is_some() && described.uses_credit() {
+        return Err(SpawnError::Refused(PluginRefusal {
+            kind: RefusalKind::CreditExhausted,
+            reason: format!(
+                "{} runs on a credit, which a sandbox can't be admitted to, so it doesn't run there",
+                choice.engine
+            ),
+            resets_at: None,
+        }));
+    }
     // When a plugin leaves its static `describe` model catalog empty (meaning
     // unpinned turns run on the harness's own default without `--model`), an
     // explicit per-role model override admitted by `burrow-settings`'s live
@@ -400,56 +437,18 @@ pub fn spawn(
         .stderr(Stdio::piped())
         .env("PROJ_STREAM_EVENTS", "1");
 
-    if sandboxed {
-        cmd.arg(plugin_path)
-            .env("PROJ_APPEND_SYSTEM_PROMPT", sandbox_instructions(must))
-            .env("PROJ_VM_NEXT", crate::guest::path(job, n));
-    } else {
-        let scratch = scratch::dir(cfg, job.id);
-        let instructions = host_instructions(cfg, job, must);
-        // Host turns run inside a login shell followed by any configured App
-        // env so nothing in the login profile can undo `--app`, then `_plugin`
-        // resolves host capability grants in that final environment and execs
-        // the configured plugin executable.
-        cmd.arg(&cfg.tools.bash)
-            .args([
-                "-lc",
-                r#"eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec "$@""#,
-            ])
-            .arg("proj-engine")
-            .arg(&cfg.me)
-            .arg("_plugin")
-            .arg(plugin_path)
-            .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
-            .env(
-                "PROJ_HOST_JOBS_SOCKET",
-                crate::host_jobs::socket(cfg, job, n),
-            )
-            .env("PROJ_JOB", job.id)
-            .env("PROJ_GITHUB_DIR", job.file(JobFile::Github))
-            .env(
-                "PROJ_GITHUB_KICK",
-                if cfg.kick.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}/proj-watch", cfg.kick)
-                },
-            )
-            .env(
-                "PROJ_GITHUB_REFUSALS",
-                job.turn_file(n, TurnFile::GithubRefusals),
-            )
-            .env("PROJ_WAIT_DIR", waitdir)
-            .env("PROJ_SCRATCH", &scratch)
-            .env("PROJ_APP_ENV", app_env)
-            .env("PROJ_APPEND_SYSTEM_PROMPT", instructions);
-        if described.uses_credit() {
-            cmd.env("PROJ_CREDIT_LEDGER_FILE", &stream_path);
+    match agent {
+        Some(agent) => launch::sandboxed(&mut cmd, job, n, agent, must, plugin_path),
+        None => {
+            launch::host(&mut cmd, cfg, job, n, waitdir, must, app_env, plugin_path);
+            if described.uses_credit() {
+                cmd.env("PROJ_CREDIT_LEDGER_FILE", &stream_path);
+            }
         }
     }
 
     let started_at = crate::now();
-    let uses_credit = described.uses_credit() && !sandboxed;
+    let uses_credit = described.uses_credit();
     let mut child = if uses_credit {
         // Credit-metered plugins write their own atomic budgeted `burrow.run`
         // marker under `.credit.lock` once admitted; avoid writing a duplicate

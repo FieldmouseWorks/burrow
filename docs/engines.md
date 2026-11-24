@@ -175,11 +175,16 @@ CLI) currently hits five places where burrow still assumes Claude Code:
   `Execution`/`Negotiated` provenance verification; and generic stderr
   diagnostics (`stream`, `session`, `activity`, `usage`, `refusal`, `error`)
   supply live progress, normalized usage and refusal classification without
-  provider-specific code in `burrow-proj`. `burrow.proj` wires host and
-  sandbox plugin executables (`claude`, `claude-api`, any enabled engine
-  plugin in `burrow.agents.engines`, and `burrow.proj.plugins`) and
-  `burrow-settings` validates engine names dynamically against configured and
-  offered engine plugins.
+  provider-specific code in `burrow-proj`. `burrow.proj` wires the plugin
+  executables (`claude`, `claude-api`, any enabled engine plugin in
+  `burrow.agents.engines`, and `burrow.proj.plugins`) and `burrow-settings`
+  validates engine names dynamically against configured and offered engine
+  plugins. A `proj run --vm` job's turn runs the same plugin inside the
+  job's own sandbox over `agent sh`
+  ([`engine/plugin/launch.rs`](../crates/burrow-proj/src/engine/plugin/launch.rs)),
+  where the guest's `proj` declares its next step, its session carries to
+  the next turn and its work stays for `agent fetch`; an engine metered by a
+  credit is refused there, since the credit is admitted on the host.
 
 ### 2. Per-engine usage holds, meters and accounting
 

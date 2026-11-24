@@ -131,15 +131,12 @@ pub struct Config {
     /// checks; the plugin itself opens the file when launching a turn.
     #[serde(default)]
     pub claude_api_key_file: Option<PathBuf>,
-    /// Configured Conary `conary-plugin v5` (`job`) executables for host turns,
-    /// keyed by engine plugin name (for example `claude`, `claude-api`,
-    /// `antigravity`, or any custom engine plugin).
+    /// Configured Conary `conary-plugin v5` (`job`) executables, keyed by
+    /// engine plugin name (for example `claude`, `claude-api`, `antigravity`,
+    /// or any custom engine plugin). A `--vm` job's turn runs the same one
+    /// inside its sandbox (engine/plugin/launch.rs).
     #[serde(default)]
     pub plugins: BTreeMap<String, PathBuf>,
-    /// Configured Conary `conary-plugin v5` (`job`) executables for sandboxed
-    /// (`--vm`) turns (`agent-plugin-<engine>`), keyed by engine plugin name.
-    #[serde(default)]
-    pub sandbox_plugins: BTreeMap<String, PathBuf>,
     /// Additional engine names metered by `proj.apiCredit` (beyond the
     /// schema's default `burrow_settings::credit::ENGINE`).
     #[serde(default)]
@@ -270,16 +267,6 @@ impl Config {
         self.settings
             .as_ref()
             .map(burrow_settings::Config::credit_file)
-    }
-
-    /// The configured Conary plugin executable for `engine` on the host or in a
-    /// sandbox (`--vm`).
-    pub(crate) fn plugin_for(&self, engine: &str, sandboxed: bool) -> Option<&PathBuf> {
-        if sandboxed {
-            self.sandbox_plugins.get(engine)
-        } else {
-            self.plugins.get(engine)
-        }
     }
 
     /// Whether `engine` is metered by `proj.apiCredit`.
@@ -417,11 +404,6 @@ impl Config {
             crate::engine::parse_engine(engine)?;
             burrow_process::executable(path)
                 .map_err(|e| format!("plugins.{engine} {}: {e}", path.display()))?;
-        }
-        for (engine, path) in &self.sandbox_plugins {
-            crate::engine::parse_engine(engine)?;
-            burrow_process::executable(path)
-                .map_err(|e| format!("sandboxPlugins.{engine} {}: {e}", path.display()))?;
         }
         if let Some(inbox) = &self.inbox {
             for (label, engine) in &inbox.labels {

@@ -437,3 +437,225 @@ esac
         })
     );
 }
+
+/// Stand-ins for `timeout(1)` and `agent`: `agent sh ID COMMAND...` runs
+/// COMMAND here, as the sandbox ID, after recording each `agent` call; any
+/// other command `timeout` is given runs as it is.
+fn stand_in_sandbox(tmp: &TempDir, cfg: &mut Config) -> (PathBuf, PathBuf) {
+    let calls = tmp.path().join("agent-calls");
+    let agent = tmp.path().join("agent");
+    burrow_test::executable(
+        &agent,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> {calls}
+case "$1" in
+  sh) shift 2; exec "$@" ;;
+  stop) exit 0 ;;
+esac
+exit 97
+"#,
+            calls = calls.display()
+        ),
+    );
+    let timeout = tmp.path().join("timeout");
+    burrow_test::executable(
+        &timeout,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+shift 3
+if [ "$1" = agent ]; then shift; exec {agent} "$@"; fi
+exec "$@"
+"#,
+            agent = agent.display()
+        ),
+    );
+    cfg.tools.timeout = timeout;
+    (agent, calls)
+}
+
+/// A `--vm` job's turn runs its engine's plugin inside the job's own
+/// sandbox (`agent sh ID`), with the turn's instructions and the place the
+/// guest's `proj` declares the next step, a stale declaration removed first;
+/// what the plugin declares there is what the host collects into the job.
+#[test]
+fn sandboxed_turn_runs_its_plugin_in_the_jobs_sandbox_with_the_turns_context() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let (agent, calls) = stand_in_sandbox(&tmp, &mut cfg);
+    let seen = tmp.path().join("seen-env");
+    let desc_path = tmp.path().join("desc.json");
+    let turn_path = tmp.path().join("turn.json");
+    fs::write(&desc_path, describe_json("vm-engine", vec![], vec![])).unwrap();
+    fs::write(
+        &turn_path,
+        job_json(
+            "vm-engine",
+            "sess-vm-1",
+            Context::Fresh,
+            None,
+            None,
+            "answered in the sandbox",
+            Next::Done,
+        ),
+    )
+    .unwrap();
+    // As the guest's `proj done` does: the declaration in PROJ_VM_NEXT.
+    let plugin = tmp.path().join("vm-engine-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+req="$(cat)"
+if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
+{{
+  printf 'next=%s\n' "${{PROJ_VM_NEXT:-}}"
+  printf 'stale=%s\n' "$([ -e "${{PROJ_VM_NEXT:-/nonexistent}}" ] && echo yes || echo no)"
+  printf 'stream=%s\n' "${{PROJ_STREAM_EVENTS:-}}"
+  printf 'prompt=%s\n' "${{PROJ_APPEND_SYSTEM_PROMPT:-}}"
+}} > {seen}
+printf '{{"end":"done","targets":[]}}' > "$PROJ_VM_NEXT"
+cat {turn}
+"#,
+            desc = desc_path.display(),
+            seen = seen.display(),
+            turn = turn_path.display(),
+        ),
+    );
+    cfg.plugins.insert("vm-engine".into(), plugin.clone());
+
+    let id = format!("job-vm-{}", std::process::id());
+    let job = make_job(&cfg, &project, &id);
+    let declared = PathBuf::from(crate::guest::path(&job, "1"));
+    fs::write(&declared, r#"{"end":"ask","targets":[]}"#).unwrap();
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Solve it in the sandbox\n").unwrap();
+    let choice = Choice {
+        engine: "vm-engine".into(),
+        model: None,
+        effort: None,
+    };
+
+    let mut running = spawn(
+        &cfg,
+        &job,
+        "1",
+        &prompt,
+        &waitdir,
+        Some("demo-4"),
+        true,
+        "",
+        &choice,
+    )
+    .unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    let res = running.finish(status, false, &cfg, &job, "1", 0);
+    assert_eq!(res.rc, 0);
+    assert_eq!(res.last.unwrap()["result"], "answered in the sandbox");
+
+    let agent_calls = fs::read_to_string(&calls).unwrap();
+    let first = agent_calls.lines().next().unwrap();
+    assert!(
+        first.starts_with("sh demo-4 env ") && first.ends_with(&plugin.display().to_string()),
+        "the plugin runs in the job's own sandbox: {first}"
+    );
+    let seen = fs::read_to_string(&seen).unwrap();
+    assert!(
+        seen.contains(&format!("next={}\n", declared.display())),
+        "{seen}"
+    );
+    assert!(seen.contains("stale=no\n"), "{seen}");
+    assert!(seen.contains("stream=1\n"), "{seen}");
+    assert!(
+        seen.contains(&format!("Before answering, run {}", crate::engine::NEXT)),
+        "{seen}"
+    );
+
+    // What it declared in the sandbox becomes the job's next step.
+    crate::guest::collect_with(
+        &cfg,
+        &job,
+        "1",
+        "demo-4",
+        &agent.display().to_string(),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let _ = fs::remove_file(&declared);
+    assert_eq!(
+        crate::read(&job.file(JobFile::EndNext)).as_deref(),
+        Some("done")
+    );
+}
+
+/// A credit is admitted on the host, through a ledger no sandbox is given:
+/// a `--vm` turn on a credit-metered engine is refused before anything runs,
+/// so the turn's route takes it on rather than spend the credit unmetered.
+#[test]
+fn sandboxed_turn_on_a_credit_metered_plugin_is_refused_before_it_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let (_, calls) = stand_in_sandbox(&tmp, &mut cfg);
+    let desc_path = tmp.path().join("desc.json");
+    fs::write(
+        &desc_path,
+        describe_json("metered", vec![], vec!["credit".into()]),
+    )
+    .unwrap();
+    let ran = tmp.path().join("ran");
+    let plugin = tmp.path().join("metered-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            r#"#!/usr/bin/env bash
+req="$(cat)"
+if printf '%s' "$req" | grep -q '"kind":"describe"'; then cat {desc}; exit 0; fi
+touch {ran}
+exit 1
+"#,
+            desc = desc_path.display(),
+            ran = ran.display(),
+        ),
+    );
+    cfg.plugins.insert("metered".into(), plugin);
+
+    let job = make_job(&cfg, &project, "job-metered");
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Spend\n").unwrap();
+    let choice = Choice {
+        engine: "metered".into(),
+        model: None,
+        effort: None,
+    };
+
+    let refused = match spawn(
+        &cfg,
+        &job,
+        "1",
+        &prompt,
+        &waitdir,
+        Some("demo-4"),
+        true,
+        "",
+        &choice,
+    ) {
+        Err(SpawnError::Refused(r)) => r,
+        Err(SpawnError::Failed(e)) => panic!("refused, not failed: {e}"),
+        Ok(_) => panic!("a credit-metered plugin started in a sandbox"),
+    };
+    assert_eq!(refused.kind, RefusalKind::CreditExhausted);
+    assert!(!ran.exists(), "the plugin's job ran");
+    assert!(!calls.exists(), "the sandbox was reached");
+    assert!(!job.turn_file("1", TurnFile::Started).exists());
+    assert_eq!(
+        fs::read_to_string(job.turn_file("1", TurnFile::Jsonl)).unwrap(),
+        ""
+    );
+}

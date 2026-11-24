@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
-use crate::engine::{self, LONG, NEXT, RefusalKind, answer, is_error};
+use crate::engine::{self, LONG, NEXT, RefusalKind, SpawnError, answer, is_error};
 use crate::job::{Job, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
@@ -519,7 +519,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 break (None, 1);
             }
         };
-        let mut running = match engine::spawn(
+        let (run, cut, ran) = match engine::spawn(
             cfg,
             &job,
             &n,
@@ -530,30 +530,43 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             &app_env,
             &choice,
         ) {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(mut running) => {
+                let child = running.child.take().expect("plugin child spawned");
+                let (status, cut) = Run {
+                    cfg,
+                    job: &job,
+                    n: &n,
+                    engine: &choice.engine,
+                    waitdir: &waitdir,
+                    quiet,
+                }
+                .watch(child, from);
+                drop(bridge);
+                (running.finish(status, cut, cfg, &job, &n, from), cut, true)
+            }
+            // Refused before it started: nothing ran, and the route takes
+            // the turn on as it does a run the plugin refused.
+            Err(SpawnError::Refused(refusal)) => {
+                drop(bridge);
+                let run = engine::RunResult {
+                    last: None,
+                    refusal: Some(refusal),
+                    rc: 1,
+                };
+                (run, false, false)
+            }
+            Err(SpawnError::Failed(e)) => {
                 drop(bridge);
                 eprintln!("proj: couldn't start {}: {e}", choice.engine);
                 break (None, 1);
             }
         };
-        let child = running.child.take().expect("plugin child spawned");
-        let (status, cut) = Run {
-            cfg,
-            job: &job,
-            n: &n,
-            engine: &choice.engine,
-            waitdir: &waitdir,
-            quiet,
-        }
-        .watch(child, from);
-        drop(bridge);
-        let run = running.finish(status, cut, cfg, &job, &n, from);
         let rc = run.rc;
         let last = run.last;
         let oomed = oom_kills() > ooms;
         let declaration_error = agent
             .as_deref()
+            .filter(|_| ran)
             .and_then(|a| crate::guest::collect(cfg, &job, &n, a).err());
         // The turn's next run, in the same conversation and slot, is told
         // `text`, kept in its N.KIND.

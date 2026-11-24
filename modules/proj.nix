@@ -87,11 +87,6 @@ let
     claude = lib.getExe hostClaudePlugin;
     "claude-api" = lib.getExe hostClaudeApiPlugin;
   } // lib.mapAttrs (_: lib.getExe) cfg.plugins;
-  sandboxPlugins =
-    if config.burrow.agents.enable or false then
-      lib.mapAttrs (_: pkg: lib.getExe pkg) (config.burrow.agents.plugins or { })
-    else
-      { };
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
@@ -130,7 +125,6 @@ let
     inherit (cfg) meters;
     claudeApiKeyFile = cfg.claudeApi.keyFile;
     plugins = hostPlugins;
-    inherit sandboxPlugins;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
