@@ -5,7 +5,7 @@ triage is disabled. In that case only enrolled, ready and tracker issues
 enter the planning queue; unrelated unlabelled issues remain untouched.
 Planning uses a new job on the `planner` role, independently of the
 implementation engine label. Its model and effort come from the role
-configuration like any other role's, Claude's own where none is set.
+configuration like any other role's, the routed engine's default where none is set.
 Host planning jobs are required;
 enabling planning with `inbox.vm` is rejected at configuration time.
 
