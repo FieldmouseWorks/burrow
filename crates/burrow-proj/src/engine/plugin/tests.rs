@@ -269,10 +269,7 @@ fn plugin_rejects_mismatched_engine_identity_and_provenance() {
     let bad_desc = tmp.path().join("bad-desc.json");
     fs::write(&bad_desc, describe_json("someone-else", vec![], vec![])).unwrap();
     let bad_id = tmp.path().join("bad-id-plugin");
-    burrow_test::executable(
-        &bad_id,
-        format!("#!/bin/sh\ncat {}\n", bad_desc.display()),
-    );
+    burrow_test::executable(&bad_id, format!("#!/bin/sh\ncat {}\n", bad_desc.display()));
     cfg.plugins.insert("expected-engine".into(), bad_id);
     let err = describe(&cfg, &cfg.plugins["expected-engine"], "expected-engine").unwrap_err();
     assert!(err.contains("reported engine identity"), "{err}");
