@@ -725,3 +725,34 @@ fn configured_and_offered_plugin_engines_route_without_a_closed_allowlist() {
         "closed ENGINES allowlist must be deleted"
     );
 }
+
+#[test]
+fn removed_configured_plugin_rejects_persisted_route_and_allows_recovery() {
+    let (_d, mut cfg) = rig();
+    cfg.engines = vec!["claude".into(), "claude-api".into(), "antigravity".into()];
+    set(&cfg, "offer antigravity models ag-m").unwrap();
+    set(&cfg, "offer antigravity efforts high").unwrap();
+    set(&cfg, "role fix antigravity").unwrap();
+    set(&cfg, "model fix antigravity ag-m high").unwrap();
+    set(&cfg, "engines save ag-setup").unwrap();
+    assert!(cfg.role_view().is_ok());
+
+    // After the custom plugin is removed from machine config, its persisted
+    // proj.engineOffers entry must not keep it routable.
+    cfg.engines = vec!["claude".into(), "claude-api".into()];
+    let err = cfg.role_view().unwrap_err();
+    assert!(err.contains("unknown engine antigravity"), "{err}");
+    assert!(cfg.engines().is_err());
+    assert!(set(&cfg, "role triage antigravity").is_err());
+    assert!(set(&cfg, "engines use ag-setup").is_err());
+
+    // Operators can still clear the stale route and tuning via the settings
+    // door, after which role_view succeeds and drops the unconfigured offer.
+    set(&cfg, "role fix claude").unwrap();
+    let err = cfg.role_view().unwrap_err();
+    assert!(err.contains("unknown engine antigravity"), "{err}");
+    set(&cfg, "model fix antigravity unset").unwrap();
+    let view = cfg.role_view().unwrap();
+    assert!(!view.in_force.offers.contains_key("antigravity"));
+    assert_eq!(view.in_force.route("fix", None).engine, "claude");
+}

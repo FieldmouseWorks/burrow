@@ -260,6 +260,31 @@ pub fn default_offers_for(configured: &[String]) -> BTreeMap<String, Offer> {
     offers
 }
 
+/// Merge persisted offers over the machine's default offers. Every persisted
+/// entry is checked for valid syntax and plain words; when `configured` is
+/// non-empty, only engines still present in `configured` remain routable in
+/// the merged offer map, so removing a plugin from machine config invalidates
+/// any route or tuning still targeting it while letting operators clear those
+/// references through the settings door.
+fn merge_offers(
+    offers: &BTreeMap<String, Offer>,
+    configured: &[String],
+) -> Result<BTreeMap<String, Offer>, String> {
+    let mut offered = default_offers_for(configured);
+    for (name, offer) in offers {
+        engine_syntax(name)?;
+        for word in offer.models.iter().chain(&offer.efforts) {
+            if !plain(word) {
+                return Err(format!("{name}: offers {word:?}, not a plain word"));
+            }
+        }
+        if offerable_engine(name, configured).is_ok() {
+            offered.insert(name.clone(), offer.clone());
+        }
+    }
+    Ok(offered)
+}
+
 impl Roles {
     /// These values over the schema's defaults, each checked against the
     /// offers.
@@ -273,16 +298,7 @@ impl Roles {
         offers: &BTreeMap<String, Offer>,
         configured: &[String],
     ) -> Result<InForce, String> {
-        let mut offered = default_offers_for(configured);
-        offered.extend(offers.clone());
-        for (name, offer) in &offered {
-            engine_syntax(name)?;
-            for word in offer.models.iter().chain(&offer.efforts) {
-                if !plain(word) {
-                    return Err(format!("{name}: offers {word:?}, not a plain word"));
-                }
-            }
-        }
+        let offered = merge_offers(offers, configured)?;
         self.check(&offered)?;
         let mut roles = default_routes();
         roles.extend(self.roles.clone());
@@ -435,28 +451,25 @@ pub(crate) fn apply(
     args: &[&str],
 ) -> Result<String, String> {
     let before = active(roles, setups);
-    let offered = |offers: &BTreeMap<String, Offer>| {
-        let mut all = default_offers_for(configured_engines);
-        all.extend(offers.clone());
-        all
-    };
+    let offered = |offers: &BTreeMap<String, Offer>| merge_offers(offers, configured_engines);
     match args {
         ["role", key, "unset"] => {
             roles.roles.remove(&Key::parse(key)?.canonical());
         }
         ["role", key, words @ ..] => {
             let parsed = route(words)?;
-            parsed.check_against(&offered(offers))?;
+            parsed.check_against(&offered(offers)?)?;
             roles.roles.insert(Key::parse(key)?.canonical(), parsed);
         }
         ["model", key, on, "unset"] => {
-            known_engine(on, &offered(offers))?;
-            roles
-                .models
-                .remove(&format!("{} {on}", Key::parse(key)?.canonical()));
+            let model_key = format!("{} {on}", Key::parse(key)?.canonical());
+            if !roles.models.contains_key(&model_key) {
+                known_engine(on, &offered(offers)?)?;
+            }
+            roles.models.remove(&model_key);
         }
         ["model", key, on, model, effort @ ..] => {
-            let all_offers = offered(offers);
+            let all_offers = offered(offers)?;
             known_engine(on, &all_offers)?;
             let effort = match effort {
                 [] | ["-"] => None,
@@ -478,7 +491,7 @@ pub(crate) fn apply(
             if let Some(w) = words.iter().find(|w| !plain(w)) {
                 return Err(format!("{w:?} is not a plain word"));
             }
-            let mut next = offered(offers);
+            let mut next = offered(offers)?;
             let offer = next.entry((*on).to_owned()).or_default();
             let list: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
             if *what == "models" {
@@ -517,7 +530,7 @@ pub(crate) fn apply(
                     .cloned()
                     .ok_or_else(|| format!("unknown setup: {name}"))?
             };
-            next.check(&offered(offers))?;
+            next.check(&offered(offers)?)?;
             let was = std::mem::replace(roles, next);
             if was != *roles {
                 setups.previous = Some(was);
