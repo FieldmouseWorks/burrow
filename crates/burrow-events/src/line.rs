@@ -182,9 +182,10 @@ impl Line {
     /// for one, and however often it's due, a repo's pass waits for no more
     /// than the passes this take starts.
     ///
-    /// `until`: none that fell due after it starts (a pass of a handler
-    /// yielding to this one waits from then, and goes first). Those don't
-    /// count towards the next one due either: news ends the wait for them.
+    /// `until`: none that fell due after it starts (a pass of a line this
+    /// one yields to, or that yields to it, waits from then, and goes
+    /// first). Those don't count towards the next one due either: news
+    /// ends the wait for them.
     pub fn take(&self, now: f64, until: Option<f64>) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;

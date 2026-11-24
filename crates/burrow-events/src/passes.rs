@@ -129,10 +129,10 @@ pub fn check_yields(handlers: &BTreeMap<String, Handler>) -> Result<(), String> 
 /// that one has a pass running or one that fell due before its own, and
 /// each of `behind`, the lines yielding to it, while one of theirs runs.
 /// They share a lock, and a pass started beside one that holds it would
-/// only come back every GAP until that one ended. Nor does a line start a
-/// pass that fell due after one of `behind`'s that waits: the two go in
-/// the order their passes fell due (`first`'s first on a tie), so neither
-/// waits for more than the passes booked ahead of its own.
+/// only come back every GAP until that one ended. Nor does either side
+/// take a pass that fell due after one of the other's that waits: the two
+/// go in the order their passes fell due (`first`'s first on a tie), so
+/// neither waits for more than the passes booked ahead of its own.
 #[derive(Default)]
 pub struct Yields<'a> {
     pub first: Option<&'a Line>,
@@ -160,16 +160,21 @@ impl<'a> Yields<'a> {
     /// `behind`'s that fell due before it.
     fn held(&self, since: Option<f64>) -> bool {
         self.first.is_some_and(|f| f.ahead(since))
-            || self.behind.iter().any(|b| b.running())
-            || since.zip(self.until(now())).is_some_and(|(s, u)| u < s)
+            || self
+                .behind
+                .iter()
+                .any(|b| b.running() || since.zip(b.since(now())).is_some_and(|(s, u)| u < s))
     }
 
-    /// When the first of `behind`'s waiting passes fell due: none of this
-    /// handler's that fell due after it starts before it.
+    /// The last time a pass of this handler's taken now may have fallen
+    /// due: when the first of `behind`'s waiting passes did, or just before
+    /// `first`'s did (it goes first on a tie). Both sides' takes stop
+    /// there, so neither takes a pass the other's waiting one holds off.
     fn until(&self, now: f64) -> Option<f64> {
         self.behind
             .iter()
             .filter_map(|b| b.since(now))
+            .chain(self.first.and_then(|f| f.since(now)).map(f64::next_down))
             .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))))
     }
 }
@@ -581,6 +586,45 @@ mod tests {
                 "autoland@sam-a.service",
                 "autoland-continue@sam-x.service",
                 "autoland@sam-b.service",
+            ]
+        );
+    }
+
+    // A yielder's take stops short of the line it yields to's first pass
+    // due, as that line's stops short of the yielder's: a batch in name
+    // order whose head fell due after that pass never holds back one of
+    // its own that fell due before it, and neither side stalls the other.
+    #[test]
+    fn neither_stalls() {
+        let (_dir, mut steward, fake) = setup();
+        steward.wake = None;
+        let cont = Handler {
+            unit: "autoland-continue".into(),
+            ..steward.clone()
+        };
+        let t = crate::now() - 1000.0;
+        let (first, line) = (Line::default(), Line::default());
+        line.event(Pass::Full, t + 100.0);
+        line.event(Pass::repo("sam/x"), t + 300.0);
+        first.event(Pass::repo("sam/c"), t + 200.0);
+        let ahead = Yields {
+            first: Some(&first),
+            ..ALONE
+        };
+        let behind = Yields {
+            behind: vec![&line],
+            ..ALONE
+        };
+        for _ in 0..3 {
+            serve("continue", &cont, &line, &ahead, &fake, true, || {});
+            serve("autoland", &steward, &first, &behind, &fake, true, || {});
+        }
+        assert_eq!(
+            *fake.started.borrow(),
+            [
+                "autoland-continue.service",
+                "autoland@sam-c.service",
+                "autoland-continue@sam-x.service",
             ]
         );
     }
