@@ -60,6 +60,10 @@ struct Answers {
     /// A comment on the PR, or None.
     #[serde(default)]
     comment: Option<String>,
+    /// The issue or PR (`OWNER/REPO#N`) that tracks a red check's cause
+    /// outside the PR (the machine's, another repo's), or None.
+    #[serde(default)]
+    tracker: Option<String>,
 }
 
 /// Its answer on one review thread: what it says, and whether its push
@@ -105,6 +109,10 @@ pub struct Took {
     pub description: Option<String>,
     /// The head is the job's own push (this turn's, or an earlier one's).
     pub own: bool,
+    /// What tracks the head's red check's cause outside the PR, as its
+    /// answers named it, when they went up on the head it was handed (a
+    /// push of its own is a new head, whose CI says afresh).
+    pub tracker: Option<String>,
 }
 
 /// Why nothing (more) went up.
@@ -145,6 +153,23 @@ fn commit(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// Whether s names an issue or PR as `OWNER/REPO#N`.
+pub fn tracker(s: &str) -> bool {
+    let Some((repo, n)) = s.split_once('#') else {
+        return false;
+    };
+    let name = |x: &str| {
+        !x.is_empty()
+            && x.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    };
+    repo.split_once('/')
+        .is_some_and(|(o, r)| name(o) && name(r))
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+        && !n.starts_with('0')
+}
+
 fn short(c: &str) -> &str {
     c.get(..12).unwrap_or(c)
 }
@@ -167,6 +192,13 @@ fn read(text: &str) -> Result<Answers, Unposted> {
     {
         return Err(Unposted::Wrong(format!(
             "its answers say it pushed {c:?}, which isn't a commit's full name"
+        )));
+    }
+    if let Some(t) = &a.tracker
+        && !tracker(t)
+    {
+        return Err(Unposted::Wrong(format!(
+            "its answers name {t:?} as what tracks the cause, which isn't OWNER/REPO#N"
         )));
     }
     let mut seen = BTreeSet::new();
@@ -384,6 +416,7 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
         head: want.to_owned(),
         description: left,
         own: pushed.is_some() || h.own,
+        tracker: a.tracker.filter(|_| pushed.is_none()),
     }))
 }
 

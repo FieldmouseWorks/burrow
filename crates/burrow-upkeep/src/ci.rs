@@ -301,6 +301,27 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     ))
 }
 
+/// The workflow runs of the check runs that are red on the head, as the
+/// verdict reads them: each failed one that still speaks for it. A
+/// cancelled one is the verdict's own to recover, and a status has no run.
+pub(crate) fn red_runs(p: &mut Pass, ask: &Ask) -> BTreeSet<String> {
+    let contexts =
+        array(&ask.pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]);
+    let runs = ci_runs::runs(p, ask, contexts);
+    ci_runs::effective(contexts, &runs.stale, ci_runs::docs_lane(ask))
+        .into_iter()
+        .filter(|c| {
+            c["__typename"] == "CheckRun"
+                && c["status"] == "COMPLETED"
+                && !cancelled(c)
+                && !["SUCCESS", "NEUTRAL", "SKIPPED"]
+                    .iter()
+                    .any(|s| c["conclusion"] == *s)
+        })
+        .filter_map(run_id)
+        .collect()
+}
+
 /// Ask GitHub to merge the base into the PR's branch, at the head the
 /// verdict is of (so never onto a head pushed since): a new head, whose
 /// workflows run afresh. Ok(Err) is GitHub's no, in its words, for the

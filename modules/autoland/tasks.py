@@ -68,7 +68,8 @@ def answers(repo, pr):
     return (
         "Don't reply on the threads, resolve them, edit the PR's description or comment on it yourself. When you're done, "
         f"write what you have to say to {claims.brief_file()} as JSON, "
-        '{"pushed": COMMIT, "threads": [{"id": THREAD_ID, "fixed": true, "reply": TEXT}], "description": TEXT, "comment": TEXT}, '
+        '{"pushed": COMMIT, "threads": [{"id": THREAD_ID, "fixed": true, "reply": TEXT}], "description": TEXT, "comment": TEXT, '
+        '"tracker": OWNER/REPO#N}, '
         "and the steward posts it, resolving each thread after its reply, only once the PR's head is your push. "
         "It goes up as each turn of yours ends: one that ends awaiting this PR (proj await) is resumed by its next change, "
         "and a later turn's answers go up only if that turn rewrites the file. "
@@ -80,6 +81,9 @@ def answers(repo, pr):
         "reply says what you did, or why it's wrong or out of scope, without naming a commit (the steward names the one it's fixed in). "
         "description is the PR's whole new description, written from the one you read (gh pr view --json body), or null to leave it. "
         "comment is what to say on the PR, or null. "
+        "tracker is the issue or PR that tracks a red check's cause outside this PR, as OWNER/REPO#N, or null: "
+        "named with no push of yours, the steward hands this head to no other job while it's open, and runs the red check "
+        "again once it closes. "
     )
 
 
@@ -100,8 +104,8 @@ NEGATIVE = ("{} is burrow's negative: it ran the tests this PR adds or changes o
             "adds or fixes, and check that they do on the base; if some of the test changes are a tidy the code "
             "doesn't need, take them out of this PR into one of their own. Anything else (it can't tell, it timed "
             "out, the base or a dependency didn't build or evaluate, a fetch or the runner failed) says nothing about "
-            "the tests: fix what the log shows if it's the PR's, and if it's the machine's, push nothing and say so "
-            "in your answers' comment. "
+            "the tests: fix what the log shows if it's the PR's; if it's the machine's, it's a red check whose cause "
+            "lies outside the PR, and goes as such a check does, with no push. "
             "Whichever it is, never delete, skip or weaken a test to turn it green, and never move a test into the "
             "code it tests (an inline #[cfg(test)] block counts as code) to get it out of the negative's sight.")
 
@@ -137,6 +141,14 @@ def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, 
         "A fix that belongs in another repo (one this PR pins, say) goes there, as a PR of its own; end your turn with "
         "`proj await` on it, and the steward leaves this PR to you meanwhile: proj resumes you once it changes, to bring "
         "the fix in here once it has landed. "
+        "A red check whose cause lies outside the PR (the machine's: a runner lost or killed, a service, a fetch; or another "
+        "repo's) goes the same way, with no push for it: find the open issue or PR that tracks that cause (gh search issues, "
+        "gh issue list and gh pr list in the repo it lies in), file the issue there if there is none, saying what failed, "
+        "where and the log lines that show it, name it as tracker in your answers and in their comment, and end your turn "
+        "with `proj await` on it. proj resumes you on each change to it: while it's still open, await it again; once it's "
+        "closed, run the red check's whole workflow run again (gh run rerun RUN_ID -R REPO, never only its failed jobs, so it "
+        "reads its workflows afresh), write your answers again, still naming it, and end your turn (if GitHub won't run it "
+        "again, say what it said in their comment). "
         "A finding that a reason in the PR's description (a `Why not Rust:` line, say) doesn't hold is settled by porting the code "
         "to Rust, or, only where the code has a solid reason the line left out, by writing that reason into the description and "
         "saying so in the thread's reply. A judge's is settled only by the port: only a push gets the PR judged again. "

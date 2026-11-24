@@ -169,6 +169,26 @@ def ci_state(pr, proofs=(), moved=None, repo=None, recover=False):
     return got["state"], got["names"], got["docs"]
 
 
+def tracked(pr, tracker, proofs, moved, repo):
+    """What the Rust owner (crates/burrow-upkeep/src/tracked.rs) says of a
+    head whose fix job found its red check's cause outside the PR, tracked
+    by `tracker` (OWNER/REPO#N): first the tracker, read as the App on its
+    own owner when it's one the steward is on (so a private repo of the
+    other owner is seen), open or closed; once it's closed, each red run
+    from before that asked to run again, as the PR's (through the CI
+    owner's one rerun door), going, refused, or run since and red on its
+    own."""
+    where = tracker.partition("#")[0]
+    ours = where.split("/")[0].lower() in {o.lower() for o in CFG["owners"]}
+    with C.acting_for(where if ours else repo):
+        got = C.upkeep("tracked", repo, input=json.dumps({"tracker": tracker}))["tracked"]
+    if got["closed"] is None:
+        return got
+    return C.upkeep("tracked", repo, input=json.dumps({"tracker": tracker, "closed": got["closed"], "ci": {
+        "pr": pr, "proofs": list(proofs), "moved": list(moved) if moved is not None else None,
+        "remote": True, "recover": False}}))["tracked"]
+
+
 def our_status(pr, context=CONTEXT):
     """The steward's own status on the head: its context (or the train's,
     which cn posts as its App), posted by its App. Anyone who can push can

@@ -233,6 +233,47 @@ fn an_answer_with_no_push_goes_up_on_the_head_it_was_handed() {
     assert_eq!(changed(&hub), vec![]);
 }
 
+/// A job that found a red check's cause outside the PR names what tracks
+/// it, and that's carried out with its answers, on the head it was handed;
+/// named beside a push of its own, the push is a new head, whose CI says
+/// afresh, and it's carried nowhere.
+#[test]
+fn a_cause_outside_the_pr_is_named_with_the_answers() {
+    let named = |pushed: Option<&str>| {
+        Some(json!({"pushed": pushed, "threads": [], "comment": "The runner was lost.", "tracker": "FieldmouseWorks/burrow#1484"}).to_string())
+    };
+    let mut hub = github(pr("OPEN", HANDED, BODY, open()));
+    assert_eq!(
+        answered(&mut hub, &handed(named(None))),
+        Ok(Posted::Answers(Took {
+            head: HANDED.into(),
+            description: None,
+            own: false,
+            tracker: Some("FieldmouseWorks/burrow#1484".into()),
+        }))
+    );
+    let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
+    assert!(matches!(
+        answered(&mut hub, &handed(named(Some(PUSHED)))),
+        Ok(Posted::Answers(Took { tracker: None, .. }))
+    ));
+    for good in ["o/r#1", "Field-mouse/re.po_x#1566"] {
+        assert!(tracker(good), "{good}");
+    }
+    for bad in [
+        "o/r",
+        "o/r#",
+        "o/r#01",
+        "o#1",
+        "/r#1",
+        "o/r#1x",
+        "o/r/x#1",
+        "https://github.com/o/r/issues/1",
+    ] {
+        assert!(!tracker(bad), "{bad}");
+    }
+}
+
 #[test]
 fn a_fix_with_no_new_commit_is_no_answer() {
     for pushed in [None, Some(HANDED)] {
@@ -275,6 +316,7 @@ fn a_later_turn_names_its_own_push_for_a_thread_opened_before_it() {
                 head: PUSHED.into(),
                 description: None,
                 own: true,
+                tracker: None,
             }))
         );
         assert_eq!(
@@ -322,6 +364,10 @@ fn what_isnt_answers_posts_nothing() {
         (
             r#"{"pushed": null, "threads": [{"id": "PRRT_a", "fixed": false, "reply": "x"}, {"id": "PRRT_a", "fixed": false, "reply": "y"}]}"#,
             "its answers reply on thread PRRT_a twice",
+        ),
+        (
+            r#"{"pushed": null, "threads": [], "tracker": "remi#1566"}"#,
+            "its answers name \"remi#1566\" as what tracks the cause, which isn't OWNER/REPO#N",
         ),
     ];
     for (text, said) in wrong {

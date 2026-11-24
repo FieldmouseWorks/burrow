@@ -35,6 +35,7 @@ pub mod settle;
 #[path = "testing_tests.rs"]
 mod testing;
 pub mod token;
+pub mod tracked;
 pub mod verdict;
 
 use pass::{Pass, repo_file};
