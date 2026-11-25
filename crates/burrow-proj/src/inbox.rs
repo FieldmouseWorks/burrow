@@ -388,7 +388,10 @@ impl Pass<'_> {
     fn routing(&self, issue: &Value) -> (Option<String>, Option<String>) {
         match self.machine_role(issue) {
             Some(role) => (Some(role), None),
-            None => (self.inbox.owner_role.clone(), self.engine(issue)),
+            None => match self.inbox.owner_role.clone() {
+                Some(role) => (Some(role), None),
+                None => (None, self.engine(issue)),
+            },
         }
     }
 

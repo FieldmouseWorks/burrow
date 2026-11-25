@@ -372,7 +372,7 @@ fn the_unstick_label_beats_a_role_mapped_to_an_engine_label() {
 }
 
 #[test]
-fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
+fn owner_issues_take_the_owner_role_without_pinning_their_label_engine() {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     let p = pass(&cfg);
     let mut i = issue(json!("work"));
@@ -380,10 +380,7 @@ fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
     assert_eq!(p.routing(&i), (None, Some("claude".to_owned())));
     cfg.inbox.as_mut().unwrap().owner_role = Some("inbox".into());
     let p = pass(&cfg);
-    assert_eq!(
-        p.routing(&i),
-        (Some("inbox".into()), Some("claude".to_owned()))
-    );
+    assert_eq!(p.routing(&i), (Some("inbox".into()), None));
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i), (Some("stuck".into()), None));
     i["labels"] = json!([{"name":"claude"}]);

@@ -85,12 +85,15 @@ impl Pass<'_> {
                     continue;
                 }
             }
-            // Adopt existing machine issues too: a deployment must not leave
-            // the long-lived stuck job pinned to its old label's engine.
-            if let Some(role) = open
-                .iter()
-                .find(|i| raw(&i["number"]) == n)
-                .and_then(|i| self.machine_role(i))
+            // Adopt existing role-routed issues too: a deployment must not leave
+            // long-lived inbox or stuck jobs pinned to their old label's engine.
+            if let Some(role) =
+                open.iter()
+                    .find(|i| raw(&i["number"]) == n)
+                    .and_then(|i| match self.routing(i) {
+                        (Some(role), None) => Some(role),
+                        _ => None,
+                    })
             {
                 let _held = job
                     .lock()

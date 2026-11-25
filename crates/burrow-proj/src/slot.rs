@@ -409,7 +409,6 @@ pub fn take(
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
-    let run = usage::login::run_of(cfg, id);
     // This turn says it has its slot only under its job's lock ([`took_slot`]),
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
@@ -433,6 +432,10 @@ pub fn take(
     let mut shown: Option<Class> = None;
     loop {
         let paused = automation_paused(cfg, &job);
+        // Live role settings can move a waiting turn off a held engine before
+        // it ever takes a slot, so refresh its choice on each wait tick.
+        let _ = crate::engine::refresh_queued(cfg, &job, n);
+        let run = usage::login::run_of(cfg, id);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too. A sandbox's isn't
         // by this machine's expired login (usage/login.rs).
