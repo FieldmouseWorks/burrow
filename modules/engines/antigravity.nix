@@ -386,9 +386,9 @@ in
     };
 
     deadlineSeconds = mkOption {
-      type = types.ints.positive;
-      default = 1800;
-      description = "Outer hard wall-clock deadline in seconds enforced on the child process group.";
+      type = types.nullOr types.ints.positive;
+      default = null;
+      description = "Optional outer hard wall-clock deadline in seconds enforced on the child process group; null leaves turn deadlines to the caller (such as proj's timeout).";
     };
 
     meters = mkOption {

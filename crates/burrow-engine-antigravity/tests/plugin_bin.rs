@@ -679,3 +679,88 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
         "{denied_out:?}"
     );
 }
+
+#[test]
+fn streams_events_and_preserves_session_when_invocation_times_out() {
+    let dir = TempDir::new().unwrap();
+    let init_line =
+        r#"{"event":"init","init":{"session_id":"ag-timeout-sess-1","model":"model-a"}}"#;
+    let bin = write_executable(
+        dir.path(),
+        "fake-antigravity",
+        &format!("#!/bin/sh\nprintf '%s\\n' '{init_line}'\nsleep 10\n"),
+    );
+    let cfg = Config {
+        binary: bin,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        deadline_secs: Some(1),
+        activity_secs: 60,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("cfg.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let req = Request {
+        contract: CONTRACT.to_owned(),
+        execution: Some(Execution {
+            choice: None,
+            context: Context::Fresh,
+        }),
+        negotiated: Some(Negotiated {
+            by: Identity {
+                engine: ENGINE.to_owned(),
+                session: None,
+            },
+            offers: cfg.offers(),
+        }),
+        task: Task::Job {
+            repo: "owner/demo".to_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "do the task".to_owned(),
+            model: None,
+            effort: None,
+        },
+    };
+    let mut command = Command::new(burrow_test::program!("burrow-engine-antigravity"));
+    command
+        .arg(&cfg_path)
+        .env("PROJ_STREAM_EVENTS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&req).unwrap())
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "stream" && e["line"] == init_line),
+        "expected streamed init line in stderr: {stderr}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "session" && e["session_id"] == "ag-timeout-sess-1"),
+        "expected session event in stderr: {stderr}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "error" && e["session"] == "ag-timeout-sess-1"),
+        "expected session preserved on error diagnostic: {stderr}"
+    );
+}

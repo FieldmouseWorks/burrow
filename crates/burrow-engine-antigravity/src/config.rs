@@ -220,8 +220,9 @@ pub struct Config {
     pub json_schema: Option<String>,
     /// Optional `--print-timeout` (seconds) passed to `antigravity`.
     pub print_timeout_secs: Option<u64>,
-    /// Outer wall-clock deadline (seconds) enforced on the child process group.
-    pub deadline_secs: u64,
+    /// Optional outer wall-clock deadline (seconds) enforced on the child process group.
+    #[serde(default)]
+    pub deadline_secs: Option<u64>,
     /// Maximum stdout/stderr bytes captured per stream.
     pub max_output_bytes: usize,
     /// Whether `describe` declares the `network` capability.
@@ -259,7 +260,7 @@ impl Default for Config {
             add_dirs: Vec::new(),
             json_schema: None,
             print_timeout_secs: None,
-            deadline_secs: DEFAULT_DEADLINE_SECS,
+            deadline_secs: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             network: true,
             devices: Vec::new(),
@@ -333,8 +334,8 @@ impl Config {
                 "host_mode cannot be combined with dangerously_skip_permissions".to_owned(),
             );
         }
-        if self.deadline_secs == 0 {
-            return Err("deadline_secs must be positive".to_owned());
+        if self.deadline_secs == Some(0) {
+            return Err("deadline_secs must be positive when set".to_owned());
         }
         if self.activity_secs == 0 {
             return Err("activity_secs must be positive".to_owned());

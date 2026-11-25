@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use burrow_engine_antigravity::{Config, plugin};
+use burrow_engine_antigravity::{Config, normalize, plugin};
 use conary_core::plugin::{Request, Task};
 
 /// Says `activity` on stderr every `every` until dropped: the CLI's output
@@ -80,9 +80,31 @@ fn main() -> ExitCode {
         std::env::var("PROJ_APPEND_SYSTEM_PROMPT").ok().as_deref(),
     );
     let streams = std::env::var("PROJ_STREAM_EVENTS").is_ok_and(|v| v == "1");
-    let activity = (streams && matches!(request.task, Task::Job { .. }))
-        .then(|| Activity::start(Duration::from_secs(config.activity_secs)));
-    let result = plugin::handle_request(&config, &request, &|| false);
+    let stream_job = streams && matches!(request.task, Task::Job { .. });
+    let activity = stream_job.then(|| Activity::start(Duration::from_secs(config.activity_secs)));
+    let mut emitted_session = false;
+    let mut on_line = |line: &str| {
+        if !stream_job {
+            return;
+        }
+        if let Ok(event) = serde_json::to_string(&serde_json::json!({
+            "event": "stream",
+            "line": line,
+        })) {
+            eprintln!("{event}");
+        }
+        if !emitted_session
+            && let Some(sid) = normalize::extract_session_from_line(line)
+            && let Ok(event) = serde_json::to_string(&serde_json::json!({
+                "event": "session",
+                "session_id": sid,
+            }))
+        {
+            emitted_session = true;
+            eprintln!("{event}");
+        }
+    };
+    let result = plugin::handle_request_streaming(&config, &request, &|| false, &mut on_line);
     drop(activity);
     if let Some(diag) = &result.diagnostic
         && let Ok(line) = serde_json::to_string(diag)

@@ -553,6 +553,47 @@ fn extract_session(v: &Value) -> Option<String> {
     None
 }
 
+/// Extract a session/conversation ID from one raw JSON/NDJSON stdout line.
+pub fn extract_session_from_line(line: &str) -> Option<String> {
+    let record: Value = serde_json::from_str(line.trim()).ok()?;
+    let (_, payload) = unwrap_event(&record);
+    extract_session(&record).or_else(|| extract_session(payload))
+}
+
+/// Extract any session ID and usage already emitted on partial `stdout` when a
+/// turn is stopped or exceeds its deadline.
+pub fn partial_turn_output(stdout: &[u8], error: RunError) -> TurnOutput {
+    let mut session: Option<String> = None;
+    let mut usage = Usage::default();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let (_, payload) = unwrap_event(&record);
+        if session.is_none() {
+            session = extract_session(&record).or_else(|| extract_session(payload));
+        }
+        if let Some(u) = extract_usage(&record) {
+            usage.merge(u);
+        }
+        if !std::ptr::eq(payload, &record)
+            && let Some(u) = extract_usage(payload)
+        {
+            usage.merge(u);
+        }
+    }
+    TurnOutput {
+        session,
+        usage: (!usage.is_empty()).then_some(usage),
+        error: Some(error),
+        ..TurnOutput::default()
+    }
+}
+
 fn extract_structured_output(v: &Value) -> Option<Value> {
     for key in ["structured_output", "structuredOutput"] {
         if let Some(val) = v.get(key)
