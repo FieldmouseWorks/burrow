@@ -78,6 +78,8 @@ let
     };
     appendSystemPrompt = anthropicCfg.plugin.appendSystemPrompt;
   };
+  antigravityCfg = config.burrow.engines.antigravity or { enable = false; };
+  antigravityHostEnabled = (antigravityCfg.enable or false) && (antigravityCfg.host.enable or false);
   # Sandbox-only engine plugins (wired from burrow.agents.engines.<name>.plugin,
   # whose contract says they run only inside that engine's sandbox). Listed in
   # `plugins` so a `--vm` turn can run them inside its sandbox over `agent sh`,
@@ -85,17 +87,37 @@ let
   # host turns refuse them without running them and `--vm` turns enforce the
   # same `burrow-grants` capability boundary before launch.
   sandboxOnlyEngines = lib.filterAttrs (
-    name: e: (e.plugin or null) != null && name != "claude" && name != "claude-api"
+    name: e:
+    (e.plugin or null) != null
+    && name != "claude"
+    && name != "claude-api"
+    && !(antigravityHostEnabled && name == "antigravity")
   ) (config.burrow.agents.engines or { });
   sandboxOnlyPlugins = lib.mapAttrs (_: e: lib.getExe e.plugin) sandboxOnlyEngines;
   sandboxPluginCapabilities = lib.mapAttrs (_: e: e.capabilities or [ ]) sandboxOnlyEngines;
+  # Dual-mode engines (host plugin wired in `plugins`, strict sandbox plugin
+  # wired in `burrow.agents.engines`): `--vm` turns run the strict sandbox
+  # plugin inside the VM and enforce its owner-approved capabilities.
+  vmPlugins = lib.optionalAttrs (
+    antigravityHostEnabled && ((config.burrow.agents.engines.antigravity.plugin or null) != null)
+  ) {
+    antigravity = {
+      plugin = lib.getExe config.burrow.agents.engines.antigravity.plugin;
+      capabilities = config.burrow.agents.engines.antigravity.capabilities or [ ];
+    };
+  };
   # The engines wired here, which burrow.proj.plugins only adds to: one of
   # its names replacing them (claude-api's credit and key, an engine's
   # sandbox build) is refused by an assertion below.
-  wiredPlugins = sandboxOnlyPlugins // {
-    claude = lib.getExe hostClaudePlugin;
-    "claude-api" = lib.getExe hostClaudeApiPlugin;
-  };
+  wiredPlugins =
+    sandboxOnlyPlugins
+    // {
+      claude = lib.getExe hostClaudePlugin;
+      "claude-api" = lib.getExe hostClaudeApiPlugin;
+    }
+    // lib.optionalAttrs antigravityHostEnabled {
+      antigravity = lib.getExe antigravityCfg.hostPluginPackage;
+    };
   replacedPlugins = lib.attrNames (builtins.intersectAttrs wiredPlugins cfg.plugins);
   # Extra plugins in `burrow.proj.plugins` run on the host; prove in a pure,
   # networkless Nix build sandbox that each declares a valid `describe` reply
@@ -164,6 +186,7 @@ let
     claudeApiKeyFile = apiKeyFile;
     plugins = hostPlugins;
     sandboxPlugins = sandboxPluginCapabilities;
+    inherit vmPlugins;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.

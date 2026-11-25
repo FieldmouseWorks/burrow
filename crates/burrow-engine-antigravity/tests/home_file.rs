@@ -334,3 +334,54 @@ exit 1
         "{eof_turn:?}"
     );
 }
+
+#[test]
+fn host_mode_isolates_home_for_env_and_file_credential_modes() {
+    let dir = TempDir::new().unwrap();
+    let seen_home_file = dir.path().join("seen-home");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-print-home",
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s' \"$HOME\" > \"{}\"\nprintf '{{\"type\":\"result\",\"result\":\"ok\"}}\\n'\n",
+            seen_home_file.display()
+        ),
+    );
+    let real_home = std::env::var_os("HOME").map(PathBuf::from);
+    for mode in [CredentialMode::Env, CredentialMode::File] {
+        let mut cfg = base_config(fixture.clone());
+        cfg.host_mode = true;
+        cfg.credential_mode = mode;
+        cfg.credential_file = None;
+        cfg.credential_env = None;
+        let inv = Invocation::from_config(
+            &cfg,
+            dir.path().to_path_buf(),
+            "check home".to_owned(),
+            Some("test-model".to_owned()),
+            Some(Effort::Low),
+            None,
+        );
+        let turn = run_invocation(&cfg, &inv, &|| false);
+        assert_eq!(turn.error, None, "mode={mode:?} turn={turn:?}");
+        let seen_home = PathBuf::from(fs::read_to_string(&seen_home_file).unwrap());
+        assert_ne!(
+            Some(seen_home.clone()),
+            real_home,
+            "host mode must isolate HOME for credential mode {mode:?}"
+        );
+        assert!(
+            seen_home
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("antigravity-host-home-")),
+            "unexpected host HOME: {}",
+            seen_home.display()
+        );
+        assert!(
+            !seen_home.exists(),
+            "isolated host HOME should be cleaned up after the turn: {}",
+            seen_home.display()
+        );
+    }
+}

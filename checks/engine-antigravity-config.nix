@@ -58,6 +58,35 @@ let
     ];
   };
   homeFileValid = builtins.all (a: a.assertion) withHomeFile.config.assertions;
+  withDedicatedHost = withHomeFile.extendModules {
+    modules = [
+      {
+        burrow.engines.antigravity.host = {
+          enable = true;
+          credentialFile = "/run/secrets/antigravity-host-credential";
+        };
+      }
+    ];
+  };
+  dedicatedHostValid = builtins.all (a: a.assertion) withDedicatedHost.config.assertions;
+  hostMissingCredRefused =
+    pkgs.lib.any
+      (a: !a.assertion && pkgs.lib.hasPrefix "burrow.engines.antigravity.host.credentialFile" a.message)
+      (withHomeFile.extendModules { modules = [ { burrow.engines.antigravity.host.enable = true; } ]; })
+      .config.assertions;
+  hostSharedCredRefused =
+    pkgs.lib.any
+      (a: !a.assertion && pkgs.lib.hasPrefix "burrow.engines.antigravity.host.credentialFile" a.message)
+      (withHomeFile.extendModules {
+        modules = [
+          {
+            burrow.engines.antigravity.host = {
+              enable = true;
+              credentialFile = "/run/secrets/antigravity-agent-credential";
+            };
+          }
+        ];
+      }).config.assertions;
   badHomePaths = [
     ""
     "/etc/passwd"
@@ -88,6 +117,7 @@ let
   agent = machine.config.burrow.agents.package;
   plugin = machine.config.burrow.engines.antigravity.pluginPackage;
   homeFilePlugin = withHomeFile.config.burrow.engines.antigravity.pluginPackage;
+  hostPlugin = withDedicatedHost.config.burrow.engines.antigravity.hostPluginPackage;
   call = "${
     self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-example-plugin
   }/bin/burrow-example-plugin-call";
@@ -110,8 +140,14 @@ pkgs.runCommand "engine-antigravity-config-check" { nativeBuildInputs = [ pkgs.j
   homeFileCfg=${homeFilePlugin.config}
   jq -e '.credential_mode == "home-file" and .credential_home_path == ".config/antigravity/oauth-token"' "$homeFileCfg" >/dev/null
 
+  hostCfg=${hostPlugin.config}
+  jq -e '.host_mode == true and .dangerously_skip_permissions == false and .credential_file == "/run/secrets/antigravity-host-credential"' "$hostCfg" >/dev/null
+
   [ ${pkgs.lib.boolToString mcpRefused} = true ] || { echo "mcp in capabilities was not refused"; exit 1; }
   [ ${pkgs.lib.boolToString homeFileValid} = true ] || { echo "valid home-file config failed assertions"; exit 1; }
+  [ ${pkgs.lib.boolToString dedicatedHostValid} = true ] || { echo "dedicated host credential config failed assertions"; exit 1; }
+  [ ${pkgs.lib.boolToString hostMissingCredRefused} = true ] || { echo "host mode without host.credentialFile was not refused"; exit 1; }
+  [ ${pkgs.lib.boolToString hostSharedCredRefused} = true ] || { echo "host mode sharing VM credentialFile was not refused"; exit 1; }
   [ ${pkgs.lib.boolToString badHomePathsRefused} = true ] || { echo "invalid credentialHomePath was not refused"; exit 1; }
 
   checked=$(${call} check ${pkgs.lib.getExe plugin})

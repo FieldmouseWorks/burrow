@@ -200,6 +200,10 @@ pub struct Config {
     pub settings_file: Option<PathBuf>,
     /// Optional `--mode` (`accept-edits`, `auto`, `plan`).
     pub mode: Option<Mode>,
+    /// Run as a host-mode `proj` plugin (`Sandbox::None`) rather than inside a
+    /// microVM sandbox (`Sandbox::Needs`). Refuses `dangerously_skip_permissions`
+    /// and isolates `$HOME` per turn so desktop/T3 userdata is never touched.
+    pub host_mode: bool,
     /// Pass `--dangerously-skip-permissions` (intended only inside an isolated microVM).
     pub dangerously_skip_permissions: bool,
     /// Pass `--sandbox` to `antigravity`.
@@ -246,6 +250,7 @@ impl Default for Config {
             credential_home_path: PathBuf::from(DEFAULT_CREDENTIAL_HOME_PATH),
             settings_file: None,
             mode: None,
+            host_mode: false,
             dangerously_skip_permissions: false,
             sandbox: false,
             disable_slash_commands: true,
@@ -323,6 +328,11 @@ impl Config {
         if self.binary.as_os_str().is_empty() {
             return Err("antigravity binary path must not be empty".to_owned());
         }
+        if self.host_mode && self.dangerously_skip_permissions {
+            return Err(
+                "host_mode cannot be combined with dangerously_skip_permissions".to_owned(),
+            );
+        }
         if self.deadline_secs == 0 {
             return Err("deadline_secs must be positive".to_owned());
         }
@@ -391,7 +401,11 @@ impl Config {
         Offers {
             models,
             capabilities: Capabilities {
-                sandbox: Sandbox::Needs,
+                sandbox: if self.host_mode {
+                    Sandbox::None
+                } else {
+                    Sandbox::Needs
+                },
                 network: self.network,
                 devices: self.devices.clone(),
                 // Nothing here hands the CLI the servers a sandbox approves
