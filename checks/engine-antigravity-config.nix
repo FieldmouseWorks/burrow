@@ -143,7 +143,16 @@ pkgs.runCommand "engine-antigravity-config-check" { nativeBuildInputs = [ pkgs.j
   hostCfg=${hostPlugin.config}
   jq -e '.host_mode == true and .dangerously_skip_permissions == false and .mode == "accept-edits" and .credential_file == "/run/secrets/antigravity-host-credential" and (.settings_file | type == "string")' "$hostCfg" >/dev/null
   hostSettings=$(jq -r '.settings_file' "$hostCfg")
-  jq -e '.toolPermission == "always-proceed" and (.permissions.deny | index("command(zfs destroy)") != null) and (.permissions.deny | index("command(sudo zfs destroy)") != null)' "$hostSettings" >/dev/null
+  jq -e '
+    .toolPermission == "always-proceed"
+    and (.permissions.deny | index("command(zfs destroy)") != null)
+    and (.permissions.deny | index("command(sudo zfs destroy)") != null)
+    and (.permissions.deny | index("command(regex:mkfs.*)") != null)
+    and (.permissions.deny | index("command(regex:sudo mkfs.*)") != null)
+    and (.permissions.deny | index("command(regex:fwupdmgr update.*)") != null)
+    and (.permissions.deny | index("command(regex:git push --force origin main.*)") != null)
+    and (.permissions.deny | index("command(mkfs)") == null)
+  ' "$hostSettings" >/dev/null
 
   [ ${pkgs.lib.boolToString mcpRefused} = true ] || { echo "mcp in capabilities was not refused"; exit 1; }
   [ ${pkgs.lib.boolToString homeFileValid} = true ] || { echo "valid home-file config failed assertions"; exit 1; }

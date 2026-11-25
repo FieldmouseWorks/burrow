@@ -75,7 +75,32 @@ let
   );
 
   r2Patterns = import ./anthropic/r2.nix;
-  r2Prefix = pat: lib.removeSuffix "*" (lib.removeSuffix " *" pat);
+  # Convert each Claude Bash-pattern entry in r2.nix into Antigravity CLI
+  # `command(...)` deny rules (plus `sudo` variants):
+  # - Trailing ` *` is a whole-token prefix (e.g. `zfs destroy *` -> `command(zfs destroy)`).
+  # - Any remaining `*` wildcard inside a token (e.g. `mkfs*`, `fwupdmgr update*`,
+  #   `git push --force origin main*`) uses Antigravity's `regex:` token-regex
+  #   syntax (`command(regex:mkfs.*)`), because plain `command(...)` matches
+  #   command prefixes word-by-word literally.
+  r2ToAntigravityRules =
+    pat:
+    let
+      trimmed = lib.removeSuffix " *" pat;
+      toRegex = s: lib.concatMapStringsSep ".*" lib.escapeRegex (lib.splitString "*" s);
+    in
+    if lib.hasInfix "*" trimmed then
+      let
+        rx = toRegex trimmed;
+      in
+      [
+        "command(regex:${rx})"
+        "command(regex:sudo ${rx})"
+      ]
+    else
+      [
+        "command(${trimmed})"
+        "command(sudo ${trimmed})"
+      ];
   # Default headless host settings: allow workspace edits and commands without
   # interactive prompts while denying every R2 one-way command from r2.nix
   # (one fact, one home shared with the Anthropic host settings).
@@ -83,16 +108,7 @@ let
     builtins.toJSON {
       toolPermission = "always-proceed";
       permissions = {
-        deny = lib.concatMap (
-          pat:
-          let
-            prefix = r2Prefix pat;
-          in
-          [
-            "command(${prefix})"
-            "command(sudo ${prefix})"
-          ]
-        ) r2Patterns;
+        deny = lib.concatMap r2ToAntigravityRules r2Patterns;
       };
     }
   );
