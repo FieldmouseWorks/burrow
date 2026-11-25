@@ -23,9 +23,13 @@
 //! so a job still finishing on an older head, a push since, a PR retargeted
 //! since, someone else's comment or another job quoting a marker can't
 //! clear a PR. The autoland steward merges an ok one once its CI is green
-//! (the same rule) in the repos it covers (steward.rs). The owner gets one
-//! notice listing the held ones, as waiting on a decision, and the ok ones
-//! no steward will merge.
+//! (the same rule) in the repos it lands, and conaryd in its own
+//! (steward.rs). In a repo burrow-landing's record gives conaryd, the
+//! markers are Conary's v2 issuances instead (seal/v2.rs), the only form its
+//! flow reads: sealed on the PR's revision (its description too) and a
+//! generation, and the sweep reads them back as the flow does. The owner
+//! gets one notice listing the held ones, as waiting on a decision, and the
+//! ok ones in repos nothing lands, each repo once.
 //!
 //! Security fixes (Renovate's `security` label) merge themselves even when
 //! they're majors: none is asked for a verdict or waits for one. A red one
@@ -43,6 +47,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use conary_github::flow::Revision;
+use major::{Major, V2};
 use rustix::fs::{FlockOperation, flock};
 use serde_json::Value;
 
@@ -50,6 +56,7 @@ use crate::{complain, say, trimmed};
 
 mod config;
 mod job;
+mod major;
 mod pr;
 mod request;
 mod scan;
@@ -170,6 +177,17 @@ impl Config {
     /// would fix it several times over, side by side.
     fn repo(&self, project: &str, repo: &str, who: &Who, steward: &Steward, pass: &mut Pass) {
         let info = steward.repo(repo, now());
+        // Who its majors' verdicts are sealed for: conaryd, when the record
+        // gives it the repo (or is handing it over to it). A record it
+        // can't read seals nothing, in either form.
+        let conaryd = match self.conaryd(repo) {
+            Ok(conaryd) => conaryd,
+            Err(Broke(why)) => {
+                complain(&format!("{}: {why}", self.name));
+                pass.failed = true;
+                return;
+            }
+        };
         let prs = match self.list(repo) {
             Ok(prs) => prs,
             Err(Broke(why)) => {
@@ -183,6 +201,7 @@ impl Config {
             repo,
             who,
             info: &info,
+            conaryd,
             labelled: false,
             next: None,
         };
@@ -236,19 +255,6 @@ impl Config {
                 job::put_back(&self.name, &files, before);
             }
         }
-    }
-
-    /// The marker that seals verdict `v` on major `m`, in `repo`.
-    fn seal(&self, repo: &str, m: &Major, v: &str) -> Result<String, Broke> {
-        seal::Verdict {
-            repo,
-            n: &m.n,
-            verdict: v,
-            head: &m.sha,
-            base: &m.base,
-        }
-        .marker(&self.state)
-        .map_err(|why| Broke(format!("{repo}: sealing #{} {v}: {why}", m.n)))
     }
 
     /// The majors waiting on the owner, in one notice: the held ones apart
@@ -437,13 +443,6 @@ struct Handed {
     want: String,
 }
 
-/// A major as it's handed over: its number, head and base.
-struct Major {
-    n: String,
-    sha: String,
-    base: String,
-}
-
 /// Something it needed broke.
 struct Broke(String);
 
@@ -453,6 +452,8 @@ struct Sweep<'a> {
     repo: &'a str,
     who: &'a Who,
     info: &'a steward::Repo,
+    /// Whether its majors' verdicts are sealed for conaryd (v2).
+    conaryd: bool,
     /// Whether the labels a job puts on a major are there yet.
     labelled: bool,
     /// Earliest refresh deadline in this repo.
@@ -489,8 +490,18 @@ impl Sweep<'_> {
         // A major's key also says the job was handed sealed verdicts on
         // this base, so one retargeted since (or handed over before its
         // task carried them) is handed over once more.
+        // Where conaryd lands, the verdicts seal the PR's revision as its
+        // flow reads it, the description included (Renovate rewrites it):
+        // a key that names it, and its form, hands it over again once that
+        // changes, or the repo changes hands.
+        let revision = (major && self.conaryd).then(|| {
+            let raw = |k| pr.0.get(k).and_then(Value::as_str).unwrap_or("");
+            Revision::for_parts(sha.clone(), base.clone(), raw("title"), raw("body"))
+        });
         let mut want = sha.clone();
-        if major {
+        if let Some(r) = &revision {
+            want = format!("{sha} v2 verdicts sealed for {base} on {}", r.description);
+        } else if major {
             want = format!("{sha} verdicts sealed for {base}");
         }
         if security {
@@ -508,16 +519,24 @@ impl Sweep<'_> {
             want.push_str(&format!(" after CI {finished}"));
         }
         // The newest one with its seal, of our own login's for this head on
-        // this base.
+        // this base; where conaryd lands, the one its flow would read, of
+        // the form sealed for it alone.
         let mut verdict = String::new();
+        let mut posted = 0;
         if major && !who.me.is_empty() {
             let said = cfg.said(
                 &cfg.tools.gh,
                 &["pr", "view", &n, "-R", repo, "--json", "comments"],
             );
-            for (v, mac) in pr::verdicts(&said, &who.me, &sha, &base) {
-                if self.sealed(&n, &v, &sha, &base, &mac) {
-                    verdict = v;
+            if let Some(r) = &revision {
+                let read = self.issued(&n, r, &pr::issuances(&said, &who.me));
+                verdict = read.verdict.unwrap_or_default();
+                posted = read.highest;
+            } else {
+                for (v, mac) in pr::verdicts(&said, &who.me, &sha, &base) {
+                    if self.sealed(&n, &v, &sha, &base, &mac) {
+                        verdict = v;
+                    }
                 }
             }
         }
@@ -770,28 +789,15 @@ impl Sweep<'_> {
         };
         Ok(Some(Handed {
             line: format!("- #{n} \"{title}\" (branch {branch}): {why}{request}\n"),
-            major: major.then_some(Major { n, sha, base }),
+            major: major.then(|| Major {
+                n,
+                sha,
+                base,
+                v2: revision.map(|revision| V2 { revision, posted }),
+            }),
             key,
             want,
         }))
-    }
-
-    /// Whether `mac` seals verdict `v` on PR `n`'s `sha` for `base`.
-    fn sealed(&self, n: &str, v: &str, sha: &str, base: &str, mac: &str) -> bool {
-        let verdict = seal::Verdict {
-            repo: self.repo,
-            n,
-            verdict: v,
-            head: sha,
-            base,
-        };
-        verdict.sealed(&self.cfg.state, mac).unwrap_or_else(|why| {
-            complain(&format!(
-                "{}: {}: checking #{n}'s seal: {why}",
-                self.cfg.name, self.repo
-            ));
-            false
-        })
     }
 
     /// When a lock file refresh lock-age refused for age only can go

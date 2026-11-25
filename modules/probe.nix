@@ -105,6 +105,7 @@ in
           "renovate@*.service"
           "renovate-sweep.service"
           "renovate-sweep@*.service"
+          "renovate-sweep-key.service"
           "proj-*.service"
           # The rest of burrow's own (checks/probe-journals.nix holds every
           # unit its modules define to this list), but gh-token's.
@@ -124,7 +125,7 @@ in
           "nix-daemon.service"
           "systemd-oomd.service"
         ];
-        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "renovate.service" "renovate@*.service" "renovate-sweep.service" "renovate-sweep@*.service" "proj-*.service" "house-sync.service" "house-sync@*.service" "cargo-follow.service" "cargo-follow@*.service" "conaryd.service" "advisory-watch.service" "firmware-*.service" "agent-*.service" "agents-*.service" "prune-pre-snapshots.service" "zfs-delegate-*.service" "rust-cache-*.service" "hardware-watchdog-link.service" "nix-daemon.service" "systemd-oomd.service" ]'';
+        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "renovate.service" "renovate@*.service" "renovate-sweep.service" "renovate-sweep@*.service" "renovate-sweep-key.service" "proj-*.service" "house-sync.service" "house-sync@*.service" "cargo-follow.service" "cargo-follow@*.service" "conaryd.service" "advisory-watch.service" "firmware-*.service" "agent-*.service" "agents-*.service" "prune-pre-snapshots.service" "zfs-delegate-*.service" "rust-cache-*.service" "hardware-watchdog-link.service" "nix-daemon.service" "systemd-oomd.service" ]'';
         description = ''
           The system units whose journals a probe may read (globs: `*`, `?`,
           `[...]`). Keep off any whose log can hold a secret: the scrubber only

@@ -16,6 +16,7 @@
 //! the lock file refreshes, and passes.rs what a pass tells the owner and
 //! how it fails.
 
+mod conary;
 mod handing;
 mod passes;
 mod refreshes;
@@ -175,6 +176,8 @@ struct Machine {
     renovate: Option<&'static str>,
     /// The steward's repos.json, once there's one.
     steward: Option<PathBuf>,
+    /// burrow-landing's record, once there's one.
+    landing: Option<PathBuf>,
 }
 
 /// One sweep: what it exited with and said, the jobs it started and the
@@ -263,6 +266,7 @@ impl Machine {
             app: None,
             renovate: None,
             steward: None,
+            landing: None,
         };
         m.project("r", "https://github.com/sam/r.git");
         fs::create_dir(m.path("state")).unwrap();
@@ -358,7 +362,7 @@ impl Machine {
         let app = self
             .app
             .map(|(name, bot)| json!({"name": name, "bot": bot}));
-        let config = json!({
+        let mut config = json!({
             "name": "renovate-sweep", "state": self.path("state"), "projects": self.path("projects"),
             "owner": "Sam", "settled": "review-settled", "steward": self.steward, "app": app,
             "renovate": self.renovate,
@@ -366,6 +370,10 @@ impl Machine {
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "lockWait": b.join("lock-wait")},
         });
+        // burrow-landing's record, only where a test gives one.
+        if let Some(landing) = &self.landing {
+            config["landing"] = json!(landing);
+        }
         let path = self.path("config.json");
         fs::write(&path, config.to_string()).unwrap();
         path

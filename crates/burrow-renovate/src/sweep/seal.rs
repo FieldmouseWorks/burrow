@@ -4,7 +4,9 @@
 //! marker would pass for the verdict. The MAC is Conary's `SealKey::seal`,
 //! the one the autoland steward (modules/autoland/seal.py) and conaryd check
 //! a major's verdict with, so the marker is the v1 one they read:
-//! `<!-- major-verdict: ok|held SHA on BASE MAC -->`.
+//! `<!-- major-verdict: ok|held SHA on BASE MAC -->`. In a repo the landing
+//! record gives conaryd, which reads only Conary's v2 issuance, the same
+//! key seals that instead (v2.rs).
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -105,6 +107,14 @@ impl Verdict<'_> {
     }
 }
 
+/// The key in `state`, made if there's none or it isn't one.
+pub(crate) fn ensure(state: &Path) -> Result<(), String> {
+    let path = state.join(KEY);
+    key(&path, true)
+        .map(drop)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The key at `path`; with `create`, a new one if it's missing or isn't one
 /// (else None). An empty or short key (a crash or a full disk as it was
 /// made) is one anyone could seal with, so a new one, whole or not at all:
@@ -163,6 +173,9 @@ fn key(path: &Path, create: bool) -> io::Result<Option<SealKey>> {
 fn parse(text: &[u8]) -> Option<SealKey> {
     SealKey::from_hex(std::str::from_utf8(text).ok()?.trim()).ok()
 }
+
+mod v2;
+pub(crate) use v2::{Issuance, Read};
 
 #[cfg(test)]
 mod tests;

@@ -24,6 +24,8 @@ tempfile.workspace = true
 
 [dev-dependencies]
 burrow-test = { path = "../burrow-test" }
+# Conary's flow, which reads the v2 verdicts the sweep seals (tests/sweep/conary.rs).
+conary-core.workspace = true
 
 [lints]
 workspace = true

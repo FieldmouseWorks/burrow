@@ -65,12 +65,13 @@ let
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
     settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
-      "job_login" "job_timeout" "judge_engines" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
+      "job_login" "job_timeout" "judge_engines" "major_key_file" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
       "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
-  # Every key a config has: all of Settings' but the seal keys,
+  # Every key a config has: all of Settings' but the seal keys (the
+  # example runs renovate-sweep, whose key the config names by its file),
   # renovate_run and default_priority, left to Conary's defaults. Conary's defaults name no
   # machine (Conary#381), so the engines a judge is owed for and the bots'
   # addresses are the steward's own.
@@ -144,20 +145,28 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
     and .settings.stall_after == {high: 1800, medium: 7200, low: 7200}
     and .settings.bot_emails == ["49699333+dependabot[bot]@users.noreply.github.com"]' \
     ${withApp.plain} >/dev/null || fail "plain's settings aren't the steward's: $(jq -c .settings ${withApp.plain})"
-  jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]", "sam-workers[bot]"]' ${withApp.plain} >/dev/null \
-    || fail "with a machinery App, not the steward's authors and bots: $(jq -c .trusted_authors ${withApp.plain})"
-  jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]"] and .settings.people == ["sam"]' ${noApp.plain} >/dev/null \
-    || fail "without one, not the steward's authors and bots: $(jq -c .trusted_authors ${noApp.plain})"
-  # Conary's own types: the configs rendered, and the class policy.
-  ${flowFiles} flow ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
+  jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]", "sam-workers[bot]"]
+    and .settings.verdict_authors == ["sams-steward[bot]", "sam-workers[bot]"]' ${withApp.plain} >/dev/null \
+    || fail "with a machinery App, not the steward's authors, bots and verdict authors: $(jq -c '{trusted_authors, verdict_authors: .settings.verdict_authors}' ${withApp.plain})"
+  jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]"] and .settings.people == ["sam"]
+    and .settings.verdict_authors == ["sams-steward[bot]", "sam"]' ${noApp.plain} >/dev/null \
+    || fail "without one, not the steward's authors, bots and verdict authors: $(jq -c '{trusted_authors, verdict_authors: .settings.verdict_authors}' ${noApp.plain})"
+  # Conary's own types: the configs rendered, and the class policy. The
+  # loader reads each key a config names by its file (renovate-sweep's, as
+  # the example runs it), which only the machine has: a stand-in here.
+  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
+    jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal"' $f >/dev/null \
+      || fail "$f doesn't name renovate-sweep's key by its file"
+  done
+  ${flowFiles} flow --stand-in-keys ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
   ${flowFiles} policy ${policy} || fail "Conary's Policy refuses the machine's class policy"
   # And they refuse what the machine's cn would: a key Conary doesn't know,
   # a value of the wrong type, a policy with a key it doesn't take.
   jq '.settings.bogus = 1' ${withApp.homelab} > key.json
   jq '.settings.rounds = "two"' ${withApp.homelab} > type.json
   jq '. + {bogus: []}' ${policy} > policy.json
-  ! ${flowFiles} flow key.json || fail "a flow config with a key Conary doesn't know was taken"
-  ! ${flowFiles} flow type.json || fail "a flow config with a value of the wrong type was taken"
+  ! ${flowFiles} flow --stand-in-keys key.json || fail "a flow config with a key Conary doesn't know was taken"
+  ! ${flowFiles} flow --stand-in-keys type.json || fail "a flow config with a value of the wrong type was taken"
   ! ${flowFiles} policy policy.json || fail "a policy with a key Conary doesn't know was taken"
   touch $out
 ''

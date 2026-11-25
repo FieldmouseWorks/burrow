@@ -290,6 +290,10 @@ let
   lockWait = pkgs.writeShellScriptBin "lock-wait" ''
     exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
   '';
+  # Who lands each repo (autoland/landing.nix), read at each run of
+  # renovate-run and renovate-sweep. None without autoland, where nothing
+  # hands landing over.
+  landingRecord = if autoland.enable or false then lib.attrByPath [ "burrow" "landing" "record" ] null config else null;
   # renovate-run (crates/burrow-renovate), with its config built in.
   renovateWake = "${cfg.renovate.dir}/wake.json";
   renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
@@ -304,10 +308,8 @@ let
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
     };
-    # Who lands each repo (autoland/landing.nix), read at each run: Renovate
-    # merges only where the steward does. None without autoland, where
-    # nothing hands landing over.
-    landing = if autoland.enable or false then lib.attrByPath [ "burrow" "landing" "record" ] null config else null;
+    # Renovate merges only where the steward lands.
+    landing = landingRecord;
     # A full run as the user leaves out the repos it may not merge in.
     inherit (renovateSettings) autodiscoverFilter;
     tools = {
@@ -333,6 +335,8 @@ let
     # The steward's list of its repos (who lands each, its proofs); none
     # without it.
     steward = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else null;
+    # A major's verdicts are sealed as conaryd reads them where it lands.
+    landing = landingRecord;
     # The App the jobs it starts act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };
@@ -937,7 +941,21 @@ in
           User = user;
           ExecStart = "${renovateSweep}/bin/renovate-sweep${lib.optionalString (name == "renovate-sweep@") " %I"}";
         };
-      });
+      }) // {
+        # The key it seals majors' verdicts with, made as its first seal
+        # would make it (or a new one, for one that isn't a key), so it's
+        # there for the flow's keys unit, which takes it as a credential
+        # (autoland/shadow.nix) and runs this each time it starts. Not
+        # RemainAfterExit: a key deleted since is made again.
+        renovate-sweep-key = {
+          description = "Make renovate-sweep's seal key, if it has none";
+          serviceConfig = {
+            Type = "oneshot";
+            User = user;
+            ExecStart = "${renovateSweep}/bin/renovate-sweep --key";
+          };
+        };
+      };
 
       systemd.tmpfiles.settings.burrow = {
         ${rcfg.dir}.d = { mode = "0755"; inherit user; group = account.group; };

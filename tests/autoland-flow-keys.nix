@@ -149,10 +149,10 @@ pkgs.testers.runNixOSTest {
         # The sealFile as the controller may read it here, to compare: it
         # can't open the root's own.
         machine.succeed("install -m 0400 -o conary-flow ${seal} /run/seal-copy")
-        machine.succeed("runuser -u conary-flow -- ${flowFiles} judge-key ${config} /run/seal-copy")
+        machine.succeed("runuser -u conary-flow -- ${flowFiles} key judge ${config} /run/seal-copy")
         # And refused against any other key.
         machine.succeed("printf '%064d' 0 > /run/seal-other && chown conary-flow /run/seal-other")
-        machine.fail("runuser -u conary-flow -- ${flowFiles} judge-key ${config} /run/seal-other")
+        machine.fail("runuser -u conary-flow -- ${flowFiles} key judge ${config} /run/seal-other")
         machine.succeed("rm /run/seal-copy /run/seal-other")
 
     with subtest("burrow.user reads neither the key nor its file"):

@@ -15,8 +15,7 @@ serde_json.workspace = true
 # kit's by Cargo.lock.
 conary-core.workspace = true
 conary-github.workspace = true
-
-[dev-dependencies]
+# Where `flow --stand-in-keys` puts its stand-in key and config.
 tempfile.workspace = true
 
 [lints]

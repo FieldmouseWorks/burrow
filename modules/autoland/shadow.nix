@@ -11,10 +11,12 @@
 # Each repo's flow config is the steward's own settings for it, in the
 # flow's terms (Conary's flow::Config), at OWNER/NAME.json lowercased, as
 # burrow-events names a pass's instance. The seal keys stay out of it:
-# they're secrets, and a config is everyone's to read. The judge's is named by
-# its file instead (`judge_key_file`, which Conary reads at each load):
-# autoland-flow-keys's copy of its credential, which only the flow's
-# controller can read. renovate-sweep's (`major_key`) isn't given to the flow yet.
+# they're secrets, and a config is everyone's to read. Each is named by its
+# file instead (`judge_key_file`, `major_key_file`, which Conary reads at
+# each load): autoland-flow-keys's copy of its credential, which only the
+# flow's controller can read. The judge's is its sealFile; renovate-sweep's
+# its verdict.key, which the sweep makes as it runs, so the keys unit has
+# the sweep make it first, and copies it again whenever it changes.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
 #
@@ -63,10 +65,19 @@ let
   # itself: a unit's credentials are mounted in its own namespace, which no
   # other unit sees. Every unit that runs the flow (the shadow's and
   # conaryd's) requires it, as its config names the key's file there. None
-  # with the judge off: no unit. They require the flow's state too,
-  # carried to the flow's user (burrow.ledger.flow.needs).
+  # with the judge and renovate-sweep off: no unit. They require the
+  # flow's state too, carried to the flow's user (burrow.ledger.flow.needs).
   keysUnit = "autoland-flow-keys";
-  seals = lib.optionalAttrs (enabled ? judge) { judge-seal = enabled.judge.sealFile; };
+  seals = lib.optionalAttrs (enabled ? judge) { judge-seal = enabled.judge.sealFile; }
+    # renovate-sweep's, where there's a flow to read it: a shadowed repo
+    # (conaryd lands only those).
+    // lib.optionalAttrs (settings.majorKey != null && cfg.shadow != [ ]) { major-seal = settings.majorKey; };
+  # What makes renovate-sweep's key, before the keys unit takes it
+  # (updates.nix), and what has it taken again once it changes: the sweep
+  # makes a new one for one that isn't a key, and its old one's copy would
+  # check no verdict the sweep hands out after.
+  sweepKey = "renovate-sweep-key.service";
+  keysAgain = "${keysUnit}-again";
   keyFile = name: "/run/${keysUnit}/${name}";
   needs = ledger.flow.needs ++ lib.optional (seals != { }) "${keysUnit}.service";
   # The judge's: what the configs name, and what its producer checks they
@@ -110,6 +121,7 @@ let
         // lib.mapAttrs (_: c: { Run = [ settings.bash "-c" c ]; }) rc.proofRuns
         // lib.mapAttrs (_: a: { Build = a; }) rc.proofBuilds;
       trusted = producers proofs;
+      people = lib.filter (a: !bot a) cfg.authors;
     in {
       # Whose PRs are the steward's authors': its people, and the bots
       # (their REST logins) whose PRs it lands too.
@@ -146,7 +158,12 @@ let
         # The flow's own account: review-settled, the conary/train status and
         # its answers are read only from it.
         flow_authors = [ stewardLogin ];
-        verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
+        # Whose sealed judge and major verdicts count: the steward's App and,
+        # where there's a machinery App, its bot (which renovate-sweep's jobs
+        # and the judge producer post as); without one, the machine user's own
+        # GitHub login, one of `people`, as the steward's `ours` reads it.
+        verdict_authors = [ stewardLogin ]
+          ++ (if settings.machineryLogin != null then [ settings.machineryLogin ] else people);
         # No job engine's commits go to a judge on their own: there are no
         # Codex jobs. One by none of the bots' addresses is someone editing a
         # dependency update, as the steward reads a PR's commits (touches.py,
@@ -161,7 +178,7 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
-        people = lib.filter (a: !bot a) cfg.authors;
+        inherit people;
         require_ci = rc.requireCi;
         inherit proofs;
         settle_delay = minutes rc.settleDelay;
@@ -183,6 +200,10 @@ let
         # The judge's seal key, its sealFile, as the flow's controller alone
         # reads it.
         judge_key_file = judgeKey;
+      } // lib.optionalAttrs (seals ? major-seal) {
+        # renovate-sweep's seal key, its verdict.key, likewise: the one the
+        # majors' verdicts it seals in a repo conaryd lands are v2 under.
+        major_key_file = keyFile "major-seal";
       };
     };
   # Loaded by the machine's own cn as it's built (`cn flow settings`), as
@@ -279,12 +300,33 @@ in
       pathConfig.PathChanged = [ rolesFile ];
     }; };
   };
-  # The unit holding the flow's seal keys, null with none.
-  keys = if seals == { } then null else {
-    name = keysUnit;
-    service = {
+  # The unit holding the flow's seal keys, none with none; with
+  # renovate-sweep's among them, the path unit that has it take them again
+  # when the sweep's changes, and the unit that path starts.
+  keys = let
+    again = seals ? major-seal;
+  in {
+    paths = lib.optionalAttrs again { ${keysAgain} = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = { PathChanged = [ seals.major-seal ]; Unit = "${keysAgain}.service"; };
+    }; };
+    services = lib.optionalAttrs again {
+      # A restart of a unit running ones that require it restarts them too,
+      # on the new key: conaryd's and the shadow's, which read it at each
+      # pass anyway. Nothing when it isn't up: its start takes the key.
+      ${keysAgain} = {
+        description = "autoland: the flow's seal keys, taken again for renovate-sweep's new one";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${config.systemd.package}/bin/systemctl try-restart ${keysUnit}.service";
+        };
+      };
+    } // lib.optionalAttrs (seals != { }) { ${keysUnit} = {
       description = "autoland: the flow's seal keys, for its controller alone";
       wantedBy = [ "multi-user.target" ];
+      # renovate-sweep's key made, if it has none, before it's taken.
+      requires = lib.optional again sweepKey;
+      after = lib.optional again sweepKey;
       # One of the flow's own units (burrow.ledger keeps the controller to
       # those).
       environment = ledger.flow.env;
@@ -299,7 +341,7 @@ in
         # %d: its credentials' directory.
         ExecStart = map (name: "${pkgs.coreutils}/bin/install -m 0400 %d/${name} ${keyFile name}") (lib.attrNames seals);
       };
-    };
+    }; };
   };
   # What a successful pass starts: the shadow, which skips a repo with no
   # config.
