@@ -285,6 +285,7 @@ pub fn is_test(path: &str) -> bool {
     name == "tests.rs"
         || name.ends_with("_tests.rs")
         || (name.starts_with("test_") && name.ends_with(".py"))
+        || name.ends_with("_test.py")
         || name.ends_with("_test.go")
         || name.ends_with(".test.ts")
         || name.ends_with(".test.tsx")

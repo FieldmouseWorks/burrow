@@ -145,6 +145,7 @@ fn test_files_are_exempt() {
         "crates/a/src/inbox/drain_tests.rs",
         "a_tests.rs",
         "tools/x/test_y.py",
+        "src/parser_test.py",
         "pkg/z_test.go",
         "web/src/app.test.ts",
         "web/src/app.spec.tsx",
@@ -161,7 +162,7 @@ fn test_files_are_exempt() {
             o.calls
         );
     }
-    for path in ["src/testing.rs", "src/contests.rs", "tools/load_test.py"] {
+    for path in ["src/testing.rs", "src/contests.rs", "tools/load_tester.py"] {
         fails(
             &case(vec![change("modified", path, 20, 5)])
                 .tree("4ead", path, &long)
