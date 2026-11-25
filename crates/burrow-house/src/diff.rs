@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::github::GitHub;
-use crate::rules::{self, Language};
+use crate::rules::{self, AllowList, Language};
 
 /// The most files GitHub lists in a comparison. Past that, what it leaves
 /// out could break any rule, so a PR that long needs every line.
@@ -57,9 +57,12 @@ impl Contents<'_> {
     /// How many lines a file has at a commit, a last one with no newline
     /// included.
     fn length(&mut self, path: &str, at: &str) -> Result<usize, String> {
-        let content = self.get(path, at)?;
-        let ends = content.last().is_some_and(|b| *b != b'\n');
-        Ok(content.iter().filter(|b| **b == b'\n').count() + usize::from(ends))
+        Ok(rules::line_count(self.get(path, at)?))
+    }
+
+    /// How many non-test code lines a file has at a commit.
+    fn code_length(&mut self, path: &str, at: &str) -> Result<usize, String> {
+        Ok(rules::code_lines(path, self.get(path, at)?))
     }
 
     /// An AGENTS.md's own lines at a commit.
@@ -89,9 +92,16 @@ fn text<'a>(file: &'a Value, key: &str) -> &'a str {
     file[key].as_str().unwrap_or_default()
 }
 
-/// Read the diff of `head` over `base`, where `lines` is how long a code
-/// file may grow.
-pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Diff, String> {
+/// Read the diff of `head` over `base`, where `lines` is how long a non-test
+/// code file may grow and the allow lists hold standing per-path waivers.
+pub fn read(
+    gh: &dyn GitHub,
+    base: &str,
+    head: &str,
+    lines: usize,
+    rust_first_allow: &AllowList,
+    file_size_allow: &AllowList,
+) -> Result<Diff, String> {
     let compare = gh.compare(base, head)?;
     // The diff's old side: the merge base, never the base branch's tip,
     // which may have moved on.
@@ -118,30 +128,50 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
         // A copy is a new file, like one added: it has no old side, and
         // every line of it is the PR's.
         let new_file = matches!(status, "added" | "copied");
-        let was = if new_file {
-            None
-        } else {
-            contents.language(previous, origin)?
-        };
-        let now = match status {
-            "removed" => None,
-            _ => contents.language(file, head)?,
-        };
-        match (was, now) {
-            (Some(Language::Python), Some(_)) | (Some(Language::Shell), Some(Language::Shell)) => {
-                diff.growth += added - removed;
+        let was_waived = !new_file && rust_first_allow.matches(previous);
+        let now_waived = status != "removed" && rust_first_allow.matches(file);
+        let mut head_language: Option<Option<Language>> = None;
+        if !now_waived {
+            let was = if new_file || was_waived {
+                None
+            } else {
+                contents.language(previous, origin)?
+            };
+            let now = match status {
+                "removed" => None,
+                _ => {
+                    let lang = contents.language(file, head)?;
+                    head_language = Some(lang);
+                    lang
+                }
+            };
+            match (was, now) {
+                (Some(Language::Python), Some(_))
+                | (Some(Language::Shell), Some(Language::Shell)) => {
+                    diff.growth += added - removed;
+                }
+                (_, Some(Language::Python)) => diff.new_python.push(file.to_owned()),
+                (None, Some(Language::Shell)) => {
+                    diff.growth += i64::try_from(contents.length(file, head)?).unwrap_or(i64::MAX);
+                }
+                (Some(_), None) => diff.growth -= removed,
+                (None, None) => {}
             }
-            (_, Some(Language::Python)) => diff.new_python.push(file.to_owned()),
-            (None, Some(Language::Shell)) => {
-                diff.growth += i64::try_from(contents.length(file, head)?).unwrap_or(i64::MAX);
-            }
-            (Some(_), None) => diff.growth -= removed,
-            (None, None) => {}
         }
-        if status != "removed" && (new_file || added > removed) && rules::is_code(file, now) {
-            let length = contents.length(file, head)?;
-            if length > lines {
-                diff.big.push((file.to_owned(), length));
+        if status != "removed"
+            && (new_file || added > removed)
+            && !rules::is_test(file)
+            && !file_size_allow.matches(file)
+        {
+            let now = match head_language {
+                Some(lang) => lang,
+                None => contents.language(file, head)?,
+            };
+            if rules::is_code(file, now) {
+                let length = contents.code_length(file, head)?;
+                if length > lines {
+                    diff.big.push((file.to_owned(), length));
+                }
             }
         }
         if status != "removed" && rules::is_guide(file) {

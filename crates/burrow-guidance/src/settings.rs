@@ -1,12 +1,16 @@
 //! The settings' facts, from burrow-settings' schema: an option's value and
 //! the file a live one is kept in are stated only in the generated reference.
 
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
+
 use burrow_settings::reference::PATH;
 use burrow_settings::schema::{Change, Kind, SETTINGS, Setting};
 use regex::{Regex, escape};
 use serde_json::Value;
 
-use crate::{Fact, Near};
+use crate::{Fact, Finding, Fix, Near, sentences};
 
 /// How close to its name a value has to be to be the option's: a few
 /// words, as in "(default 2)" or "defaults to false".
@@ -164,6 +168,49 @@ fn has_engine(kind: &Kind) -> bool {
         Kind::Maybe(kind) | Kind::List(kind) => has_engine(kind),
         _ => false,
     }
+}
+
+/// In the repo that owns both the house blocks and the settings reference
+/// (burrow), its own AGENTS.md tells agents to read pipeline options with
+/// `proj settings show`, never bare `settings show`. Checking it here holds
+/// AGENTS.md-only changes to it on the docs lane without rebuilding the Rust
+/// test suite.
+pub fn check_read_door(root: &Path) -> Result<Vec<Finding>, String> {
+    if !root.join("house").is_dir() || !root.join(PATH).is_file() {
+        return Ok(Vec::new());
+    }
+    let path = root.join("AGENTS.md");
+    let agents = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let mut found = Vec::new();
+    let mut has_proj_door = false;
+    for (line, sentence) in sentences(&agents) {
+        if sentence.contains("read them with `proj settings show`") {
+            has_proj_door = true;
+        }
+        if sentence.contains("read them with `settings show`") {
+            found.push(Finding {
+                file: "AGENTS.md".to_owned(),
+                line,
+                what: "names the wrong settings read door (`settings show`)".to_owned(),
+                owner: PATH.to_owned(),
+                fix: Fix::Door,
+            });
+        }
+    }
+    if !has_proj_door {
+        found.push(Finding {
+            file: "AGENTS.md".to_owned(),
+            line: 1,
+            what: "omits the settings read door (`proj settings show`)".to_owned(),
+            owner: PATH.to_owned(),
+            fix: Fix::Door,
+        });
+    }
+    Ok(found)
 }
 
 #[cfg(test)]

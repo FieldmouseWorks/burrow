@@ -446,12 +446,53 @@ fn no_answer() {
 #[test]
 fn forks() {
     for fork in [Fork::Yes, Fork::Gone] {
+        let mut c = case(new_tool()).body(REASON);
+        c.fork = fork;
+        passes(&c);
         let mut c = case(new_tool());
         c.fork = fork;
         fails(&c, "rust-first");
-        passes(&c.clone().body(REASON));
         let mut rust = case(vec![change("modified", "src/main.rs", 1, 1)]);
         rust.fork = fork;
         passes(&rust);
+    }
+}
+
+// Standing waivers in rust-first-allow exempt matching paths from new-Python
+// and growth checks, while non-waived paths (and files moved out of waived
+// paths) still fail.
+#[test]
+fn standing_waiver() {
+    let allow = "modules/autoland/** # steward stays Python until ported\nscripts/run?.sh\n";
+    passes(
+        &case(vec![
+            change("added", "modules/autoland/new_step.py", 120, 0),
+            change("modified", "modules/autoland/common.py", 80, 0),
+            change("added", "scripts/run1.sh", 90, 0),
+        ])
+        .rust_first_allow(allow),
+    );
+    // A non-waived path in the same PR still triggers rust-first.
+    fails(
+        &case(vec![
+            change("modified", "modules/autoland/common.py", 80, 0),
+            change("added", "tools/other.py", 10, 0),
+        ])
+        .rust_first_allow(allow),
+        "rust-first",
+    );
+    // Moving a Python file out of a waived tree into a non-waived path counts
+    // as new Python.
+    fails(
+        &case(vec![from(
+            change("renamed", "tools/moved.py", 1, 0),
+            "modules/autoland/old.py",
+        )])
+        .rust_first_allow(allow),
+        "rust-first",
+    );
+    // Invalid allow patterns are refused clearly.
+    for bad in ["/abs/path.py", "dir/", "a//b.py", "../x.py", "a**b/x.py"] {
+        assert!(AllowList::parse(bad).is_err(), "{bad}");
     }
 }

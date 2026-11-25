@@ -26,6 +26,16 @@ inputs:
       Whether a PR that names a model says why. Off only for a repo whose
       subject is models.
     default: "true"
+  rust-first-allow:
+    description: >-
+      Standing per-path waivers for rust-first: one path or glob per line
+      (`*`, `?`, `**`), with `#` starting a comment.
+    default: ""
+  file-size-allow:
+    description: >-
+      Standing per-path waivers for file-size: one path or glob per line
+      (`*`, `?`, `**`), with `#` starting a comment.
+    default: ""
   token:
     description: A token that can read the PR and post statuses on its commits
     default: ${{ github.token }}
@@ -56,4 +66,6 @@ runs:
         GROWTH: ${{ inputs.growth }}
         LINES: ${{ inputs.lines }}
         MODEL_NAMES: ${{ inputs.model-names }}
+        RUST_FIRST_ALLOW: ${{ inputs.rust-first-allow }}
+        FILE_SIZE_ALLOW: ${{ inputs.file-size-allow }}
       run: '"$RUNNER_TEMP/house-build/release/burrow-house" check'
