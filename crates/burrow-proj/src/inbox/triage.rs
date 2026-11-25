@@ -632,8 +632,10 @@ impl Pass<'_> {
     /// it carries on from the next and says nothing twice.
     fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step], job: &Job) -> bool {
         let did: usize = files::did(d).and_then(|n| n.parse().ok()).unwrap_or(0);
-        for (i, step) in steps.iter().enumerate().skip(did) {
-            let took = match step {
+        let mut steps = steps.to_vec();
+        let mut i = did;
+        while i < steps.len() {
+            let took = match &steps[i] {
                 Step::Priority(l) => {
                     let Some(issue) =
                         crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
@@ -653,7 +655,29 @@ impl Pass<'_> {
                     let Ok(input) = files::input(d) else {
                         return false;
                     };
-                    self.prepare_plan(repo, n, &input, tasks) && self.split_children(repo, n, tasks)
+                    match self.validate_split_issues(repo, n, tasks) {
+                        Ok(()) => {
+                            self.prepare_plan(repo, n, &input, tasks)
+                                && self.split_children(repo, n, tasks)
+                        }
+                        Err(super::plans::SplitFail::Retry) => return false,
+                        Err(super::plans::SplitFail::Invalid(reason)) => {
+                            eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
+                            self.abort_incomplete_split(repo, n, tasks);
+                            steps.truncate(i);
+                            steps.push(Step::Post(format!(
+                                "Invalid split: {reason}. No children created; needs replanning."
+                            )));
+                            steps.push(Step::Label(LATER.into()));
+                            let Ok(encoded) = serde_json::to_vec(&steps) else {
+                                return false;
+                            };
+                            if files::mark(d, File::Plan).write(encoded).is_err() {
+                                return false;
+                            }
+                            continue;
+                        }
+                    }
                 }
             };
             if !took
@@ -663,6 +687,7 @@ impl Pass<'_> {
             {
                 return false;
             }
+            i += 1;
         }
         if self.inbox.planning
             && steps
@@ -681,7 +706,7 @@ impl Pass<'_> {
 }
 
 /// One thing a verdict does on its issue.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum Step {
     Priority(String),
     Label(String),

@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 mod bound;
 mod end;
 mod place;
+mod split;
 pub(super) use place::{CHANGED, Place};
+pub(super) use split::SplitFail;
 
 use std::{
     collections::BTreeSet,
@@ -976,3 +978,7 @@ mod trust_tests;
 #[cfg(test)]
 #[path = "maintained_tests.rs"]
 mod maintained_tests;
+
+#[cfg(test)]
+#[path = "plans_split_validation_tests.rs"]
+mod split_validation_tests;
