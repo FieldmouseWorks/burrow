@@ -74,9 +74,6 @@ let
     })
   );
 
-  resolvedHostCredentialFile =
-    if cfg.host.credentialFile != null then cfg.host.credentialFile else cfg.credentialFile;
-
   hostPluginConfig = pkgs.writeText "burrow-engine-antigravity-host.json" (
     builtins.toJSON ({
       binary = resolvedBinary;
@@ -89,11 +86,10 @@ let
       default_effort = cfg.defaultEffort;
       credential_env = cfg.credentialEnv;
       target_credential_env = cfg.targetCredentialEnv;
-      credential_file = resolvedHostCredentialFile;
+      credential_file = cfg.host.credentialFile;
       credential_mode = cfg.credentialMode;
       credential_home_path = cfg.credentialHomePath;
-      settings_file =
-        if cfg.host.settingsFile != null then cfg.host.settingsFile else cfg.settingsFile;
+      settings_file = if cfg.host.settingsFile != null then cfg.host.settingsFile else cfg.settingsFile;
       mode = cfg.host.mode;
       host_mode = true;
       dangerously_skip_permissions = false;
@@ -394,7 +390,7 @@ in
     host = {
       enable = mkOption {
         type = types.bool;
-        default = true;
+        default = false;
         description = ''
           Also wire a host-mode Antigravity plugin (`Sandbox::None`,
           `--dangerously-skip-permissions` refused, isolated per-turn `$HOME`)
@@ -406,10 +402,12 @@ in
       credentialFile = mkOption {
         type = types.nullOr types.str;
         default = null;
-        example = "/run/secrets/antigravity-agent-credential";
+        example = "/run/secrets/antigravity-host-credential";
         description = ''
-          Isolated credential file readable by the host `proj` user for
-          host-mode Antigravity turns. Defaults to `credentialFile` when null.
+          Dedicated isolated credential file readable by the host `proj` user
+          for host-mode Antigravity turns. Must be distinct from
+          `credentialFile` so host jobs never share a credential (or root-only
+          VM/judge secret) with sandboxed VMs.
         '';
       };
 
@@ -477,6 +475,18 @@ in
       {
         assertion = validCredentialHomePath;
         message = "burrow.engines.antigravity.credentialHomePath (${cfg.credentialHomePath}) must be a non-empty relative path with only normal components (no leading `/`, `.`, `..`, or empty segments).";
+      }
+      {
+        assertion =
+          !cfg.host.enable
+          || cfg.credentialFile == null
+          || (cfg.host.credentialFile != null && cfg.host.credentialFile != cfg.credentialFile);
+        message = "burrow.engines.antigravity.host.credentialFile must be set and distinct from burrow.engines.antigravity.credentialFile so host and VM turns do not share a credential.";
+      }
+      {
+        assertion =
+          !cfg.host.enable || cfg.credentialMode != "home-file" || cfg.host.credentialFile != null;
+        message = "burrow.engines.antigravity.host.credentialFile must be set when burrow.engines.antigravity.host.enable is true and credentialMode is \"home-file\".";
       }
     ];
 
