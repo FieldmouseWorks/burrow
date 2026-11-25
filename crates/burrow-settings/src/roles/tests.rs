@@ -457,6 +457,7 @@ fn every_role_mutation_waits_for_migration_but_admission_stays_available() {
         "engines save mine",
         "engines use mine",
         "engines use back",
+        "engines delete mine",
     ] {
         let (d, mut cfg) = rig();
         let old = d.path().join("old");
@@ -473,7 +474,7 @@ fn every_role_mutation_waits_for_migration_but_admission_stays_available() {
         cfg.migrate(Migration::default(), "test").unwrap();
         // The same unset/replacement is accepted after cutover, and a
         // migration retry cannot reinstate the removed value.
-        if !command.contains("use") {
+        if !command.contains("use") && !command.contains("delete") {
             set(&cfg, command).unwrap();
         }
         let before = fs::read(cfg.roles_file()).unwrap();
@@ -755,4 +756,136 @@ fn removed_configured_plugin_rejects_persisted_route_and_allows_recovery() {
     let view = cfg.role_view().unwrap();
     assert!(!view.in_force.offers.contains_key("antigravity"));
     assert_eq!(view.in_force.route("fix", None).engine, "claude");
+    // An obsolete saved setup referencing the removed plugin can still be deleted.
+    let said = set(&cfg, "engines delete ag-setup").unwrap();
+    assert!(!said.contains("ag-setup"), "{said}");
+    assert!(overlay(&cfg)["setups"]["saved"].get("ag-setup").is_none());
+}
+
+#[test]
+fn engines_delete_removes_saved_setup_refuses_active_and_clears_previous() {
+    let (_d, cfg) = rig();
+    set(&cfg, "offer claude models small big").unwrap();
+    set(&cfg, "role triage claude").unwrap();
+    set(&cfg, "model triage claude small low").unwrap();
+    set(&cfg, "engines save old").unwrap();
+
+    set(&cfg, "model triage claude big high").unwrap();
+    set(&cfg, "engines save extra").unwrap();
+
+    set(&cfg, "role triage unset").unwrap();
+    set(&cfg, "model triage claude unset").unwrap();
+    set(&cfg, "model fix claude - high").unwrap();
+    set(&cfg, "engines save usual").unwrap();
+
+    // Deleting the active setup is refused and leaves the overlay untouched.
+    let before = fs::read(cfg.roles_file()).unwrap();
+    let err = set(&cfg, "engines delete usual").unwrap_err();
+    assert!(err.contains("cannot delete active setup: usual"), "{err}");
+    assert_eq!(fs::read(cfg.roles_file()).unwrap(), before);
+
+    // Deleting an inactive setup removes only it and keeps routing and other setups.
+    let said = set(&cfg, "engines delete extra").unwrap();
+    assert!(
+        said.contains("Was active: usual\nActive: usual\nPrevious: none\n"),
+        "{said}"
+    );
+    assert!(!said.contains("extra"), "{said}");
+    assert!(
+        said.contains("  old\n") && said.contains("* usual\n"),
+        "{said}"
+    );
+    assert!(!said.contains("small") && !said.contains("big"), "{said}");
+    let log = fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        last["change"],
+        serde_json::json!(["engines", "delete", "extra"])
+    );
+
+    // Switching old -> usual makes `previous` point to `old`. Deleting `old`
+    // clears `previous`, so `use back` fails cleanly instead of restoring it.
+    set(&cfg, "engines use old").unwrap();
+    set(&cfg, "engines use usual").unwrap();
+    assert!(cfg.engines().unwrap().contains("Previous: old\n"));
+    let said = set(&cfg, "engines delete old").unwrap();
+    assert!(
+        said.contains("Was active: usual\nActive: usual\nPrevious: none\n"),
+        "{said}"
+    );
+    assert!(overlay(&cfg)["setups"]["saved"].get("old").is_none());
+    assert!(overlay(&cfg)["setups"]["previous"].is_null());
+    assert_eq!(
+        set(&cfg, "engines use back").unwrap_err(),
+        "no previous setup"
+    );
+
+    // Deleting an unrelated setup leaves a named or unsaved `previous` intact.
+    set(&cfg, "model fix claude - low").unwrap();
+    set(&cfg, "engines save other").unwrap();
+    set(&cfg, "model fix claude - medium").unwrap();
+    set(&cfg, "engines use usual").unwrap();
+    assert!(cfg.engines().unwrap().contains("Previous: unsaved\n"));
+    set(&cfg, "engines delete other").unwrap();
+    assert!(cfg.engines().unwrap().contains("Previous: unsaved\n"));
+    set(&cfg, "engines use back").unwrap();
+    assert_eq!(
+        cfg.roles()
+            .unwrap()
+            .tuning("fix", None, "claude")
+            .effort
+            .as_deref(),
+        Some("medium")
+    );
+    // While unsaved edits are in force, `usual` is no longer active and can be deleted,
+    // which also clears `previous` pointing to `usual`.
+    assert!(
+        cfg.engines()
+            .unwrap()
+            .contains("Active: unsaved\nPrevious: usual\n")
+    );
+    let said = set(&cfg, "engines delete usual").unwrap();
+    assert!(said.contains("Active: unsaved\nPrevious: none\n"), "{said}");
+    assert_eq!(
+        set(&cfg, "engines use back").unwrap_err(),
+        "no previous setup"
+    );
+
+    // Duplicate setups with identical roles: deleting the non-active duplicate
+    // keeps the active one, and deleting a non-`previous` duplicate keeps `previous`.
+    set(&cfg, "engines save alpha").unwrap();
+    set(&cfg, "engines save beta").unwrap(); // active is beta
+    set(&cfg, "engines delete alpha").unwrap();
+    assert!(cfg.engines().unwrap().contains("Active: beta\n"));
+    // Even if `roles` matches `beta` only by value after editing away and back,
+    // `beta` is active and cannot be deleted.
+    set(&cfg, "role judge claude").unwrap();
+    set(&cfg, "role judge unset").unwrap();
+    assert!(
+        set(&cfg, "engines delete beta")
+            .unwrap_err()
+            .contains("cannot delete active setup: beta")
+    );
+
+    // An obsolete setup naming a withdrawn model can still be deleted.
+    set(&cfg, "model triage claude small").unwrap();
+    set(&cfg, "engines save stale").unwrap();
+    set(&cfg, "engines use beta").unwrap();
+    set(&cfg, "offer claude models").unwrap();
+    assert!(set(&cfg, "engines use stale").is_err());
+    set(&cfg, "engines delete stale").unwrap();
+    assert!(overlay(&cfg)["setups"]["saved"].get("stale").is_none());
+
+    // Invalid names, missing/extra args, and unknown setups fail without writing.
+    let before = fs::read(cfg.roles_file()).unwrap();
+    for bad in [
+        "engines delete missing",
+        "engines delete back",
+        "engines delete ../beta",
+        "engines delete",
+        "engines delete beta extra",
+    ] {
+        assert!(set(&cfg, bad).is_err(), "{bad}");
+    }
+    assert_eq!(fs::read(cfg.roles_file()).unwrap(), before);
 }

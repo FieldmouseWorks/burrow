@@ -70,6 +70,7 @@
 //! proj engines                list saved engine setups, active and previous
 //! proj engines save NAME [--replace]  check and save the current roles
 //! proj engines use NAME       check and atomically switch roles (back returns)
+//! proj engines delete NAME    remove a saved setup (refuses the active one)
 //! proj check-config           validate machine config and the role settings
 //! proj settings show [--json] every pipeline option in effect, its value and
 //!                             where it came from (default, flake, live file)

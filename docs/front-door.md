@@ -159,10 +159,11 @@ The machine flake enables `burrow.proj.engines.door` and sets its `repo`;
 `label` defaults to `engines`, and `authors` to the inbox's authors.
 
 Open an issue there with that label, as an author, whose body is one line:
-`list`, `use NAME` or `use back`. The door is a caller of the settings
-door: it runs `engines use NAME` there as the job user, comments with the
+`list`, `use NAME`, `use back` or `delete NAME`. The door is a caller of the settings
+door: it runs `engines use NAME` or `engines delete NAME` there as the job user, comments with the
 old and new active setup and each role/scope's engine, then closes the
-issue. It never posts model choices. An unknown setup, one naming a model
+issue. It never posts model choices. An unknown setup, deleting the active
+setup, one naming a model
 its engine no longer offers, or a different request changes nothing; text
 anyone outside the authors wrote or edited is ignored. Each open cycle is
 one request: reopening asks again even with unchanged text. The settings

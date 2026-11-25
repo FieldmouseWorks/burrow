@@ -509,7 +509,7 @@ in
       label = lib.mkOption {
         type = lib.types.str;
         default = "engines";
-        description = "The label on an issue asking for list, use NAME or use back.";
+        description = "The label on an issue asking for list, use NAME, use back or delete NAME.";
       };
       authors = lib.mkOption {
         type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
@@ -814,7 +814,7 @@ in
       show` has them and their declared defaults, `proj settings role ROLE ENGINE
       [over PCT ENGINE]...` (where its turns go on to when an engine is short),
       `model ROLE ENGINE MODEL|- [EFFORT]` and `offer ENGINE models|efforts ...`
-      change them, and `proj engines save|use NAME|use back` keeps named sets of
+      change them, and `proj engines save|use NAME|use back|delete NAME` keeps named sets of
       them. A model or effort must be one its engine offers. `ROLE@OWNER/REPO`
       beats the bare role in that repo, a named role beats `*`.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to

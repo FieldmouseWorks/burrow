@@ -539,6 +539,21 @@ pub(crate) fn apply(
                 .then(|| (*name).to_owned())
                 .or_else(|| active(roles, setups));
         }
+        ["engines", "delete", name] => {
+            if !setups.saved.contains_key(*name) {
+                return Err(format!("unknown setup: {name}"));
+            }
+            if before.as_deref() == Some(*name) {
+                return Err(format!("cannot delete active setup: {name}"));
+            }
+            if previous_name(setups) == Some(*name) {
+                setups.previous = None;
+            }
+            setups.saved.remove(*name);
+            if setups.active.as_deref() == Some(*name) {
+                setups.active = None;
+            }
+        }
         _ => return Err(USAGE.into()),
     }
     if args[0] != "engines" && active(roles, setups).is_none() {
@@ -547,7 +562,7 @@ pub(crate) fn apply(
     Ok(status(before.as_deref(), roles, setups))
 }
 
-pub(crate) const USAGE: &str = "usage: settings role ROLE ENGINE [over PCT ENGINE]... | role ROLE unset | model ROLE ENGINE MODEL|- [EFFORT|-] | model ROLE ENGINE unset | offer ENGINE models|efforts WORD... | engines [save NAME [--replace] | use NAME | use back]";
+pub(crate) const USAGE: &str = "usage: settings role ROLE ENGINE [over PCT ENGINE]... | role ROLE unset | model ROLE ENGINE MODEL|- [EFFORT|-] | model ROLE ENGINE unset | offer ENGINE models|efforts WORD... | engines [save NAME [--replace] | use NAME | use back | delete NAME]";
 
 /// The setup whose values are the ones in force: the last one put in force
 /// while it still is, else any equal one.
@@ -560,17 +575,24 @@ pub(crate) fn active(roles: &Roles, setups: &Setups) -> Option<String> {
         .cloned()
 }
 
+/// The saved setup that `previous` matches, if any.
+fn previous_name(setups: &Setups) -> Option<&str> {
+    let previous = setups.previous.as_ref()?;
+    setups
+        .saved
+        .iter()
+        .find(|(_, s)| *s == previous)
+        .map(|(n, _)| n.as_str())
+}
+
 /// What `engines` says: the setups, which is active, and each role's route
 /// over the defaults. No model id: an issue door answers with it.
 pub(crate) fn status(before: Option<&str>, roles: &Roles, setups: &Setups) -> String {
     let active = active(roles, setups);
-    let previous = setups.previous.as_ref().map(|p| {
-        setups
-            .saved
-            .iter()
-            .find(|(_, s)| *s == p)
-            .map_or("unsaved", |(n, _)| n.as_str())
-    });
+    let previous = setups
+        .previous
+        .as_ref()
+        .map(|_| previous_name(setups).unwrap_or("unsaved"));
     let mut out = format!(
         "Was active: {}\nActive: {}\nPrevious: {}\n",
         before.unwrap_or("unsaved"),

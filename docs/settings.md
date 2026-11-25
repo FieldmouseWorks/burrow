@@ -215,7 +215,7 @@ proj settings role ROLE unset                      back to the declared default
 proj settings model ROLE ENGINE MODEL|- [EFFORT|-] its model and effort on ENGINE
 proj settings model ROLE ENGINE unset
 proj settings offer ENGINE models|efforts WORD...  what ENGINE offers
-proj engines [save NAME [--replace] | use NAME | use back]
+proj engines [save NAME [--replace] | use NAME | use back | delete NAME]
 ```
 
 A role key is `ROLE`, `ROLE@OWNER/REPO`, `*` (every role) or
@@ -266,8 +266,10 @@ A saved engine setup is a named set of these same values, `proj.roles` and
 settings in force. `engines save NAME` saves what's in force (`--replace`
 to overwrite; names are lowercase letters, digits and hyphens, and `back`
 is reserved), `engines use NAME` puts exactly its values in force, after
-checking them against the offers, and changes nothing else, and
-`engines use back` returns to what the last switch replaced. The active
+checking them against the offers, and changes nothing else,
+`engines use back` returns to what the last switch replaced, and
+`engines delete NAME` removes an obsolete saved setup, refusing to delete
+the currently active setup and clearing `previous` if it pointed to it. The active
 setup is the one whose values are in force; a change after it leaves none
 active until one matches again. `proj engines` lists them, with each role's
 engine, and never a model id: the [engines door](front-door.md#engines-with-no-agent)
