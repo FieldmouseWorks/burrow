@@ -22,10 +22,10 @@ fn grown() {
             .tree("4ead", "src/b.rs", &long),
         case(vec![
             change("modified", "modules/x.nix", 5, 0),
-            change("modified", "tests/x.py", 5, 0),
+            change("modified", "tools/x.py", 5, 0),
         ])
         .tree("4ead", "modules/x.nix", &long)
-        .tree("4ead", "tests/x.py", &long),
+        .tree("4ead", "tools/x.py", &long),
         // A script with no extension is code by its shebang.
         case(vec![change("modified", "bin/tool", 5, 0)])
             .tree("4ead", "bin/tool", &format!("#!/bin/sh\n{long}"))
@@ -131,4 +131,123 @@ fn fork() {
         case(vec![change("modified", "src/big.rs", 20, 5)]).tree("4ead", "src/big.rs", &long());
     c.fork = Fork::Yes;
     fails(&c, "file-size");
+}
+
+// Test files don't count toward file-size, and aren't fetched for it; non-test
+// lookalikes still fail.
+#[test]
+fn test_files_are_exempt() {
+    let long = long();
+    for path in [
+        "tests/x.py",
+        "crates/a/tests/it.rs",
+        "crates/a/src/tests.rs",
+        "crates/a/src/inbox/drain_tests.rs",
+        "a_tests.rs",
+        "tools/x/test_y.py",
+        "pkg/z_test.go",
+        "web/src/app.test.ts",
+        "web/src/app.spec.tsx",
+        "src/test/java/A.java",
+    ] {
+        let o = passes(
+            &case(vec![change("modified", path, 20, 5)])
+                .tree("4ead", path, &long)
+                .tree("3e7b", path, &long),
+        );
+        assert!(
+            !o.calls.iter().any(|c| c.starts_with("content")),
+            "{path}: {:?}",
+            o.calls
+        );
+    }
+    for path in ["src/testing.rs", "src/contests.rs", "tools/load_test.py"] {
+        fails(
+            &case(vec![change("modified", path, 20, 5)])
+                .tree("4ead", path, &long)
+                .tree("3e7b", path, &long),
+            "file-size",
+        );
+    }
+}
+
+// Inline `#[cfg(test)]` items in Rust files don't count toward file-size;
+// strings/comments mentioning `#[cfg(test)]` in production code still count.
+#[test]
+fn rust_inline_cfg_test_is_excluded() {
+    let prod = "fn prod() {}\n".repeat(300);
+    let tests = format!(
+        "#[cfg(test)]\nmod tests {{\n    const BRACE: char = '}}';\n    const STR: &str = \"}} #[cfg(test)]\";\n    const RAW: &str = r#\"}} \"#;\n    /* nested /* }} */ comment */\n{} }}\n",
+        "    #[test]\n    fn t() {}\n".repeat(400)
+    );
+    let combined = format!("{prod}\n{tests}");
+    assert!(combined.lines().count() > LINES);
+    passes(&case(vec![change("modified", "src/cram.rs", 20, 5)]).tree(
+        "4ead",
+        "src/cram.rs",
+        &combined,
+    ));
+
+    // A `#[cfg(test)]` const struct literal with trailing semicolon and a
+    // `#[cfg(test)] mod tests;` declaration are also stripped cleanly.
+    let mid_test = format!(
+        "#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod tests;\n#[cfg(test)]\nconst C: S = S {{ a: 1 }};\n{}",
+        "fn prod() {}\n".repeat(LINES)
+    );
+    passes(&case(vec![change("modified", "src/mid.rs", 5, 0)]).tree(
+        "4ead",
+        "src/mid.rs",
+        &mid_test,
+    ));
+
+    // Production code past the limit still fails even with a `#[cfg(test)]`
+    // block, or when `#[cfg(test)]` only appears in a string literal.
+    let too_much_prod = format!("{}{tests}", "fn prod() {}\n".repeat(LINES + 1));
+    fails(
+        &case(vec![change("modified", "src/big.rs", 20, 5)]).tree(
+            "4ead",
+            "src/big.rs",
+            &too_much_prod,
+        ),
+        "file-size",
+    );
+    let fake_attr_in_string = format!(
+        "const S: &str = r#\"\n#[cfg(test)]\nmod fake {{\nlet x = 1;{}\n}}\n\"#;\n",
+        "\n".repeat(LINES)
+    );
+    fails(
+        &case(vec![change("modified", "src/str.rs", 20, 5)]).tree(
+            "4ead",
+            "src/str.rs",
+            &fake_attr_in_string,
+        ),
+        "file-size",
+    );
+}
+
+// Standing waivers in file-size-allow exempt matching paths without a body line.
+#[test]
+fn standing_waiver() {
+    let long = long();
+    let allow = "# legacy modules\nmodules/autoland.nix # single NixOS module\nlegacy/**\n";
+    let o = passes(
+        &case(vec![
+            change("modified", "modules/autoland.nix", 20, 5),
+            change("modified", "legacy/sub/table.ts", 20, 5),
+        ])
+        .file_size_allow(allow)
+        .tree("4ead", "modules/autoland.nix", &long)
+        .tree("4ead", "legacy/sub/table.ts", &long),
+    );
+    assert!(
+        !o.calls.iter().any(|c| c.starts_with("content")),
+        "{:?}",
+        o.calls
+    );
+    fails(
+        &case(vec![change("modified", "modules/other.nix", 20, 5)])
+            .file_size_allow(allow)
+            .tree("4ead", "modules/other.nix", &long),
+        "file-size",
+    );
 }

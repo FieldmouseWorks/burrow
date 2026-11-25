@@ -16,8 +16,8 @@ pub enum Rule {
     RustFirst,
     /// Work starts from events: a PR that adds a timer says why.
     Timers,
-    /// A PR that grows a code file past the limit, or one already past it,
-    /// splits it or says why not.
+    /// A PR that grows a non-test code file past the limit, or one already
+    /// past it, splits it or says why not.
     FileSize,
     /// An AGENTS.md is a map: a PR that grows one's own part past GUIDE
     /// lines says why.
@@ -272,6 +272,415 @@ pub fn is_code(path: &str, language: Option<Language>) -> bool {
                 | "swift"
         )
     })
+}
+
+/// Whether a path is a test file by its name or directory: test files are
+/// exempt from `Rule::FileSize`.
+pub fn is_test(path: &str) -> bool {
+    let wrapped = format!("/{path}");
+    if wrapped.contains("/tests/") || wrapped.contains("/src/test/") {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == "tests.rs"
+        || name.ends_with("_tests.rs")
+        || (name.starts_with("test_") && name.ends_with(".py"))
+        || name.ends_with("_test.go")
+        || name.ends_with(".test.ts")
+        || name.ends_with(".test.tsx")
+        || name.ends_with(".test.js")
+        || name.ends_with(".test.jsx")
+        || name.ends_with(".spec.ts")
+        || name.ends_with(".spec.tsx")
+        || name.ends_with(".spec.js")
+        || name.ends_with(".spec.jsx")
+}
+
+/// How many lines `content` has, a last one with no newline included.
+pub fn line_count(content: &[u8]) -> usize {
+    let ends = content.last().is_some_and(|b| *b != b'\n');
+    content.iter().filter(|b| **b == b'\n').count() + usize::from(ends)
+}
+
+/// How many non-test code lines a file has for `Rule::FileSize`. For Rust
+/// files, lines belonging solely to inline `#[cfg(test)]` items don't count.
+pub fn code_lines(path: &str, content: &[u8]) -> usize {
+    if !path.ends_with(".rs") || content.is_empty() {
+        return line_count(content);
+    }
+    let ranges = rust_cfg_test_ranges(content);
+    if ranges.is_empty() {
+        return line_count(content);
+    }
+    let mut kept = 0usize;
+    let mut ls = 0usize;
+    while ls < content.len() {
+        let nl = content[ls..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(content.len(), |off| ls + off);
+        let le = if nl > ls && content[nl - 1] == b'\r' {
+            nl - 1
+        } else {
+            nl
+        };
+        let excluded = if ls == le {
+            ranges.iter().any(|&(s, e)| s < ls && ls < e)
+        } else {
+            let mut has_non_ws = false;
+            let mut all_in_test = true;
+            for (idx, &byte) in content[ls..le].iter().enumerate() {
+                if !byte.is_ascii_whitespace() {
+                    has_non_ws = true;
+                    let pos = ls + idx;
+                    if !ranges.iter().any(|&(s, e)| s <= pos && pos < e) {
+                        all_in_test = false;
+                        break;
+                    }
+                }
+            }
+            if has_non_ws {
+                all_in_test
+            } else {
+                ranges.iter().any(|&(s, e)| s < ls && le <= e)
+            }
+        };
+        if !excluded {
+            kept += 1;
+        }
+        ls = if nl < content.len() {
+            nl + 1
+        } else {
+            content.len()
+        };
+    }
+    kept
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn skip_non_code(b: &[u8], i: usize) -> Option<usize> {
+    if b[i..].starts_with(b"//") {
+        let mut j = i + 2;
+        while j < b.len() && b[j] != b'\n' {
+            j += 1;
+        }
+        return Some(j);
+    }
+    if b[i..].starts_with(b"/*") {
+        let mut j = i + 2;
+        let mut depth = 1usize;
+        while j < b.len() && depth > 0 {
+            if b[j..].starts_with(b"/*") {
+                depth += 1;
+                j += 2;
+            } else if b[j..].starts_with(b"*/") {
+                depth -= 1;
+                j += 2;
+            } else {
+                j += 1;
+            }
+        }
+        return Some(j);
+    }
+    // Raw string literals: r"...", r#"..."#, br#"..."#, cr#"..."#.
+    let prev_ident = i > 0 && is_ident_byte(b[i - 1]);
+    if !prev_ident {
+        let prefix = if b[i] == b'r' {
+            Some(1)
+        } else if (b[i] == b'b' || b[i] == b'c') && b.get(i + 1) == Some(&b'r') {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(plen) = prefix {
+            let mut k = i + plen;
+            let mut hashes = 0usize;
+            while b.get(k) == Some(&b'#') {
+                hashes += 1;
+                k += 1;
+            }
+            if b.get(k) == Some(&b'"') {
+                k += 1;
+                while k < b.len() {
+                    if b[k] == b'"' {
+                        let mut matched = 0usize;
+                        while matched < hashes && b.get(k + 1 + matched) == Some(&b'#') {
+                            matched += 1;
+                        }
+                        if matched == hashes {
+                            return Some(k + 1 + hashes);
+                        }
+                    }
+                    k += 1;
+                }
+                return Some(b.len());
+            }
+        }
+    }
+    if b[i] == b'"' {
+        let mut j = i + 1;
+        while j < b.len() {
+            if b[j] == b'\\' {
+                j = (j + 2).min(b.len());
+            } else if b[j] == b'"' {
+                return Some(j + 1);
+            } else {
+                j += 1;
+            }
+        }
+        return Some(b.len());
+    }
+    if b[i] == b'\'' {
+        if b.get(i + 1) == Some(&b'\\') {
+            let mut j = (i + 3).min(b.len());
+            let limit = (i + 14).min(b.len());
+            while j < limit && b[j] != b'\n' {
+                if b[j] == b'\'' {
+                    return Some(j + 1);
+                }
+                j += 1;
+            }
+            return Some(i + 1);
+        }
+        if let Some(&first) = b.get(i + 1)
+            && first != b'\''
+            && first != b'\n'
+        {
+            let width = if first < 0x80 {
+                1
+            } else if first & 0xE0 == 0xC0 {
+                2
+            } else if first & 0xF0 == 0xE0 {
+                3
+            } else if first & 0xF8 == 0xF0 {
+                4
+            } else {
+                1
+            };
+            if b.get(i + 1 + width) == Some(&b'\'') {
+                return Some(i + 2 + width);
+            }
+        }
+    }
+    None
+}
+
+fn skip_ws_and_comments(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+        } else if b[i..].starts_with(b"//") || b[i..].starts_with(b"/*") {
+            i = skip_non_code(b, i).unwrap_or(i + 1);
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn match_cfg_test_attr(b: &[u8], i: usize) -> Option<usize> {
+    if !b[i..].starts_with(b"#[") {
+        return None;
+    }
+    let mut j = skip_ws_and_comments(b, i + 2);
+    if !b[j..].starts_with(b"cfg") || b.get(j + 3).is_some_and(|&c| is_ident_byte(c)) {
+        return None;
+    }
+    j = skip_ws_and_comments(b, j + 3);
+    if b.get(j) != Some(&b'(') {
+        return None;
+    }
+    j = skip_ws_and_comments(b, j + 1);
+    if !b[j..].starts_with(b"test") || b.get(j + 4).is_some_and(|&c| is_ident_byte(c)) {
+        return None;
+    }
+    j = skip_ws_and_comments(b, j + 4);
+    if b.get(j) != Some(&b')') {
+        return None;
+    }
+    j = skip_ws_and_comments(b, j + 1);
+    if b.get(j) != Some(&b']') {
+        return None;
+    }
+    Some(j + 1)
+}
+
+fn find_item_end(b: &[u8], mut j: usize) -> usize {
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut saw_brace = false;
+    while j < b.len() {
+        if let Some(next) = skip_non_code(b, j) {
+            j = next;
+            continue;
+        }
+        match b[j] {
+            b'[' => {
+                bracket_depth += 1;
+                j += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                j += 1;
+            }
+            b'(' => {
+                paren_depth += 1;
+                j += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                j += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                saw_brace = true;
+                j += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                j += 1;
+                if saw_brace && brace_depth == 0 && bracket_depth == 0 && paren_depth == 0 {
+                    let mut k = j;
+                    while matches!(b.get(k), Some(b' ' | b'\t')) {
+                        k += 1;
+                    }
+                    if b.get(k) == Some(&b';') {
+                        return k + 1;
+                    }
+                    return j;
+                }
+            }
+            b';' => {
+                j += 1;
+                if !saw_brace && brace_depth == 0 && bracket_depth == 0 && paren_depth == 0 {
+                    return j;
+                }
+            }
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+fn rust_cfg_test_ranges(b: &[u8]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if let Some(next) = skip_non_code(b, i) {
+            i = next;
+            continue;
+        }
+        if let Some(after) = match_cfg_test_attr(b, i) {
+            let end = find_item_end(b, after);
+            ranges.push((i, end));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    ranges
+}
+
+/// Standing per-path waivers from an action input: one path or glob pattern
+/// per line (`*` and `?` within a segment, `**` for zero or more segments),
+/// `#` starting a comment, blank lines ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllowList {
+    patterns: Vec<Vec<String>>,
+}
+
+impl AllowList {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let mut patterns = Vec::new();
+        for line in raw.lines() {
+            let entry = line.split('#').next().unwrap_or("").trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if entry.starts_with('/') || entry.ends_with('/') {
+                return Err(format!(
+                    "allow pattern {entry:?} must be a relative path without leading or trailing '/'"
+                ));
+            }
+            let mut segs: Vec<String> = Vec::new();
+            for seg in entry.split('/') {
+                if seg.is_empty() || seg == "." || seg == ".." {
+                    return Err(format!(
+                        "allow pattern {entry:?} has an empty or relative segment"
+                    ));
+                }
+                if seg.contains("**") && seg != "**" {
+                    return Err(format!(
+                        "allow pattern {entry:?} can only use '**' as a whole path segment"
+                    ));
+                }
+                if seg == "**" && segs.last().map(String::as_str) == Some("**") {
+                    continue;
+                }
+                segs.push(seg.to_owned());
+            }
+            patterns.push(segs);
+        }
+        Ok(Self { patterns })
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        if self.patterns.is_empty() {
+            return false;
+        }
+        let segs: Vec<&str> = path.split('/').collect();
+        self.patterns
+            .iter()
+            .any(|pat| match_path_segments(pat, &segs))
+    }
+}
+
+fn match_path_segments(pat: &[String], segs: &[&str]) -> bool {
+    let Some((first, rest)) = pat.split_first() else {
+        return segs.is_empty();
+    };
+    if first == "**" {
+        if rest.is_empty() {
+            return true;
+        }
+        for split in 0..=segs.len() {
+            if match_path_segments(rest, &segs[split..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some((seg, seg_rest)) = segs.split_first() else {
+        return false;
+    };
+    glob_segment(first, seg) && match_path_segments(rest, seg_rest)
+}
+
+fn glob_segment(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    let mut star = None;
+    while t < text.len() {
+        if pattern.get(p) == Some(&'*') {
+            star = Some((p, t));
+            p += 1;
+        } else if pattern.get(p).is_some_and(|&c| c == '?' || c == text[t]) {
+            p += 1;
+            t += 1;
+        } else if let Some((sp, st)) = star {
+            star = Some((sp, st + 1));
+            p = sp + 1;
+            t = st + 1;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
 }
 
 /// How many lines of its own an AGENTS.md may have, outside the house

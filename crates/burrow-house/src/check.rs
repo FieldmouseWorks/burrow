@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::diff::{self, Diff};
 use crate::github::{GitHub, Status};
-use crate::rules::{self, Rule, Said};
+use crate::rules::{self, AllowList, Rule, Said};
 
 /// What the run is for, from the event that started it.
 #[derive(Clone, Debug)]
@@ -22,11 +22,15 @@ pub struct Event {
     /// How many lines a PR may add to Python and shell, net, before it needs
     /// the line: enough for a fix, not for a feature.
     pub growth: i64,
-    /// How long a code file may grow before it's split.
+    /// How long a non-test code file may grow before it's split.
     pub lines: usize,
     /// Whether a PR that names a model needs the line: off only for a repo
     /// whose subject is models.
     pub model_names: bool,
+    /// Standing per-path waivers for `Rule::RustFirst`.
+    pub rust_first_allow: AllowList,
+    /// Standing per-path waivers for `Rule::FileSize`.
+    pub file_size_allow: AllowList,
     /// The run's page, which each status links.
     pub run_url: String,
 }
@@ -129,7 +133,7 @@ fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
                 diff.new_python.len(),
                 diff.growth
             ),
-            "The house rules want new code in Rust, shell included, unless there's a solid reason: a coin toss goes to Rust. Port it, or add a line to the PR body starting 'Why not Rust:' with the reason (a file a tool generates, glue that only runs another program, a throwaway script, deleted once it's run)".to_owned(),
+            "The house rules want new tools, scripts and services in Rust, shell included, unless there's a solid reason: a coin toss goes to Rust. Port it, add a standing waiver in .github/workflows/house.yml, or add a line to the PR body starting 'Why not Rust:' with the reason (a file a tool generates, glue that only runs another program, a throwaway script, deleted once it's run)".to_owned(),
         ),
         Rule::Timers => (
             !diff.timers.is_empty(),
@@ -139,7 +143,7 @@ fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
         Rule::FileSize => (
             !diff.big.is_empty(),
             format!("grows {} code file(s) past {} lines", diff.big.len(), event.lines),
-            format!("The house rules split a code file before it passes {} lines. Split it in this PR, or add a line to the PR body starting 'Why not split:' with the reason", event.lines),
+            format!("The house rules split a non-test code file before it passes {} lines (test files and inline #[cfg(test)] blocks don't count). Split it in this PR, add a standing waiver in .github/workflows/house.yml, or add a line to the PR body starting 'Why not split:' with the reason", event.lines),
         ),
         Rule::GuideSize => (
             !diff.guides.is_empty(),
@@ -303,7 +307,14 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
         }
         let base = text(&pr["base"], "sha");
         if diff.as_ref().is_none_or(|(at, _)| at != base) {
-            let read = diff::read(gh, base, &event.head, event.lines)?;
+            let read = diff::read(
+                gh,
+                base,
+                &event.head,
+                event.lines,
+                &event.rust_first_allow,
+                &event.file_size_allow,
+            )?;
             found(out, &read, event)?;
             diff = Some((base.to_owned(), read));
         }

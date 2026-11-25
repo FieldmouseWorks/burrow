@@ -29,8 +29,11 @@ fn the_reference_command_documents_every_option_and_its_read_door() {
         "regenerate the reference with burrow-settings reference"
     );
     let house = std::fs::read_to_string(root.join("house/rules.md")).unwrap();
-    assert!(house.contains("read them with `proj settings show`"));
-    assert!(!house.contains("read them with `settings show`"));
-    // burrow's own AGENTS.md carrying it verbatim is the guidance check's
-    // (crates/burrow-guidance's house), which the docs lane runs too.
+    assert!(!house.contains("proj settings show"));
+    let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("read them with `proj settings show`"));
+    assert!(!agents.contains("read them with `settings show`"));
+    // burrow's own AGENTS.md carrying the house blocks verbatim is the
+    // guidance check's (crates/burrow-guidance's house), which the docs lane
+    // runs too.
 }
