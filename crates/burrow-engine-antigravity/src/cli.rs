@@ -15,7 +15,9 @@ use tempfile::TempDir;
 use crate::config::{
     Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
 };
-use crate::normalize::{RunError, TurnOutput, normalize_output, partial_turn_output};
+use crate::normalize::{
+    RunError, StreamForwarder, StreamStep, TurnOutput, normalize_output, partial_turn_output,
+};
 use crate::schema::Schema;
 
 /// Cross-engine credentials that must NEVER leak into the `antigravity` child,
@@ -443,17 +445,17 @@ pub fn run_invocation(
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
 ) -> TurnOutput {
-    run_invocation_streaming(config, invocation, stop, &mut |_| {})
+    run_invocation_streaming(config, invocation, stop, None)
 }
 
-/// Like [`run_invocation`], forwarding each complete stdout line via
-/// `on_stdout_line` as it arrives and preserving any partial session/usage on
+/// Like [`run_invocation`], scrubbing and normalizing each complete stdout line
+/// via `on_step` as it arrives and preserving any partial session/usage on
 /// timeout or cancellation.
 pub fn run_invocation_streaming(
     config: &Config,
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
-    on_stdout_line: &mut dyn FnMut(&str),
+    mut on_step: Option<&mut dyn FnMut(StreamStep)>,
 ) -> TurnOutput {
     // A schema that can't be held to is refused before the child runs: never
     // "any JSON will do".
@@ -597,16 +599,21 @@ pub fn run_invocation_streaming(
         } else {
             None
         };
+    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
+    let mut forwarder = StreamForwarder::new();
+    let mut on_stdout_line = |line: &str| {
+        if let Some(cb) = on_step.as_deref_mut() {
+            cb(forwarder.process_line_scrubbed(line, &secrets));
+        }
+    };
     let result = burrow_process::stream_unless(
         &mut command,
         stdin_payload.as_deref(),
         deadline,
         config.max_output_bytes,
         stop,
-        on_stdout_line,
+        &mut on_stdout_line,
     );
-
-    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
 
     match result {
         Ok(output) => normalize_output(
@@ -619,10 +626,10 @@ pub fn run_invocation_streaming(
             &secrets,
         ),
         Err(err) if err.reason == "command was stopped" => {
-            partial_turn_output(&err.stdout, RunError::Cancelled)
+            partial_turn_output(&err.stdout, RunError::Cancelled, &secrets)
         }
         Err(err) if err.reason == "command exceeded its time limit" => {
-            partial_turn_output(&err.stdout, RunError::TimedOut)
+            partial_turn_output(&err.stdout, RunError::TimedOut, &secrets)
         }
         Err(err) => TurnOutput {
             error: Some(RunError::ProcessFailed {

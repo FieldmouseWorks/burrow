@@ -13,7 +13,8 @@ use serde_json::{Map, Value, json};
 
 use super::{
     Usage, extract_assistant_text, extract_error_text, extract_result_text, extract_session,
-    extract_structured_output, extract_usage, record_has_error, unwrap_event,
+    extract_structured_output, extract_usage, record_has_error, scrub, scrub_stream_line,
+    unwrap_event,
 };
 
 /// Result of processing one raw stdout line for `PROJ_STREAM_EVENTS=1`.
@@ -40,17 +41,26 @@ impl StreamForwarder {
         Self::default()
     }
 
-    /// Process one raw NDJSON line from the Antigravity CLI.
+    /// Process one raw NDJSON line from the Antigravity CLI without secret
+    /// scrubbing.
+    pub fn process_line(&mut self, line: &str) -> StreamStep {
+        self.process_line_scrubbed(line, &[])
+    }
+
+    /// Process one raw NDJSON line from the Antigravity CLI, scrubbing any
+    /// loaded credential material from both forwarded non-terminal lines and
+    /// normalized terminal result/error records.
     ///
     /// Non-JSON lines, non-terminal events (`init`, `step_update`, assistant
-    /// chunks), and empty non-error results are forwarded verbatim. Terminal
-    /// result and error records are normalized into `burrow-proj`'s top-level
-    /// `{"type":"result",...}` transcript shape.
-    pub fn process_line(&mut self, line: &str) -> StreamStep {
+    /// chunks), and empty non-error results are forwarded (scrubbed) without
+    /// changing their shape. Terminal result and error records are normalized
+    /// into `burrow-proj`'s top-level `{"type":"result",...}` transcript shape.
+    pub fn process_line_scrubbed(&mut self, raw_line: &str, secrets: &[&str]) -> StreamStep {
+        let line = scrub_stream_line(raw_line, secrets);
         let trimmed = line.trim();
         let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
             return StreamStep {
-                line: line.to_owned(),
+                line,
                 new_session: None,
             };
         };
@@ -86,10 +96,7 @@ impl StreamForwarder {
             {
                 self.streamed_chunks.push(delta.to_owned());
             }
-            return StreamStep {
-                line: line.to_owned(),
-                new_session,
-            };
+            return StreamStep { line, new_session };
         }
 
         if matches!(
@@ -99,18 +106,12 @@ impl StreamForwarder {
             if let Some(text) = extract_assistant_text(payload) {
                 self.streamed_chunks.push(text);
             }
-            return StreamStep {
-                line: line.to_owned(),
-                new_session,
-            };
+            return StreamStep { line, new_session };
         }
 
         let is_terminal = matches!(record_type, "result" | "error");
         if !is_terminal {
-            return StreamStep {
-                line: line.to_owned(),
-                new_session,
-            };
+            return StreamStep { line, new_session };
         }
 
         let is_err = self.saw_error
@@ -127,7 +128,7 @@ impl StreamForwarder {
                 .last_error
                 .clone()
                 .unwrap_or_else(|| "antigravity reported an error without details".to_owned());
-            Some(self.build_result_record(true, text, payload, &record))
+            Some(self.build_result_record(true, text, payload, &record, secrets))
         } else {
             let structured =
                 extract_structured_output(payload).or_else(|| extract_structured_output(&record));
@@ -142,12 +143,12 @@ impl StreamForwarder {
                         .as_ref()
                         .and_then(|v| serde_json::to_string(v).ok())
                 });
-            text.map(|t| self.build_result_record(false, t, payload, &record))
+            text.map(|t| self.build_result_record(false, t, payload, &record, secrets))
         };
 
         let out = normalized
             .and_then(|v| serde_json::to_string(&v).ok())
-            .unwrap_or_else(|| line.to_owned());
+            .unwrap_or(line);
 
         StreamStep {
             line: out,
@@ -161,6 +162,7 @@ impl StreamForwarder {
         result_text: String,
         payload: &Value,
         record: &Value,
+        secrets: &[&str],
     ) -> Value {
         let mut map = Map::new();
         map.insert("type".to_owned(), Value::from("result"));
@@ -169,10 +171,13 @@ impl StreamForwarder {
             Value::from(if is_error { "error" } else { "success" }),
         );
         map.insert("is_error".to_owned(), Value::from(is_error));
-        map.insert("result".to_owned(), Value::from(result_text));
+        map.insert(
+            "result".to_owned(),
+            Value::from(scrub(&result_text, secrets)),
+        );
 
         if let Some(sid) = &self.session {
-            map.insert("session_id".to_owned(), Value::from(sid.as_str()));
+            map.insert("session_id".to_owned(), Value::from(scrub(sid, secrets)));
         }
         if let Some(turns) = extract_num_turns(payload).or_else(|| extract_num_turns(record)) {
             map.insert("num_turns".to_owned(), turns);
@@ -356,5 +361,45 @@ mod tests {
             })
         );
         assert_eq!(v["total_cost_usd"], 0.01);
+    }
+
+    #[test]
+    fn scrubs_streamed_lines_and_reassembled_chunks() {
+        let raw_cred = r#"{"access_token":"ya29.unit-secret-1234"}"#;
+        let secrets = [raw_cred, "ya29.unit-secret-1234"];
+        let mut fwd = StreamForwarder::new();
+
+        let tool_line = json!({
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "tool_info": { "output": raw_cred }
+            }
+        })
+        .to_string();
+        let step1 = fwd.process_line_scrubbed(&tool_line, &secrets);
+        assert!(
+            !step1.line.contains("ya29.unit-secret-1234"),
+            "{}",
+            step1.line
+        );
+        let parsed1: Value = serde_json::from_str(&step1.line).unwrap();
+        assert_eq!(parsed1["step_update"]["tool_info"]["output"], "[redacted]");
+
+        fwd.process_line_scrubbed(
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"prefix ya29.unit-"}}"#,
+            &secrets,
+        );
+        fwd.process_line_scrubbed(
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"secret-1234 suffix"}}"#,
+            &secrets,
+        );
+        let step_res = fwd.process_line_scrubbed(
+            r#"{"event":"result","result":{"conversation_id":"conv-s","status":"SUCCESS","response":""}}"#,
+            &secrets,
+        );
+        let v: Value = serde_json::from_str(&step_res.line).unwrap();
+        assert_eq!(v["type"], "result");
+        assert_eq!(v["result"], "prefix [redacted] suffix");
     }
 }
