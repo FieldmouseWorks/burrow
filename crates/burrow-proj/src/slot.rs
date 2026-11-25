@@ -171,6 +171,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
+    let _ = crate::engine::refresh_queued(cfg, &job, n);
     if usage::login::out_for(cfg, &usage::login::run_of(cfg, id)).is_some()
         || automation_paused(cfg, &job)
         || crate::github_quota::held(cfg, &job).is_some()
@@ -409,7 +410,6 @@ pub fn take(
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
-    let run = usage::login::run_of(cfg, id);
     // This turn says it has its slot only under its job's lock ([`took_slot`]),
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
@@ -433,6 +433,10 @@ pub fn take(
     let mut shown: Option<Class> = None;
     loop {
         let paused = automation_paused(cfg, &job);
+        // Live role settings can move a waiting turn off a held engine before
+        // it ever takes a slot, so refresh its choice on each wait tick.
+        let _ = crate::engine::refresh_queued(cfg, &job, n);
+        let run = usage::login::run_of(cfg, id);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too. A sandbox's isn't
         // by this machine's expired login (usage/login.rs).
@@ -543,6 +547,8 @@ pub fn take(
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
+        let _ = crate::engine::refresh_queued(cfg, &job, n);
+        let run = usage::login::run_of(cfg, id);
         let store = usage::read_store_ok(cfg);
         let at = now();
         if !due(&slots, &queue.join(&me), looked) || store.holds_run(&run, at) {

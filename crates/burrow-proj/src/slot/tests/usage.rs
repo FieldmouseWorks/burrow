@@ -107,3 +107,126 @@ fn a_sandboxs_turn_takes_a_slot_past_this_machines_login_hold() {
     );
     slot.unlock().unwrap();
 }
+
+// A queued turn whose role moves off a held engine in live settings must not
+// stay stuck behind the old engine's usage hold: slot admission refreshes its
+// choice from host-owned settings and lets it take a free slot immediately.
+#[test]
+fn a_queued_turn_moves_off_a_held_engine_when_its_role_reroutes() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut v = example();
+    v["jobs"] = jobs.to_str().unwrap().into();
+    v["meters"] = serde_json::json!(jobs.join("meters"));
+    v["settings"]["overlay"] = serde_json::json!(jobs.join("settings.json"));
+    v["settings"]["engines"] = serde_json::json!(["claude", "alt-engine"]);
+    let notify = jobs.join("notify");
+    burrow_test::executable(&notify, "#!/bin/sh\nexit 0\n");
+    v["notify"] = serde_json::json!(notify);
+    v["maxJobs"] = 1.into();
+    v["pipelineSlots"] = 0.into();
+    v["maxJobsPerProject"] = 4.into();
+    v["minFreeMemory"] = 0.into();
+    v["maxWait"] = 99999.into();
+    v["flake"] = "/nowhere".into();
+    v["tools"]["git"] = "git".into();
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    let settings = cfg.settings.as_ref().unwrap();
+    settings
+        .command(
+            &[
+                "offer".into(),
+                "alt-engine".into(),
+                "models".into(),
+                "alt-model".into(),
+            ],
+            "test",
+        )
+        .unwrap();
+    settings
+        .command(
+            &[
+                "offer".into(),
+                "alt-engine".into(),
+                "efforts".into(),
+                "high".into(),
+            ],
+            "test",
+        )
+        .unwrap();
+    settings
+        .command(&["role".into(), "inbox".into(), "claude".into()], "test")
+        .unwrap();
+    crate::usage::record(&cfg, "w0", Some(now() + 7200), "usage limit", now()).unwrap();
+
+    let job = Job::new(&cfg, "w0");
+    fs::create_dir_all(&job.dir).unwrap();
+    let project = tmp.path().join("web");
+    fs::create_dir_all(&project).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    let req = crate::job::Request {
+        project: project.to_string_lossy().into_owned(),
+        role: Some("inbox".into()),
+        engine: None,
+        app: None,
+        agent: None,
+        agent_engine: None,
+        owned: false,
+    };
+    req.save(&job).unwrap();
+    job.set_turns(1).unwrap();
+    let initial = crate::engine::Choice {
+        engine: "claude".into(),
+        model: None,
+        effort: None,
+    };
+    crate::retry::Identity::capture_choice(&job, "1", &initial).unwrap();
+    job.record_choice("1", &initial).unwrap();
+
+    let wait_cfg = cfg.clone();
+    let waiter =
+        std::thread::spawn(move || take(&wait_cfg, "w0", "1", Class::Normal, false).unwrap());
+    until("held turn joins the queue", || in_queue(&jobs) == 1);
+    sleep(Duration::from_secs(3));
+    assert!(!waiter.is_finished(), "Claude hold keeps it waiting");
+
+    settings
+        .command(
+            &["role".into(), "inbox".into(), "alt-engine".into()],
+            "test",
+        )
+        .unwrap();
+    settings
+        .command(
+            &[
+                "model".into(),
+                "inbox".into(),
+                "alt-engine".into(),
+                "alt-model".into(),
+                "high".into(),
+            ],
+            "test",
+        )
+        .unwrap();
+
+    until(
+        "rerouted turn leaves the Claude hold and takes a slot",
+        || waiter.is_finished(),
+    );
+    let slot = waiter.join().unwrap();
+    assert!(jobs.join("w0/1.slot").exists());
+    let updated = crate::retry::Identity::load(&job, "1")
+        .unwrap()
+        .unwrap()
+        .choice;
+    assert_eq!(updated.engine, "alt-engine");
+    assert_eq!(updated.model.as_deref(), Some("alt-model"));
+    assert_eq!(updated.effort.as_deref(), Some("high"));
+    assert_eq!(crate::usage::login::run_of(&cfg, "w0").engine, "alt-engine");
+    slot.unlock().unwrap();
+}

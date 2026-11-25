@@ -549,7 +549,7 @@ in
         type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = null;
         example = "inbox";
-        description = "The role the authors' own issues run as when no rule above names one, so the role settings can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
+        description = "The role the authors' own issues run as when no rule above names one. Roles select the engine each turn; engine labels only enroll these issues. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;

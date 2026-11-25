@@ -99,6 +99,31 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     requested(cfg, job, &request, request.engine.as_deref())
 }
 
+/// Re-resolve a waiting turn against live host settings so a queued turn
+/// never stays stuck behind a held engine after live role settings move it.
+/// Reads only host-owned [`crate::job::Request`] and `settings.roles`.
+pub(crate) fn refresh_queued(cfg: &Config, job: &Job, n: &str) -> Result<Option<Choice>, String> {
+    if cfg.settings.is_none() {
+        return Ok(None);
+    }
+    let Ok(request) = crate::job::Request::load(job) else {
+        return Ok(None);
+    };
+    let live = requested(cfg, job, &request, request.engine.as_deref())?;
+    let saved = crate::retry::Identity::load(job, n)?;
+    if let Some(saved) = saved {
+        if saved.choice.engine == live.engine {
+            return Ok(Some(saved.choice));
+        }
+        crate::retry::Identity::reroute(job, n, &live)?;
+    } else {
+        crate::retry::Identity::capture_choice(job, n, &live)?;
+    }
+    let _ = job.record_choice(n, &live);
+    crate::snapshot::stream::notify(cfg);
+    Ok(Some(live))
+}
+
 /// The request's role, scoped to the repository its admission bound (not
 /// its project's origin, which the job's git metadata grant reaches), with
 /// `pinned` for the engine, in the sandbox the request names or here.
