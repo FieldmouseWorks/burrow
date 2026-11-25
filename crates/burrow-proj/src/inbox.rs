@@ -383,8 +383,9 @@ impl Pass<'_> {
         Ok(id)
     }
 
-    /// A machine role picks the engine itself; the owner role only tunes the
-    /// model, so an authors' issue still runs on its label's engine.
+    /// Machine roles and a configured owner role choose the engine through
+    /// live role settings; engine labels only enroll those issues. Without
+    /// `owner_role`, an authors' issue falls back to its label's engine.
     fn routing(&self, issue: &Value) -> (Option<String>, Option<String>) {
         match self.machine_role(issue) {
             Some(role) => (Some(role), None),

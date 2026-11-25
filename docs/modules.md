@@ -200,8 +200,8 @@ see [README.md](../README.md).
   these issues but their roles choose
   the engine each turn, at the declared default when no setting matches.
   The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
-  set, so the settings can tune them; their engine label still picks
-  the engine.
+  set, so that role chooses the engine and tuning each turn while engine
+  labels only enroll them; leaving `ownerRole` unset keeps label routing.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Interactive shells and existing
   proj jobs retain the roleless form for work an agent hands on.
