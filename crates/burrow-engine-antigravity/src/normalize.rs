@@ -238,6 +238,52 @@ fn parse_single_json(stdout: &str) -> ParsedRecords {
     }
 }
 
+/// Extract any `session` and `usage` already emitted in partial stdout before
+/// a timeout or cancellation.
+pub(crate) fn extract_partial_session_and_usage(
+    format: OutputFormat,
+    stdout: &[u8],
+) -> (Option<String>, Option<Usage>) {
+    let stdout_str = String::from_utf8_lossy(stdout);
+    let mut records: Vec<Value> = Vec::new();
+    match format {
+        OutputFormat::StreamJson => {
+            for line in stdout_str.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                    records.push(v);
+                }
+            }
+        }
+        OutputFormat::Json => {
+            if let Ok(v) = serde_json::from_str::<Value>(stdout_str.trim()) {
+                records.push(v);
+            }
+        }
+        OutputFormat::Text => {}
+    }
+    let mut session: Option<String> = None;
+    let mut usage = Usage::default();
+    for record in &records {
+        let (_, payload) = unwrap_event(record);
+        if session.is_none() {
+            session = extract_session(record).or_else(|| extract_session(payload));
+        }
+        if let Some(u) = extract_usage(record) {
+            usage.merge(u);
+        }
+        if !std::ptr::eq(payload, record)
+            && let Some(u) = extract_usage(payload)
+        {
+            usage.merge(u);
+        }
+    }
+    (session, (!usage.is_empty()).then_some(usage))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn normalize_records(
     parsed: ParsedRecords,

@@ -912,3 +912,49 @@ fn plugin_judge_env_applies_schema_and_add_dir_and_encodes_structured_output() {
         "missing --add-dir: {args:?}"
     );
 }
+
+#[test]
+fn plugin_timeout_preserves_streamed_session_and_default_deadline_covers_proj_turn() {
+    assert!(
+        Config::default().deadline_secs >= 14_400,
+        "default deadline_secs ({}) must not cut off 4h proj turns at 30 minutes",
+        Config::default().deadline_secs
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_executable(
+        dir.path(),
+        "ag-timeout-stub",
+        "#!/bin/sh\nprintf '{\"event\":\"init\",\"session_id\":\"ag-partial-1\"}\\n'\nexec sleep 60\n",
+    );
+    let mut cfg = base_config(fixture);
+    cfg.deadline_secs = 1;
+    let req = conary_core::plugin::Request {
+        contract: conary_core::plugin::CONTRACT.to_owned(),
+        task: conary_core::plugin::Task::Job {
+            repo: "acme/widget".to_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "Run long build.".to_owned(),
+            model: None,
+            effort: None,
+        },
+        execution: Some(conary_core::plugin::Execution {
+            choice: Some(conary_core::plugin::Choice {
+                engine: "antigravity".to_owned(),
+                model: None,
+                effort: None,
+            }),
+            context: conary_core::plugin::Context::Fresh,
+        }),
+        negotiated: None,
+    };
+    let out = crate::plugin::handle_request(&cfg, &req, &|| false);
+    assert_ne!(out.exit_code, 0);
+    let diag = out.diagnostic.expect("timeout diagnostic");
+    assert_eq!(
+        diag["error"].as_str(),
+        Some("antigravity exceeded its time limit"),
+        "{diag}"
+    );
+    assert_eq!(diag["session"].as_str(), Some("ag-partial-1"), "{diag}");
+}

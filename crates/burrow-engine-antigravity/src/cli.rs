@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use crate::config::{
     Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
 };
-use crate::normalize::{RunError, TurnOutput, normalize_output};
+use crate::normalize::{RunError, TurnOutput, extract_partial_session_and_usage, normalize_output};
 use crate::schema::Schema;
 
 /// Cross-engine credentials that must NEVER leak into the `antigravity` child,
@@ -583,7 +583,7 @@ pub fn run_invocation(
         } else {
             None
         };
-    let result = burrow_process::output_unless(
+    let result = burrow_process::output_unless_partial(
         &mut command,
         stdin_payload.as_deref(),
         deadline,
@@ -603,15 +603,27 @@ pub fn run_invocation(
             schema.as_ref(),
             &secrets,
         ),
-        Err(why) if why == "command was stopped" => TurnOutput {
-            error: Some(RunError::Cancelled),
-            ..TurnOutput::default()
-        },
-        Err(why) if why == "command exceeded its time limit" => TurnOutput {
-            error: Some(RunError::TimedOut),
-            ..TurnOutput::default()
-        },
-        Err(why) => TurnOutput {
+        Err(burrow_process::OutputError::Stopped { stdout, .. }) => {
+            let (session, usage) =
+                extract_partial_session_and_usage(invocation.output_format, &stdout);
+            TurnOutput {
+                session,
+                usage,
+                error: Some(RunError::Cancelled),
+                ..TurnOutput::default()
+            }
+        }
+        Err(burrow_process::OutputError::TimedOut { stdout, .. }) => {
+            let (session, usage) =
+                extract_partial_session_and_usage(invocation.output_format, &stdout);
+            TurnOutput {
+                session,
+                usage,
+                error: Some(RunError::TimedOut),
+                ..TurnOutput::default()
+            }
+        }
+        Err(burrow_process::OutputError::Other(why)) => TurnOutput {
             error: Some(RunError::ProcessFailed {
                 exit_code: None,
                 signal: None,

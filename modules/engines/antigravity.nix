@@ -387,7 +387,7 @@ in
 
     deadlineSeconds = mkOption {
       type = types.ints.positive;
-      default = 1800;
+      default = 14400;
       description = "Outer hard wall-clock deadline in seconds enforced on the child process group.";
     };
 

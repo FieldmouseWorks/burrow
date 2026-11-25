@@ -66,6 +66,25 @@ pub fn output(
     output_unless(command, input, until, max, &|| false)
 }
 
+/// Failure from [`output_unless_partial`], preserving partial pipe bytes on
+/// timeout or cancellation.
+#[derive(Debug)]
+pub enum OutputError {
+    TimedOut { stdout: Vec<u8>, stderr: Vec<u8> },
+    Stopped { stdout: Vec<u8>, stderr: Vec<u8> },
+    Other(String),
+}
+
+impl OutputError {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::TimedOut { .. } => "command exceeded its time limit".into(),
+            Self::Stopped { .. } => "command was stopped".into(),
+            Self::Other(msg) => msg,
+        }
+    }
+}
+
 /// [`output`], stopped the same way, process group and all, as soon as
 /// `stop` says so: the work it was for was abandoned.
 pub fn output_unless(
@@ -75,8 +94,23 @@ pub fn output_unless(
     max: usize,
     stop: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
+    output_unless_partial(command, input, until, max, stop).map_err(OutputError::into_message)
+}
+
+/// Like [`output_unless`], but returns any partial stdout/stderr bytes already
+/// read before a timeout or cancellation.
+pub fn output_unless_partial(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    until: Instant,
+    max: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Output, OutputError> {
     if Instant::now() >= until {
-        return Err("command exceeded its time limit".into());
+        return Err(OutputError::TimedOut {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
     }
     let mut child = command
         .process_group(0)
@@ -88,26 +122,38 @@ pub fn output_unless(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| OutputError::Other(e.to_string()))?;
     let pid = Pid::from_child(&child);
     let result = (|| {
         let mut stdin = child.stdin.take();
         if let Some(pipe) = &stdin {
-            nonblocking(pipe)?;
+            nonblocking(pipe).map_err(OutputError::Other)?;
         }
         let mut input = input.unwrap_or_default();
-        let mut stdout = child.stdout.take().ok_or("missing stdout")?;
-        let mut stderr = child.stderr.take().ok_or("missing stderr")?;
-        nonblocking(&stdout)?;
-        nonblocking(&stderr)?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| OutputError::Other("missing stdout".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| OutputError::Other("missing stderr".into()))?;
+        nonblocking(&stdout).map_err(OutputError::Other)?;
+        nonblocking(&stderr).map_err(OutputError::Other)?;
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut out_done, mut err_done) = (false, false);
         loop {
             if Instant::now() >= until {
-                return Err("command exceeded its time limit".into());
+                return Err(OutputError::TimedOut {
+                    stdout: out,
+                    stderr: err,
+                });
             }
             if stop() {
-                return Err("command was stopped".into());
+                return Err(OutputError::Stopped {
+                    stdout: out,
+                    stderr: err,
+                });
             }
             if let Some(pipe) = &mut stdin {
                 let mut done = input.is_empty();
@@ -125,7 +171,7 @@ pub fn output_unless(
                         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
                             done = true;
                         }
-                        Err(e) => return Err(e.to_string()),
+                        Err(e) => return Err(OutputError::Other(e.to_string())),
                     }
                 }
                 if done {
@@ -133,14 +179,16 @@ pub fn output_unless(
                 }
             }
             if !out_done {
-                out_done = read(&mut stdout, &mut out, max)?;
+                out_done = read(&mut stdout, &mut out, max).map_err(OutputError::Other)?;
             }
             if !err_done {
-                err_done = read(&mut stderr, &mut err, max)?;
+                err_done = read(&mut stderr, &mut err, max).map_err(OutputError::Other)?;
             }
             if out_done
                 && err_done
-                && let Some(status) = child.try_wait().map_err(|e| e.to_string())?
+                && let Some(status) = child
+                    .try_wait()
+                    .map_err(|e| OutputError::Other(e.to_string()))?
             {
                 return Ok(Output {
                     status,
@@ -191,6 +239,27 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("time limit"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn partial_preserves_stdout_on_timeout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'hello\\n'; exec sleep 60"]);
+        let start = Instant::now();
+        let err = output_unless_partial(
+            &mut command,
+            None,
+            start + Duration::from_millis(80),
+            1024,
+            &|| false,
+        )
+        .unwrap_err();
+        match err {
+            OutputError::TimedOut { stdout, .. } => {
+                assert_eq!(stdout, b"hello\n");
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
     }
 
     #[test]
