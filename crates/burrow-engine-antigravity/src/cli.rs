@@ -539,6 +539,8 @@ pub fn run_invocation(
                 "GH_TOKEN_SOCKET",
                 "GH_TOKEN",
                 "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
             ]
             .iter()
             .all(|key| std::env::var_os(key).filter(|v| !v.is_empty()).is_none())

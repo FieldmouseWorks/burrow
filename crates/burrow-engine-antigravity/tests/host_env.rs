@@ -116,6 +116,8 @@ fn host_mode_forwards_real_home_gh_config_dir_and_xdg_git_config_when_unset() {
             .env_remove("GH_TOKEN_SOCKET")
             .env_remove("GH_TOKEN")
             .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN")
             .env_remove("GIT_CONFIG_GLOBAL");
     });
 
@@ -152,6 +154,8 @@ fn host_mode_honors_xdg_config_home_for_gh_and_git_config() {
             .env_remove("GH_TOKEN_SOCKET")
             .env_remove("GH_TOKEN")
             .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN")
             .env_remove("GIT_CONFIG_GLOBAL");
     });
 
@@ -209,13 +213,36 @@ fn host_mode_preserves_explicit_gh_config_dir_and_app_socket_isolation() {
             .env("GH_TOKEN", "ghs_scoped_token")
             .env_remove("GH_CONFIG_DIR")
             .env_remove("GH_TOKEN_SOCKET")
-            .env_remove("GITHUB_TOKEN");
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN");
     });
     assert_eq!(
         env_value(&dumped_token, "GH_CONFIG_DIR"),
         None,
         "GH_TOKEN jobs must not inherit real HOME's gh config:\n{dumped_token}"
     );
+
+    for ent_key in ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] {
+        let dumped_ent = run_plugin_and_dump_env(dir.path(), true, |cmd| {
+            cmd.env("HOME", &real_home)
+                .env(ent_key, "ghs_enterprise_token")
+                .env_remove("GH_CONFIG_DIR")
+                .env_remove("GH_TOKEN_SOCKET")
+                .env_remove("GH_TOKEN")
+                .env_remove("GITHUB_TOKEN")
+                .env_remove(if ent_key == "GH_ENTERPRISE_TOKEN" {
+                    "GITHUB_ENTERPRISE_TOKEN"
+                } else {
+                    "GH_ENTERPRISE_TOKEN"
+                });
+        });
+        assert_eq!(
+            env_value(&dumped_ent, "GH_CONFIG_DIR"),
+            None,
+            "{ent_key} jobs must not inherit real HOME's gh config:\n{dumped_ent}"
+        );
+    }
 }
 
 #[test]
