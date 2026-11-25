@@ -73,6 +73,17 @@ fn run_plugin_streaming(
     child.wait_with_output().unwrap()
 }
 
+fn assert_not_leaked(kind: &str, needle: &str, stderr: &str, stdout: &str) {
+    assert!(
+        !stderr.contains(needle),
+        "{kind} leaked into streamed stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains(needle),
+        "{kind} leaked into stdout response:\n{stdout}"
+    );
+}
+
 #[test]
 fn streamed_tool_output_and_result_scrub_configured_credential_file() {
     let dir = TempDir::new().unwrap();
@@ -150,21 +161,25 @@ printf '%s\n' '{result_line}'
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    for secret in [
-        raw_cred,
+    assert_not_leaked("raw credential JSON", raw_cred, &stderr, &stdout);
+    assert_not_leaked(
+        "access token",
         "ya29.stream-secret-access-1234",
+        &stderr,
+        &stdout,
+    );
+    assert_not_leaked(
+        "refresh token",
         "1//stream-secret-refresh-5678",
+        &stderr,
+        &stdout,
+    );
+    assert_not_leaked(
+        "extra credential field",
         "custom-unlisted-secret-9999",
-    ] {
-        assert!(
-            !stderr.contains(secret),
-            "secret {secret:?} leaked into streamed stderr:\n{stderr}"
-        );
-        assert!(
-            !stdout.contains(secret),
-            "secret {secret:?} leaked into stdout response:\n{stdout}"
-        );
-    }
+        &stderr,
+        &stdout,
+    );
 
     let stream_lines: Vec<serde_json::Value> = stderr
         .lines()
