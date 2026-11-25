@@ -124,10 +124,10 @@ it builds cold (`src/builds.rs`): how many and which, their bytes, how long
 fetching them would take (estimated from one NAR's first 64 MiB, timed), and
 how long the kept builds' restore took. The last line is
 `builds-shadow {JSON}`, for a reader of the job's log. It reads narinfos
-only, through `nix path-info` and `nix store verify --no-contents` with a
-cache of its own, counts only what the store's key signs, and never fails
-or holds up the leg: each question has a deadline. Nothing substitutes
-from the store.
+concurrently by hash with `curl` and verifies their signatures offline
+with `nix store verify --no-contents`, counts only what the store's key
+signs, and never fails or holds up the leg: each question has a deadline.
+Nothing substitutes from the store.
 
 Such a run's builds go to the store, so every nix the worker starts also
 gets `accept-flake-config = false` and `sandbox = true`, after the caller's
