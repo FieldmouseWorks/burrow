@@ -106,7 +106,7 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(run) if ok else machine.fail(run)
 
     def unit(id):
-        return f"autoland-judge-look@{id}.service"
+        return f"autoland-judge-look-claude@{id}.service"
 
     def folder(id):
         return f"${state}/looks/{id}"
@@ -199,9 +199,9 @@ pkgs.testers.runNixOSTest {
             "mkdir -p ${state}/looks/c0ffee",
             "ln -s /tmp ${state}/looks/c0ffee",
             "ls ${state}/looks",
-            "systemctl start autoland-judge-look@b1.service",
-            "systemctl start autoland-judge-look@c0ffee.service",
-            "systemctl stop autoland-judge-look@a1.service",
+            "systemctl start autoland-judge-look-claude@b1.service",
+            "systemctl start autoland-judge-look-claude@c0ffee.service",
+            "systemctl stop autoland-judge-look-claude@a1.service",
             "test -e /run/conary-producers/judge/producer.sock",
             "cat /run/credentials/autoland-judge.service/judge-seal",
             "cat /run/keys/claude-token",
@@ -221,8 +221,8 @@ pkgs.testers.runNixOSTest {
             machine.fail(f"runuser -u {who} -- grep -rqs sk-the-looks-token /run/credentials /run/keys")
 
     with subtest("only the producer starts and stops looks, and nothing else"):
-        machine.fail("runuser -u conary-flow -- systemctl start autoland-judge-look@d1.service")
-        producer("systemctl start autoland-judge-look@not-a-look.service", ok=False)
+        machine.fail("runuser -u conary-flow -- systemctl start autoland-judge-look-claude@d1.service")
+        producer("systemctl start autoland-judge-look-claude@not-a-look.service", ok=False)
         producer("systemctl restart autoland-judge.service", ok=False)
         producer("systemctl stop nix-daemon.service", ok=False)
         producer(f"systemctl stop {unit('a1')} {unit('b1')} {unit('c1')}")

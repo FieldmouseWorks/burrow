@@ -275,6 +275,7 @@ pub(super) fn rig() -> Rig {
         "claude".into(),
         EngineConfig {
             plugin: stand_in(dir.path()),
+            unit: "autoland-judge-look-claude".into(),
             credential: "judge-login-claude".into(),
             credential_env: "CLAUDE_CODE_OAUTH_TOKEN".into(),
             hosts: vec!["api.anthropic.com".into()],
@@ -300,10 +301,14 @@ pub(super) fn rig() -> Rig {
 
 impl Rig {
     pub fn looks(&self) -> Looks {
+        let units: BTreeMap<String, Box<dyn Units>> = BTreeMap::from([(
+            "claude".into(),
+            Box::new(self.units.clone()) as Box<dyn Units>,
+        )]);
         Looks::new(
             config(self.dir.path()),
             read(&self.w),
-            Box::new(self.units.clone()),
+            units,
             Box::new(self.builds.clone()),
             api(self.dialed.clone()),
         )
@@ -667,7 +672,7 @@ fn a_judgment_a_look_cant_take_is_refused_before_it_burns_a_generation() {
 
 #[test]
 fn a_look_dispatches_to_a_routed_non_claude_engine_with_its_own_login_and_egress() {
-    let mut r = rig();
+    let r = rig();
     // Register a second modular engine surface (`custom`) alongside `claude`,
     // with its own credential, credential env var, and wildcard egress hosts.
     let custom_plugin = stand_in_for(
@@ -681,15 +686,21 @@ fn a_look_dispatches_to_a_routed_non_claude_engine_with_its_own_login_and_egress
     );
     let custom_cfg = EngineConfig {
         plugin: custom_plugin,
+        unit: "autoland-judge-look-custom".into(),
         credential: "judge-login-custom".into(),
         credential_env: "CUSTOM_ENGINE_TOKEN".into(),
         hosts: vec!["*.googleapis.com".into()],
     };
-    r.units.engines.insert("custom".into(), custom_cfg.clone());
-    r.units.credentials.insert(
-        "judge-login-custom".into(),
-        b"custom-secret-token\n".to_vec(),
-    );
+    let custom_units = InProcess {
+        engines: BTreeMap::from([("custom".into(), custom_cfg.clone())]),
+        credentials: BTreeMap::from([(
+            "judge-login-custom".into(),
+            b"custom-secret-token\n".to_vec(),
+        )]),
+        looks: r.units.looks.clone(),
+        home: r.units.home.clone(),
+        asked: r.units.asked.clone(),
+    };
     // Build config first (which seeds default claude overlay), then route
     // `judge` to `custom` via the live settings overlay without changing code.
     let mut cfg = config(r.dir.path());
@@ -717,10 +728,14 @@ fn a_look_dispatches_to_a_routed_non_claude_engine_with_its_own_login_and_egress
     let p = crate::plugin(&cfg).unwrap();
     assert_eq!(p.by.engine, "custom");
 
+    let units: BTreeMap<String, Box<dyn Units>> = BTreeMap::from([
+        ("claude".into(), Box::new(r.units.clone()) as Box<dyn Units>),
+        ("custom".into(), Box::new(custom_units) as Box<dyn Units>),
+    ]);
     let looks = Looks::new(
         cfg.clone(),
         read(&r.w),
-        Box::new(r.units.clone()),
+        units,
         Box::new(r.builds.clone()),
         api(r.dialed.clone()),
     )

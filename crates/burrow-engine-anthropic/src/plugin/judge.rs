@@ -148,6 +148,12 @@ pub fn execute(
     };
     let _ = writer.join();
 
+    if !out.status.success() {
+        let why = parse_output(&out.stdout, model)
+            .err()
+            .unwrap_or_else(|| "Claude exited unsuccessfully".to_owned());
+        return fail(format!("{why} (it exited {})", out.status));
+    }
     match parse_output(&out.stdout, model) {
         Ok((session, answer)) => JobOutcome::Ok {
             session: Some(session),

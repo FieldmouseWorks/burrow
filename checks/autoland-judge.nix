@@ -60,11 +60,12 @@ let
   failing = machine: map (a: a.message) (lib.filter (a: !a.assertion) machine.assertions);
   failed = failing uncontrolled;
   producer = on.systemd.services.autoland-judge;
-  look = on.systemd.services."autoland-judge-look@";
+  look = on.systemd.services."autoland-judge-look-claude@";
   build = on.systemd.services."autoland-judge-build@";
   read = on.burrow.autoland.plugins.judge.config;
   readAg = withAntigravity.burrow.autoland.plugins.judge.config;
-  lookAg = withAntigravity.systemd.services."autoland-judge-look@";
+  lookAgClaude = withAntigravity.systemd.services."autoland-judge-look-claude@";
+  lookAgAntigravity = withAntigravity.systemd.services."autoland-judge-look-antigravity@";
   configFile = builtins.unsafeDiscardStringContext (
     lib.last (lib.splitString " " producer.serviceConfig.ExecStart)
   );
@@ -74,6 +75,7 @@ let
     offByDefault =
       !(off.systemd.services ? autoland-judge)
       && !(off.systemd.services ? "autoland-judge-look@")
+      && !(off.systemd.services ? "autoland-judge-look-claude@")
       && !(off.systemd.services ? "autoland-judge-build@");
     # On, with a controller, nothing fails: the judging engine is out of
     # authoring sessions' reach.
@@ -125,7 +127,7 @@ let
     # The producer alone starts and stops looks and builds.
     polkit =
       lib.hasInfix ''subject.user != "autoland-judge"'' on.security.polkit.extraConfig
-      && lib.hasInfix "/^(autoland-judge-look|autoland-judge-build)@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
+      && lib.hasInfix "/^(autoland-judge-look-claude|autoland-judge-build)@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
     # No runner, and nothing of proj's: a judgment is no burrow.user job.
     noRunner = !(on.systemd.services ? burrow-judge-runner) && !(read ? proj) && !(read ? runner);
     producerCommand = lib.hasSuffix "/bin/burrow-judge producer ${configFile}" (
@@ -148,8 +150,9 @@ let
       && read.producer == "sam/judge"
       && read.credential == "judge-key"
       && read.seal == "judge-seal"
-      && read.unit == "autoland-judge-look"
+      && !(read ? unit)
       && (read.engines ? claude)
+      && read.engines.claude.unit == "autoland-judge-look-claude"
       && read.engines.claude.credential == "judge-login-claude"
       && read.engines.claude.credential_env == "CLAUDE_CODE_OAUTH_TOKEN"
       && read.engines.claude.hosts == [ "api.anthropic.com" ]
@@ -160,15 +163,25 @@ let
       && read.state == state
       && read.token != null;
     # Enabling burrow.engines.antigravity automatically registers its read-only
-    # judge surface alongside claude, with its own credential and egress hosts.
+    # judge surface alongside claude, with a dedicated look unit per engine so
+    # each look loads only its own engine's login credential.
     antigravityEngine =
       failing withAntigravity == [ ]
+      && !(withAntigravity.systemd.services ? "autoland-judge-look@")
       && (readAg.engines ? claude)
       && (readAg.engines ? antigravity)
+      && readAg.engines.antigravity.unit == "autoland-judge-look-antigravity"
       && readAg.engines.antigravity.credential == "judge-login-antigravity"
       && readAg.engines.antigravity.credential_env == "BURROW_ANTIGRAVITY_CREDENTIAL"
       && lib.elem "*.googleapis.com" readAg.engines.antigravity.hosts
-      && lib.elem "judge-login-antigravity:/run/secrets/antigravity-agent-credential" lookAg.serviceConfig.LoadCredential;
+      &&
+        lookAgClaude.serviceConfig.LoadCredential
+        == [ "judge-login-claude:/run/secrets/judge-claude-token" ]
+      &&
+        lookAgAntigravity.serviceConfig.LoadCredential == [
+          "judge-login-antigravity:/run/secrets/antigravity-agent-credential"
+        ]
+      && lib.hasInfix "/^(autoland-judge-look-antigravity|autoland-judge-look-claude|autoland-judge-build)@[0-9a-f]+\\.service$/" withAntigravity.security.polkit.extraConfig;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
 in

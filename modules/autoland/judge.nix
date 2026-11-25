@@ -133,8 +133,10 @@ let
           };
         };
   allEngines = wiredEngines // cfg.engines;
+  validEngineName = name: builtins.match "[a-z0-9][a-z0-9-]*" name != null;
   renderedEngines = lib.mapAttrs (name: eng: {
     plugin = lib.getExe eng.plugin;
+    unit = "${look}-${name}";
     credential = "judge-login-${name}";
     credential_env = eng.credentialEnv;
     hosts = eng.hosts;
@@ -302,7 +304,6 @@ in
         git = lib.getExe config.programs.git.package;
         github = "https://github.com";
         inherit state;
-        unit = look;
         systemctl = "${config.systemd.package}/bin/systemctl";
         timeout = cfg.timeoutMinutes * 60;
         engines = renderedEngines;
@@ -339,6 +340,10 @@ in
         assertion = allEngines != { };
         message = "burrow.autoland.plugins.judge: configure at least one judge engine (claudeTokenFile, burrow.engines.antigravity, or engines.<name>).";
       }
+      {
+        assertion = lib.all validEngineName (lib.attrNames allEngines);
+        message = "burrow.autoland.plugins.judge: engine names must match [a-z0-9][a-z0-9-]* so each engine gets its own isolated look unit.";
+      }
     ];
 
     environment.etc.${etcConfig}.source = configFile;
@@ -358,140 +363,146 @@ in
     # group, to read the one that's its own.
     systemd.tmpfiles.rules = [ "d ${state} 0750 ${producer} ${producer} -" ];
 
-    systemd.services.${producer} = {
-      description = "Conary's judge producer: the flow's judgments, sealed and signed";
-      wantedBy = [ "multi-user.target" ];
-      # After the flow's configs are rendered, which it reads at each
-      # request (autoland/shadow.nix).
-      after = [ "network-online.target" ] ++ autoland.flow.render;
-      wants = [ "network-online.target" ] ++ autoland.flow.render;
-      environment = lib.optionalAttrs (app != null) app.env;
-      # With no controller, the assertion above says why, rather than
-      # flow.producer's throw.
-      serviceConfig = lib.optionalAttrs (flow.controller != null) (flow.producer "judge") // {
-        User = producer;
-        Group = producer;
-        ExecStart = "${lib.getExe package} producer ${configFile}";
-        LoadCredential = [
-          "judge-key:${cfg.keyFile}"
-          "judge-seal:${cfg.sealFile}"
-        ];
-        UMask = "0027";
-        # A restart drops its requests, whose plugins see their connections
-        # close, and stops their looks; what a crash left is finished at
-        # its start.
-        Restart = "on-failure";
+    systemd.services = {
+      ${producer} = {
+        description = "Conary's judge producer: the flow's judgments, sealed and signed";
+        wantedBy = [ "multi-user.target" ];
+        # After the flow's configs are rendered, which it reads at each
+        # request (autoland/shadow.nix).
+        after = [ "network-online.target" ] ++ autoland.flow.render;
+        wants = [ "network-online.target" ] ++ autoland.flow.render;
+        environment = lib.optionalAttrs (app != null) app.env;
+        # With no controller, the assertion above says why, rather than
+        # flow.producer's throw.
+        serviceConfig = lib.optionalAttrs (flow.controller != null) (flow.producer "judge") // {
+          User = producer;
+          Group = producer;
+          ExecStart = "${lib.getExe package} producer ${configFile}";
+          LoadCredential = [
+            "judge-key:${cfg.keyFile}"
+            "judge-seal:${cfg.sealFile}"
+          ];
+          UMask = "0027";
+          # A restart drops its requests, whose plugins see their connections
+          # close, and stops their looks; what a crash left is finished at
+          # its start.
+          Restart = "on-failure";
+        };
       };
-    };
 
-    # One judgment's look: its answer, in its folder, once its unit exits 0
-    # (crates/burrow-judge, worker.rs).
-    systemd.services."${look}@" = {
-      description = "A judge producer's look %i";
-      # Its producer, which alone reads what it answers: a look outliving it
-      # is no one's.
-      bindsTo = [ "${producer}.service" ];
-      after = [ "${producer}.service" ];
-      unitConfig.CollectMode = "inactive-or-failed";
-      # A switch leaves a look be: its producer stops it.
-      restartIfChanged = false;
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        # A user of its own, named for the look, and the producer's group,
-        # for its look's folder, the only part of the producer's state it
-        # sees. Other users' processes it doesn't see.
-        DynamicUser = true;
-        User = "judge-%i";
-        ProtectProc = "invisible";
-        ProtectHome = true;
-        SupplementaryGroups = [ producer ];
-        # Nothing of burrow's state but its folder, nothing of the
-        # projects', and none of the machine's settings for Claude (its
-        # managed settings and CLAUDE.md, which are for authoring).
-        TemporaryFileSystem = [
-          "${stateDir}:ro"
-          "/etc/claude-code:ro"
-        ]
-        ++ [ "${config.burrow.projectsDir}:ro" ];
-        BindPaths = [ "${state}/looks/%i" ];
-        # No network of its own: its one way out is its folder's gate.
-        PrivateNetwork = true;
-        LoadCredential = lib.mapAttrsToList (
-          name: eng: "judge-login-${name}:${eng.credentialFile}"
-        ) allEngines;
-        ExecStart = "${lib.getExe package} look ${configFile} %i";
-        TimeoutStartSec = cfg.timeoutMinutes * 60;
-        UMask = "0077";
-      };
-    };
-
-    # One build of a head no CI reported on: burrow-proof's worker, whose
-    # exit, kept until the producer stops it, is how it came out
-    # (crates/burrow-judge, build.rs).
-    systemd.services."${build}@" = {
-      description = "A judge producer's build %i, of a head no CI reported on";
-      bindsTo = [ "${producer}.service" ];
-      after = [ "${producer}.service" ];
-      # Anything but 0 or 1 is no outcome: the unit fails, and goes.
-      unitConfig.CollectMode = "inactive-or-failed";
-      restartIfChanged = false;
-      path = [
-        pkgs.bash
-        pkgs.coreutils
-        config.programs.git.package
-      ];
-      environment = {
-        # Its copy of its repo is the producer's, which git refuses to read
-        # unless it's named safe.
-        GIT_CONFIG_COUNT = "1";
-        GIT_CONFIG_KEY_0 = "safe.directory";
-        GIT_CONFIG_VALUE_0 = "${state}/runs/*";
-      };
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        # A fail is an outcome too, and so is a check its worker couldn't
-        # run (2: a program it needs isn't here, it needed the network, it
-        # was killed), which the look is shown as that: each kept as the
-        # unit's success. A timeout or a stop is none.
-        SuccessExitStatus = "1 2";
-        # A user of its own, named for the build, and the producer's group,
-        # for its run's folder, the only part of the producer's state it
-        # sees: not the mirror, not a look's. Other users' processes it
-        # doesn't see.
-        DynamicUser = true;
-        User = "jbuild-%i";
-        ProtectProc = "invisible";
-        ProtectHome = true;
-        SupplementaryGroups = [ producer ];
-        TemporaryFileSystem = [
-          "${stateDir}:ro"
-          "${config.burrow.projectsDir}:ro"
+      # One build of a head no CI reported on: burrow-proof's worker, whose
+      # exit, kept until the producer stops it, is how it came out
+      # (crates/burrow-judge, build.rs).
+      "${build}@" = {
+        description = "A judge producer's build %i, of a head no CI reported on";
+        bindsTo = [ "${producer}.service" ];
+        after = [ "${producer}.service" ];
+        # Anything but 0 or 1 is no outcome: the unit fails, and goes.
+        unitConfig.CollectMode = "inactive-or-failed";
+        restartIfChanged = false;
+        path = [
+          pkgs.bash
+          pkgs.coreutils
+          config.programs.git.package
         ];
-        BindPaths = [ "${state}/runs/%i" ];
-        # No network, and no Nix daemon, whose fetches would be its way out:
-        # nothing it runs gets past the look's gate.
-        PrivateNetwork = true;
-        InaccessiblePaths = [ "-/nix/var/nix/daemon-socket" ];
-        ExecStart = "${lib.getExe package} build ${configFile} %i";
-        TimeoutStartSec = cfg.timeoutMinutes * 60;
-        # Its cgroup is the build's to fence its command in.
-        Delegate = true;
-        UMask = "0027";
+        environment = {
+          # Its copy of its repo is the producer's, which git refuses to read
+          # unless it's named safe.
+          GIT_CONFIG_COUNT = "1";
+          GIT_CONFIG_KEY_0 = "safe.directory";
+          GIT_CONFIG_VALUE_0 = "${state}/runs/*";
+        };
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # A fail is an outcome too, and so is a check its worker couldn't
+          # run (2: a program it needs isn't here, it needed the network, it
+          # was killed), which the look is shown as that: each kept as the
+          # unit's success. A timeout or a stop is none.
+          SuccessExitStatus = "1 2";
+          # A user of its own, named for the build, and the producer's group,
+          # for its run's folder, the only part of the producer's state it
+          # sees: not the mirror, not a look's. Other users' processes it
+          # doesn't see.
+          DynamicUser = true;
+          User = "jbuild-%i";
+          ProtectProc = "invisible";
+          ProtectHome = true;
+          SupplementaryGroups = [ producer ];
+          TemporaryFileSystem = [
+            "${stateDir}:ro"
+            "${config.burrow.projectsDir}:ro"
+          ];
+          BindPaths = [ "${state}/runs/%i" ];
+          # No network, and no Nix daemon, whose fetches would be its way out:
+          # nothing it runs gets past the look's gate.
+          PrivateNetwork = true;
+          InaccessiblePaths = [ "-/nix/var/nix/daemon-socket" ];
+          ExecStart = "${lib.getExe package} build ${configFile} %i";
+          TimeoutStartSec = cfg.timeoutMinutes * 60;
+          # Its cgroup is the build's to fence its command in.
+          Delegate = true;
+          UMask = "0027";
+        };
       };
-    };
+    }
+    // lib.mapAttrs' (
+      name: eng:
+      # One judgment's look for a single engine: its own template unit so
+      # systemd loads only this engine's login credential into the unit.
+      lib.nameValuePair "${look}-${name}@" {
+        description = "A judge producer's ${name} look %i";
+        # Its producer, which alone reads what it answers: a look outliving it
+        # is no one's.
+        bindsTo = [ "${producer}.service" ];
+        after = [ "${producer}.service" ];
+        unitConfig.CollectMode = "inactive-or-failed";
+        # A switch leaves a look be: its producer stops it.
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # A user of its own, named for the look, and the producer's group,
+          # for its look's folder, the only part of the producer's state it
+          # sees. Other users' processes it doesn't see.
+          DynamicUser = true;
+          User = "judge-%i";
+          ProtectProc = "invisible";
+          ProtectHome = true;
+          SupplementaryGroups = [ producer ];
+          # Nothing of burrow's state but its folder, nothing of the
+          # projects', and none of the machine's settings for Claude (its
+          # managed settings and CLAUDE.md, which are for authoring).
+          TemporaryFileSystem = [
+            "${stateDir}:ro"
+            "/etc/claude-code:ro"
+          ]
+          ++ [ "${config.burrow.projectsDir}:ro" ];
+          BindPaths = [ "${state}/looks/%i" ];
+          # No network of its own: its one way out is its folder's gate.
+          PrivateNetwork = true;
+          LoadCredential = [ "judge-login-${name}:${eng.credentialFile}" ];
+          ExecStart = "${lib.getExe package} look ${configFile} %i";
+          TimeoutStartSec = cfg.timeoutMinutes * 60;
+          UMask = "0077";
+        };
+      }
+    ) allEngines;
 
     # The producer starts and stops its looks' and builds' units, and
     # nothing else.
     security.polkit.enable = true;
-    security.polkit.extraConfig = ''
-      polkit.addRule(function(action, subject) {
-        if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${producer}") return polkit.Result.NOT_HANDLED;
-        var verb = action.lookup("verb");
-        if (verb != "start" && verb != "stop") return polkit.Result.NOT_HANDLED;
-        return /^(${look}|${build})@[0-9a-f]+\.service$/.test(action.lookup("unit")) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
-      });
-    '';
+    security.polkit.extraConfig =
+      let
+        allowedUnits = map (name: "${look}-${name}") (lib.attrNames allEngines) ++ [ build ];
+      in
+      ''
+        polkit.addRule(function(action, subject) {
+          if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "${producer}") return polkit.Result.NOT_HANDLED;
+          var verb = action.lookup("verb");
+          if (verb != "start" && verb != "stop") return polkit.Result.NOT_HANDLED;
+          return /^(${lib.concatStringsSep "|" allowedUnits})@[0-9a-f]+\.service$/.test(action.lookup("unit")) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
+        });
+      '';
   };
 }

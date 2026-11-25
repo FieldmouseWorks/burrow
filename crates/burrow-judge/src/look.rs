@@ -38,6 +38,7 @@ use conary_core::plugin::{
     Answer, Context, Executed, Identity, Judgment, Request, Response, Task, Trigger,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -98,7 +99,9 @@ impl Looked {
 pub struct Looks {
     pub cfg: Config,
     pub read: Read,
-    pub units: Box<dyn Units>,
+    /// Per-engine look unit managers, keyed by engine name, so each engine's
+    /// look runs in a systemd unit that loads only that engine's credential.
+    pub units: BTreeMap<String, Box<dyn Units>>,
     /// The builds' units, for a head no CI reported on.
     pub builds: Box<dyn Units>,
     /// How the gates reach the engine's API.
@@ -123,7 +126,7 @@ impl Looks {
     pub fn new(
         cfg: Config,
         read: Read,
-        units: Box<dyn Units>,
+        units: BTreeMap<String, Box<dyn Units>>,
         builds: Box<dyn Units>,
         dial: Dial,
     ) -> Result<Self, String> {
@@ -148,12 +151,19 @@ impl Looks {
     /// their folders (their requests went with them). How many it stopped.
     pub fn reconcile(&self) -> Result<usize, String> {
         let mut stopped = 0;
-        for (units, dir) in [(&self.units, "looks"), (&self.builds, "runs")] {
+        for units in self.units.values() {
             let loaded = units.loaded()?;
             for id in &loaded {
                 units.stop(id)?;
             }
             stopped += loaded.len();
+        }
+        let loaded_builds = self.builds.loaded()?;
+        for id in &loaded_builds {
+            self.builds.stop(id)?;
+        }
+        stopped += loaded_builds.len();
+        for dir in ["looks", "runs"] {
             let dir = self.cfg.state.join(dir);
             for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
                 let path = entry.map_err(|e| e.to_string())?.path();
@@ -373,17 +383,21 @@ impl Judges for Looks {
             model,
             effort,
         };
+        let engine_units = self
+            .units
+            .get(&engine)
+            .ok_or_else(|| format!("no look unit manager is configured for engine {engine}"))?;
         let ran = lay(&self.cfg, &id, repo, head, &pull.base.sha, &spec).and_then(|()| {
             let gate = Gate::open(&dir.join(GATE), &engine_cfg.hosts, self.dial.clone())
                 .map_err(|e| format!("its gate: {e}"))?;
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
-            let ended = self.units.run(&id, work, until);
+            let ended = engine_units.run(&id, work, until);
             drop(gate);
             ended
         });
         // Stopped, and read, once nothing of it is left running; its folder
         // goes either way.
-        let stopped = self.units.stop(&id);
+        let stopped = engine_units.stop(&id);
         let said = fs::read(dir.join(ANSWER));
         let _ = fs::remove_dir_all(&dir);
         match ran? {

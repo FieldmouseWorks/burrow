@@ -43,6 +43,9 @@ use std::path::{Path, PathBuf};
 pub struct EngineConfig {
     /// Conary v5 `job` plugin executable configured for restricted read-only judge looks.
     pub plugin: PathBuf,
+    /// Per-engine systemd look template unit (`UNIT@ID.service`) that loads
+    /// only this engine's login credential.
+    pub unit: String,
     /// Systemd credential name carrying this engine's isolated login.
     pub credential: String,
     /// Environment variable name under which the plugin reads its login.
@@ -94,9 +97,7 @@ pub struct Config {
     /// The producer's own state: `records/`, `generations/`, its mirrors
     /// (`git/`) and its looks' folders (`looks/`).
     pub state: PathBuf,
-    /// The looks' unit (`UNIT@ID.service`), systemctl, and how long a look
-    /// may run, in seconds.
-    pub unit: String,
+    /// systemctl, and how long a look may run, in seconds.
     pub systemctl: PathBuf,
     pub timeout: u64,
     /// Configured modular engine surfaces a look may dispatch to, keyed by

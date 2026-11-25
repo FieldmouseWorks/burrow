@@ -461,3 +461,49 @@ fn judge_mode_runs_restricted_read_only_and_returns_structured_output() {
     let res2 = handle_request(&cfg, &non_fresh, &|k| env_map.get(k).cloned(), 0);
     assert_eq!(res2.exit_code, EXIT_FAILURE);
 }
+
+#[test]
+fn judge_mode_rejects_nonzero_exit_even_with_success_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_bin = dir.path().join("fake-claude-fail");
+    let script = "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{\"verdict\":\"pass\",\"why\":\"Clean diff.\"},\"modelUsage\":{\"test-model-a\":{\"outputTokens\":1}}}\\n'\nexit 1\n";
+    std::fs::write(&claude_bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut cfg = sample_config(Mode::Claude);
+    cfg.program = Some(claude_bin);
+    cfg.judge_mode = true;
+
+    let env_map: BTreeMap<&str, String> = BTreeMap::from([
+        (
+            "BURROW_JUDGE_JSON_SCHEMA",
+            r#"{"type":"object","required":["verdict","why"]}"#.to_owned(),
+        ),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token".to_owned()),
+    ]);
+    let req = Request {
+        contract: conary_core::plugin::CONTRACT.into(),
+        task: Task::Job {
+            repo: "owner/repo".into(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "Judge this PR.".into(),
+            model: Some("test-model-a".into()),
+            effort: Some("high".into()),
+        },
+        execution: Some(Execution {
+            choice: Some(Choice {
+                engine: "claude".into(),
+                model: Some("test-model-a".into()),
+                effort: Some("high".into()),
+            }),
+            context: Context::Fresh,
+        }),
+        negotiated: None,
+    };
+    let res = handle_request(&cfg, &req, &|k| env_map.get(k).cloned(), 0);
+    assert_eq!(res.exit_code, EXIT_FAILURE);
+    assert!(res.response.is_none());
+}

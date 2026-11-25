@@ -54,10 +54,23 @@ fn main() -> ExitCode {
                         ..Default::default()
                     })
                 });
-                let units = Box::new(Systemd {
-                    systemctl: cfg.systemctl.clone(),
-                    unit: cfg.unit.clone(),
-                });
+                let units: std::collections::BTreeMap<
+                    String,
+                    Box<dyn burrow_producer::units::Units>,
+                > = cfg
+                    .engines
+                    .iter()
+                    .map(|(name, eng)| {
+                        (
+                            name.clone(),
+                            Box::new(Systemd {
+                                systemctl: cfg.systemctl.clone(),
+                                unit: eng.unit.clone(),
+                            })
+                                as Box<dyn burrow_producer::units::Units>,
+                        )
+                    })
+                    .collect();
                 let builds = Box::new(Systemd {
                     systemctl: cfg.systemctl.clone(),
                     unit: cfg.build.clone(),
