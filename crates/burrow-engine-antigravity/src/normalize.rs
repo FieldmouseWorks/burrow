@@ -206,6 +206,27 @@ fn parse_jsonl(stdout: &str) -> ParsedRecords {
     ParsedRecords::Ok(records)
 }
 
+/// Unwrap Antigravity's `stream-json` envelope (`{"event": "<kind>", "<kind>": {...}}`).
+fn unwrap_event(record: &Value) -> (Option<&str>, &Value) {
+    let Some(event) = record.get("event").and_then(Value::as_str) else {
+        return (None, record);
+    };
+    let payload = record
+        .get(event)
+        .filter(|v| v.is_object())
+        .unwrap_or(record);
+    (Some(event), payload)
+}
+
+fn record_has_error(v: &Value) -> bool {
+    v.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+        || v.get("isError").and_then(Value::as_bool).unwrap_or(false)
+        || v.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("error") || s.eq_ignore_ascii_case("failed"))
+        || v.get("error").is_some_and(|e| !e.is_null())
+}
+
 fn parse_single_json(stdout: &str) -> ParsedRecords {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
@@ -257,58 +278,81 @@ fn normalize_records(
     let mut usage = Usage::default();
     let mut record_error_texts: Vec<String> = Vec::new();
     let mut saw_error_flag = false;
+    let mut denied_actions: Vec<String> = Vec::new();
+    let mut refusal_records: Vec<Value> = Vec::with_capacity(records.len() * 2);
 
     for record in &records {
+        let (event_name, payload) = unwrap_event(record);
+        refusal_records.push(record.clone());
+        if !std::ptr::eq(payload, record) {
+            refusal_records.push(payload.clone());
+        }
+
         if session.is_none() {
-            session = extract_session(record);
+            session = extract_session(record).or_else(|| extract_session(payload));
         }
         if let Some(u) = extract_usage(record) {
             usage.merge(u);
         }
-        if let Some(so) = extract_structured_output(record) {
+        if !std::ptr::eq(payload, record)
+            && let Some(u) = extract_usage(payload)
+        {
+            usage.merge(u);
+        }
+        if let Some(so) =
+            extract_structured_output(payload).or_else(|| extract_structured_output(record))
+        {
             structured_output = Some(so);
         }
 
-        let record_type = record
-            .get("type")
-            .and_then(Value::as_str)
+        let record_type = event_name
+            .or_else(|| record.get("type").and_then(Value::as_str))
             .unwrap_or_default();
-        let is_err = record
-            .get("is_error")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || record
-                .get("isError")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            || record_type == "error"
-            || record
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|s| {
-                    s.eq_ignore_ascii_case("error") || s.eq_ignore_ascii_case("failed")
-                })
-            || record.get("error").is_some_and(|e| !e.is_null());
+        let is_err = record_has_error(record)
+            || (!std::ptr::eq(payload, record) && record_has_error(payload))
+            || record_type == "error";
 
         if is_err {
             saw_error_flag = true;
-            if let Some(msg) = extract_error_text(record) {
+            if let Some(msg) = extract_error_text(payload).or_else(|| extract_error_text(record)) {
                 record_error_texts.push(msg);
             }
             continue;
+        }
+
+        if let Some(arr) = payload.get("denied_actions").and_then(Value::as_array) {
+            for item in arr {
+                if let Some(name) = item
+                    .get("action")
+                    .or_else(|| item.get("display_name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    denied_actions.push(name.to_owned());
+                }
+            }
         }
 
         if record_type == "result"
             || record.get("result").is_some()
             || record.get("output").is_some()
         {
-            if let Some(text) = extract_result_text(record) {
+            if let Some(text) = extract_result_text(payload).or_else(|| extract_result_text(record))
+            {
                 final_result = Some(text);
+            }
+        } else if record_type == "step_update" {
+            if payload.get("step_type").and_then(Value::as_str) == Some("agent_response")
+                && let Some(delta) = payload.get("text_delta").and_then(Value::as_str)
+                && !delta.is_empty()
+            {
+                streamed_chunks.push(delta.to_owned());
             }
         } else if matches!(
             record_type,
             "assistant" | "message" | "content" | "delta" | "text"
-        ) && let Some(text) = extract_assistant_text(record)
+        ) && let Some(text) = extract_assistant_text(payload)
         {
             streamed_chunks.push(text);
         }
@@ -323,7 +367,7 @@ fn normalize_records(
         } else {
             joined
         };
-        let error = classify_refusal(&records, &fallback, secrets)
+        let error = classify_refusal(&refusal_records, &fallback, secrets)
             .map(RunError::Refusal)
             .unwrap_or_else(|| RunError::ProcessFailed {
                 exit_code,
@@ -369,13 +413,26 @@ fn normalize_records(
     }
 
     if result.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        let msg = if !denied_actions.is_empty() {
+            let detail = scrub(
+                &combined_or(
+                    stderr_str,
+                    &format!("denied actions: {}", denied_actions.join(", ")),
+                ),
+                secrets,
+            );
+            format!(
+                "antigravity exited 0 without producing a result (denied actions: {}; {detail})",
+                denied_actions.join(", ")
+            )
+        } else {
+            "antigravity exited 0 without producing a result".to_owned()
+        };
         return TurnOutput {
             session,
             result: None,
             structured_output,
-            error: Some(RunError::InvalidOutput(
-                "antigravity exited 0 without producing a result".to_owned(),
-            )),
+            error: Some(RunError::InvalidOutput(msg)),
             usage: usage_opt,
         };
     }

@@ -74,6 +74,45 @@ let
     })
   );
 
+  r2Patterns = import ./anthropic/r2.nix;
+  # Convert each Claude Bash-pattern entry in r2.nix into Antigravity CLI
+  # `command(...)` deny rules (plus `sudo` variants):
+  # - Trailing ` *` is a whole-token prefix (e.g. `zfs destroy *` -> `command(zfs destroy)`).
+  # - Any remaining `*` wildcard inside a token (e.g. `mkfs*`, `fwupdmgr update*`,
+  #   `git push --force origin main*`) uses Antigravity's `regex:` token-regex
+  #   syntax (`command(regex:mkfs.*)`), because plain `command(...)` matches
+  #   command prefixes word-by-word literally.
+  r2ToAntigravityRules =
+    pat:
+    let
+      trimmed = lib.removeSuffix " *" pat;
+      toRegex = s: lib.concatMapStringsSep ".*" lib.escapeRegex (lib.splitString "*" s);
+    in
+    if lib.hasInfix "*" trimmed then
+      let
+        rx = toRegex trimmed;
+      in
+      [
+        "command(regex:${rx})"
+        "command(regex:sudo ${rx})"
+      ]
+    else
+      [
+        "command(${trimmed})"
+        "command(sudo ${trimmed})"
+      ];
+  # Default headless host settings: allow workspace edits and commands without
+  # interactive prompts while denying every R2 one-way command from r2.nix
+  # (one fact, one home shared with the Anthropic host settings).
+  defaultHostSettingsFile = pkgs.writeText "burrow-antigravity-host-settings.json" (
+    builtins.toJSON {
+      toolPermission = "always-proceed";
+      permissions = {
+        deny = lib.concatMap r2ToAntigravityRules r2Patterns;
+      };
+    }
+  );
+
   hostPluginConfig = pkgs.writeText "burrow-engine-antigravity-host.json" (
     builtins.toJSON ({
       binary = resolvedBinary;
@@ -89,7 +128,13 @@ let
       credential_file = cfg.host.credentialFile;
       credential_mode = cfg.credentialMode;
       credential_home_path = cfg.credentialHomePath;
-      settings_file = if cfg.host.settingsFile != null then cfg.host.settingsFile else cfg.settingsFile;
+      settings_file =
+        if cfg.host.settingsFile != null then
+          cfg.host.settingsFile
+        else if cfg.settingsFile != null then
+          cfg.settingsFile
+        else
+          defaultHostSettingsFile;
       mode = cfg.host.mode;
       host_mode = true;
       dangerously_skip_permissions = false;
@@ -419,8 +464,12 @@ in
             "plan"
           ]
         );
-        default = "auto";
-        description = "Execution mode passed via `antigravity --mode` on host turns.";
+        default = "accept-edits";
+        description = ''
+          Execution mode passed via `antigravity --mode` on host turns.
+          Defaults to `accept-edits` because `auto` is unavailable on business
+          and enterprise accounts (falling back to `request-review`).
+        '';
       };
 
       sandbox = mkOption {
