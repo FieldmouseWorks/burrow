@@ -5,12 +5,15 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use burrow_engine_antigravity::{Config, plugin};
 use conary_core::plugin::{Request, Task};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 /// Says `activity` on stderr every `every` until dropped: the CLI's output
 /// comes only once it ends, so a runner's idle limit would take a long, live
@@ -79,15 +82,41 @@ fn main() -> ExitCode {
         &mut request,
         std::env::var("PROJ_APPEND_SYSTEM_PROMPT").ok().as_deref(),
     );
-    let streams = std::env::var("PROJ_STREAM_EVENTS").is_ok_and(|v| v == "1");
-    let activity = (streams && matches!(request.task, Task::Job { .. }))
-        .then(|| Activity::start(Duration::from_secs(config.activity_secs)));
-    let result = plugin::handle_request(&config, &request, &|| false);
+    let streams = std::env::var("PROJ_STREAM_EVENTS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let stream_job = streams && matches!(request.task, Task::Job { .. });
+    let stopped = Arc::new(AtomicBool::new(false));
+    for sig in [SIGTERM, SIGINT, SIGHUP] {
+        if let Err(e) = signal_hook::flag::register(sig, Arc::clone(&stopped)) {
+            eprintln!("burrow-engine-antigravity: failed to register signal handler: {e}");
+            return ExitCode::from(plugin::EXIT_FAILURE);
+        }
+    }
+    let activity = stream_job.then(|| Activity::start(Duration::from_secs(config.activity_secs)));
+    let result = plugin::handle_request_with_session(
+        &config,
+        &request,
+        &|| stopped.load(Ordering::Relaxed),
+        &mut |session_id| {
+            if stream_job
+                && let Ok(line) = serde_json::to_string(&serde_json::json!({
+                    "event": "session",
+                    "session_id": session_id,
+                }))
+            {
+                let mut err = io::stderr().lock();
+                let _ = writeln!(err, "{line}");
+                let _ = err.flush();
+            }
+        },
+    );
     drop(activity);
     if let Some(diag) = &result.diagnostic
         && let Ok(line) = serde_json::to_string(diag)
     {
-        eprintln!("{line}");
+        let mut err = io::stderr().lock();
+        let _ = writeln!(err, "{line}");
+        let _ = err.flush();
     }
     if let Some(response) = &result.response {
         let written = serde_json::to_vec(response)

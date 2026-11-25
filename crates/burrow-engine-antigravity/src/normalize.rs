@@ -238,6 +238,17 @@ fn parse_single_json(stdout: &str) -> ParsedRecords {
     }
 }
 
+/// Extract a session/conversation identifier from a single JSON line.
+pub(crate) fn extract_session_from_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let record: Value = serde_json::from_str(trimmed).ok()?;
+    let (_, payload) = unwrap_event(&record);
+    extract_session(&record).or_else(|| extract_session(payload))
+}
+
 /// Extract any `session` and `usage` already emitted in partial stdout before
 /// a timeout or cancellation.
 pub(crate) fn extract_partial_session_and_usage(

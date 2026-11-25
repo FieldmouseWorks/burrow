@@ -7,7 +7,7 @@ use conary_core::plugin::{
     Response, Task, fixtures, version,
 };
 
-use crate::cli::{Invocation, run_invocation};
+use crate::cli::{Invocation, run_invocation_with_session};
 use crate::config::{Config, ENGINE, Effort};
 use crate::normalize::{Refusal, RunError, Usage};
 
@@ -94,7 +94,18 @@ pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
 /// Answer one Conary plugin request and return structured diagnostics + exit code
 /// for stdio callers (`burrow-proj`, `conaryd`).
 pub fn handle_request(config: &Config, request: &Request, stop: &dyn Fn() -> bool) -> PluginResult {
-    match answer_detailed(config, request, stop) {
+    handle_request_with_session(config, request, stop, &mut |_| {})
+}
+
+/// Like [`handle_request`], invoking `on_session` as soon as the CLI streams a
+/// session identifier so callers can persist it before any outer deadline or kill.
+pub fn handle_request_with_session(
+    config: &Config,
+    request: &Request,
+    stop: &dyn Fn() -> bool,
+    on_session: &mut dyn FnMut(&str),
+) -> PluginResult {
+    match answer_detailed(config, request, stop, on_session) {
         Ok((response, usage)) => {
             let diagnostic = usage.map(|u| usage_event(response.by.session.as_deref(), &u));
             PluginResult {
@@ -215,7 +226,7 @@ pub fn answer_cancellable(
     request: &Request,
     stop: &dyn Fn() -> bool,
 ) -> Result<Response, String> {
-    answer_detailed(config, request, stop)
+    answer_detailed(config, request, stop, &mut |_| {})
         .map(|(response, _)| response)
         .map_err(|e| e.message())
 }
@@ -224,6 +235,7 @@ fn answer_detailed(
     config: &Config,
     request: &Request,
     stop: &dyn Fn() -> bool,
+    on_session: &mut dyn FnMut(&str),
 ) -> Result<(Response, Option<Usage>), Box<DetailedError>> {
     config.validate().map_err(DetailedError::other)?;
 
@@ -329,7 +341,7 @@ fn answer_detailed(
                 resolved_effort,
                 conversation.clone(),
             );
-            let turn = run_invocation(config, &invocation, stop);
+            let turn = run_invocation_with_session(config, &invocation, stop, on_session);
 
             if let Some(err) = turn.error {
                 return match err {

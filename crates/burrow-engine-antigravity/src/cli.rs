@@ -15,7 +15,10 @@ use tempfile::TempDir;
 use crate::config::{
     Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
 };
-use crate::normalize::{RunError, TurnOutput, extract_partial_session_and_usage, normalize_output};
+use crate::normalize::{
+    RunError, TurnOutput, extract_partial_session_and_usage, extract_session_from_line,
+    normalize_output,
+};
 use crate::schema::Schema;
 
 /// Cross-engine credentials that must NEVER leak into the `antigravity` child,
@@ -443,6 +446,17 @@ pub fn run_invocation(
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
 ) -> TurnOutput {
+    run_invocation_with_session(config, invocation, stop, &mut |_| {})
+}
+
+/// Like [`run_invocation`], calling `on_session` once as soon as a streamed
+/// `stream-json` line names the session/conversation identifier.
+pub(crate) fn run_invocation_with_session(
+    config: &Config,
+    invocation: &Invocation,
+    stop: &dyn Fn() -> bool,
+    on_session: &mut dyn FnMut(&str),
+) -> TurnOutput {
     // A schema that can't be held to is refused before the child runs: never
     // "any JSON will do".
     let schema = match invocation
@@ -583,12 +597,34 @@ pub fn run_invocation(
         } else {
             None
         };
-    let result = burrow_process::output_unless_partial(
+    let mut pending = Vec::new();
+    let mut reported_session = false;
+    let stream_session = invocation.output_format == OutputFormat::StreamJson;
+    let result = burrow_process::output_unless_partial_streaming(
         &mut command,
         stdin_payload.as_deref(),
         deadline,
         config.max_output_bytes,
         stop,
+        &mut |chunk| {
+            if !stream_session || reported_session {
+                return;
+            }
+            pending.extend_from_slice(chunk);
+            while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                let found = {
+                    let line = String::from_utf8_lossy(&pending[..pos]);
+                    extract_session_from_line(&line)
+                };
+                pending.drain(..=pos);
+                if let Some(sid) = found {
+                    reported_session = true;
+                    pending.clear();
+                    on_session(&sid);
+                    break;
+                }
+            }
+        },
     );
 
     let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();

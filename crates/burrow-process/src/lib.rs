@@ -54,6 +54,19 @@ fn read(pipe: &mut impl Read, bytes: &mut Vec<u8>, max: usize) -> Result<bool, S
     }
 }
 
+fn drain_available(pipe: &mut impl Read, bytes: &mut Vec<u8>, max: usize) {
+    let mut buffer = [0; 8192];
+    while bytes.len() < max {
+        let room = (max - bytes.len()).min(buffer.len());
+        match pipe.read(&mut buffer[..room]) {
+            Ok(0) => break,
+            Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 /// Feed input and drain both pipes without blocking past `until`. Cap each
 /// output, and kill and reap the process group on every exit, even if a
 /// descendant holds a pipe open after the command itself has finished.
@@ -106,8 +119,27 @@ pub fn output_unless_partial(
     max: usize,
     stop: &dyn Fn() -> bool,
 ) -> Result<Output, OutputError> {
+    output_unless_partial_streaming(command, input, until, max, stop, &mut |_| {})
+}
+
+/// Like [`output_unless_partial`], invoking `on_stdout` with each newly read
+/// stdout chunk as it arrives.
+pub fn output_unless_partial_streaming(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    until: Instant,
+    max: usize,
+    stop: &dyn Fn() -> bool,
+    on_stdout: &mut dyn FnMut(&[u8]),
+) -> Result<Output, OutputError> {
     if Instant::now() >= until {
         return Err(OutputError::TimedOut {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
+    }
+    if stop() {
+        return Err(OutputError::Stopped {
             stdout: Vec::new(),
             stderr: Vec::new(),
         });
@@ -143,16 +175,29 @@ pub fn output_unless_partial(
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut out_done, mut err_done) = (false, false);
         loop {
-            if Instant::now() >= until {
-                return Err(OutputError::TimedOut {
-                    stdout: out,
-                    stderr: err,
-                });
-            }
-            if stop() {
-                return Err(OutputError::Stopped {
-                    stdout: out,
-                    stderr: err,
+            let timed_out = Instant::now() >= until;
+            let stopped = !timed_out && stop();
+            if timed_out || stopped {
+                if !out_done {
+                    let prev = out.len();
+                    drain_available(&mut stdout, &mut out, max);
+                    if out.len() > prev {
+                        on_stdout(&out[prev..]);
+                    }
+                }
+                if !err_done {
+                    drain_available(&mut stderr, &mut err, max);
+                }
+                return Err(if timed_out {
+                    OutputError::TimedOut {
+                        stdout: out,
+                        stderr: err,
+                    }
+                } else {
+                    OutputError::Stopped {
+                        stdout: out,
+                        stderr: err,
+                    }
                 });
             }
             if let Some(pipe) = &mut stdin {
@@ -179,7 +224,11 @@ pub fn output_unless_partial(
                 }
             }
             if !out_done {
+                let prev = out.len();
                 out_done = read(&mut stdout, &mut out, max).map_err(OutputError::Other)?;
+                if out.len() > prev {
+                    on_stdout(&out[prev..]);
+                }
             }
             if !err_done {
                 err_done = read(&mut stderr, &mut err, max).map_err(OutputError::Other)?;
@@ -259,6 +308,37 @@ mod tests {
                 assert_eq!(stdout, b"hello\n");
             }
             other => panic!("expected TimedOut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_callback_delivers_stdout_before_stop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'hello\\n'; exec sleep 60"]);
+        let stop = AtomicBool::new(false);
+        let mut streamed = Vec::new();
+        let err = output_unless_partial_streaming(
+            &mut command,
+            None,
+            Instant::now() + Duration::from_secs(10),
+            1024,
+            &|| stop.load(Ordering::Relaxed),
+            &mut |chunk| {
+                streamed.extend_from_slice(chunk);
+                if streamed == b"hello\n" {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(streamed, b"hello\n");
+        match err {
+            OutputError::Stopped { stdout, .. } => {
+                assert_eq!(stdout, b"hello\n");
+            }
+            other => panic!("expected Stopped, got {other:?}"),
         }
     }
 

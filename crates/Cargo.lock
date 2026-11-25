@@ -538,8 +538,10 @@ dependencies = [
  "burrow-process",
  "burrow-test",
  "conary-core",
+ "rustix",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
 ]
 

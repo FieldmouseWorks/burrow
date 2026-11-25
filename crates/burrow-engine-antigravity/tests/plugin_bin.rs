@@ -679,3 +679,225 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
         "{denied_out:?}"
     );
 }
+
+#[test]
+fn live_session_streams_before_outer_deadline_or_kill() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let dir = TempDir::new().unwrap();
+    let fixture = write_executable(
+        dir.path(),
+        "ag-live-session",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"event\":\"init\",\"conversation_id\":\"live-sess-1\"}\\n'\nexec sleep 60\n",
+    );
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        activity_secs: 60,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+    let req = Request {
+        contract: CONTRACT.to_owned(),
+        execution: Some(Execution {
+            choice: None,
+            context: Context::Fresh,
+        }),
+        negotiated: Some(Negotiated {
+            by: Identity {
+                engine: ENGINE.to_owned(),
+                session: None,
+            },
+            offers: cfg.offers(),
+        }),
+        task: Task::Job {
+            repo: "owner/demo".to_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "long turn".to_owned(),
+            model: None,
+            effort: None,
+        },
+    };
+
+    let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
+        .arg(&cfg_path)
+        .env("PROJ_STREAM_EVENTS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&req).unwrap())
+        .unwrap();
+    drop(child.stdin.take());
+
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // The session event must arrive on stderr while the plugin and CLI are still
+    // running, before any outer deadline or kill.
+    let mut got_session = None;
+    let wait_until = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < wait_until {
+        let left = wait_until.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line)
+                    && val["event"] == "session"
+                {
+                    got_session = val["session_id"].as_str().map(str::to_owned);
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Verify the plugin is still running when the live session event arrives,
+    // then terminate it cleanly via SIGTERM so its child group is reaped too.
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "plugin exited before live session event check"
+    );
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::Signal::TERM,
+    );
+    let _ = child.wait();
+    drop(rx);
+    let _ = reader.join();
+
+    assert_eq!(
+        got_session.as_deref(),
+        Some("live-sess-1"),
+        "expected live session event on stderr before plugin exits or is killed"
+    );
+}
+
+#[test]
+fn sigterm_cancels_child_group_and_emits_partial_session_and_usage() {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    let child_pid_file = dir.path().join("child.pid");
+    let ready_file = dir.path().join("ready");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-sigterm-stub",
+        &format!(
+            r#"#!/bin/sh
+cat >/dev/null
+sleep 60 &
+echo $! > "{}"
+printf '{{"event":"init","conversation_id":"sigterm-sess-1"}}\n'
+printf '{{"event":"step_update","usage":{{"input_tokens":42,"output_tokens":7}}}}\n'
+touch "{}"
+wait
+"#,
+            child_pid_file.display(),
+            ready_file.display(),
+        ),
+    );
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+    let req = Request {
+        contract: CONTRACT.to_owned(),
+        execution: Some(Execution {
+            choice: None,
+            context: Context::Fresh,
+        }),
+        negotiated: Some(Negotiated {
+            by: Identity {
+                engine: ENGINE.to_owned(),
+                session: None,
+            },
+            offers: cfg.offers(),
+        }),
+        task: Task::Job {
+            repo: "owner/demo".to_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "cut by proj deadline".to_owned(),
+            model: None,
+            effort: None,
+        },
+    };
+
+    let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
+        .arg(&cfg_path)
+        .env_remove("PROJ_STREAM_EVENTS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&req).unwrap())
+        .unwrap();
+    drop(child.stdin.take());
+
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_file.exists() && Instant::now() < ready_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready_file.exists(), "fixture never signaled ready");
+    // Give the plugin a moment to finish draining the init/usage lines.
+    std::thread::sleep(Duration::from_millis(50));
+
+    let pid = Pid::from_child(&child);
+    kill_process(pid, Signal::TERM).unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected clean EXIT_FAILURE after SIGTERM, got {:?}; stderr: {stderr}",
+        output.status
+    );
+    let diag: serde_json::Value = stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["event"] == "error")
+        .unwrap_or_else(|| panic!("expected structured error diagnostic on stderr: {stderr}"));
+    assert_eq!(diag["session"].as_str(), Some("sigterm-sess-1"), "{diag}");
+    assert_eq!(
+        diag["error"].as_str(),
+        Some("antigravity invocation was cancelled"),
+        "{diag}"
+    );
+    assert_eq!(diag["usage"]["input_tokens"].as_u64(), Some(42), "{diag}");
+    assert_eq!(diag["usage"]["output_tokens"].as_u64(), Some(7), "{diag}");
+
+    let bg_pid = fs::read_to_string(&child_pid_file).unwrap();
+    let bg_pid = bg_pid.trim();
+    let gone = (0..200).any(|_| {
+        std::thread::sleep(Duration::from_millis(10));
+        !Path::new(&format!("/proc/{bg_pid}")).exists()
+    });
+    assert!(gone, "background child {bg_pid} was not killed on SIGTERM");
+}

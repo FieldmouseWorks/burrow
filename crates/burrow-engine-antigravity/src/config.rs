@@ -29,8 +29,9 @@ pub const JUDGE_DIR_ENV: &str = "BURROW_JUDGE_DIR";
 pub const PRINT_TIMEOUT_ENV: &str = "BURROW_ANTIGRAVITY_PRINT_TIMEOUT_SECS";
 
 /// Default outer wall-clock deadline (seconds) for one headless invocation.
-/// Matches `proj`'s 4h turn timeout; `proj` enforces shorter turn deadlines
-/// via cancellation and `timeout(1)`.
+/// Matches `proj`'s 4h turn timeout; `proj` enforces turn deadlines via
+/// `SIGTERM` (handled cleanly by the plugin) and persists the session in real
+/// time from streamed `session` events.
 pub const DEFAULT_DEADLINE_SECS: u64 = 14_400;
 
 /// Default interval (seconds) between a running job's `activity` events.
