@@ -385,15 +385,10 @@ fn judge_mode_runs_restricted_read_only_and_returns_structured_output() {
     let seen_args = dir.path().join("seen-args");
     let claude_bin = dir.path().join("fake-claude");
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\ncat >/dev/null\nprintf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{{\"verdict\":\"pass\",\"why\":\"Clean diff.\"}},\"modelUsage\":{{\"test-model-a\":{{\"outputTokens\":1}}}}}}\\n'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{{\"verdict\":\"pass\",\"why\":\"Clean diff.\"}},\"modelUsage\":{{\"test-model-a\":{{\"outputTokens\":1}}}}}}\\n'\n",
         seen_args.display()
     );
-    std::fs::write(&claude_bin, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    burrow_test::executable(&claude_bin, script);
     let mut cfg = sample_config(Mode::Claude);
     cfg.program = Some(claude_bin);
     cfg.judge_mode = true;
@@ -466,13 +461,8 @@ fn judge_mode_runs_restricted_read_only_and_returns_structured_output() {
 fn judge_mode_rejects_nonzero_exit_even_with_success_json() {
     let dir = tempfile::tempdir().unwrap();
     let claude_bin = dir.path().join("fake-claude-fail");
-    let script = "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{\"verdict\":\"pass\",\"why\":\"Clean diff.\"},\"modelUsage\":{\"test-model-a\":{\"outputTokens\":1}}}\\n'\nexit 1\n";
-    std::fs::write(&claude_bin, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let script = "#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"judge-sess\",\"structured_output\":{\"verdict\":\"pass\",\"why\":\"Clean diff.\"},\"modelUsage\":{\"test-model-a\":{\"outputTokens\":1}}}\\n'\nexit 1\n";
+    burrow_test::executable(&claude_bin, script);
     let mut cfg = sample_config(Mode::Claude);
     cfg.program = Some(claude_bin);
     cfg.judge_mode = true;
