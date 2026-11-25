@@ -18,6 +18,7 @@
   credit ? null,
   appendSystemPrompt ? null,
   hostMode ? false,
+  judgeMode ? false,
   apiKeyFile ? null,
 }:
 let
@@ -52,6 +53,7 @@ let
       // lib.optionalAttrs (credit != null) { inherit credit; }
       // lib.optionalAttrs (appendSystemPrompt != null) { inherit appendSystemPrompt; }
       // lib.optionalAttrs hostMode { inherit hostMode; }
+      // lib.optionalAttrs judgeMode { inherit judgeMode; }
     )
   );
 in

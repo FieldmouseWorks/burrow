@@ -6,6 +6,7 @@
 //! on stderr (never on stdout, and never containing credentials).
 
 pub mod grants;
+pub mod judge;
 pub mod run;
 
 use std::io::{Read, Write};
@@ -110,6 +111,11 @@ pub struct PluginConfig {
     /// host capability/system-prompt handoff.
     #[serde(default)]
     pub host_mode: bool,
+    /// True only for restricted read-only judge looks (`burrow-judge`): runs
+    /// Claude Code with `--restricted`, read-only tools alone, `--json-schema`,
+    /// `--no-session-persistence`, and returns structured JSON output.
+    #[serde(default)]
+    pub judge_mode: bool,
 }
 
 impl PluginConfig {
@@ -625,12 +631,6 @@ pub fn handle_request_with_stream(
                 );
             }
 
-            let grants = match grants::from_env_with_host(env, Path::new(workdir), config.host_mode)
-            {
-                Ok(g) => g,
-                Err(why) => return PluginResult::error(engine, None, why, None),
-            };
-
             // A `claude-api` run's budget, as its settings cap it; a metered
             // credit's admission caps it again, just before the run starts.
             let budget = match config.mode {
@@ -648,7 +648,18 @@ pub fn handle_request_with_stream(
                 credit: config.credit.as_ref(),
             };
 
-            match run::execute_with_stream(config, &grants, &spec, env, now, on_stream) {
+            let outcome = if config.judge_mode {
+                judge::execute(config, &spec, env)
+            } else {
+                let grants =
+                    match grants::from_env_with_host(env, Path::new(workdir), config.host_mode) {
+                        Ok(g) => g,
+                        Err(why) => return PluginResult::error(engine, None, why, None),
+                    };
+                run::execute_with_stream(config, &grants, &spec, env, now, on_stream)
+            };
+
+            match outcome {
                 JobOutcome::Ok {
                     session,
                     answer,

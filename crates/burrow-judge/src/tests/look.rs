@@ -5,15 +5,19 @@
 use super::build::Builds;
 use super::world::{World, github, read, world};
 use super::{PRODUCER, REPO, SECRET, ask, ask_with, config, judge_request, seal};
+use crate::EngineConfig;
 use crate::egress::Dial;
 use crate::look::{ANSWER, Looked, Looks, Spec};
 use crate::producer::{Judges, Producer};
-use crate::worker::{Worker, argv, holds_login, looked};
+use crate::worker::{
+    JUDGE_DIR_ENV, JUDGE_SCHEMA_ENV, Worker, holds_login, looked, plugin_request, schema,
+};
 use burrow_producer::serve::Work;
 use burrow_producer::sign::Signer;
 use burrow_producer::units::{Ended, Units};
 use conary_core::plugin::{Judgment, Request, Trigger};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -22,13 +26,21 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-/// What the stand-in prints when the test doesn't say: a verdict, by its
-/// session, on the model it was asked for.
+/// What a stand-in Conary v5 engine plugin prints when the test doesn't say:
+/// a fresh-session job response carrying the structured verdict JSON.
+pub(super) fn printed_for(engine: &str, verdict: &str, model: &str, effort: Option<&str>) -> Value {
+    json!({
+        "contract": conary_core::plugin::CONTRACT,
+        "by": {"engine": engine, "session": "look-session"},
+        "execution": {"model": model, "effort": effort, "context": {"kind": "fresh"}},
+        "kind": "job",
+        "summary": json!({"verdict": verdict, "why": "Read the diff and every thread."}).to_string(),
+        "next": {"step": "done"},
+    })
+}
+
 pub(super) fn printed(verdict: &str, model: &str) -> Value {
-    json!({"type": "result", "subtype": "success", "is_error": false,
-        "session_id": "look-session",
-        "structured_output": {"verdict": verdict, "why": "Read the diff and every thread."},
-        "modelUsage": {model: {"outputTokens": 1}}})
+    printed_for("claude", verdict, model, Some("high"))
 }
 
 /// bash, by its path on PATH: a build's sandbox has no /usr/bin/env, and
@@ -41,23 +53,26 @@ fn bash() -> PathBuf {
         .expect("bash is on PATH")
 }
 
-/// A stand-in for Claude Code in `dir`: it keeps its arguments, where it
-/// ran, its environment and its prompt in `dir/seen`, asks its proxy for
-/// a host it may not reach and then for its API's, keeping what each
-/// answered, and prints `dir/prints`.
-fn stand_in(dir: &Path) -> PathBuf {
+/// A stand-in Conary v5 engine plugin in `dir`: it keeps its request JSON,
+/// where it ran, and its environment in `dir/seen`, probes its egress proxy
+/// for a disallowed host and its API host, and prints `dir/prints`.
+fn stand_in_for(dir: &Path, engine: &str, probe_hosts: &[&str]) -> PathBuf {
     let seen = dir.join("seen");
     std::fs::create_dir_all(&seen).unwrap();
-    let path = dir.join("claude");
+    let path = dir.join(format!("{engine}-plugin"));
+    let probes = probe_hosts
+        .iter()
+        .map(|h| format!("ask {h}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     burrow_test::executable(
         &path,
         format!(
             r#"#!{bash}
 seen={seen}
-printf '%s\n' "$@" >$seen/args
 pwd >$seen/pwd
 env >$seen/env
-cat >$seen/prompt
+cat >$seen/request
 ask() {{
   hostport=${{HTTPS_PROXY#http://}}
   exec 3<>/dev/tcp/${{hostport%:*}}/${{hostport#*:}}
@@ -66,8 +81,7 @@ ask() {{
   echo "$line" >>$seen/proxy
   exec 3>&-
 }}
-ask example.org:443
-ask api.anthropic.com:443
+{probes}
 cat {prints}
 "#,
             bash = bash().display(),
@@ -75,6 +89,11 @@ cat {prints}
             prints = dir.join("prints").display(),
         ),
     );
+    path
+}
+
+fn stand_in(dir: &Path) -> PathBuf {
+    let path = stand_in_for(dir, "claude", &["example.org:443", "api.anthropic.com:443"]);
     std::fs::write(dir.join("prints"), printed("pass", "a-model").to_string()).unwrap();
     path
 }
@@ -83,7 +102,8 @@ cat {prints}
 /// and keep what they were asked.
 #[derive(Clone)]
 struct InProcess {
-    claude: PathBuf,
+    engines: BTreeMap<String, EngineConfig>,
+    credentials: BTreeMap<String, Vec<u8>>,
     looks: PathBuf,
     home: PathBuf,
     asked: Arc<Mutex<Asked>>,
@@ -120,11 +140,17 @@ impl Units for InProcess {
         if self.asked.lock().unwrap().abandon {
             return Err("its request was abandoned".into());
         }
+        let creds = self.credentials.clone();
         let worker = Worker {
-            claude: self.claude.clone(),
+            engines: self.engines.clone(),
             dir,
             home: self.home.clone(),
-            token: b"the-look-token\n".to_vec(),
+            read_credential: Box::new(move |name| {
+                creds
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("missing test credential {name}"))
+            }),
         };
         Ok(match worker.look() {
             Ok(()) => Ended::Exited(0),
@@ -244,8 +270,21 @@ pub(super) fn rig() -> Rig {
     repo(dir.path(), &w);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    let mut engines = BTreeMap::new();
+    engines.insert(
+        "claude".into(),
+        EngineConfig {
+            plugin: stand_in(dir.path()),
+            unit: "autoland-judge-look-claude".into(),
+            credential: "judge-login-claude".into(),
+            credential_env: "CLAUDE_CODE_OAUTH_TOKEN".into(),
+            hosts: vec!["api.anthropic.com".into()],
+        },
+    );
+    let credentials = BTreeMap::from([("judge-login-claude".into(), b"the-look-token\n".to_vec())]);
     let units = InProcess {
-        claude: stand_in(dir.path()),
+        engines,
+        credentials,
         looks: dir.path().join("state/looks"),
         home,
         asked: Arc::default(),
@@ -262,10 +301,14 @@ pub(super) fn rig() -> Rig {
 
 impl Rig {
     pub fn looks(&self) -> Looks {
+        let units: BTreeMap<String, Box<dyn Units>> = BTreeMap::from([(
+            "claude".into(),
+            Box::new(self.units.clone()) as Box<dyn Units>,
+        )]);
         Looks::new(
             config(self.dir.path()),
             read(&self.w),
-            Box::new(self.units.clone()),
+            units,
             Box::new(self.builds.clone()),
             api(self.dialed.clone()),
         )
@@ -285,6 +328,14 @@ impl Rig {
     }
 
     pub fn seen(&self, name: &str) -> String {
+        if name == "prompt" {
+            let raw =
+                std::fs::read_to_string(self.dir.path().join("seen/request")).unwrap_or_default();
+            return serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("prompt")?.as_str().map(str::to_owned))
+                .unwrap_or_default();
+        }
         std::fs::read_to_string(self.dir.path().join("seen").join(name)).unwrap_or_default()
     }
 
@@ -346,23 +397,16 @@ fn a_look_judges_the_laid_out_head_and_is_published_by_its_own_session_and_model
         ("a-model", Some("high"))
     );
 
-    // The engine, as the look runs it: fresh, restricted to reading, with no
-    // MCP servers, its folder added, from a home of its own, its login the
+    // The engine plugin, as the look runs it: fresh Conary v5 Task::Job,
+    // its folder via BURROW_JUDGE_DIR, strict verdict schema via
+    // BURROW_JUDGE_JSON_SCHEMA, from a home of its own, its login the
     // unit's, and its proxy the gate.
-    let args: Vec<String> = r.seen("args").lines().map(str::to_owned).collect();
     let dir = r.dir.path().join("state/looks").join(id);
-    assert_eq!(args, argv(spec, &dir));
-    for flag in [
-        "--restricted",
-        "--strict-mcp-config",
-        "--no-session-persistence",
-    ] {
-        assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
-    }
-    assert!(!args.iter().any(|a| a == "--resume" || a == "--continue"));
-    let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
-    assert_eq!(at("--tools"), "Read,Grep,Glob");
-    assert_eq!(at("--add-dir"), dir.to_string_lossy());
+    let sent: Request = serde_json::from_str(&r.seen("request")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&sent).unwrap(),
+        serde_json::to_value(plugin_request(spec, &r.units.home)).unwrap()
+    );
     let home = r.units.home.to_string_lossy().into_owned();
     assert_eq!(r.seen("pwd").trim(), home);
     let env = r.seen("env");
@@ -370,6 +414,16 @@ fn a_look_judges_the_laid_out_head_and_is_published_by_its_own_session_and_model
     assert!(
         env.lines()
             .any(|l| l == "CLAUDE_CODE_OAUTH_TOKEN=the-look-token"),
+        "{env}"
+    );
+    assert!(
+        env.lines()
+            .any(|l| l == format!("{JUDGE_DIR_ENV}={}", dir.display())),
+        "{env}"
+    );
+    assert!(
+        env.lines()
+            .any(|l| l == format!("{JUDGE_SCHEMA_ENV}={}", schema())),
         "{env}"
     );
     assert!(
@@ -384,9 +438,11 @@ fn a_look_judges_the_laid_out_head_and_is_published_by_its_own_session_and_model
         "TMPDIR",
         "HTTPS_PROXY",
         "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        JUDGE_DIR_ENV,
+        JUDGE_SCHEMA_ENV,
         "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "DISABLE_AUTOUPDATER",
         // What bash sets itself.
         "PWD",
         "OLDPWD",
@@ -398,7 +454,9 @@ fn a_look_judges_the_laid_out_head_and_is_published_by_its_own_session_and_model
         assert!(given.contains(&name), "the look was given {name}");
     }
     // Its brief, with every thread and where things are.
-    let prompt = r.seen("prompt");
+    let conary_core::plugin::Task::Job { prompt, .. } = sent.task else {
+        panic!("expected Task::Job")
+    };
     assert!(prompt.contains("> It ends on the empty line, by design."));
     assert!(prompt.contains(&format!("{}/head", dir.display())));
 }
@@ -425,15 +483,19 @@ fn a_look_that_leaves_no_answer_that_reads_answers_nothing() {
     let r = rig();
     let request = judge_request(&r.w, vec![Trigger::Asked]);
     for (printed, says) in [
-        (json!("not a result"), "no result that reads"),
+        (json!("not a result"), "no response that reads"),
         (
-            json!({"subtype": "error_max_turns", "is_error": true, "session_id": "s"}),
-            "failed",
+            {
+                let mut p = printed("pass", "a-model");
+                p["by"]["engine"] = json!("other");
+                p
+            },
+            "answered as",
         ),
         (
             {
                 let mut p = printed("pass", "a-model");
-                p["session_id"] = json!(" ");
+                p["by"]["session"] = json!(" ");
                 p
             },
             "no session",
@@ -441,7 +503,15 @@ fn a_look_that_leaves_no_answer_that_reads_answers_nothing() {
         (
             {
                 let mut p = printed("pass", "a-model");
-                p["structured_output"]["why"] = json!(" ");
+                p["execution"]["context"] = json!({"kind": "continue", "session": "old"});
+                p
+            },
+            "fresh session",
+        ),
+        (
+            {
+                let mut p = printed("pass", "a-model");
+                p["summary"] = json!({"verdict": "pass", "why": " "}).to_string().into();
                 p
             },
             "no reasons",
@@ -449,13 +519,17 @@ fn a_look_that_leaves_no_answer_that_reads_answers_nothing() {
         (
             {
                 let mut p = printed("pass", "a-model");
-                p.as_object_mut().unwrap().remove("structured_output");
+                p["summary"] = json!("not json");
                 p
             },
-            "no verdict",
+            "no valid verdict JSON",
         ),
         (printed("pass", "b-model"), "not a-model"),
-        (printed("land", "a-model"), "no result that reads"),
+        (
+            printed_for("claude", "pass", "a-model", Some("low")),
+            "ran effort",
+        ),
+        (printed("land", "a-model"), "no valid verdict JSON"),
     ] {
         r.prints(&printed);
         let ran = r.asked().ran.len();
@@ -467,9 +541,11 @@ fn a_look_that_leaves_no_answer_that_reads_answers_nothing() {
         // What the worker said goes to the unit's log; the producer reads
         // only that the look failed, and nothing it left.
         let spec = Spec {
+            engine: "claude".into(),
+            repo: REPO.into(),
             prompt: String::new(),
             model: "a-model".into(),
-            effort: None,
+            effort: Some("high".into()),
         };
         let why = looked(printed.to_string().as_bytes(), &spec).unwrap_err();
         assert!(why.contains(says), "{printed}: {why}");
@@ -491,13 +567,14 @@ fn the_producer_takes_only_the_answer_its_look_left() {
     std::fs::write(&path, b"").unwrap();
     assert!(Looked::read(&std::fs::read(&path).unwrap()).is_err());
     let ok = Looked {
+        engine: "claude".into(),
         verdict: Judgment::Fail,
         why: "It breaks the build.".into(),
         session: "s".into(),
         model: "a-model".into(),
     };
     assert_eq!(Looked::read(&serde_json::to_vec(&ok).unwrap()).unwrap(), ok);
-    for (field, blank) in [("why", " "), ("session", "")] {
+    for (field, blank) in [("engine", " "), ("why", " "), ("session", "")] {
         let mut v = serde_json::to_value(&ok).unwrap();
         v[field] = json!(blank);
         assert!(Looked::read(v.to_string().as_bytes()).is_err(), "{field}");
@@ -517,7 +594,7 @@ fn a_head_no_ci_ran_on_or_a_discussion_that_isnt_the_requests_runs_no_look() {
     r.w.with(|p| p.threads.clear());
     assert!(r.judge(&request).is_err());
     assert!(r.asked().ran.is_empty());
-    assert!(!r.dir.path().join("seen/args").exists());
+    assert!(!r.dir.path().join("seen/request").exists());
 }
 
 #[test]
@@ -537,7 +614,9 @@ fn a_looks_answer_that_quotes_its_login_answers_nothing() {
     let r = rig();
     let request = judge_request(&r.w, vec![Trigger::Asked]);
     let mut p = printed("pass", "a-model");
-    p["structured_output"]["why"] = json!("As asked, here it is: the-look-token.");
+    p["summary"] = json!({"verdict": "pass", "why": "As asked, here it is: the-look-token."})
+        .to_string()
+        .into();
     r.prints(&p);
     assert!(
         r.judge(&request)
@@ -563,7 +642,7 @@ fn a_look_whose_request_ends_is_stopped_and_answers_nothing() {
     let asked = r.asked();
     assert_eq!(asked.stopped, asked.ran, "{:?}", asked.stopped);
     assert_eq!(asked.ran.len(), 1);
-    assert!(!r.dir.path().join("seen/args").exists());
+    assert!(!r.dir.path().join("seen/request").exists());
     assert_eq!(
         std::fs::read_dir(r.dir.path().join("state/looks"))
             .unwrap()
@@ -589,4 +668,138 @@ fn a_judgment_a_look_cant_take_is_refused_before_it_burns_a_generation() {
     assert!(!r.dir.path().join("state/generations").exists());
     assert!(r.asked().ran.is_empty());
     assert!(r.w.posted().is_empty());
+}
+
+#[test]
+fn a_look_dispatches_to_a_routed_non_claude_engine_with_its_own_login_and_egress() {
+    let r = rig();
+    // Register a second modular engine surface (`custom`) alongside `claude`,
+    // with its own credential, credential env var, and wildcard egress hosts.
+    let custom_plugin = stand_in_for(
+        r.dir.path(),
+        "custom",
+        &[
+            "example.org:443",
+            "api.anthropic.com:443",
+            "generativelanguage.googleapis.com:443",
+        ],
+    );
+    let custom_cfg = EngineConfig {
+        plugin: custom_plugin,
+        unit: "autoland-judge-look-custom".into(),
+        credential: "judge-login-custom".into(),
+        credential_env: "CUSTOM_ENGINE_TOKEN".into(),
+        hosts: vec!["*.googleapis.com".into()],
+    };
+    let custom_units = InProcess {
+        engines: BTreeMap::from([("custom".into(), custom_cfg.clone())]),
+        credentials: BTreeMap::from([(
+            "judge-login-custom".into(),
+            b"custom-secret-token\n".to_vec(),
+        )]),
+        looks: r.units.looks.clone(),
+        home: r.units.home.clone(),
+        asked: r.units.asked.clone(),
+    };
+    // Build config first (which seeds default claude overlay), then route
+    // `judge` to `custom` via the live settings overlay without changing code.
+    let mut cfg = config(r.dir.path());
+    cfg.engines.insert("custom".into(), custom_cfg);
+    std::fs::write(
+        r.dir.path().join("overlay.roles.json"),
+        json!({
+            "routing": {
+                "roles": {"judge": {"engine": "custom"}},
+                "models": {"judge custom": {"model": "custom-model", "effort": "medium"}}
+            },
+            "offers": {"custom": {"models": ["custom-model"], "efforts": ["medium"]}},
+            "migrated": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+    r.prints(&printed_for(
+        "custom",
+        "pass",
+        "custom-model",
+        Some("medium"),
+    ));
+
+    let p = crate::plugin(&cfg).unwrap();
+    assert_eq!(p.by.engine, "custom");
+
+    let units: BTreeMap<String, Box<dyn Units>> = BTreeMap::from([
+        ("claude".into(), Box::new(r.units.clone()) as Box<dyn Units>),
+        ("custom".into(), Box::new(custom_units) as Box<dyn Units>),
+    ]);
+    let looks = Looks::new(
+        cfg.clone(),
+        read(&r.w),
+        units,
+        Box::new(r.builds.clone()),
+        api(r.dialed.clone()),
+    )
+    .unwrap();
+    let producer = Producer::new(
+        cfg,
+        read(&r.w),
+        github(&r.w),
+        Box::new(looks),
+        Signer::for_tests(PRODUCER, SECRET),
+        seal(),
+    )
+    .unwrap();
+    let request: Request = serde_json::from_value(json!({
+        "contract": conary_core::plugin::CONTRACT,
+        "execution": {"choice": {"engine": "custom", "model": "custom-model", "effort": "medium"},
+            "context": {"kind": "fresh"}},
+        "negotiated": {"by": {"engine": "custom", "session": null},
+            "offers": {"models": [{"id": "custom-model", "efforts": ["medium"]}],
+                "capabilities": {"sandbox": "brings", "network": true, "devices": [], "mcp": false},
+                "meters": []}},
+        "kind": "judge", "repo": REPO, "pr": super::PR, "head": r.w.with(|p| p.head.clone()),
+        "against": r.w.against(), "author": {"engine": "claude", "session": super::AUTHOR},
+        "reviewers": [{"engine": "codex", "session": super::REVIEWER}],
+        "why": [Trigger::Asked], "context": r.w.context(),
+    }))
+    .unwrap();
+
+    let got = ask(r.dir.path(), &producer, &request).unwrap();
+    assert_eq!(got["verdict"], "pass", "{got}");
+    assert_eq!(
+        got["by"],
+        json!({"engine": "custom", "session": "look-session"})
+    );
+    assert_eq!(got["execution"]["model"], "custom-model");
+    assert_eq!(got["execution"]["effort"], "medium");
+    // Only the selected engine's login env was injected (never claude's).
+    let env = r.seen("env");
+    assert!(
+        env.lines()
+            .any(|l| l == "CUSTOM_ENGINE_TOKEN=custom-secret-token"),
+        "{env}"
+    );
+    assert!(
+        !env.lines()
+            .any(|l| l.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")),
+        "{env}"
+    );
+    // Egress matched `*.googleapis.com` alone: example.org and api.anthropic.com rejected.
+    let proxy: Vec<String> = r.seen("proxy").lines().map(str::to_owned).collect();
+    assert_eq!(
+        proxy,
+        [
+            "HTTP/1.1 403 Forbidden",
+            "HTTP/1.1 403 Forbidden",
+            "HTTP/1.1 200 Connection established",
+        ],
+        "{proxy:?}"
+    );
+    assert_eq!(
+        *r.dialed.lock().unwrap(),
+        ["generativelanguage.googleapis.com"]
+    );
+    // Sealed verdict + attested check run published as usual.
+    assert_eq!(r.w.posted().len(), 1);
+    assert_eq!(r.w.completed().len(), 1);
 }

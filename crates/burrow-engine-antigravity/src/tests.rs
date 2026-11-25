@@ -836,3 +836,73 @@ fn host_mode_declares_no_sandbox_refuses_skip_permissions_and_isolates_home() {
     );
     let _ = fs::metadata(dir.path()).unwrap().permissions().mode();
 }
+
+#[test]
+fn plugin_judge_env_applies_schema_and_add_dir_and_encodes_structured_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let look_dir = dir.path().join("look");
+    std::fs::create_dir_all(&look_dir).unwrap();
+    let seen_args = dir.path().join("seen-ag-args");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-judge-stub",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf '{{\"session_id\":\"ag-judge-1\",\"model\":\"model-a\",\"structured_output\":{{\"verdict\":\"pass\",\"why\":\"Looks solid.\"}}}}\\n'\n",
+            seen_args.display()
+        ),
+    );
+    let mut cfg = base_config(fixture);
+    cfg.models = vec![crate::config::ModelSpec {
+        id: "model-a".to_owned(),
+        efforts: vec!["high".to_owned()],
+        context_tokens: None,
+        max_output_tokens: None,
+    }];
+    cfg.default_model = Some("model-a".to_owned());
+    cfg.default_effort = Some(Effort::High);
+
+    let schema = r#"{"type":"object","properties":{"verdict":{"type":"string"},"why":{"type":"string"}},"required":["verdict","why"],"additionalProperties":false}"#;
+    cfg.json_schema = Some(schema.to_owned());
+    cfg.add_dirs.push(look_dir.clone());
+    let req = conary_core::plugin::Request {
+        contract: conary_core::plugin::CONTRACT.to_owned(),
+        task: conary_core::plugin::Task::Job {
+            repo: "acme/widget".to_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            prompt: "Judge PR.".to_owned(),
+            model: Some("model-a".to_owned()),
+            effort: Some("high".to_owned()),
+        },
+        execution: Some(conary_core::plugin::Execution {
+            choice: Some(conary_core::plugin::Choice {
+                engine: "antigravity".to_owned(),
+                model: Some("model-a".to_owned()),
+                effort: Some("high".to_owned()),
+            }),
+            context: conary_core::plugin::Context::Fresh,
+        }),
+        negotiated: None,
+    };
+    let out = crate::plugin::handle_request(&cfg, &req, &|| false);
+    assert_eq!(out.exit_code, 0, "diagnostic: {:?}", out.diagnostic);
+    let resp = out.response.expect("response");
+    assert_eq!(resp.by.engine, "antigravity");
+    assert_eq!(resp.by.session.as_deref(), Some("ag-judge-1"));
+    let conary_core::plugin::Answer::Job { summary, .. } = resp.answer else {
+        panic!("expected Answer::Job");
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(parsed["verdict"], "pass");
+    assert_eq!(parsed["why"], "Looks solid.");
+
+    let args: Vec<String> = std::fs::read_to_string(&seen_args)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "--add-dir" && w[1] == look_dir.to_string_lossy()),
+        "missing --add-dir: {args:?}"
+    );
+}

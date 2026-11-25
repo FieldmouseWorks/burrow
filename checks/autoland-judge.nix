@@ -12,7 +12,12 @@
 # the producer would trust burrow.user, the user authoring jobs run as.
 # Nothing of it is burrow.user's: tests/judge-look.nix tries, as that user,
 # to answer in the judge's place, for real.
-{ self, pkgs, nixpkgs, ... }:
+{
+  self,
+  pkgs,
+  nixpkgs,
+  ...
+}:
 let
   lib = nixpkgs.lib;
   machine = modules: (self.nixosConfigurations.example.extendModules { inherit modules; }).config;
@@ -23,40 +28,80 @@ let
     sealFile = "/run/secrets/judge-seal-key";
     claudeTokenFile = "/run/secrets/judge-claude-token";
   };
-  on = machine [{
-    burrow.ledger.controllerUser = "conary-flow";
-    burrow.autoland.plugins.judge = plugin // { enable = true; };
-  }];
-  uncontrolled = machine [{ burrow.autoland.plugins.judge = plugin // { enable = true; }; }];
+  on = machine [
+    {
+      burrow.ledger.controllerUser = "conary-flow";
+      burrow.autoland.plugins.judge = plugin // {
+        enable = true;
+      };
+    }
+  ];
+  withAntigravity = machine [
+    {
+      burrow.ledger.controllerUser = "conary-flow";
+      burrow.engines.antigravity = {
+        enable = true;
+        package = pkgs.writeShellScriptBin "agy" "exit 0";
+        credentialFile = "/run/secrets/antigravity-agent-credential";
+        hosts = [ "*.googleapis.com" ];
+      };
+      burrow.autoland.plugins.judge = plugin // {
+        enable = true;
+      };
+    }
+  ];
+  uncontrolled = machine [
+    {
+      burrow.autoland.plugins.judge = plugin // {
+        enable = true;
+      };
+    }
+  ];
   failing = machine: map (a: a.message) (lib.filter (a: !a.assertion) machine.assertions);
   failed = failing uncontrolled;
   producer = on.systemd.services.autoland-judge;
-  look = on.systemd.services."autoland-judge-look@";
+  look = on.systemd.services."autoland-judge-look-claude@";
   build = on.systemd.services."autoland-judge-build@";
   read = on.burrow.autoland.plugins.judge.config;
-  configFile = builtins.unsafeDiscardStringContext (lib.last (lib.splitString " " producer.serviceConfig.ExecStart));
+  readAg = withAntigravity.burrow.autoland.plugins.judge.config;
+  lookAgClaude = withAntigravity.systemd.services."autoland-judge-look-claude@";
+  lookAgAntigravity = withAntigravity.systemd.services."autoland-judge-look-antigravity@";
+  configFile = builtins.unsafeDiscardStringContext (
+    lib.last (lib.splitString " " producer.serviceConfig.ExecStart)
+  );
   plain = builtins.unsafeDiscardStringContext;
   state = "${on.burrow.stateDir}/autoland-judge";
   wiring = {
-    offByDefault = !(off.systemd.services ? autoland-judge) && !(off.systemd.services ? "autoland-judge-look@")
+    offByDefault =
+      !(off.systemd.services ? autoland-judge)
+      && !(off.systemd.services ? "autoland-judge-look@")
+      && !(off.systemd.services ? "autoland-judge-look-claude@")
       && !(off.systemd.services ? "autoland-judge-build@");
     # On, with a controller, nothing fails: the judging engine is out of
     # authoring sessions' reach.
     builds = failing on == [ ];
     refusedWithoutController = lib.any (lib.hasInfix "plugins.judge: only the flow's controller may ask") failed;
     # The keys are the producer's alone, and it is no authoring user.
-    ownUser = producer.serviceConfig.User == "autoland-judge"
+    ownUser =
+      producer.serviceConfig.User == "autoland-judge"
       && producer.serviceConfig.User != on.burrow.user
       && !(lib.elem "autoland-judge" (on.users.users.${on.burrow.user}.extraGroups or [ ]));
-    keys = producer.serviceConfig.LoadCredential
-      == [ "judge-key:/run/secrets/judge-producer-key" "judge-seal:/run/secrets/judge-seal-key" ];
-    socketDir = producer.serviceConfig.RuntimeDirectory == "conary-producers/judge"
+    keys =
+      producer.serviceConfig.LoadCredential == [
+        "judge-key:/run/secrets/judge-producer-key"
+        "judge-seal:/run/secrets/judge-seal-key"
+      ];
+    socketDir =
+      producer.serviceConfig.RuntimeDirectory == "conary-producers/judge"
       && producer.serviceConfig.SupplementaryGroups == [ "conary-flow" ];
     # A look is a user of its own, never burrow.user, with its login and
     # neither key, seeing its folder alone, with no network of its own.
-    look = look.serviceConfig.DynamicUser && look.serviceConfig.User == "judge-%i"
-      && look.serviceConfig.LoadCredential == [ "claude-token:/run/secrets/judge-claude-token" ]
-      && look.serviceConfig.PrivateNetwork && look.serviceConfig.ProtectHome
+    look =
+      look.serviceConfig.DynamicUser
+      && look.serviceConfig.User == "judge-%i"
+      && look.serviceConfig.LoadCredential == [ "judge-login-claude:/run/secrets/judge-claude-token" ]
+      && look.serviceConfig.PrivateNetwork
+      && look.serviceConfig.ProtectHome
       && look.serviceConfig.SupplementaryGroups == [ "autoland-judge" ]
       && lib.elem "${on.burrow.stateDir}:ro" look.serviceConfig.TemporaryFileSystem
       && lib.elem "/etc/claude-code:ro" look.serviceConfig.TemporaryFileSystem
@@ -65,37 +110,82 @@ let
     # A build is a user of its own too, with no credential, seeing its run's
     # folder alone, with no network and no Nix daemon: nothing it runs gets
     # past the look's gate.
-    build = build.serviceConfig.DynamicUser && build.serviceConfig.User == "jbuild-%i"
+    build =
+      build.serviceConfig.DynamicUser
+      && build.serviceConfig.User == "jbuild-%i"
       && !(build.serviceConfig ? LoadCredential)
-      && build.serviceConfig.PrivateNetwork && build.serviceConfig.ProtectHome
+      && build.serviceConfig.PrivateNetwork
+      && build.serviceConfig.ProtectHome
       && build.serviceConfig.InaccessiblePaths == [ "-/nix/var/nix/daemon-socket" ]
       && build.serviceConfig.SupplementaryGroups == [ "autoland-judge" ]
       && lib.elem "${on.burrow.stateDir}:ro" build.serviceConfig.TemporaryFileSystem
       && build.serviceConfig.BindPaths == [ "${state}/runs/%i" ]
-      && build.serviceConfig.Delegate && build.serviceConfig.SuccessExitStatus == "1 2"
+      && build.serviceConfig.Delegate
+      && build.serviceConfig.SuccessExitStatus == "1 2"
       && build.bindsTo == [ "autoland-judge.service" ]
       && lib.hasSuffix "/bin/burrow-judge build ${configFile} %i" (plain build.serviceConfig.ExecStart);
     # The producer alone starts and stops looks and builds.
-    polkit = lib.hasInfix ''subject.user != "autoland-judge"'' on.security.polkit.extraConfig
-      && lib.hasInfix "/^(autoland-judge-look|autoland-judge-build)@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
+    polkit =
+      lib.hasInfix ''subject.user != "autoland-judge"'' on.security.polkit.extraConfig
+      && lib.hasInfix "/^(autoland-judge-look-claude|autoland-judge-build)@[0-9a-f]+\\.service$/" on.security.polkit.extraConfig;
     # No runner, and nothing of proj's: a judgment is no burrow.user job.
     noRunner = !(on.systemd.services ? burrow-judge-runner) && !(read ? proj) && !(read ? runner);
-    producerCommand = lib.hasSuffix "/bin/burrow-judge producer ${configFile}" (plain producer.serviceConfig.ExecStart);
-    lookCommand = lib.hasSuffix "/bin/burrow-judge look ${configFile} %i" (plain look.serviceConfig.ExecStart);
+    producerCommand = lib.hasSuffix "/bin/burrow-judge producer ${configFile}" (
+      plain producer.serviceConfig.ExecStart
+    );
+    lookCommand = lib.hasSuffix "/bin/burrow-judge look ${configFile} %i" (
+      plain look.serviceConfig.ExecStart
+    );
     # The plugin reads the same config where the machine keeps it: the
     # config names the flow's configs, which name the plugin.
-    plugin = lib.hasInfix "/bin/burrow-judge plugin /etc/burrow/autoland-judge-plugin.json" (plain on.burrow.autoland.plugins.judge.plugin.text)
+    plugin =
+      lib.hasInfix "/bin/burrow-judge plugin /etc/burrow/autoland-judge-plugin.json" (
+        plain on.burrow.autoland.plugins.judge.plugin.text
+      )
       && plain "${on.environment.etc."burrow/autoland-judge-plugin.json".source}" == configFile;
-    config = read.socket == "/run/conary-producers/judge/producer.sock" && read.controller == "conary-flow"
-      && read.role == "judge" && read.producer == "sam/judge" && read.credential == "judge-key"
-      && read.seal == "judge-seal" && read.login == "claude-token" && read.unit == "autoland-judge-look"
-      && read.hosts == [ "api.anthropic.com" ] && lib.hasSuffix "/bin/claude" read.claude
-      && read.build == "autoland-judge-build" && read.trees == "/var/tmp"
+    config =
+      read.socket == "/run/conary-producers/judge/producer.sock"
+      && read.controller == "conary-flow"
+      && read.role == "judge"
+      && read.producer == "sam/judge"
+      && read.credential == "judge-key"
+      && read.seal == "judge-seal"
+      && !(read ? unit)
+      && (read.engines ? claude)
+      && read.engines.claude.unit == "autoland-judge-look-claude"
+      && read.engines.claude.credential == "judge-login-claude"
+      && read.engines.claude.credential_env == "CLAUDE_CODE_OAUTH_TOKEN"
+      && read.engines.claude.hosts == [ "api.anthropic.com" ]
+      && lib.hasInfix "burrow-engine-anthropic" (plain read.engines.claude.plugin)
+      && read.build == "autoland-judge-build"
+      && read.trees == "/var/tmp"
       && read.settings == on.burrow.settings.effective
-      && read.state == state && read.token != null;
+      && read.state == state
+      && read.token != null;
+    # Enabling burrow.engines.antigravity automatically registers its read-only
+    # judge surface alongside claude, with a dedicated look unit per engine so
+    # each look loads only its own engine's login credential.
+    antigravityEngine =
+      failing withAntigravity == [ ]
+      && !(withAntigravity.systemd.services ? "autoland-judge-look@")
+      && (readAg.engines ? claude)
+      && (readAg.engines ? antigravity)
+      && readAg.engines.antigravity.unit == "autoland-judge-look-antigravity"
+      && readAg.engines.antigravity.credential == "judge-login-antigravity"
+      && readAg.engines.antigravity.credential_env == "BURROW_ANTIGRAVITY_CREDENTIAL"
+      && lib.elem "*.googleapis.com" readAg.engines.antigravity.hosts
+      &&
+        lookAgClaude.serviceConfig.LoadCredential
+        == [ "judge-login-claude:/run/secrets/judge-claude-token" ]
+      &&
+        lookAgAntigravity.serviceConfig.LoadCredential == [
+          "judge-login-antigravity:/run/secrets/antigravity-agent-credential"
+        ]
+      && lib.hasInfix "/^(autoland-judge-look-antigravity|autoland-judge-look-claude|autoland-judge-build)@[0-9a-f]+\\.service$/" withAntigravity.security.polkit.extraConfig;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
-in pkgs.runCommand "autoland-judge-check" { } ''
+in
+pkgs.runCommand "autoland-judge-check" { } ''
   fail() { echo "$*"; exit 1; }
   ${lib.concatMapStrings (w: "fail 'the judge producer is wrong: ${w}'\n") wrong}
   touch $out

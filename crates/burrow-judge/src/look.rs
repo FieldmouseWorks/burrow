@@ -38,14 +38,12 @@ use conary_core::plugin::{
     Answer, Context, Executed, Identity, Judgment, Request, Response, Task, Trigger,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// The engine a look runs: Claude Code, the one engine proj routes to.
-pub const ENGINE: &str = "claude";
 
 /// What's in a look's folder: what it's told, the head and its base, the
 /// diff between them, its gate, and its answer.
@@ -60,6 +58,8 @@ pub const ANSWER: &str = "answer.json";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
+    pub engine: String,
+    pub repo: String,
     pub prompt: String,
     pub model: String,
     pub effort: Option<String>,
@@ -69,6 +69,7 @@ pub struct Spec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Looked {
+    pub engine: String,
     pub verdict: Judgment,
     pub why: String,
     /// The engine's own session, and the model it reports it ran.
@@ -81,6 +82,9 @@ impl Looked {
     pub fn read(bytes: &[u8]) -> Result<Self, String> {
         let looked: Self = serde_json::from_slice(bytes)
             .map_err(|e| format!("the judge's look left no answer that reads: {e}"))?;
+        if looked.engine.trim().is_empty() {
+            return Err("the judge's look names no engine".into());
+        }
         if looked.why.trim().is_empty() {
             return Err("the judge's look gave no reasons for its verdict".into());
         }
@@ -95,7 +99,9 @@ impl Looked {
 pub struct Looks {
     pub cfg: Config,
     pub read: Read,
-    pub units: Box<dyn Units>,
+    /// Per-engine look unit managers, keyed by engine name, so each engine's
+    /// look runs in a systemd unit that loads only that engine's credential.
+    pub units: BTreeMap<String, Box<dyn Units>>,
     /// The builds' units, for a head no CI reported on.
     pub builds: Box<dyn Units>,
     /// How the gates reach the engine's API.
@@ -120,7 +126,7 @@ impl Looks {
     pub fn new(
         cfg: Config,
         read: Read,
-        units: Box<dyn Units>,
+        units: BTreeMap<String, Box<dyn Units>>,
         builds: Box<dyn Units>,
         dial: Dial,
     ) -> Result<Self, String> {
@@ -145,12 +151,19 @@ impl Looks {
     /// their folders (their requests went with them). How many it stopped.
     pub fn reconcile(&self) -> Result<usize, String> {
         let mut stopped = 0;
-        for (units, dir) in [(&self.units, "looks"), (&self.builds, "runs")] {
+        for units in self.units.values() {
             let loaded = units.loaded()?;
             for id in &loaded {
                 units.stop(id)?;
             }
             stopped += loaded.len();
+        }
+        let loaded_builds = self.builds.loaded()?;
+        for id in &loaded_builds {
+            self.builds.stop(id)?;
+        }
+        stopped += loaded_builds.len();
+        for dir in ["looks", "runs"] {
             let dir = self.cfg.state.join(dir);
             for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
                 let path = entry.map_err(|e| e.to_string())?.path();
@@ -204,9 +217,79 @@ impl Looks {
     }
 }
 
+impl Looks {
+    /// Resolve the live engine, model, effort, and configured engine surface
+    /// for judging `repo`, verifying that the live settings route, optional
+    /// request choice, and configured surfaces agree.
+    fn resolve(
+        &self,
+        repo: &str,
+        request: &Request,
+    ) -> Result<(String, String, Option<String>, crate::EngineConfig), String> {
+        let in_force = self.cfg.settings.role_view()?.in_force;
+        let engine = in_force.route(&self.cfg.role, Some(repo)).engine.clone();
+        let engine_cfg = self.cfg.engines.get(&engine).cloned().ok_or_else(|| {
+            let have: Vec<&str> = self.cfg.engines.keys().map(String::as_str).collect();
+            format!(
+                "the {} role for {repo} routes to {engine}, which has no configured judge engine surface (configured: {})",
+                self.cfg.role,
+                if have.is_empty() {
+                    "none".to_owned()
+                } else {
+                    have.join(", ")
+                }
+            )
+        })?;
+        let offer = in_force.offers.get(&engine).cloned().unwrap_or_default();
+        let tuning = in_force.tuning(&self.cfg.role, Some(repo), &engine);
+        let choice = request.execution.as_ref().and_then(|e| e.choice.as_ref());
+        if let Some(c) = choice
+            && c.engine != engine
+        {
+            return Err(format!(
+                "the flow chose engine {}, while the {} role for {repo} routes to {engine}",
+                c.engine, self.cfg.role
+            ));
+        }
+        let model = choice
+            .and_then(|c| c.model.clone())
+            .or(tuning.model)
+            .ok_or("the flow chose no model and live settings name none")?;
+        let effort = match choice {
+            Some(c) => c.effort.clone(),
+            None => tuning.effort,
+        };
+        if !offer.models.contains(&model) {
+            return Err(format!("{engine} doesn't offer model {model}"));
+        }
+        if let Some(e) = &effort
+            && !offer.efforts.contains(e)
+        {
+            return Err(format!("{engine} doesn't offer effort {e}"));
+        }
+        if let Some(neg) = &request.negotiated {
+            if neg.by.engine != engine {
+                return Err(format!(
+                    "negotiated engine {} disagrees with live route {engine}",
+                    neg.by.engine
+                ));
+            }
+            if !neg.offers.allows(Some(&model), effort.as_deref()) {
+                return Err(format!(
+                    "negotiated offers for {engine} do not allow model {model}{}",
+                    effort
+                        .as_deref()
+                        .map_or(String::new(), |e| format!(" at effort {e}"))
+                ));
+            }
+        }
+        Ok((engine, model, effort, engine_cfg))
+    }
+}
+
 impl Judges for Looks {
     /// A head no CI reported on that the repo's flow names nothing to
-    /// build with, or a role a look can't run.
+    /// build with, or a role/choice a configured engine surface can't run.
     fn refuses(&self, request: &Request) -> Result<(), String> {
         let Task::Judge {
             repo, head, why, ..
@@ -217,13 +300,7 @@ impl Judges for Looks {
         if why.contains(&Trigger::NoCi) {
             build::unbuildable(&self.cfg.flow(repo)?, repo, head)?;
         }
-        let offer = jobs::offered(&self.cfg.settings, &self.cfg.role)?;
-        if offer.engine != ENGINE {
-            return Err(format!(
-                "the {} role runs on {}, and a judge's look runs {ENGINE} alone",
-                self.cfg.role, offer.engine
-            ));
-        }
+        let _ = self.resolve(repo, request)?;
         Ok(())
     }
 
@@ -242,8 +319,8 @@ impl Judges for Looks {
             return Err("the judge judges alone".into());
         };
         self.refuses(request)?;
-        let choice = jobs::chosen(request.execution.as_ref().and_then(|e| e.choice.as_ref()))?;
-        let model = choice.model.clone().ok_or("the flow chose no model")?;
+        let _ = jobs::chosen(request.execution.as_ref().and_then(|e| e.choice.as_ref()))?;
+        let (engine, model, effort, engine_cfg) = self.resolve(repo, request)?;
 
         let source = (self.read)()?;
         let (pull, _) = current(&*source, repo, *pr, head, against)?;
@@ -288,6 +365,8 @@ impl Judges for Looks {
         let id = run_id();
         let dir = self.cfg.look(&id);
         let spec = Spec {
+            engine: engine.clone(),
+            repo: repo.clone(),
             prompt: brief::task(&brief::Judge {
                 repo,
                 pr: *pr,
@@ -302,19 +381,23 @@ impl Judges for Looks {
                 ci: &ci,
             }),
             model,
-            effort: choice.effort.clone(),
+            effort,
         };
+        let engine_units = self
+            .units
+            .get(&engine)
+            .ok_or_else(|| format!("no look unit manager is configured for engine {engine}"))?;
         let ran = lay(&self.cfg, &id, repo, head, &pull.base.sha, &spec).and_then(|()| {
-            let gate = Gate::open(&dir.join(GATE), &self.cfg.hosts, self.dial.clone())
+            let gate = Gate::open(&dir.join(GATE), &engine_cfg.hosts, self.dial.clone())
                 .map_err(|e| format!("its gate: {e}"))?;
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
-            let ended = self.units.run(&id, work, until);
+            let ended = engine_units.run(&id, work, until);
             drop(gate);
             ended
         });
         // Stopped, and read, once nothing of it is left running; its folder
         // goes either way.
-        let stopped = self.units.stop(&id);
+        let stopped = engine_units.stop(&id);
         let said = fs::read(dir.join(ANSWER));
         let _ = fs::remove_dir_all(&dir);
         match ran? {
@@ -324,6 +407,18 @@ impl Judges for Looks {
         }
         stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
         let looked = Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)?;
+        if looked.engine != spec.engine {
+            return Err(format!(
+                "the judge's look answered as {}, not {}",
+                looked.engine, spec.engine
+            ));
+        }
+        if looked.model != spec.model {
+            return Err(format!(
+                "the judge's look ran {}, not {}",
+                looked.model, spec.model
+            ));
+        }
         if looked.verdict == Judgment::Pass && !built.is_empty() && !build::passed(built) {
             return Err(
                 "the judge's look passed a head none of whose checks passed when it was built: nothing is judged unbuilt"
@@ -339,7 +434,7 @@ impl Judges for Looks {
         Ok(Response {
             contract: request.contract.clone(),
             by: Identity {
-                engine: ENGINE.into(),
+                engine: looked.engine,
                 session: Some(looked.session),
             },
             execution: Some(Executed {

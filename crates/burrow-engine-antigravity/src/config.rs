@@ -24,6 +24,8 @@ pub const CONFIG_ENV: &str = "BURROW_ANTIGRAVITY_CONFIG";
 /// Optional environment overrides for ad-hoc or fixture invocations.
 pub const BIN_ENV: &str = "BURROW_ANTIGRAVITY_BIN";
 pub const JSON_SCHEMA_ENV: &str = "BURROW_ANTIGRAVITY_JSON_SCHEMA";
+pub const JUDGE_SCHEMA_ENV: &str = "BURROW_JUDGE_JSON_SCHEMA";
+pub const JUDGE_DIR_ENV: &str = "BURROW_JUDGE_DIR";
 pub const PRINT_TIMEOUT_ENV: &str = "BURROW_ANTIGRAVITY_PRINT_TIMEOUT_SECS";
 
 /// Default outer wall-clock deadline (seconds) for one headless invocation.
@@ -286,6 +288,18 @@ impl Config {
             && !schema.trim().is_empty()
         {
             cfg.json_schema = Some(schema);
+        } else if let Ok(schema) = std::env::var(JUDGE_SCHEMA_ENV)
+            && !schema.trim().is_empty()
+        {
+            cfg.json_schema = Some(schema);
+        }
+        if let Some(dir) = std::env::var_os(JUDGE_DIR_ENV)
+            && !dir.is_empty()
+        {
+            let dir = PathBuf::from(dir);
+            if !cfg.add_dirs.contains(&dir) {
+                cfg.add_dirs.push(dir);
+            }
         }
         if let Ok(timeout) = std::env::var(PRINT_TIMEOUT_ENV)
             && !timeout.trim().is_empty()

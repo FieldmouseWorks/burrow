@@ -59,7 +59,11 @@ pkgs.testers.runNixOSTest {
   name = "judge-look";
 
   nodes.machine = { lib, ... }: {
-    imports = [ self.nixosModules.autoland self.nixosModules.ledger self.nixosModules.github ];
+    imports = [
+      self.nixosModules.autoland
+      self.nixosModules.ledger
+      self.nixosModules.github
+    ];
     burrow.ledger = {
       enable = true;
       package = cn;
@@ -72,7 +76,8 @@ pkgs.testers.runNixOSTest {
     # Its App, which nothing here asks: the crate's tests are GitHub's half.
     burrow.github = {
       apps.workers = {
-        id = 7; accountId = 8;
+        id = 7;
+        accountId = 8;
         slug = "acme-workers";
         keyFile = "/run/keys/workers.pem";
         api = "http://127.0.0.1:8080";
@@ -101,7 +106,7 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(run) if ok else machine.fail(run)
 
     def unit(id):
-        return f"autoland-judge-look@{id}.service"
+        return f"autoland-judge-look-claude@{id}.service"
 
     def folder(id):
         return f"${state}/looks/{id}"
@@ -112,7 +117,7 @@ pkgs.testers.runNixOSTest {
 
     # A look's folder as the producer lays it out (look.rs, `lay`).
     def lay(id):
-        spec = {"prompt": "Judge it.", "model": "a-model", "effort": "high"}
+        spec = {"engine": "claude", "repo": "acme/widget", "prompt": "Judge it.", "model": "a-model", "effort": "high"}
         producer(" && ".join([
             f"mkdir -m 0750 {folder(id)} {folder(id)}/head {folder(id)}/base",
             f"printf %s {shlex.quote(json.dumps(spec))} >{folder(id)}/spec.json",
@@ -182,7 +187,7 @@ pkgs.testers.runNixOSTest {
         for never in ["WROTE", "SEES", "READ the producer", "REACHED"]:
             assert never not in out, out
         answer = json.loads(producer(f"cat {folder('a1')}/answer.json"))
-        assert answer == {"verdict": "pass", "why": "Read it.", "session": "look-session", "model": "a-model"}, answer
+        assert answer == {"engine": "claude", "verdict": "pass", "why": "Read it.", "session": "look-session", "model": "a-model"}, answer
 
     with subtest("burrow.user can't answer in the judge's place"):
         lay("b1")
@@ -194,9 +199,9 @@ pkgs.testers.runNixOSTest {
             "mkdir -p ${state}/looks/c0ffee",
             "ln -s /tmp ${state}/looks/c0ffee",
             "ls ${state}/looks",
-            "systemctl start autoland-judge-look@b1.service",
-            "systemctl start autoland-judge-look@c0ffee.service",
-            "systemctl stop autoland-judge-look@a1.service",
+            "systemctl start autoland-judge-look-claude@b1.service",
+            "systemctl start autoland-judge-look-claude@c0ffee.service",
+            "systemctl stop autoland-judge-look-claude@a1.service",
             "test -e /run/conary-producers/judge/producer.sock",
             "cat /run/credentials/autoland-judge.service/judge-seal",
             "cat /run/keys/claude-token",
@@ -216,8 +221,8 @@ pkgs.testers.runNixOSTest {
             machine.fail(f"runuser -u {who} -- grep -rqs sk-the-looks-token /run/credentials /run/keys")
 
     with subtest("only the producer starts and stops looks, and nothing else"):
-        machine.fail("runuser -u conary-flow -- systemctl start autoland-judge-look@d1.service")
-        producer("systemctl start autoland-judge-look@not-a-look.service", ok=False)
+        machine.fail("runuser -u conary-flow -- systemctl start autoland-judge-look-claude@d1.service")
+        producer("systemctl start autoland-judge-look-claude@not-a-look.service", ok=False)
         producer("systemctl restart autoland-judge.service", ok=False)
         producer("systemctl stop nix-daemon.service", ok=False)
         producer(f"systemctl stop {unit('a1')} {unit('b1')} {unit('c1')}")
