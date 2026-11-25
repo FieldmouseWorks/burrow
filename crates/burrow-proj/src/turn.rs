@@ -459,35 +459,54 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // the next. A sandbox's work is in its VM, past the unit's reach: the VM
     // is stopped, which ends all of it, and the next run's `agent sh` starts
     // it again, its clone and home as they were.
-    let mut wait_again =
-        |said: &str, engine: &str, base_prompt: &Path| -> Result<Option<PathBuf>, Fail> {
-            if !(reap() && agent.as_deref().is_none_or(|a| stopped("agent", a))) {
-                return Ok(None);
+    let mut wait_again = |said: &str,
+                          choice: &mut engine::Choice,
+                          base_prompt: &mut PathBuf|
+     -> Result<Option<PathBuf>, Fail> {
+        if !(reap() && agent.as_deref().is_none_or(|a| stopped("agent", a))) {
+            return Ok(None);
+        }
+        // Waiting, as `proj state` and the watchdog read it: under the job's
+        // lock, as its slot was said (slot.rs took_slot).
+        {
+            let _lock = job.lock();
+            let _ = crate::record::mark_turn(&job, &n, TurnMarker::Slot).remove();
+        }
+        drop(held.take());
+        rewatch(cfg, &[id]);
+        let waited = now_nanos();
+        crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, said)
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+        crate::snapshot::stream::notify(cfg);
+        let _ = held.insert(take(true, &choice.engine)?);
+        let admitted = engine::choice(cfg, &job).map_err(|e| Fail::new(1, e))?;
+        if admitted != *choice {
+            let same_conv = engine::conversation_of(&admitted.engine)
+                == engine::conversation_of(&choice.engine);
+            *choice = admitted;
+            if !same_conv {
+                *base_prompt = engine::first_prompt(&job, &n, &choice.engine).map_err(|e| {
+                    Fail::new(
+                        1,
+                        format!(
+                            "proj: {}: {e}",
+                            job.turn_file(&n, TurnFile::Handoff).display()
+                        ),
+                    )
+                })?;
             }
-            // Waiting, as `proj state` and the watchdog read it: under the job's
-            // lock, as its slot was said (slot.rs took_slot).
-            {
-                let _lock = job.lock();
-                let _ = crate::record::mark_turn(&job, &n, TurnMarker::Slot).remove();
-            }
-            drop(held.take());
-            rewatch(cfg, &[id]);
-            let waited = now_nanos();
-            crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, said)
-                .map_err(|e| Fail::new(1, e.to_string()))?;
-            crate::snapshot::stream::notify(cfg);
-            let _ = held.insert(take(true, engine)?);
-            kick(cfg, lines(&job.file(JobFile::Kick)));
-            let state = crate::retry::Checkpoint::load(&job, &n)
-                .map_err(|e| Fail::new(1, e.to_string()))?
-                .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
-            let prompt = state
-                .resume(&job, &n, base_prompt)
-                .map_err(|e| Fail::new(1, e.to_string()))?;
-            crate::snapshot::stream::notify(cfg);
-            rewatch_later(cfg, id);
-            Ok(Some(prompt))
-        };
+        }
+        kick(cfg, lines(&job.file(JobFile::Kick)));
+        let state = crate::retry::Checkpoint::load(&job, &n)
+            .map_err(|e| Fail::new(1, e.to_string()))?
+            .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
+        let prompt = state
+            .resume(&job, &n, base_prompt)
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+        crate::snapshot::stream::notify(cfg);
+        rewatch_later(cfg, id);
+        Ok(Some(prompt))
+    };
     // Where the role's route runs the turn now, when a refusal moves it to
     // another engine with room (engine/route.rs): kept as the turn's identity,
     // which its next run and a retained retry start on.
@@ -620,7 +639,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         let Some(spent) = usage::login::out_for(cfg, &run_id) else {
                             continue;
                         };
-                        match wait_again(&spent.said, &choice.engine, &first)? {
+                        match wait_again(&spent.said, &mut choice, &mut first)? {
                             Some(p) => {
                                 prompt = p;
                                 continue;
@@ -629,7 +648,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         }
                     }
                     let said = usage::login::moved_to(&choice.engine, same_conv, &refusal.reason);
-                    if let Some(p) = wait_again(&said, &choice.engine, &first)? {
+                    if let Some(p) = wait_again(&said, &mut choice, &mut first)? {
                         prompt = p;
                         continue;
                     }
@@ -696,7 +715,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     }
                     said = usage::login::moved_to(&choice.engine, same_conv, &said);
                 }
-                if let Some(p) = wait_again(&said, &choice.engine, &first)? {
+                if let Some(p) = wait_again(&said, &mut choice, &mut first)? {
                     prompt = p;
                     continue;
                 }
