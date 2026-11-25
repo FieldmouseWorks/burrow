@@ -19,7 +19,7 @@ use crate::egress;
 use crate::look::{ANSWER, GATE, Looked, SPEC, Spec};
 use conary_core::plugin::{
     Answer, CONTRACT, Capabilities, Choice, Context, Execution, Identity, Judgment, Model,
-    Negotiated, Offers, Request, Response, Sandbox, Task,
+    Negotiated, Next, Offers, Request, Response, Sandbox, Task,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -141,6 +141,12 @@ pub fn plugin_request(spec: &Spec, workdir: &Path) -> Request {
 pub fn looked(printed: &[u8], spec: &Spec) -> Result<Looked, String> {
     let response: Response = serde_json::from_slice(printed)
         .map_err(|e| format!("{} plugin printed no response that reads: {e}", spec.engine))?;
+    if response.contract != CONTRACT {
+        return Err(format!(
+            "{} plugin answered contract {:?}, not {CONTRACT:?}",
+            spec.engine, response.contract
+        ));
+    }
     if response.by.engine != spec.engine {
         return Err(format!(
             "engine plugin answered as {:?}, not {:?}",
@@ -173,9 +179,15 @@ pub fn looked(printed: &[u8], spec: &Spec) -> Result<Looked, String> {
             spec.engine, executed.effort, spec.effort
         ));
     }
-    let Answer::Job { summary, .. } = response.answer else {
+    let Answer::Job { summary, next } = response.answer else {
         return Err(format!("{} plugin returned a non-job answer", spec.engine));
     };
+    if !matches!(next, Next::Done) {
+        return Err(format!(
+            "{} plugin did not finish its look ({next:?})",
+            spec.engine
+        ));
+    }
     let said: Said = serde_json::from_str(summary.trim())
         .map_err(|e| format!("{} plugin gave no valid verdict JSON: {e}", spec.engine))?;
     let looked = Looked {
@@ -252,5 +264,66 @@ impl Worker {
             serde_json::to_vec(&looked).map_err(|e| e.to_string())?,
         )
         .map_err(|e| at(e, &path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_spec() -> Spec {
+        Spec {
+            engine: "claude".into(),
+            repo: "owner/repo".into(),
+            prompt: "Judge it.".into(),
+            model: "test-model".into(),
+            effort: Some("high".into()),
+        }
+    }
+
+    #[test]
+    fn looked_rejects_mismatched_contract_and_incomplete_next_step() {
+        use conary_core::plugin::Executed;
+        let spec = sample_spec();
+        let make = |contract: &str, next: Next| {
+            serde_json::to_vec(&Response {
+                contract: contract.into(),
+                by: Identity {
+                    engine: "claude".into(),
+                    session: Some("s-1".into()),
+                },
+                execution: Some(Executed {
+                    model: Some("test-model".into()),
+                    effort: Some("high".into()),
+                    context: Context::Fresh,
+                }),
+                answer: Answer::Job {
+                    summary: r#"{"verdict":"pass","why":"Clean diff."}"#.into(),
+                    next,
+                },
+            })
+            .unwrap()
+        };
+
+        let err = looked(&make("conary-plugin/v4", Next::Done), &spec).unwrap_err();
+        assert!(err.contains("contract"), "{err}");
+
+        let err = looked(
+            &make(
+                CONTRACT,
+                Next::Ask {
+                    question: "Proceed?".into(),
+                    default: "yes".into(),
+                    one_way: false,
+                },
+            ),
+            &spec,
+        )
+        .unwrap_err();
+        assert!(err.contains("did not finish"), "{err}");
+
+        let ok = looked(&make(CONTRACT, Next::Done), &spec).unwrap();
+        assert_eq!(ok.verdict, Judgment::Pass);
+        assert_eq!(ok.session, "s-1");
     }
 }
