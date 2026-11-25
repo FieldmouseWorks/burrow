@@ -112,7 +112,7 @@ pub fn execute(
         .env("DISABLE_AUTOUPDATER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::inherit());
     for key in [
         "PATH",
         "HOME",
