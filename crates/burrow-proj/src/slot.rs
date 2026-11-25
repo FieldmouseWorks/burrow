@@ -171,6 +171,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
+    let _ = crate::engine::refresh_queued(cfg, &job, n);
     if usage::login::out_for(cfg, &usage::login::run_of(cfg, id)).is_some()
         || automation_paused(cfg, &job)
         || crate::github_quota::held(cfg, &job).is_some()
@@ -546,6 +547,8 @@ pub fn take(
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
         // Out of usage while it waited for the lock: no look, no slot.
+        let _ = crate::engine::refresh_queued(cfg, &job, n);
+        let run = usage::login::run_of(cfg, id);
         let store = usage::read_store_ok(cfg);
         let at = now();
         if !due(&slots, &queue.join(&me), looked) || store.holds_run(&run, at) {

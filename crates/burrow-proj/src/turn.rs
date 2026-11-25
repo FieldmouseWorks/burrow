@@ -392,11 +392,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             .map_err(|e| Fail::new(1, format!("proj: {e}")))
     };
     let mut held = Some(take(true, &choice.engine)?);
-    if let Ok(Some(updated)) = engine::refresh_queued(cfg, &job, &n) {
-        choice = updated;
-    } else if let Ok(current) = engine::choice(cfg, &job) {
-        choice = current;
-    }
+    // Keep the exact choice whose hold slot admission verified before granting
+    // the slot rather than re-resolving to a newly held engine after admission.
+    choice = engine::choice(cfg, &job).map_err(|e| Fail::new(1, e))?;
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
     kick(cfg, lines(&job.file(JobFile::Kick)));
