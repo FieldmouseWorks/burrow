@@ -442,13 +442,10 @@ pub fn run_invocation(
     let orig_home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    // In host mode with `home-file` credentials, materialize into a private
-    // per-turn `$HOME` so interactive desktop or T3 userdata in the real
+    // In host mode, always run in a private per-turn `$HOME` (regardless of
+    // credential mode) so interactive desktop or T3 userdata in the real
     // `$HOME` is never read or overwritten.
-    let isolated_host_home = if config.host_mode
-        && config.credential_mode == CredentialMode::HomeFile
-        && invocation.home_dir.is_none()
-    {
+    let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
         match tempfile::Builder::new()
             .prefix("antigravity-host-home-")
             .tempdir()
