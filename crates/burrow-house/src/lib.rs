@@ -48,3 +48,4 @@ pub mod check;
 pub mod diff;
 pub mod github;
 pub mod rules;
+mod rust_cfg_test;

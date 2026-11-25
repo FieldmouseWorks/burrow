@@ -226,6 +226,118 @@ fn rust_inline_cfg_test_is_excluded() {
     );
 }
 
+// `#[cfg(test)]` on fields, variants, match arms, expressions, and
+// semicolon-terminated items containing braces never swallows production code
+// that follows them.
+#[test]
+fn rust_cfg_test_never_swallows_production_code() {
+    let big_body = "    fn prod() {}\n".repeat(LINES + 1);
+    let big_fns = "fn prod() {}\n".repeat(LINES + 1);
+
+    for (name, src) in [
+        (
+            "struct field with comma",
+            format!(
+                "struct Config {{\n    #[cfg(test)]\n    fake: bool,\n    real: String,\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "last struct field without trailing comma",
+            format!(
+                "struct Config {{\n    real: String,\n    #[cfg(test)]\n    pub(crate) fake: bool\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "weak-keyword struct fields (union, default)",
+            format!(
+                "struct Config {{\n    #[cfg(test)]\n    union: bool,\n    #[cfg(test)]\n    default: bool,\n    real: String,\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "tuple struct fields including fn pointer types",
+            format!(
+                "struct Callbacks(\n    #[cfg(test)]\n    fn(i32) -> i32,\n    #[cfg(test)]\n    extern \"C\" fn(i32),\n    #[cfg(test)]\n    bool\n);\nimpl Callbacks {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "enum unit, tuple, and struct variants",
+            format!(
+                "enum Mode {{\n    #[cfg(test)]\n    Unit,\n    #[cfg(test)]\n    Tuple(i32),\n    #[cfg(test)]\n    Struct {{ a: i32 }},\n    #[cfg(test)]\n    Last\n}}\nimpl Mode {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "const slice containing struct literal",
+            format!("#[cfg(test)]\nconst ITEMS: &[S] = &[S {{ a: 1 }}];\n{big_fns}"),
+        ),
+        (
+            "static slice containing struct literal",
+            format!("#[cfg(test)]\nstatic ITEMS: &[S] = &[S {{ a: 1 }}];\n{big_fns}"),
+        ),
+        (
+            "const with multiple block expressions",
+            format!("#[cfg(test)]\nconst N: usize = {{ let a = 1; a }} + {{ 2 }};\n{big_fns}"),
+        ),
+        (
+            "use group with alias",
+            format!("#[cfg(test)]\nuse foo::{{a, b}} as c;\n{big_fns}"),
+        ),
+        (
+            "type alias with const array block",
+            format!("#[cfg(test)]\ntype Arr = [u8; {{ 1 + 1 }}];\n{big_fns}"),
+        ),
+        (
+            "let statement with struct literal inside function",
+            format!(
+                "fn prod_outer() {{\n    #[cfg(test)]\n    let x = S {{ a: 1 }};\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "macro call with braces inside parens",
+            format!("#[cfg(test)]\nmy_macro!(S {{ a: 1 }});\n{big_fns}"),
+        ),
+        (
+            "match arm with comparison before big production arm",
+            format!(
+                "fn decide(n: i32) {{\n    match n {{\n        #[cfg(test)]\n        x if x < 5 => 1,\n        _ => {{\n{big_body}        }}\n    }}\n}}\n"
+            ),
+        ),
+        (
+            "inline const block inside array literal",
+            format!(
+                "const ARR: &[usize] = &[\n    #[cfg(test)]\n    const {{ 1 + 1 }},\n    3,\n];\n{big_fns}"
+            ),
+        ),
+    ] {
+        let path = "src/prod.rs";
+        fails(
+            &case(vec![change("modified", path, 20, 5)]).tree("4ead", path, &src),
+            "file-size",
+        );
+        let _ = name;
+    }
+
+    // Large `#[cfg(test)]` items using those same constructs are still excluded
+    // cleanly without tripping file-size.
+    let big_const = format!(
+        "#[cfg(test)]\nconst ITEMS: &[S] = &[\n{}];\nfn prod() {{}}\n",
+        "    S { a: 1 },\n".repeat(LINES + 1)
+    );
+    let big_const_generic_fn = format!(
+        "#[cfg(test)]\nfn helper() -> Foo<{{ 1 }}> {{\n{}}}\nfn prod() {{}}\n",
+        "    let _ = 1;\n".repeat(LINES + 1)
+    );
+    for (name, src) in [
+        ("large cfg(test) const slice", big_const),
+        (
+            "large cfg(test) fn with const-generic block",
+            big_const_generic_fn,
+        ),
+    ] {
+        assert!(src.lines().count() > LINES, "{name}");
+        passes(&case(vec![change("modified", "src/ok.rs", 20, 5)]).tree("4ead", "src/ok.rs", &src));
+    }
+}
+
 // Standing waivers in file-size-allow exempt matching paths without a body line.
 #[test]
 fn standing_waiver() {
