@@ -282,7 +282,7 @@ exit 1
 "#,
     );
     let mut cfg = base_config(fast_exit);
-    cfg.output_format = OutputFormat::Json;
+    cfg.output_format = OutputFormat::StreamJson;
     let big_prompt = "x".repeat(256 * 1024);
     let inv = Invocation::from_config(
         &cfg,

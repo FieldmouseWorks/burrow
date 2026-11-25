@@ -192,7 +192,6 @@ fn build_args_covers_verified_headless_flags() {
     assert_eq!(
         args,
         vec![
-            "-p",
             "--output-format",
             "json",
             "--input-format",
@@ -218,6 +217,7 @@ fn build_args_covers_verified_headless_flags() {
             "/etc/antigravity/settings.json",
             "--print-timeout",
             "120",
+            "--print=hello",
         ]
     );
 }
@@ -324,14 +324,20 @@ fi
         Answer::Job { ref summary, next: Next::Done } if summary == "fresh reply"
     ));
     let recorded_args = fs::read_to_string(&args_log).unwrap();
-    assert!(recorded_args.contains("-p\n"));
     assert!(recorded_args.contains("--output-format\nstream-json\n"));
+    assert!(recorded_args.contains("--input-format\nstream-json\n"));
     assert!(recorded_args.contains("--disable-slash-commands\n"));
     assert!(recorded_args.contains("--model\ntest-model\n"));
     assert!(recorded_args.contains("--effort\nmedium\n"));
     assert!(recorded_args.contains("--dangerously-skip-permissions\n"));
+    assert!(recorded_args.contains("--print=\n"));
     assert!(!recorded_args.contains("--conversation"));
-    assert_eq!(fs::read_to_string(&stdin_log).unwrap(), "do the fresh job");
+    let stdin_msg: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&stdin_log).unwrap().trim()).unwrap();
+    assert_eq!(
+        stdin_msg,
+        serde_json::json!({"event": "user", "message": {"content": "do the fresh job"}})
+    );
 
     // Verify normalized TurnOutput directly as well (usage + session + result).
     let inv = Invocation::from_config(

@@ -88,14 +88,29 @@ impl Invocation {
     }
 }
 
+/// Whether this invocation delivers its prompt as a `stream-json` NDJSON user
+/// message on stdin (avoiding `ARG_MAX` / `MAX_ARG_STRLEN` limits and cmdline
+/// exposure) rather than via `--print=<prompt>`.
+///
+/// Real `antigravity` supports `--input-format stream-json` whenever
+/// `--output-format stream-json` is active (the default for all burrow turns),
+/// and requires `--print=<prompt>` for single-shot `json`/`text` output modes.
+fn uses_stream_json_stdin(invocation: &Invocation) -> bool {
+    invocation.output_format == OutputFormat::StreamJson
+        && invocation.input_format != Some(InputFormat::Text)
+}
+
 /// Render the verified headless `antigravity` CLI argument vector.
 pub fn build_args(invocation: &Invocation) -> Vec<OsString> {
+    let stream_stdin = uses_stream_json_stdin(invocation);
     let mut args: Vec<OsString> = vec![
-        OsString::from("-p"),
         OsString::from("--output-format"),
         OsString::from(invocation.output_format.as_str()),
     ];
-    if let Some(input_format) = invocation.input_format {
+    if stream_stdin {
+        args.push(OsString::from("--input-format"));
+        args.push(OsString::from(InputFormat::StreamJson.as_str()));
+    } else if let Some(input_format) = invocation.input_format {
         args.push(OsString::from("--input-format"));
         args.push(OsString::from(input_format.as_str()));
     }
@@ -139,6 +154,15 @@ pub fn build_args(invocation: &Invocation) -> Vec<OsString> {
     if let Some(secs) = invocation.print_timeout_secs {
         args.push(OsString::from("--print-timeout"));
         args.push(OsString::from(secs.to_string()));
+    }
+    // Real `antigravity` parses `-p` / `--print` as a flag taking a string
+    // value: in `stream-json` input mode pass `--print=` and stream the prompt
+    // as NDJSON on stdin; in single-shot `json`/`text` mode attach the prompt
+    // directly with `--print=<prompt>` so leading `-` is never parsed as a flag.
+    if stream_stdin {
+        args.push(OsString::from("--print="));
+    } else {
+        args.push(OsString::from(format!("--print={}", invocation.prompt)));
     }
     args
 }
@@ -542,13 +566,26 @@ pub fn run_invocation(
     }
 
     let deadline = Instant::now() + Duration::from_secs(config.deadline_secs);
-    // `burrow_process::output_unless` always binds child stdin to either
-    // `/dev/null` (when empty) or a pipe closed immediately once the prompt is
-    // written, so an unauthenticated CLI never inherits an open terminal stdin.
-    let stdin_input = (!invocation.prompt.is_empty()).then_some(invocation.prompt.as_bytes());
+    // In `stream-json` input mode, deliver the prompt as a single NDJSON
+    // `{"event":"user","message":{"content":...}}` line on stdin (which
+    // `output_unless` closes immediately on write, and binds to `/dev/null`
+    // when empty). In single-shot `json`/`text` mode, `--print=<prompt>` carries
+    // the prompt and stdin stays `/dev/null`.
+    let stdin_payload: Option<Vec<u8>> =
+        if uses_stream_json_stdin(invocation) && !invocation.prompt.is_empty() {
+            let mut line = serde_json::to_vec(&serde_json::json!({
+                "event": "user",
+                "message": { "content": invocation.prompt },
+            }))
+            .expect("stream-json user prompt serialization cannot fail");
+            line.push(b'\n');
+            Some(line)
+        } else {
+            None
+        };
     let result = burrow_process::output_unless(
         &mut command,
-        stdin_input,
+        stdin_payload.as_deref(),
         deadline,
         config.max_output_bytes,
         stop,

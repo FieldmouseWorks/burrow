@@ -482,9 +482,14 @@ fn a_job_gets_the_turns_instructions_and_says_its_at_work_while_the_cli_runs() {
         let output = child.wait_with_output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "stderr: {stderr}");
+        let given_msg: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&given).unwrap().trim()).unwrap();
         assert_eq!(
-            fs::read_to_string(&given).unwrap(),
-            "do the task\n\nEnd by running proj done."
+            given_msg,
+            serde_json::json!({
+                "event": "user",
+                "message": { "content": "do the task\n\nEnd by running proj done." }
+            })
         );
         let said = stderr
             .lines()
@@ -496,4 +501,181 @@ fn a_job_gets_the_turns_instructions_and_says_its_at_work_while_the_cli_runs() {
             assert_eq!(said, 0, "{stderr}");
         }
     }
+}
+
+#[test]
+fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_leading_dash_prompt() {
+    use burrow_engine_antigravity::{
+        Invocation, Refusal, RunError, Schema, build_args, normalize_output,
+    };
+
+    // 1a. Default `stream-json` uses `--input-format stream-json` + `--print=` (never bare `-p` before `--output-format`).
+    let stream_inv = Invocation {
+        workdir: PathBuf::from("/tmp/work"),
+        prompt: "--leading-dash prompt".to_owned(),
+        model: Some("test-model".to_owned()),
+        effort: Some(Effort::High),
+        conversation: None,
+        add_dirs: Vec::new(),
+        json_schema: None,
+        mode: None,
+        dangerously_skip_permissions: false,
+        sandbox: false,
+        disable_slash_commands: true,
+        settings_file: None,
+        output_format: OutputFormat::StreamJson,
+        input_format: None,
+        print_timeout_secs: None,
+        home_dir: None,
+    };
+    let stream_args: Vec<String> = build_args(&stream_inv)
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        stream_args.first().map(String::as_str),
+        Some("--output-format")
+    );
+    assert!(
+        stream_args
+            .windows(2)
+            .any(|w| w == ["--input-format", "stream-json"])
+    );
+    assert_eq!(stream_args.last().map(String::as_str), Some("--print="));
+    assert!(!stream_args.iter().any(|a| a == "-p"));
+
+    // 1b. Single-shot `json` mode attaches a leading-`-` prompt to `--print=` at the end.
+    let mut dash_inv = stream_inv;
+    dash_inv.output_format = OutputFormat::Json;
+    let args: Vec<String> = build_args(&dash_inv)
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args.first().map(String::as_str), Some("--output-format"));
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("--print=--leading-dash prompt")
+    );
+    assert!(!args.iter().any(|a| a == "-p"));
+
+    // 2. Real `stream-json` envelope with `init`, recoverable tool `step_update` error, and `result`.
+    let real_stream = concat!(
+        r#"{"event":"init","conversation_id":"conv-real-1","init":{"model":"test-model","cwd":"/tmp/work","permission_mode":"request-review"}}"#,
+        "\n",
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-real-1","step_index":0,"state":"DONE","step_type":"user_input"}}"#,
+        "\n",
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-real-1","step_index":1,"state":"ERROR","step_type":"tool","tool_name":"run_command","tool_info":{"error":{"type":"TOOL_ERROR","message":"recoverable"}}}}"#,
+        "\n",
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-real-1","step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"OK\n"}}"#,
+        "\n",
+        r#"{"event":"result","result":{"conversation_id":"conv-real-1","status":"SUCCESS","response":"OK\n","duration_seconds":2.5,"num_turns":1,"usage":{"input_tokens":120,"output_tokens":15,"cache_read_tokens":40,"total_tokens":135}}}"#,
+        "\n"
+    );
+    let ok = normalize_output(
+        OutputFormat::StreamJson,
+        real_stream.as_bytes(),
+        b"",
+        Some(0),
+        None,
+        None,
+        &[],
+    );
+    assert_eq!(ok.error, None, "{ok:?}");
+    assert_eq!(ok.session.as_deref(), Some("conv-real-1"));
+    assert_eq!(ok.result.as_deref(), Some("OK\n"));
+    let usage = ok.usage.expect("usage from real stream-json");
+    assert_eq!(usage.model.as_deref(), Some("test-model"));
+    assert_eq!(usage.input_tokens, Some(120));
+    assert_eq!(usage.output_tokens, Some(15));
+    assert_eq!(usage.cache_read_tokens, Some(40));
+    assert_eq!(usage.total_tokens, Some(135));
+
+    // 3. Real `--json-schema` structured output inside `event: "result"`.
+    let schema_stream = concat!(
+        r#"{"event":"init","conversation_id":"conv-schema-1","init":{"model":"test-model"}}"#,
+        "\n",
+        r#"{"event":"result","result":{"conversation_id":"conv-schema-1","status":"SUCCESS","response":"{\"verdict\":\"pass\",\"reason\":\"ok\"}\n","structured_output":{"verdict":"pass","reason":"ok"},"usage":{"input_tokens":90,"output_tokens":12,"total_tokens":102}}}"#,
+        "\n"
+    );
+    let schema = Schema::compile(r#"{"type":"object","required":["verdict","reason"]}"#).unwrap();
+    let structured = normalize_output(
+        OutputFormat::StreamJson,
+        schema_stream.as_bytes(),
+        b"",
+        Some(0),
+        None,
+        Some(&schema),
+        &[],
+    );
+    assert_eq!(structured.error, None, "{structured:?}");
+    assert_eq!(structured.session.as_deref(), Some("conv-schema-1"));
+    assert_eq!(
+        structured.structured_output,
+        Some(serde_json::json!({"verdict": "pass", "reason": "ok"}))
+    );
+
+    // 4. Wrapped `status: "ERROR"` in `event: "result"` fails even on exit 0 and classifies refusals.
+    let auth_err = concat!(
+        r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"authentication failed or timed out","finished_reason":"error"}}"#,
+        "\n"
+    );
+    let auth_out = normalize_output(
+        OutputFormat::StreamJson,
+        auth_err.as_bytes(),
+        b"",
+        Some(0),
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        matches!(
+            auth_out.error,
+            Some(RunError::Refusal(Refusal::Login { .. }))
+        ),
+        "{auth_out:?}"
+    );
+
+    let quota_err = concat!(
+        r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded","finished_reason":"error"}}"#,
+        "\n"
+    );
+    let quota_out = normalize_output(
+        OutputFormat::StreamJson,
+        quota_err.as_bytes(),
+        b"",
+        Some(1),
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        matches!(
+            quota_out.error,
+            Some(RunError::Refusal(Refusal::Quota { .. }))
+        ),
+        "{quota_out:?}"
+    );
+
+    // 5. Empty response with `denied_actions` surfaces the denied action in InvalidOutput.
+    let denied = concat!(
+        r#"{"event":"result","result":{"conversation_id":"conv-deny-1","status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#,
+        "\n"
+    );
+    let denied_out = normalize_output(
+        OutputFormat::StreamJson,
+        denied.as_bytes(),
+        b"jetski: command permission auto-denied\n",
+        Some(0),
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        matches!(
+            denied_out.error,
+            Some(RunError::InvalidOutput(ref msg)) if msg.contains("denied actions: command")
+        ),
+        "{denied_out:?}"
+    );
 }
