@@ -82,25 +82,24 @@ fn main() -> ExitCode {
     let streams = std::env::var("PROJ_STREAM_EVENTS").is_ok_and(|v| v == "1");
     let stream_job = streams && matches!(request.task, Task::Job { .. });
     let activity = stream_job.then(|| Activity::start(Duration::from_secs(config.activity_secs)));
-    let mut emitted_session = false;
+    let mut forwarder = normalize::StreamForwarder::new();
     let mut on_line = |line: &str| {
         if !stream_job {
             return;
         }
-        if let Ok(event) = serde_json::to_string(&serde_json::json!({
-            "event": "stream",
-            "line": line,
-        })) {
-            eprintln!("{event}");
-        }
-        if !emitted_session
-            && let Some(sid) = normalize::extract_session_from_line(line)
+        let step = forwarder.process_line(line);
+        if let Some(sid) = step.new_session
             && let Ok(event) = serde_json::to_string(&serde_json::json!({
                 "event": "session",
                 "session_id": sid,
             }))
         {
-            emitted_session = true;
+            eprintln!("{event}");
+        }
+        if let Ok(event) = serde_json::to_string(&serde_json::json!({
+            "event": "stream",
+            "line": step.line,
+        })) {
             eprintln!("{event}");
         }
     };

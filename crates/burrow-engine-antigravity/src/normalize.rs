@@ -14,6 +14,9 @@ use serde_json::Value;
 use crate::config::OutputFormat;
 use crate::schema::Schema;
 
+mod stream;
+pub use stream::{StreamForwarder, StreamStep};
+
 /// Normalized token and cost usage extracted from an Antigravity turn.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
@@ -551,13 +554,6 @@ fn extract_session(v: &Value) -> Option<String> {
         }
     }
     None
-}
-
-/// Extract a session/conversation ID from one raw JSON/NDJSON stdout line.
-pub fn extract_session_from_line(line: &str) -> Option<String> {
-    let record: Value = serde_json::from_str(line.trim()).ok()?;
-    let (_, payload) = unwrap_event(&record);
-    extract_session(&record).or_else(|| extract_session(payload))
 }
 
 /// Extract any session ID and usage already emitted on partial `stdout` when a
