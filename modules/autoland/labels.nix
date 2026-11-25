@@ -80,11 +80,11 @@ in
         {
           review = {
             name = "waiting: review";
-            description = "Its reviewers, or a Claude job judging it, are looking at this head";
+            description = "Its reviewers, or an agent job judging it, are looking at this head";
           };
           fix = {
             name = "waiting: fix";
-            description = "A Claude job, or the session that opened it, fixes findings, red CI or a conflict";
+            description = "An agent job, or the session that opened it, fixes findings, red CI or a conflict";
           };
           ci = {
             name = "waiting: CI";

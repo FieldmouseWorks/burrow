@@ -1,4 +1,4 @@
-"""What a Claude job that settles a PR (tasks.fix_task) says it did, and
+"""What an agent job that settles a PR (tasks.fix_task) says it did, and
 when that goes up. The job pushes, and leaves its answers (a reply on each
 review thread, the PR's new description, a comment) in its answers file
 rather than posting them. The PR's state keeps each such job as it was
@@ -86,9 +86,9 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
         C.wake(repo, out["wake"])  # ends: claims.rs's next look for who pushed the head, LOOKS at most
     for s in out["stop"]:
         if C.stop_job(s["jid"]):
-            log(f"{tag}: stopped Claude job {s['jid']}: {s['why']}")
+            log(f"{tag}: stopped agent job {s['jid']}: {s['why']}")
         else:
-            log(f"{tag}: couldn't stop Claude job {s['jid']}, though {s['why']}")
+            log(f"{tag}: couldn't stop agent job {s['jid']}, though {s['why']}")
             st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [s["jid"]]))
             strike("stop")
     status = None
@@ -96,31 +96,31 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
         jid, outcome, why = a["jid"], a["outcome"], a["why"]
         if outcome in ("refused", "unanswered"):
             strike("answer", why)
-            status = "GitHub didn't take a Claude job's answers: they go up next try"
+            status = "GitHub didn't take an agent job's answers: they go up next try"
             continue
         if outcome == "pending":
             # What its turn held can't be read: its answers wait, read again
             # next try, a strike each time, and nothing else is handed out.
             strike("answer", why)
-            status = status or "A Claude job's turn can't be read yet: its answers wait"
+            status = status or "An agent job's turn can't be read yet: its answers wait"
             continue
         cleared("answer")
         if outcome == "posted":
-            log(f"{tag}: Claude job {jid}'s answers posted")
+            log(f"{tag}: agent job {jid}'s answers posted")
             if a.get("tracker"):
                 # Its red check's cause is outside the PR, and this tracks
                 # it: the head gets no other job of the kind meanwhile
                 # (step_actions.hand_off), and a new head is none of it.
                 st[a["kind"] + "Tracker"] = a["tracker"]
             after(C.NOW, 0)  # ends: the pass that reads what went up
-            status = status or "A Claude job's answers went up: reading the PR again"
+            status = status or "An agent job's answers went up: reading the PR again"
         elif outcome == "moved":
-            log(f"{tag}: Claude job {jid} stood down, nothing posted: {why}")
+            log(f"{tag}: agent job {jid} stood down, nothing posted: {why}")
         else:
             # It ended without its answer, as one that left none: the PR's
             # still to settle, so this head's next job of the kind (lost)
             # is told why, and a second such fails the PR for the owner.
-            log(f"{tag}: Claude job {jid}'s answers not posted: {why}")
+            log(f"{tag}: agent job {jid}'s answers not posted: {why}")
             st[a["kind"] + "Unposted"] = {"at": pr["headRefOid"], "why": why}
     return status, out
 

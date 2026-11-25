@@ -294,7 +294,7 @@ status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.
 assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
 # Nothing after the steward reads its commits, so one it can't tell is
 # Renovate's alone (commits not read, or no address for Renovate) is reviewed
-# like one a Claude job fixed, not put in the train on CI alone.
+# like one an agent job fixed, not put in the train on CI alone.
 for unread in (COMMITS, COMMITTERS, "address"):
     fresh_pr_state()
     seen()

@@ -2,7 +2,7 @@
 the binary, the branches nothing needs, deleted after its PRs are seen to, and its Renovate dashboard and flaky tests,
 looked at by the binary (its own tests have the rules) as the App for the
 repo's owner, what it lists put where the steward sorts it, the passes it
-books booked, the Claude jobs it asks for started under their keys and
+books booked, the agent jobs it asks for started under their keys and
 found by them, and what happens when any of that fails: the pass goes
 on."""
 
@@ -170,7 +170,7 @@ def state(part):
 
 
 # The first look: the dashboard is found (one search, counted), its error
-# isn't due for a day; the CI's flaky test goes to a Claude job at once,
+# isn't due for a day; the CI's flaky test goes to an agent job at once,
 # project work with its own timeout, in a clone if need be, under its key.
 # Eve's is the owner's to look at, listed under the heading the steward
 # gives the owner; every call went as the App.
@@ -219,7 +219,7 @@ NEXT["jid"] = None
 mine = look(0)
 NEXT.pop("jid", None)
 stuck = [x for x in mine if x[0] not in R.OWNERS]
-assert stuck == [("Couldn't start a Claude job", "sam/r#4", "for the flaky test `browser/stream`")], mine
+assert stuck == [("Couldn't start an agent job", "sam/r#4", "for the flaky test `browser/stream`")], mine
 assert C.WAKE == {"sam/r": T + 300}, C.WAKE
 assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 assert "sam/r: couldn't start its flaky job (no checkout, or proj refused)" in LOGGED, LOGGED
@@ -269,7 +269,7 @@ mine = look(0)
 assert [j["pipeline"] for j in JOBS] == [True, False], JOBS
 assert [j["key"] for j in JOBS] == [f"upkeep/sam/r/{p}/{T}" for p in ("dashboard", "flaky")], JOBS
 assert "handed" not in state("dashboard")["items"]["branch renovate/npm-packages"], state("dashboard")
-assert ("Couldn't start a Claude job", "sam/r#7", "for what's stuck on Renovate's dashboard") in mine, mine
+assert ("Couldn't start an agent job", "sam/r#7", "for what's stuck on Renovate's dashboard") in mine, mine
 assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 300, (waits.FAILED, C.WAKE)
 assert "sam/r: its dashboard job didn't start: [Errno 7] Argument list too long" in LOGGED, LOGGED
 os.remove(f"{C.STATE}/flaky-sam_r.json")
@@ -327,7 +327,7 @@ def upkeep(repo, mine):
     seen.append(f"upkeep {repo}")
     if repo == "sam/r":
         raise RuntimeError("it broke")
-    mine.append(("Still quarantined a day after a Claude job", f"{repo}#4", "x"))
+    mine.append(("Still quarantined a day after an agent job", f"{repo}#4", "x"))
 
 
 S.upkeep, argv = upkeep, sys.argv
@@ -348,13 +348,13 @@ def upkeep(repo, mine):  # noqa: F811 (as the bridge fails: within itself)
         waits.failed(repo, op="upkeep")
         C.wake(repo, C.NOW + 300)
         return
-    mine.append(("Still quarantined a day after a Claude job", f"{repo}#4", "x"))
+    mine.append(("Still quarantined a day after an agent job", f"{repo}#4", "x"))
 
 
 S.upkeep = upkeep
 S.main()
 assert seen == ["prs sam/r", "upkeep sam/r", "prs sam/q", "upkeep sam/q"], seen
-assert published[-1] == [("Still quarantined a day after a Claude job", "sam/q#4", "x")], published
+assert published[-1] == [("Still quarantined a day after an agent job", "sam/q#4", "x")], published
 assert C.load("wake.json", {})["sam/r"] == T + 300, C.load("wake.json", {})
 sys.argv = argv
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns

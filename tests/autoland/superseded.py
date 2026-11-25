@@ -18,8 +18,8 @@ C.job = lambda repo, task, clone=False, **kw: JOBS.append(task) or f"sup-{next(i
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 A, B, C2 = "a" * 40, "b" * 40, "c" * 40
-RUNNING = "a Claude job is running remi-proof"
-gated = {"files": ["secrets/app.yaml"], "number": 6}  # a one-way path: a Claude job judges it
+RUNNING = "an agent job is running remi-proof"
+gated = {"files": ["secrets/app.yaml"], "number": 6}  # a one-way path: an agent job judges it
 
 
 def line(n, t, sha=A, **kw):

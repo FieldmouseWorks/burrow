@@ -1,5 +1,5 @@
 """Past the review-round limit: Codex isn't asked or waited for again, a
-Claude job settles what's left and a judge decides."""
+agent job settles what's left and a judge decides."""
 
 from harness import JOBS, WROTE, found, fresh_pr_state, judgment, merged, mkpr, run, said, stand_in, summary
 import tasks as T
@@ -8,7 +8,7 @@ stand_in()
 newer = "9" * 40
 
 # Past the round limit the reviewers aren't asked again, and neither is the
-# owner: a Claude job settles what's left on its merits, then a judge decides.
+# owner: an agent job settles what's left on its merits, then a judge decides.
 fresh_pr_state()
 stuck = {"reviews": [found()] * 5, "threads": [False]}
 status, digest = run(mkpr(**stuck), 0)
@@ -29,7 +29,7 @@ assert len(JOBS) == 1 and "past its review-round limit" in JOBS[0], JOBS
 assert "a finding answered away" in JOBS[0] and "found nothing" not in JOBS[0], JOBS
 # The judge counts an answer as failing by the same measure the fix job fixed by.
 assert T.PAST_LIMIT in JOBS[0] and f"a finding answered away that is {T.MUST_FIX} counts as failing" in JOBS[0], JOBS
-assert "a Claude job is judging it (it went past the review-round limit" in status and not merged() and digest == [], status
+assert "an agent job is judging it (it went past the review-round limit" in status and not merged() and digest == [], status
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **answered), 7400)
 assert merged() and "judged it fine to land" in status, status
 # A push past the limit isn't looked at either: the judge reads it, and a

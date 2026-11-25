@@ -1,6 +1,6 @@
 """The digest's two issues: what only the owner can settle goes to the issue
 assigned to them, and what the pipeline is stuck on to one the inbox hands to
-a Claude job; when the inbox can't take it, all of it is the owner's."""
+an agent job; when the inbox can't take it, all of it is the owner's."""
 
 import os
 
@@ -80,14 +80,14 @@ sh("git", "-C", f"{tmp}/projects/notes", "remote", "add", "origin", "https://git
 DIGEST = [
     ("Outside contributions", "sam/r#1", "Outside contribution: Sam reviews and merges it"),
     ("Labelled needs-owner", "sam/r#2", ""),
-    ("Judged yours to decide", "sam/r#7", "a Claude job judged it Sam's"),
+    ("Judged yours to decide", "sam/r#7", "an agent job judged it Sam's"),
     ("Codex hasn't reviewed it", "sam/r#3", "no review of aaaaaaa since its push at 6:47pm UTC (its usage, or the connector's setup)"),
     ("Couldn't merge", "sam/r#4", "GitHub keeps refusing the merge (journalctl -u autoland)"),
-    ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
+    ("Two agent jobs ended without fixing it", "sam/r#5", "its findings"),
 ]
 
 # The inbox takes it: the owner's issue lists only their calls, assigned to
-# them; the rest is a Claude job's, labelled for the inbox and assigned to
+# them; the rest is an agent job's, labelled for the inbox and assigned to
 # nobody.
 fresh()
 R.publish(DIGEST)
@@ -137,7 +137,7 @@ OPEN["claude"] = 9
 CALLS.clear()
 R.publish(DIGEST)
 assert said(9) == ["New:\n- Couldn't merge: sam/r#4: GitHub keeps refusing the merge (journalctl -u autoland)\n"
-                   "- Two Claude jobs ended without fixing it: sam/r#5: its findings"], said(9)
+                   "- Two agent jobs ended without fixing it: sam/r#5: its findings"], said(9)
 # It had the unstick label all along: nothing to put back. One open from
 # before it had one, or that lost it, gets it back, before the news that
 # hands it on, which only comes once that went through.

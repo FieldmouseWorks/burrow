@@ -1,6 +1,6 @@
 """A PR whose changes conflict with its base: GitHub refuses the merge, won't
 bring it up to date and runs no CI on it, so nothing is merged or asked of
-GitHub, and a Claude job merges the base in at once, one a head on its base,
+GitHub, and an agent job merges the base in at once, one a head on its base,
 before any review or CI. Ordinary and judged PRs alike; a dependency bot's
 own update is the bot's to rebase, and one renovate-sweep has is its job's."""
 
@@ -45,11 +45,11 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     # It checks the PR is still where it was handed before it merges or pushes.
     assert f"still open on {base} at head {pr['headRefOid']}: if its base or head moved on, stop" in JOBS[0], JOBS
     targeted(JOBS[0])
-    assert "state=pending" in status and f"Conflicts with {base}; a Claude job has it" in status, status
+    assert "state=pending" in status and f"Conflicts with {base}; an agent job has it" in status, status
     assert digest == [], digest
     # One job a head while it works, however many passes see it.
     status, _ = run(at_odds, 960)
-    assert JOBS == [] and merges() == [] and "a Claude job has it" in status, (JOBS, status)
+    assert JOBS == [] and merges() == [] and "an agent job has it" in status, (JOBS, status)
     # It ended without pushing: once more, then the owner hears.
     STATES["job-1"] = "done"
     run(at_odds, 1000)
@@ -58,11 +58,11 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     targeted(JOBS[0])  # the retry too
     run(at_odds, 1100)
     status, digest = run(at_odds, 1160)
-    assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
+    assert JOBS == [] and [x[0] for x in digest] == ["Two agent jobs ended without fixing it"], (JOBS, digest)
     assert "state=failure" in status and merges() == [], status
     STATES.clear()
 
-WAITS = "a Claude job takes it once the one on {} ends"
+WAITS = "an agent job takes it once the one on {} ends"
 # Retargeted while its job is still on the old base: the job stays tracked
 # (no second one beside it on the branch, its record kept) until it ends,
 # then the new base gets its own, with two tries of its own: the old base's
@@ -83,7 +83,7 @@ for state in ("running", "queued", None):
 STATES["job-1"] = "done"
 status, _ = run(dirty(base="release"), 1200)
 assert len(JOBS) == 1 and "merge release into" in JOBS[0] and "still open on release" in JOBS[0], JOBS
-assert "a Claude job has it since" in status and "state=failure" not in status, status
+assert "an agent job has it since" in status and "state=failure" not in status, status
 STATES["job-1"] = "done"
 run(dirty(base="release"), 1300)
 status, _ = run(dirty(base="release"), 1360)
@@ -105,27 +105,27 @@ for first, then, on in ((dirty(), dirty(sha=new), "its conflicts with its base")
     assert JOBS == [] and WAITS.format(on) in status, (on, JOBS, status)
     STATES["job-1"] = "done"
     status, _ = run(then, 7300 + 7300)
-    assert len(JOBS) == 1 and "a Claude job has it since" in status, (on, JOBS, status)
+    assert len(JOBS) == 1 and "an agent job has it since" in status, (on, JOBS, status)
     STATES.clear()
 
-# A conflicted PR, settled otherwise: a Claude job merges its base in at
+# A conflicted PR, settled otherwise: an agent job merges its base in at
 # once (GitHub won't merge it and runs no CI on it), and nothing merges it.
 fresh_pr_state()
 status, _ = run(conflicting(clean()), 700)
 assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "never rebase or force-push" in JOBS[0], JOBS
-assert desc(status).startswith("Conflicts with main; a Claude job has it since") and not merged(), (status, WROTE)
+assert desc(status).startswith("Conflicts with main; an agent job has it since") and not merged(), (status, WROTE)
 # While it works, nothing more starts; one that ends with the conflict still
 # there is handed once more, and after a second the owner hears.
 status, _ = run(conflicting(clean()), 800)
-assert JOBS == [] and "a Claude job has it since" in status, (JOBS, status)
+assert JOBS == [] and "an agent job has it since" in status, (JOBS, status)
 STATES["job-1"] = "done"
 status, _ = run(conflicting(clean()), 900)
-assert JOBS == [] and "its Claude job just ended" in status, (JOBS, status)
+assert JOBS == [] and "its agent job just ended" in status, (JOBS, status)
 run(conflicting(clean()), 1000)
 assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0], JOBS
 run(conflicting(clean()), 1100)
 status, digest = run(conflicting(clean()), 1200)
-assert "state=failure" in status and digest[0][0] == "Two Claude jobs ended without fixing it", (status, digest)
+assert "state=failure" in status and digest[0][0] == "Two agent jobs ended without fixing it", (status, digest)
 STATES.clear()
 # Before any review or CI too: neither can settle it while it conflicts.
 fresh_pr_state()
@@ -151,7 +151,7 @@ COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
 for pr in (clean(comments=[said(swept("ok"))], **major), clean(**dependabot)):
     fresh_pr_state()
     status, _ = run(conflicting(pr), 700)
-    assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "a Claude job has it" in status, (JOBS, status)
+    assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "an agent job has it" in status, (JOBS, status)
 # A conflict job stuck in line (or one whose state can't be read: running,
 # as far as the steward can tell) doesn't keep the PR off the list: still
 # open a day on, it's listed, watchdog or not, a Renovate update a job of
@@ -160,7 +160,7 @@ for pr in (clean(), clean(comments=[said(swept("ok"))], **major)):
     fresh_pr_state()
     run(conflicting(pr), 700)
     status, digest = run(conflicting(pr), 90000)
-    assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
+    assert "an agent job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
 # Not one whose hold has just come off, though, however long ago it was
 # opened: nothing could land it on hold, so its day began when the hold came
 # off (remi#1486: a week on hold, then listed as stuck within the hour, with
@@ -169,11 +169,11 @@ fresh_pr_state()
 WEEK = 7 * 86400
 run(clean(labels=["hold"]), WEEK)
 status, digest = run(conflicting(clean()), WEEK + 1800)
-assert len(JOBS) == 1 and "a Claude job has it" in status and digest == [], (JOBS, status, digest)
+assert len(JOBS) == 1 and "an agent job has it" in status and digest == [], (JOBS, status, digest)
 status, digest = run(conflicting(clean()), WEEK + 86300)
 assert digest == [], digest
 status, digest = run(conflicting(clean()), WEEK + 90000)
-assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
+assert "an agent job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
 # One renovate-sweep has is its job's: a red one, or a major with no verdict
 # on this head, gets no job of ours beside it on the branch.
 red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]

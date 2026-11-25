@@ -18,7 +18,7 @@ C.job = lambda repo, task, clone=False, since=None, role=None: JOBS.append(task)
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 other = "c" * 40  # another head
-RUNNING = "a Claude job is running remi-proof"
+RUNNING = "an agent job is running remi-proof"
 
 
 def line(n, t=700, **kw):

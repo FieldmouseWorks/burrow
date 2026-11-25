@@ -1,6 +1,6 @@
 """A PR stacked on another open PR's branch: merged, it would land in that
 branch, folded into the PR below. Until it's retargeted, nobody asks Codex
-to review it, no Claude job works on it, nothing merges it and nobody waits on it; once
+to review it, no agent job works on it, nothing merges it and nobody waits on it; once
 it's retargeted it's a PR like any other. A PR into a branch no open PR has
 (a release branch) isn't stacked."""
 

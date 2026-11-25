@@ -115,7 +115,7 @@ print("a cause outside the PR, closed: ok")
 # Red again, run since it closed: the head's own, so a job takes it.
 RUN_INFO["70"] = {"run_attempt": 2, "status": "completed", "conclusion": "failure", "run_started_at": "2026-10-24T08:30:00Z"}
 status, _ = run(red, 31000)
-assert RERUNS == ["70"] and len(JOBS) == 1 and "a Claude job has it" in status, (RERUNS, JOBS, status)
+assert RERUNS == ["70"] and len(JOBS) == 1 and "an agent job has it" in status, (RERUNS, JOBS, status)
 assert "redFixedTracker" not in pr_state(), pr_state()
 print("red again after it closed: ok")
 

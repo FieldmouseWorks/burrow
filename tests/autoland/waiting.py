@@ -86,7 +86,7 @@ proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "st
 fresh_pr_state()
 P.begin("sam/r", {1, 2})
 status, _ = run(clean(checks=proof, number=1), 700)
-assert "a Claude job is running remi-proof" in status and edits() == [on(1, MACHINE)], (status, WROTE)
+assert "an agent job is running remi-proof" in status and edits() == [on(1, MACHINE)], (status, WROTE)
 status, _ = run(clean(checks=proof, number=2), 700)
 assert "waiting its turn to run remi-proof (1 ahead)" in status and edits() == [on(2, SLOT)], (status, WROTE)
 # Moved from one wait to another, the label goes with it in one call: back
@@ -109,7 +109,7 @@ status, _ = run(mkpr(), 700)
 assert edits() == [on(5, REVIEW)], WROTE
 run(mkpr(labels=[REVIEW]), 800)
 assert edits() == [], WROTE
-# A finding comes back: a Claude job has it.
+# A finding comes back: an agent job has it.
 status, _ = run(mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[False], labels=[REVIEW]), 7200)
 assert "1 open review thread" in status and edits() == [on(5, FIX, off=[REVIEW])], (status, WROTE)
 

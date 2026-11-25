@@ -29,8 +29,8 @@ use serde_json::Value;
 use crate::config::Dashboard;
 use crate::pass::{Ask, DAY, HOUR, Job, MIN, Pass};
 
-pub const STUCK: &str = "Still on Renovate's dashboard a day after a Claude job";
-pub const NO_JOB: &str = "Couldn't start a Claude job";
+pub const STUCK: &str = "Still on Renovate's dashboard a day after an agent job";
+pub const NO_JOB: &str = "Couldn't start an agent job";
 /// Repos a pass may search for a dashboard, at most: GitHub's search allows
 /// 30 a minute, and a machine's first pass would ask for every repo at once.
 pub const FINDS: usize = 10;
@@ -392,7 +392,7 @@ fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
         }
     }
     eprintln!(
-        "{}: a Claude job {jid} for {} stuck on its dashboard",
+        "{}: an agent job {jid} for {} stuck on its dashboard",
         p.repo,
         st.asked.len()
     );

@@ -10,7 +10,7 @@ import tasks as T
 pr = {"number": 6, "title": "t", "headRefName": "x", "headRefOid": head, "baseRefName": "main", "body": ""}
 first = H.fix_task("sam/r", pr, "2 open review threads")
 capped = H.fix_task("sam/r", pr, "1 open review thread, after 5 review rounds with findings, the limit, so its "
-                    "reviewers won't look again, and a Claude job judges it after, without the reviewers")
+                    "reviewers won't look again, and an agent job judges it after, without the reviewers")
 # What it's held to is burrow-brief's, with what must be fixed inside it.
 assert T.MUST_FIX in T.FINDINGS and "merits" in T.FINDINGS, T.FINDINGS
 for brief in (first, capped):

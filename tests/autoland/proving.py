@@ -1,5 +1,5 @@
 """A proof check that's a build (proofBuilds) is the steward's own to build,
-with no Claude job: a unit of the machine user's that runs one `nix-store
+with no agent job: a unit of the machine user's that runs one `nix-store
 --realise --add-root` per derivation, all at once (heavy-slotted where the
 machine has heavy), its log beside them and how it ended in end.json, then
 kicks its repo's pass. That pass posts each check as its realise passed or
@@ -272,7 +272,7 @@ assert p.returncode == 0 and end(jid)["state"] == "done", p.stderr
 assert not os.path.exists(f"{tmp}/state/pass.lock"), "a build takes no pass's lock"
 print("proof builds' start: ok")
 
-# A pass over a PR whose vm check is a build: no Claude job, a build.
+# A pass over a PR whose vm check is a build: no agent job, a build.
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
 VM = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "PENDING", "description": ""}]
 BUILT = []
@@ -281,7 +281,7 @@ kept_outputs, kept_build = P.outputs, P.build
 
 def outputs(repo, pr, checks, st):
     drvs = {"vm": X + ".drv", "other": Y + ".drv"}
-    if not set(checks) <= drvs.keys():  # a Claude job's, with no attribute
+    if not set(checks) <= drvs.keys():  # an agent job's, with no attribute
         return None
     st["proofOutputs"] = {"for": None, "paths": sorted(drvs[c].removesuffix(".drv") for c in checks), "drvs": drvs, "at": C.NOW}
     return st["proofOutputs"]["paths"]
@@ -421,9 +421,9 @@ assert statuses() == [] and "Settled; the last build of vm crashed, so another s
 status, _ = run(clean(checks=VM), 1100)
 assert len(BUILT) == 2 and "Settled; building vm here again (the last one crashed)" in status, (status, BUILT)
 assert statuses() == [] and JOBS == [], WROTE
-# Its deadline is proofTimeout's, not a Claude job's.
+# Its deadline is proofTimeout's, not an agent job's.
 assert min(C.WAKE.values()) >= C.NOW + S.CFG["proofTimeout"] * 60, C.WAKE
-# A Claude job from before its check had a build, on this head: stopped
+# An agent job from before its check had a build, on this head: stopped
 # while it's at work, and a build starts afresh, the job's lost answer and
 # retries not carried over; one that ended without its verdict, the same.
 for job_state, stopped in (("running", ["job-old"]), ("done", [])):
@@ -437,7 +437,7 @@ for job_state, stopped in (("running", ["job-old"]), ("done", [])):
     status, _ = run(clean(checks=VM), 700)
     assert STOPPED == stopped and len(BUILT) == 1 and "Settled; building vm here" in status, (job_state, status, STOPPED)
     assert "provedAgain" not in pr_state() and "again" not in status, pr_state()
-# The Claude jobs after a build start afresh too: the build's done isn't a
+# The agent jobs after a build start afresh too: the build's done isn't a
 # job that lost its answer, and their first is no second.
 fresh_pr_state()
 BUILT.clear()
@@ -515,7 +515,7 @@ finish(BUILT[0], [X, Y])
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
 status, _ = run(clean(checks=VM), 900)
 assert [s["state"] for s in statuses()] == ["success"] and statuses("other") == [], (status, WROTE)
-# A Claude job that's posted one of its two checks is the same proof still:
+# An agent job that's posted one of its two checks is the same proof still:
 # nothing stops it, and no other starts.
 fresh_pr_state()
 STOPPED.clear()

@@ -237,6 +237,7 @@ fn a_job_thats_over_is_answered_for_once() {
 fn comment_engine_comes_from_the_finished_turn() {
     for (engine, other, label, unsafe_field) in [
         ("claude", "gemini", "Claude", None),
+        ("antigravity", "claude", "Antigravity", None),
         ("gemini", "claude", "Unknown", None),
         ("gemini", "claude", "Claude", Some("turns")),
         ("gemini", "claude", "Claude", Some("2.engine")),

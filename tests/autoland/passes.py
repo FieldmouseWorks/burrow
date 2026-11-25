@@ -1,7 +1,7 @@
 from harness import admission, DEFAULT_ADMISSION
 """What starts the steward's passes, as burrow-events runs them: the
 wake-ups a pass books, a kicked pass over one repo, and the kicks from
-Claude jobs coming back."""
+agent jobs coming back."""
 
 import datetime
 import json
@@ -125,7 +125,7 @@ assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
 STATES.clear()
 print("wake-ups: ok")
 
-# A Claude job kicks the repo's pass at the end of each turn (proj run
+# An agent job kicks the repo's pass at the end of each turn (proj run
 # --kick); Codex's posts kick it as GitHub's events (burrow-events).
 fresh_pr_state()
 proj = os.path.join(tmp, "proj")

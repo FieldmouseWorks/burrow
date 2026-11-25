@@ -100,7 +100,7 @@ def restart(r, known, failed):
 
 def reset(r, k, known, failed):
     """The deleted repo whose state is under k goes: its clones are moved
-    aside, proj-inbox forgets its issues and its Claude jobs are stopped
+    aside, proj-inbox forgets its issues and its agent jobs are stopped
     (they'd push its history to the new one, or answer the new one's
     issues), and all the steward kept about it goes: its PRs' state (so a new
     PR doesn't take on an old one's of the same number), its dashboard's
@@ -143,7 +143,7 @@ def retire_checkouts(repo, k):
 
     Then proj-inbox forgets the repo's issues (C.forget_issues), so the new
     one's issue N is a new job, never the deleted one's N, and no answer
-    of an old job's goes to it. Then every Claude job of the repo's is
+    of an old job's goes to it. Then every agent job of the repo's is
     stopped, from proj's own record of every job (C.jobs): each the repo's
     by the repo its kicks name (the steward's jobs and proj-inbox's, in
     whatever folder) or by its folder (one moved aside, or the folder the
@@ -204,7 +204,7 @@ def first_fixes(r, prs):
 def watch_default(r, info, prs, digest):
     """A red default branch: CI failed on what's merged, and every PR is
     built on it. With no merge queue (docs/repo-baseline.md), this is how
-    two PRs that broke it together get undone: a Claude job finds the
+    two PRs that broke it together get undone: an agent job finds the
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
     lands like any other, except that a revert of one PR's merge is
     instead the ledger's undo of that PR, which the job names and the
@@ -301,16 +301,16 @@ def watch_default(r, info, prs, digest):
         C.wake(repo, C.NOW + 60)  # ends: the second look, once
         return {}
     if red.get("jobs", 0) >= 2:
-        digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
+        digest.append(("The default branch is red", line, "two agent jobs ended with it still red"))
         return {}
     if C.paused(repo):
         return {}
     jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused"), red.get("undone", ())), role="red-main")
     if not jid:
-        digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
+        digest.append(("Couldn't start an agent job to fix it", line, "the default branch is red"))
         C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
         return {}
-    log(f"{repo}: {default} is red at {sha[:7]}; a Claude job {jid} fixes it")
+    log(f"{repo}: {default} is red at {sha[:7]}; an agent job {jid} fixes it")
     # One told the ledger couldn't undo it isn't asked to: what it names
     # isn't undone. One told what was undone for it may name another.
     st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, **({"refused": red["refused"]} if red.get("refused") else {}),
@@ -354,7 +354,7 @@ def landed_alone(repo, default, target):
     failed (one cancelled, timed out or never started is no proof of the
     PR's: a runner killed, say). All of it is in what the pass read of the
     tip (prs.TIP). None when it isn't, or when that PR is an undo or a red
-    fix itself, whose own undo would loop: a Claude job finds the cause
+    fix itself, whose own undo would loop: an agent job finds the cause
     then, as for two landings since green, or a train's members landed back
     to back (their parents have no CI)."""
     parents = (target.get("parents") or {}).get("nodes") or []
@@ -570,14 +570,14 @@ def hooks(repos):
 # outside contribution's), a login. The rest of the digest is the
 # pipeline's own trouble (a job that keeps failing, a review that won't run,
 # a merge GitHub won't take, a PR stuck a day, a branch it couldn't
-# archive), which a Claude job on this machine takes when proj's inbox is on.
+# archive), which an agent job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
           "No reviewer can review it", "Flaky tests someone else quarantined", "Jobs waiting for the owner")
 
 
 # Kinds whose words are the PR's status as it stands, which changes each time
 # it moves on: listed with another, it's the same news. Each comment on the
-# stuck issue is a turn of its Claude job, and a day-old PR's every step
+# stuck issue is a turn of its agent job, and a day-old PR's every step
 # through its reviews and CI was one that found nothing to do (remi#210).
 MOVING = ("Open over a day",)
 
@@ -600,7 +600,7 @@ def job_questions():
 def publish(digest):
     """What waits for the owner, in one issue in config.notify.repo assigned
     to them; what the pipeline is stuck on, in another the inbox hands to a
-    Claude job. All of it is the owner's when the inbox can't take it."""
+    agent job. All of it is the owner's when the inbox can't take it."""
     # proj owns question eligibility and deadlines; this is only digest glue.
     digest = [*digest, *job_questions()]
     owners = (*OWNERS, f"Labelled {CFG['labels']['owner']}")

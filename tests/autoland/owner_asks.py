@@ -152,7 +152,7 @@ for unasked in ("unlisted", "declined"):
     DOOR.clear()
 print("once a head, the digest after: ok")
 
-# A head a conflict's Claude job holds is one it must push over: no review
+# A head a conflict's agent job holds is one it must push over: no review
 # is asked of it while the job works, though GitHub's word on the merge goes
 # quiet a while (UNKNOWN: burrow#1324, where the review that came opened a
 # thread after the job had read the PR), and the owner doesn't hear of the
@@ -164,7 +164,7 @@ quiet = {**mkpr(), "mergeStateStatus": "UNKNOWN"}
 for at in (30, 60, 120):
     status, digest = step(quiet, at * 60)
     assert heard["owner"] == [] and digest == [], (at, heard, digest)
-assert "a Claude job is replacing it" in status, status
+assert "an agent job is replacing it" in status, status
 STATES[pr_state()["conflictFixedJob"]] = "done"
 step(quiet, 121 * 60)
 assert heard["owner"] == [("sam/r", 5, head)], heard

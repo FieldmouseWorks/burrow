@@ -20,7 +20,7 @@ import re
 from harness import FORK, FORKS, JOBS, PR_DIFF, C, S, clean, fresh_pr_state, merged, run
 
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
-PROVING = "a Claude job is running agents"
+PROVING = "an agent job is running agents"
 F, G = FORK["v"], "e" * 40  # where the PR leaves main, and where it once did
 
 

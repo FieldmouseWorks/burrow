@@ -42,7 +42,7 @@ pub const REVIEWED: &str = "its reviewers found nothing on that head, every thre
 /// again, so a fix job's answers stand in for their last look, and the
 /// judge reads those too.
 pub const PAST_LIMIT: &str = concat!(
-    "it went past its review-round limit, so its reviewers weren't asked to look again and a Claude job ",
+    "it went past its review-round limit, so its reviewers weren't asked to look again and an agent job ",
     "fixed or answered their last findings (read each thread as well as the diff: a finding answered away ",
     "that is ",
     must_fix!(),

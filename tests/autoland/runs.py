@@ -1,11 +1,11 @@
 """A proof check that's a command (proofRuns) is the steward's own to run,
-with no Claude job: start_run writes what the run is, in the repo's real
+with no agent job: start_run writes what the run is, in the repo's real
 clone in projectsDir, and has burrow-proof start its unit (the real one,
 which reads what it's given, with systemd-run stood in for: the run itself
 is crates/burrow-proof's, and its tests'). The unit's end leaves end.json
 and comment.md, as burrow-proof's `end` writes them (its tests/ends.rs
 holds it to that), and a pass posts them: the verdict, and the comment as
-it is. Runs come after builds and before Claude jobs; a check's kind and
+it is. Runs come after builds and before agent jobs; a check's kind and
 command are what its verdict belongs to."""
 
 import json
@@ -101,7 +101,7 @@ assert P.start_run("sam/r", pr, ["gate"], {}) is None and asked() is None
 S.CFG["projectsDir"] = projects
 print("proof runs' start: ok")
 
-# A pass over a PR whose gate is a run: no Claude job, a run; its verdict
+# A pass over a PR whose gate is a run: no agent job, a run; its verdict
 # posted once it's done, and its comment as burrow-proof wrote it.
 HEAD = "c" * 40
 GATE = CI_GREEN + [{"__typename": "StatusContext", "context": "gate", "state": "PENDING", "description": ""}]
@@ -209,7 +209,7 @@ P.start_run = lambda repo, pr, checks, st: None
 status, _ = run(clean(sha=HEAD, checks=GATE), 700)
 assert "Settled, but the run of gate couldn't start" in status and JOBS == [], status
 P.start_run = start_run
-# Builds go first, then runs, then Claude jobs; each starts afresh, not as
+# Builds go first, then runs, then agent jobs; each starts afresh, not as
 # the last one's second go.
 BUILT = []
 
