@@ -31,7 +31,7 @@ impl Pass<'_> {
             .collect();
         let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
-            let Some(mut id) = files::job(&d).filter(|j| !j.is_empty()) else {
+            let Some(id) = files::job(&d).filter(|j| !j.is_empty()) else {
                 continue;
             };
             let issue = files::issue(&d).unwrap_or_default();
@@ -149,7 +149,49 @@ impl Pass<'_> {
             let mut rv = revived(&d);
             let streak = if rv.0 == Some(turns) { rv.1 } else { 0 };
             let mut revive = false;
-            if !split_pending && st == "failed" && k < turns && streak < 2 && now_open.is_some() {
+            if !split_pending
+                && st == "failed"
+                && k < turns
+                && streak < 2
+                && let Some(listed_now) = now_open
+            {
+                if !filled(&job.file(JobFile::Session)) {
+                    let Some(written) = self.written(repo, listed_now) else {
+                        self.miss(repo);
+                        continue;
+                    };
+                    if self.stop_parked(repo, n, &id, &d, &written.issue)? {
+                        continue;
+                    }
+                    if written.issue["state"] != "open" || !self.eligible(repo, &written.issue) {
+                        continue;
+                    }
+                    let Some(new_id) = self.restart_without_session(
+                        repo,
+                        n,
+                        &job,
+                        &d,
+                        &written.issue,
+                        &written.comments,
+                    )?
+                    else {
+                        continue;
+                    };
+                    files::mark(&d, File::Revived).put(format!("1 {}\n", streak + 1))?;
+                    let newest = written
+                        .comments
+                        .iter()
+                        .filter_map(|c| c["id"].as_i64())
+                        .max()
+                        .unwrap_or(0);
+                    files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
+                    Self::hand(
+                        &d,
+                        &self.issue_text(repo, &written.issue, &written.comments),
+                    )?;
+                    let _ = new_id;
+                    continue 'jobs;
+                }
                 match reply(self.cfg, &id, CUT_OFF, true, Some(&turns.to_string())) {
                     Ok(()) => {
                         revive = true;
@@ -515,32 +557,12 @@ impl Pass<'_> {
                         self.retry(repo);
                         continue;
                     }
-                    // No session to continue (the first turn never got
-                    // going): start over, from the issue as it stands,
-                    // replies and all. Retire the old worker before replacing
-                    // its record so neither a legacy reply nor an old await
-                    // can start it alongside the replacement.
+                    if self
+                        .restart_without_session(repo, n, &job, &d, &now_issue, &comments)?
+                        .is_none()
                     {
-                        let _held = job
-                            .lock()
-                            .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
-                        super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
-                        if let Err(f) = halt(self.cfg, &job, false) {
-                            say(f);
-                            self.retry(repo);
-                            continue;
-                        }
+                        continue;
                     }
-                    id = match self.start(repo, &now_issue, &comments) {
-                        Ok(id) => id,
-                        Err(f) => {
-                            say(f);
-                            self.retry(repo);
-                            continue;
-                        }
-                    };
-                    files::mark(&d, File::Job).put(format!("{id}\n"))?;
-                    files::mark(&d, File::Answered).put("0\n")?;
                 }
                 if !msg.is_empty() {
                     Self::hand(&d, &whole)?;
@@ -553,6 +575,42 @@ impl Pass<'_> {
 }
 
 impl Pass<'_> {
+    /// Retire a job whose first turn never recorded a session and start over
+    /// from the issue as it stands. Returns `None` when the old job couldn't
+    /// be stopped or the new one couldn't start (and schedules a retry).
+    fn restart_without_session(
+        &mut self,
+        repo: &str,
+        n: &str,
+        job: &Job,
+        d: &Path,
+        issue: &Value,
+        comments: &[Value],
+    ) -> Result<Option<String>, Fail> {
+        {
+            let _held = job
+                .lock()
+                .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
+            super::enrollment::remember(job, repo, n).map_err(|e| Fail::new(1, e))?;
+            if let Err(f) = halt(self.cfg, job, false) {
+                say(f);
+                self.retry(repo);
+                return Ok(None);
+            }
+        }
+        let id = match self.start(repo, issue, comments) {
+            Ok(id) => id,
+            Err(f) => {
+                say(f);
+                self.retry(repo);
+                return Ok(None);
+            }
+        };
+        files::mark(d, File::Job).put(format!("{id}\n"))?;
+        files::mark(d, File::Answered).put("0\n")?;
+        Ok(Some(id))
+    }
+
     /// A stopped worker on an issue still enrolled. One its labels parked
     /// is the next enrollment's to replace (enrollment.rs); one stopped by
     /// hand (`proj stop`) stays stopped, and its issue is told so once, with
