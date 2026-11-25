@@ -100,7 +100,7 @@ on:
         default: false
       legs:
         description: >-
-          How many jobs to split the gate across, 1 to 8, each on a runner of
+          How many jobs to split the gate across, 1 to 12, each on a runner of
           its own, for a gate that takes too long on one; more than one needs
           eval-apart. Every leg evaluates the plan, and leg K of N then
           evaluates the outputs whose names hash to K (counting from 1) and
@@ -415,7 +415,7 @@ jobs:
       fail-fast: false
       matrix:
         # 1 to legs: an expression has no arithmetic, so a list of each.
-        leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
+        leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
     # Its gate's run (RUN_SECONDS in burrow-flake-check) and builds-write's
     # 30, with half an hour for the rest: restores, the wait, signing and
@@ -436,6 +436,10 @@ jobs:
       leg-6: ${{ steps.leg.outputs.leg-6 }}
       leg-7: ${{ steps.leg.outputs.leg-7 }}
       leg-8: ${{ steps.leg.outputs.leg-8 }}
+      leg-9: ${{ steps.leg.outputs.leg-9 }}
+      leg-10: ${{ steps.leg.outputs.leg-10 }}
+      leg-11: ${{ steps.leg.outputs.leg-11 }}
+      leg-12: ${{ steps.leg.outputs.leg-12 }}
     # Inherit the caller's permissions here: a job map would set an omitted
     # actions permission to none. Explicitly requesting actions: read would
     # instead reject existing callers that do not grant that optional scope.
@@ -1292,8 +1296,68 @@ jobs:
           path: ${{ runner.temp }}/kept
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-${{ github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-
+      - id: kept-9
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 9 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-9-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-9-of-${{ inputs.legs }}-
+      - id: kept-9-restore
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 9 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-9-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-9-of-${{ inputs.legs }}-
+      - id: kept-10
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 10 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-10-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-10-of-${{ inputs.legs }}-
+      - id: kept-10-restore
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 10 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-10-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-10-of-${{ inputs.legs }}-
+      - id: kept-11
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 11 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-11-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-11-of-${{ inputs.legs }}-
+      - id: kept-11-restore
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 11 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-11-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-11-of-${{ inputs.legs }}-
+      - id: kept-12
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 12 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-12-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-12-of-${{ inputs.legs }}-
+      - id: kept-12-restore
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 12 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-12-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-12-of-${{ inputs.legs }}-
       - name: degraded/kept-restore
-        if: ${{ always() && ((steps.kept-1.outputs.cache-hit != '' && steps.kept-1-restore.outputs.cache-hit == '') || (steps.kept-2.outputs.cache-hit != '' && steps.kept-2-restore.outputs.cache-hit == '') || (steps.kept-3.outputs.cache-hit != '' && steps.kept-3-restore.outputs.cache-hit == '') || (steps.kept-4.outputs.cache-hit != '' && steps.kept-4-restore.outputs.cache-hit == '') || (steps.kept-5.outputs.cache-hit != '' && steps.kept-5-restore.outputs.cache-hit == '') || (steps.kept-6.outputs.cache-hit != '' && steps.kept-6-restore.outputs.cache-hit == '') || (steps.kept-7.outputs.cache-hit != '' && steps.kept-7-restore.outputs.cache-hit == '') || (steps.kept-8.outputs.cache-hit != '' && steps.kept-8-restore.outputs.cache-hit == '')) }}
+        if: ${{ always() && ((steps.kept-1.outputs.cache-hit != '' && steps.kept-1-restore.outputs.cache-hit == '') || (steps.kept-2.outputs.cache-hit != '' && steps.kept-2-restore.outputs.cache-hit == '') || (steps.kept-3.outputs.cache-hit != '' && steps.kept-3-restore.outputs.cache-hit == '') || (steps.kept-4.outputs.cache-hit != '' && steps.kept-4-restore.outputs.cache-hit == '') || (steps.kept-5.outputs.cache-hit != '' && steps.kept-5-restore.outputs.cache-hit == '') || (steps.kept-6.outputs.cache-hit != '' && steps.kept-6-restore.outputs.cache-hit == '') || (steps.kept-7.outputs.cache-hit != '' && steps.kept-7-restore.outputs.cache-hit == '') || (steps.kept-8.outputs.cache-hit != '' && steps.kept-8-restore.outputs.cache-hit == '') || (steps.kept-9.outputs.cache-hit != '' && steps.kept-9-restore.outputs.cache-hit == '') || (steps.kept-10.outputs.cache-hit != '' && steps.kept-10-restore.outputs.cache-hit == '') || (steps.kept-11.outputs.cache-hit != '' && steps.kept-11-restore.outputs.cache-hit == '') || (steps.kept-12.outputs.cache-hit != '' && steps.kept-12-restore.outputs.cache-hit == '')) }}
         shell: bash
         run: echo 'degraded/kept-restore' >> "$GITHUB_STEP_SUMMARY"
       - if: inputs.install-nix
