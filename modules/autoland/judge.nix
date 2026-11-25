@@ -94,7 +94,7 @@ let
       dangerously_skip_permissions = false;
       sandbox = true;
       disable_slash_commands = true;
-      output_format = "json";
+      output_format = "stream-json";
       deadline_secs = cfg.timeoutMinutes * 60;
       network = true;
     }

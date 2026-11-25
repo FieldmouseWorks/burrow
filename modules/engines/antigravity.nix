@@ -74,6 +74,29 @@ let
     })
   );
 
+  r2Patterns = import ./anthropic/r2.nix;
+  r2Prefix = pat: lib.removeSuffix "*" (lib.removeSuffix " *" pat);
+  # Default headless host settings: allow workspace edits and commands without
+  # interactive prompts while denying every R2 one-way command from r2.nix
+  # (one fact, one home shared with the Anthropic host settings).
+  defaultHostSettingsFile = pkgs.writeText "burrow-antigravity-host-settings.json" (
+    builtins.toJSON {
+      toolPermission = "always-proceed";
+      permissions = {
+        deny = lib.concatMap (
+          pat:
+          let
+            prefix = r2Prefix pat;
+          in
+          [
+            "command(${prefix})"
+            "command(sudo ${prefix})"
+          ]
+        ) r2Patterns;
+      };
+    }
+  );
+
   hostPluginConfig = pkgs.writeText "burrow-engine-antigravity-host.json" (
     builtins.toJSON ({
       binary = resolvedBinary;
@@ -89,7 +112,13 @@ let
       credential_file = cfg.host.credentialFile;
       credential_mode = cfg.credentialMode;
       credential_home_path = cfg.credentialHomePath;
-      settings_file = if cfg.host.settingsFile != null then cfg.host.settingsFile else cfg.settingsFile;
+      settings_file =
+        if cfg.host.settingsFile != null then
+          cfg.host.settingsFile
+        else if cfg.settingsFile != null then
+          cfg.settingsFile
+        else
+          defaultHostSettingsFile;
       mode = cfg.host.mode;
       host_mode = true;
       dangerously_skip_permissions = false;
@@ -419,8 +448,12 @@ in
             "plan"
           ]
         );
-        default = "auto";
-        description = "Execution mode passed via `antigravity --mode` on host turns.";
+        default = "accept-edits";
+        description = ''
+          Execution mode passed via `antigravity --mode` on host turns.
+          Defaults to `accept-edits` because `auto` is unavailable on business
+          and enterprise accounts (falling back to `request-review`).
+        '';
       };
 
       sandbox = mkOption {
