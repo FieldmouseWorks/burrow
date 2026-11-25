@@ -518,8 +518,9 @@ pub fn run_invocation(
 
     if let Some(home) = &effective_home {
         command.env("HOME", home);
-        if isolated_host_home.is_some()
+        if config.host_mode
             && let Some(real_home) = &orig_home
+            && home != real_home
         {
             if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
                 let gitconfig = real_home.join(".gitconfig");
