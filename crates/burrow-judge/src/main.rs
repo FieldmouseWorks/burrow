@@ -54,10 +54,23 @@ fn main() -> ExitCode {
                         ..Default::default()
                     })
                 });
-                let units = Box::new(Systemd {
-                    systemctl: cfg.systemctl.clone(),
-                    unit: cfg.unit.clone(),
-                });
+                let units: std::collections::BTreeMap<
+                    String,
+                    Box<dyn burrow_producer::units::Units>,
+                > = cfg
+                    .engines
+                    .iter()
+                    .map(|(name, eng)| {
+                        (
+                            name.clone(),
+                            Box::new(Systemd {
+                                systemctl: cfg.systemctl.clone(),
+                                unit: eng.unit.clone(),
+                            })
+                                as Box<dyn burrow_producer::units::Units>,
+                        )
+                    })
+                    .collect();
                 let builds = Box::new(Systemd {
                     systemctl: cfg.systemctl.clone(),
                     unit: cfg.build.clone(),
@@ -99,10 +112,10 @@ fn main() -> ExitCode {
                 let home = std::env::temp_dir().join("look");
                 std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
                 Worker {
-                    claude: cfg.claude.clone(),
+                    engines: cfg.engines.clone(),
                     dir: cfg.look(id),
                     home,
-                    token: burrow_producer::credential::read(&cfg.login)?,
+                    read_credential: Box::new(burrow_producer::credential::read),
                 }
                 .look()
             }

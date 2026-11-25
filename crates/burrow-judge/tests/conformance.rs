@@ -28,8 +28,16 @@ fn the_plugin_passes_conarys_check_with_no_producer() {
         "role": "judge", "owner": "Sam",
         "api": "https://api.github.com", "token": "true", "gh": "gh",
         "git": "git", "github": "https://github.com", "state": d.join("state"),
-        "unit": "autoland-judge-look", "systemctl": "systemctl", "timeout": 3600,
-        "claude": "claude", "login": "claude-token", "hosts": ["api.anthropic.com"],
+        "systemctl": "systemctl", "timeout": 3600,
+        "engines": {
+            "claude": {
+                "plugin": d.join("claude-plugin"),
+                "unit": "autoland-judge-look-claude",
+                "credential": "judge-login-claude",
+                "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+                "hosts": ["api.anthropic.com"]
+            }
+        },
         "build": "autoland-judge-build", "trees": "/var/tmp",
     });
     std::fs::write(&config, cfg.to_string()).unwrap();

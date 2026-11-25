@@ -360,16 +360,25 @@ fn answer_detailed(
                 (None, actual) => actual,
             };
 
-            let summary = turn
-                .result
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
+            let summary = match turn.structured_output {
+                Some(value) => serde_json::to_string(&value).map_err(|e| {
                     Box::new(DetailedError::Other {
                         session: session.clone(),
-                        error: "antigravity returned an empty job summary".to_owned(),
+                        error: format!("failed to encode structured output: {e}"),
                         usage: turn.usage.clone(),
                     })
-                })?;
+                })?,
+                None => turn
+                    .result
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(DetailedError::Other {
+                            session: session.clone(),
+                            error: "antigravity returned an empty job summary".to_owned(),
+                            usage: turn.usage.clone(),
+                        })
+                    })?,
+            };
 
             let executed = (ver >= 3).then(|| Executed {
                 model: resolved_model,

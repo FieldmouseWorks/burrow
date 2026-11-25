@@ -89,12 +89,18 @@ fn config_with(dir: &Path, key: serde_json::Value) -> Config {
         git: "git".into(),
         github: dir.join("github").to_string_lossy().into_owned(),
         state: dir.join("state"),
-        unit: "autoland-judge-look".into(),
         systemctl: "systemctl".into(),
         timeout: 60,
-        claude: dir.join("claude"),
-        login: "claude-token".into(),
-        hosts: vec!["api.anthropic.com".into()],
+        engines: std::collections::BTreeMap::from([(
+            "claude".into(),
+            EngineConfig {
+                plugin: dir.join("claude-plugin"),
+                unit: "autoland-judge-look-claude".into(),
+                credential: "judge-login-claude".into(),
+                credential_env: "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                hosts: vec!["api.anthropic.com".into()],
+            },
+        )]),
         build: "autoland-judge-build".into(),
         trees: dir.join("trees"),
     }

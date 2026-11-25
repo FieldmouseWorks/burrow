@@ -147,6 +147,25 @@ impl Drop for Gate {
     }
 }
 
+/// Whether `host` (already lowercased) matches an allowlist entry: either an
+/// exact hostname (`api.anthropic.com`) or a leading wildcard domain
+/// (`*.googleapis.com` matching `aicode.googleapis.com` and nested subdomains,
+/// never the bare suffix `googleapis.com` or an unrelated suffix like
+/// `evilgoogleapis.com`).
+fn host_matches(host: &str, pattern: &str) -> bool {
+    if host == pattern {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        !suffix.is_empty()
+            && host.len() > suffix.len() + 1
+            && host.ends_with(suffix)
+            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+    } else {
+        false
+    }
+}
+
 /// What the gate makes of one request head: where it may go, if anywhere.
 pub fn allowed<'a>(head: &'a [u8], hosts: &[String]) -> Option<&'a str> {
     let line = match head.windows(2).position(|w| w == b"\r\n") {
@@ -157,7 +176,8 @@ pub fn allowed<'a>(head: &'a [u8], hosts: &[String]) -> Option<&'a str> {
     let mut words = line.split(' ');
     let (method, target) = (words.next()?, words.next()?);
     let (host, port) = target.rsplit_once(':')?;
-    (method == "CONNECT" && port == "443" && hosts.contains(&host.to_ascii_lowercase()))
+    let lowered = host.to_ascii_lowercase();
+    (method == "CONNECT" && port == "443" && hosts.iter().any(|p| host_matches(&lowered, p)))
         .then_some(host)
 }
 
@@ -215,7 +235,11 @@ mod tests {
         fn at(head: &str) -> Option<&str> {
             allowed(
                 head.as_bytes(),
-                &["api.anthropic.com".to_owned(), "example.org".to_owned()],
+                &[
+                    "api.anthropic.com".to_owned(),
+                    "example.org".to_owned(),
+                    "*.googleapis.com".to_owned(),
+                ],
             )
         }
         assert_eq!(
@@ -226,9 +250,19 @@ mod tests {
             at("CONNECT API.Anthropic.com:443 HTTP/1.1\r\nHost: x"),
             Some("API.Anthropic.com")
         );
+        assert_eq!(
+            at("CONNECT aicode.googleapis.com:443 HTTP/1.1"),
+            Some("aicode.googleapis.com")
+        );
+        assert_eq!(
+            at("CONNECT sub.aicode.googleapis.com:443 HTTP/1.1"),
+            Some("sub.aicode.googleapis.com")
+        );
         for no in [
             "CONNECT api.anthropic.com:80 HTTP/1.1",
             "CONNECT example.com:443 HTTP/1.1",
+            "CONNECT googleapis.com:443 HTTP/1.1",
+            "CONNECT evilgoogleapis.com:443 HTTP/1.1",
             "CONNECT api.anthropic.com HTTP/1.1",
             "CONNECT api.anthropic.com:443\rX HTTP/1.1",
             "CONNECT api.anthropic.com.evil:443 HTTP/1.1",

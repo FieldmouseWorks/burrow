@@ -34,7 +34,25 @@ pub mod worker;
 
 use conary_core::plugin::{Answer, Capabilities, Identity, Judgment, Kind, Sandbox, Task};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// One modular engine surface a judge look can dispatch to (`modules/autoland/judge.nix`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineConfig {
+    /// Conary v5 `job` plugin executable configured for restricted read-only judge looks.
+    pub plugin: PathBuf,
+    /// Per-engine systemd look template unit (`UNIT@ID.service`) that loads
+    /// only this engine's login credential.
+    pub unit: String,
+    /// Systemd credential name carrying this engine's isolated login.
+    pub credential: String,
+    /// Environment variable name under which the plugin reads its login.
+    pub credential_env: String,
+    /// Egress host allowlist (exact hosts or leading `*.` wildcards) on port 443.
+    pub hosts: Vec<String>,
+}
 
 /// What the module tells the plugin, the producer and its looks, one file
 /// for all three.
@@ -79,17 +97,12 @@ pub struct Config {
     /// The producer's own state: `records/`, `generations/`, its mirrors
     /// (`git/`) and its looks' folders (`looks/`).
     pub state: PathBuf,
-    /// The looks' unit (`UNIT@ID.service`), systemctl, and how long a look
-    /// may run, in seconds.
-    pub unit: String,
+    /// systemctl, and how long a look may run, in seconds.
     pub systemctl: PathBuf,
     pub timeout: u64,
-    /// In a look: Claude Code, and the systemd credential its login comes
-    /// as.
-    pub claude: PathBuf,
-    pub login: String,
-    /// The hosts a look's gate lets it reach, on 443.
-    pub hosts: Vec<String>,
+    /// Configured modular engine surfaces a look may dispatch to, keyed by
+    /// engine name (for example `claude`, `antigravity`, or any custom plugin).
+    pub engines: BTreeMap<String, EngineConfig>,
     /// The builds' unit (`BUILD@ID.service`), each a check of a head no
     /// CI reported on, run before it's judged ([`build`]), and where a
     /// build's clone and home go, in its unit.
