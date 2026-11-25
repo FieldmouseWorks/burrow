@@ -169,13 +169,17 @@ impl Request {
 
     /// The machine's label maps the job to `role`: the role's own engine,
     /// not the pin its old label gave it.
-    pub fn enroll(job: &Job, role: String) -> Result<(), String> {
+    pub fn set_routing(
+        job: &Job,
+        role: Option<String>,
+        engine: Option<String>,
+    ) -> Result<(), String> {
         let mut request = Self::load(job)?;
-        if request.role.as_deref() == Some(role.as_str()) && request.engine.is_none() {
+        if request.role == role && request.engine == engine {
             return Ok(());
         }
-        request.role = Some(role);
-        request.engine = None;
+        request.role = role;
+        request.engine = engine;
         request.save(job)
     }
 
@@ -303,7 +307,7 @@ mod tests {
         fs::write(job.path("project"), "p\n").unwrap();
         let stale = Request::from(|key| read(&job.path(key))).unwrap();
         // Enrollment initializes and updates while the reader paused.
-        Request::enroll(&job, "judge".into()).unwrap();
+        Request::set_routing(&job, Some("judge".into()), None).unwrap();
         let winner = stale.adopt(&job).unwrap();
         assert_eq!(winner.role.as_deref(), Some("judge"));
         assert_eq!(Request::load(&job).unwrap().role.as_deref(), Some("judge"));

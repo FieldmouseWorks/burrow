@@ -85,20 +85,20 @@ impl Pass<'_> {
                     continue;
                 }
             }
-            // Adopt existing role-routed issues too: a deployment must not leave
-            // long-lived inbox or stuck jobs pinned to their old label's engine.
-            if let Some(role) =
-                open.iter()
-                    .find(|i| raw(&i["number"]) == n)
-                    .and_then(|i| match self.routing(i) {
-                        (Some(role), None) => Some(role),
-                        _ => None,
-                    })
+            // Keep existing open inbox jobs aligned with current routing:
+            // enabling ownerRole clears legacy label pins, and removing
+            // ownerRole restores label routing.
+            if let Some((role, engine)) = open
+                .iter()
+                .find(|i| raw(&i["number"]) == n)
+                .map(|i| self.routing(i))
+                .filter(|(role, engine)| role.is_some() || engine.is_some())
             {
                 let _held = job
                     .lock()
                     .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
-                crate::job::Request::enroll(&job, role).map_err(|e| Fail::new(1, e))?;
+                crate::job::Request::set_routing(&job, role, engine)
+                    .map_err(|e| Fail::new(1, e))?;
             }
             // The state and the turn count, read together: a turn starts
             // (proj reply, proj _watch) holding the job's lock, and halfway

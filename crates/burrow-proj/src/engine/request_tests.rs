@@ -167,7 +167,7 @@ fn host_authorized_changes_and_machine_settings_still_apply() {
     );
     // The inbox maps its label to a role: that role's model from now on,
     // as the machine's roles file has it on each turn.
-    Request::enroll(&job, "wide".into()).unwrap();
+    Request::set_routing(&job, Some("wide".into()), None).unwrap();
     crate::cmd::reply(&f.cfg, &id, "again", false, None).unwrap();
     assert_eq!(model(&f.cfg, &job).as_deref(), Some("wide-model"));
     assert_eq!(crate::read(&job.path("role")).as_deref(), Some("wide"));
