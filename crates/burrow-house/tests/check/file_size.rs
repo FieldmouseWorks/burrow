@@ -249,6 +249,9 @@ fn last_line() {
 }
 
 // A file renamed with no lines changed was already there: it didn't grow.
+// Renaming an extensionless non-code file to a code suffix crosses into code
+// and fails `file-size`, whereas renaming an extensionless script with a
+// shebang was already code and passes.
 #[test]
 fn renamed() {
     passes(
@@ -257,6 +260,18 @@ fn renamed() {
             "src/b.rs",
             &long(),
         ),
+    );
+    fails(
+        &case(vec![from(change("renamed", "src/notes.rs", 0, 0), "notes")])
+            .tree("4ead", "src/notes.rs", &long())
+            .tree("3e7b", "notes", &long()),
+        "file-size",
+    );
+    let script = format!("#!/usr/bin/env python3\n{}", long());
+    passes(
+        &case(vec![from(change("renamed", "src/tool.py", 0, 0), "bin/tool")])
+            .tree("4ead", "src/tool.py", &script)
+            .tree("3e7b", "bin/tool", &script),
     );
 }
 
