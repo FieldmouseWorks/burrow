@@ -799,21 +799,72 @@ fn a_restart_holds_a_lost_requests_pr_while_its_job_is_at_work() {
 }
 
 #[test]
-fn a_remade_request_for_another_head_waits_on_the_adopted_job_then_starts_afresh() {
+fn a_request_for_another_head_stops_the_adopted_job_and_starts_its_own() {
     let r = restarted();
+    // The PR moved on to OTHER while the broker was down: the job handed
+    // HEAD is at work on a head the flow has given up on.
     r.script(
-        &[record("running"), record("done"), record("done")],
+        &[record("running"), record("running")],
         answered(None),
         &[OTHER],
     );
+    r.serve_all();
+    let asked = {
+        let (cfg, request) = (r.cfg.clone(), fix(OTHER));
+        thread::spawn(move || {
+            let mut out = Vec::new();
+            plugin(&cfg)?.answer(&mut request.to_string().as_bytes(), &mut out)
+        })
+    };
+    while r.runner.0.lock().unwrap().started.len() < 2 && !asked.is_finished() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    {
+        let runner = r.runner.0.lock().unwrap();
+        assert_eq!(runner.stopped, ["job-1"], "the superseded job runs on");
+        assert_eq!(runner.started.len(), 2, "{:?}", runner.started);
+        let (_, k, task) = &runner.started[1];
+        assert!(task.contains(OTHER), "{task}");
+        // What's kept on disk is the new job's, not the superseded one's.
+        let kept: Vec<String> = std::fs::read_dir(r.cfg.state.join("live"))
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].lines().next(), Some(k.as_str()));
+        assert_eq!(kept[0].lines().nth(1), Some(OTHER));
+    }
+    r.script(&[record("done")], answered(None), &[OTHER]);
+    asked.join().unwrap().unwrap();
+    assert_eq!(r.runner.0.lock().unwrap().started.len(), 2);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_superseded_job_that_wont_stop_keeps_its_pr_held() {
+    let r = restarted();
+    r.script(&[record("running")], answered(None), &[OTHER]);
+    r.runner.0.lock().unwrap().stop_fails = true;
     let t = r.serve(2);
     let err = r.ask(&fix(OTHER)).unwrap_err();
-    assert!(err.contains("at work already"), "{err}");
+    assert!(err.contains("won't stop"), "{err}");
+    assert_eq!(r.runner.0.lock().unwrap().started.len(), 1);
+    // Kept, as any job that wouldn't stop: a restart still finds it so.
+    let kept = std::fs::read_dir(r.cfg.state.join("live"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(kept.len() == 1 && kept[0].ends_with("kept\n"), "{kept:?}");
+    // Once it stops, the PR's next fix runs.
+    r.runner.0.lock().unwrap().stop_fails = false;
+    r.script(&[record("done")], answered(None), &[OTHER]);
     r.ask(&fix(OTHER)).unwrap();
     t.join().unwrap();
     let runner = r.runner.0.lock().unwrap();
-    assert_eq!(runner.started.len(), 2);
-    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
+    assert_eq!(
+        (runner.started.len(), &runner.stopped[..]),
+        (2, &["job-1".to_owned()][..])
+    );
     assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
 }
 
@@ -831,7 +882,9 @@ fn a_remade_request_with_other_problems_joins_nothing() {
     let err = r.ask(&other).unwrap_err();
     t.join().unwrap();
     assert!(err.contains("at work already"), "{err}");
-    assert_eq!(r.runner.0.lock().unwrap().started.len(), 1);
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.started.len(), 1);
+    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
 }
 
 #[test]
@@ -839,9 +892,18 @@ fn an_adopted_job_that_ended_holding_anything_open_is_stopped_before_a_fresh_fix
     let r = restarted();
     let mut asked = record("ask");
     asked.ends = vec!["ask".into()];
-    r.script(&[asked, record("done")], answered(None), &[OTHER]);
+    // Asked of the same head, with other problems.
+    let mut other = fix(HEAD);
+    other["problems"].as_array_mut().unwrap().remove(1);
+    r.script(
+        &[asked, record("done")],
+        json!({"pushed": null, "unable": null, "answers": [
+        {"problem": 0, "fixed": false, "reply": "a"},
+        {"problem": 1, "fixed": false, "reply": "b"}]}),
+        &[HEAD],
+    );
     let t = r.serve(1);
-    r.ask(&fix(OTHER)).unwrap();
+    r.ask(&other).unwrap();
     t.join().unwrap();
     let runner = r.runner.0.lock().unwrap();
     assert_eq!(runner.stopped, ["job-1"]);

@@ -29,11 +29,13 @@
 //! proj job and outlives the broker: a restart leaves it at work and
 //! re-adopts it ([`Broker::reconcile`]). The flow, its connection lost,
 //! asks again; a request that asks the same of the same PR is answered from
-//! that job, at work or ended, and starts no second one. One that asks
-//! anything else is refused while that job is at work, as beside any live
-//! fix, and once it has ended, starts afresh. A re-adopted job no one asks
-//! about again ends by its own turn's timeout and idle limit, which proj
-//! keeps. A push that already happened stands; the next pass reads the
+//! that job, at work or ended, and starts no second one. One for a head
+//! the PR has moved to supersedes it, as the flow's closed connection
+//! would have: the job is stopped and the request starts its own. One that
+//! asks anything else of the same head is refused while that job is at
+//! work, as beside any live fix, and once it has ended, starts afresh. A
+//! re-adopted job is stopped by nothing else: no one asking, it ends by
+//! its own turn's timeout and idle limit, which proj keeps. A push that already happened stands; the next pass reads the
 //! head that moved.
 use crate::answers::Said;
 use crate::stuck::{self, Ask, Outcome};
@@ -360,14 +362,25 @@ impl Broker {
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
         let asks = asked(&(head, problems))?;
-        let mut held = self.hold(key(repo, *pr), &format!("a fix of {repo}#{pr}"), &asks)?;
+        let (now, branch) = self.pr(repo, *pr)?;
+        let current = (now == *head).then_some(head.as_str());
+        let mut held = self.hold(
+            key(repo, *pr),
+            &format!("a fix of {repo}#{pr}"),
+            &asks,
+            current,
+        )?;
         // The job it repeats was handed this head, which it may have moved
         // since: what it pushed is held to that head below, as its own
         // request's would have been.
         let id = match held.joined.take() {
             Some((id, _)) => id,
             None => {
-                let branch = self.handed(repo, *pr, head)?;
+                if current.is_none() {
+                    return Err(format!(
+                        "{repo}#{pr}'s head is {now}, not the {head} the fix was asked for"
+                    ));
+                }
                 let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
                 held.record(head, &asks)?;
                 // Stopped before the answer is let go of, so no fix is left
@@ -429,17 +442,27 @@ impl Broker {
     }
 
     /// The PR's live work under `key` ([`key`], [`stuck_key`]) for a
-    /// request that `asks` ([`asked`]), here, or why there's `what` at work
-    /// already. A job re-adopted from before a restart that was asked the
-    /// same is joined ([`Held::joined`]), at work or ended; one asked
-    /// anything else holds the PR while it's at work, and is let go of once
-    /// it has ended.
-    fn hold(&self, key: String, what: &str, asks: &str) -> Result<Held<'_>, String> {
+    /// request that `asks` ([`asked`]) of the head its PR has on GitHub,
+    /// `now` (none when it asks of another head), here, or why there's `what` at work already. A job re-adopted
+    /// from before a restart that was asked the same is joined
+    /// ([`Held::joined`]), at work or ended. One handed a head other than
+    /// `now` was superseded, as the flow's closed connection would have
+    /// said: it's stopped and let go of. One asked anything else on `now`
+    /// holds the PR while it's at work, as a live request's job would, and
+    /// is let go of once it has ended. A re-adopted job is stopped by
+    /// nothing else but its own timeout and idle limit.
+    fn hold(
+        &self,
+        key: String,
+        what: &str,
+        asks: &str,
+        now: Option<&str>,
+    ) -> Result<Held<'_>, String> {
         let mut live = self
             .live
             .lock()
             .map_err(|_| "the broker's lock is poisoned")?;
-        let (mut job, mut joined) = (job_key(&key), None);
+        let (mut job, mut joined, mut kept) = (job_key(&key), None, None);
         match live.get(&key) {
             None => {}
             Some(Live::Asked) => return Err(format!("{what} is at work already")),
@@ -460,14 +483,36 @@ impl Broker {
                         job.clone_from(&entry.job);
                         joined = Some((id, entry.head.clone()));
                     }
+                    Some(id)
+                        if now
+                            .is_some_and(|now| entry.head.as_deref().is_some_and(|h| h != now)) =>
+                    {
+                        if let Err(e) = self.superseded(&id) {
+                            kept = Some((entry.job.clone(), e));
+                        }
+                    }
                     Some(id) => self.outlived(&id, what)?,
                     // It never started: nothing to join or stop.
                     None => {}
                 }
-                if joined.is_none() {
+                if joined.is_none() && kept.is_none() {
                     let _ = fs::remove_file(self.kept(&entry.job));
                 }
             }
+        }
+        // A superseded job that wouldn't stop holds its PR as any kept job
+        // does: stopped before the PR's next job starts.
+        if let Some((job, e)) = kept {
+            let entry = Entry {
+                job: job.clone(),
+                kept: true,
+                ..Entry::default()
+            };
+            let _ = fs::write(self.kept(&job), entry.write());
+            live.insert(key, Live::Kept(job.clone()));
+            return Err(format!(
+                "{what} is at work already, on a head the PR has moved past, and its job {job} won't stop: {e}"
+            ));
         }
         live.insert(key.clone(), Live::Asked);
         Ok(Held {
@@ -476,6 +521,15 @@ impl Broker {
             pr: key,
             joined,
         })
+    }
+
+    /// Stop the re-adopted job `id`, handed a head the PR has moved past,
+    /// unless its turn ended done.
+    fn superseded(&self, id: &str) -> Result<(), String> {
+        if self.jobs.why(id)?.done() {
+            return Ok(());
+        }
+        self.jobs.stop(id)
     }
 
     /// A re-adopted job `id` that a request asking something else of its PR
@@ -564,10 +618,12 @@ impl Broker {
             .ok_or("the broker has no flow configurations to read a repo's authors from")?;
         let accounts = discussion::accounts(flow, repo)?;
         let asks = asked(prompt)?;
+        let (now, branch) = self.pr(repo, pr)?;
         let mut held = self.hold(
             stuck_key(repo, pr),
             &format!("a stuck-role job on {repo}#{pr}"),
             &asks,
+            Some(&now),
         )?;
         let (id, head, handed) = match held.joined.take() {
             // The job it repeats, held to the head it was handed and to the
@@ -578,7 +634,7 @@ impl Broker {
                 (id, head, self.find_followup(repo, pr, &accounts)?)
             }
             None => {
-                let (head, branch) = self.pr(repo, pr)?;
+                let head = now;
                 let shown =
                     discussion::read(&mut *(self.github)(), repo, pr, &accounts.discussion)?;
                 let handed = self.find_followup(repo, pr, &accounts)?;
@@ -734,18 +790,6 @@ impl Broker {
             ));
         }
         Ok(())
-    }
-
-    /// The PR's branch, once its head is `head`, it's open, and its branch
-    /// is in `repo` itself, where the job can push.
-    fn handed(&self, repo: &str, pr: u64, head: &str) -> Result<String, String> {
-        let (now, branch) = self.pr(repo, pr)?;
-        if now != head {
-            return Err(format!(
-                "{repo}#{pr}'s head is {now}, not the {head} the fix was asked for"
-            ));
-        }
-        Ok(branch)
     }
 
     /// The open PR's head and branch, from GitHub.
