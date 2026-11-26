@@ -292,16 +292,71 @@ impl Pass<'_> {
                     self.retry(repo);
                     continue;
                 }
-                if !self.begin_worker_split(repo, &written.issue) {
-                    self.miss(repo);
+                let Some(text) = read(&job.turn_file(&split_turn, TurnFile::Split)) else {
+                    self.retry(repo);
+                    continue;
+                };
+                let parsed = crate::planning::parse(&text);
+                let invalid = match &parsed {
+                    Err(reason) => Some(reason.clone()),
+                    Ok(tasks) => match self.validate_split_issues(repo, n, tasks) {
+                        Ok(()) => None,
+                        Err(super::plans::SplitFail::Retry) => {
+                            self.miss(repo);
+                            continue;
+                        }
+                        Err(super::plans::SplitFail::Invalid(reason)) => Some(reason),
+                    },
+                };
+                if let Some(reason) = invalid {
+                    eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
+                    let partial = parsed
+                        .as_ref()
+                        .map(|tasks| self.incomplete_split_partial(repo, n, &input, tasks))
+                        .unwrap_or_default();
+                    let body = super::plans::invalid_split_message(&reason, &partial);
+                    let marker =
+                        super::plans::invalid_split_marker(repo, n, &id, Some(&split_turn));
+                    if !self.post_marked_once(repo, n, &marker, &body) {
+                        self.miss(repo);
+                        continue;
+                    }
+                    if let Ok(tasks) = &parsed
+                        && !self.abort_incomplete_split(repo, n, &input, tasks)
+                    {
+                        self.retry(repo);
+                        continue;
+                    }
+                    if !self.add_label(repo, n, super::triage::LATER) {
+                        self.miss(repo);
+                        continue;
+                    }
+                    self.clear_worker_split(repo, n);
+                    super::enrollment::mark_parked(self.inbox, repo, n)
+                        .map_err(|e| Fail::new(1, e))?;
+                    {
+                        let _held = job
+                            .lock()
+                            .map_err(|e| io_fail(&job.file(JobFile::Lock), e))?;
+                        match fs::remove_file(job.file(JobFile::PlanningHold)) {
+                            Ok(()) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                            Err(e) => return Err(io_fail(&job.file(JobFile::PlanningHold), e)),
+                        }
+                        fs::rename(
+                            job.turn_file(&split_turn, TurnFile::Split),
+                            job.turn_file(&split_turn, TurnFile::SplitInvalid),
+                        )
+                        .map_err(|e| io_fail(&job.turn_file(&split_turn, TurnFile::Split), e))?;
+                    }
+                    self.retire_record(repo, n, &id, &d)?;
                     continue;
                 }
-                let tasks = read(&job.turn_file(&split_turn, TurnFile::Split))
-                    .and_then(|text| crate::planning::parse(&text).ok());
-                if tasks.as_ref().is_none_or(|tasks| {
-                    !self.prepare_plan(repo, n, &input, tasks)
-                        || !self.split_children(repo, n, tasks)
-                }) {
+                let tasks = parsed.expect("validated split tasks");
+                if !self.begin_worker_split(repo, &written.issue)
+                    || !self.prepare_plan(repo, n, &input, &tasks)
+                    || !self.split_children(repo, n, &tasks)
+                {
                     self.miss(repo);
                     continue;
                 }
