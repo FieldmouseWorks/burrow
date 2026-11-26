@@ -32,12 +32,41 @@ struct Candidate {
     named_language: Option<Option<Language>>,
 }
 
+/// How the local default-branch ref was selected (strictly local, never
+/// queried against the remote).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefSource {
+    /// Resolved from the cached local symbolic ref `refs/remotes/origin/HEAD`.
+    CachedOriginHead,
+    /// `refs/remotes/origin/HEAD` was absent, invalid, or dangling; fell back
+    /// to a conventional local ref.
+    LocalFallback,
+}
+
+/// One resolved local commit ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRef {
+    refname: String,
+    display: String,
+    tip: String,
+    tip_time: Option<i64>,
+}
+
+/// Selected default branch plus any competing local default-branch refs at a
+/// different commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefaultBranch {
+    chosen: ResolvedRef,
+    source: RefSource,
+    competing: Vec<ResolvedRef>,
+}
+
 pub(super) fn answer(m: &Machine, repo: &str, since: i64) -> Result<String, String> {
     let dir = find_repo(m, repo)?;
     let dir = dir
         .to_str()
         .ok_or_else(|| format!("local path for {repo} is not valid UTF-8"))?;
-    let (branch, tip) = resolve_default_branch(m, repo, dir)?;
+    let default_branch = resolve_default_branch(m, repo, dir)?;
     let shallow = is_shallow(m, dir)?;
 
     let since_arg = format!("--since=@{since}");
@@ -53,7 +82,7 @@ pub(super) fn answer(m: &Machine, repo: &str, since: i64) -> Result<String, Stri
             "--format=%x1e%H",
             "--name-only",
             "-z",
-            &tip,
+            &default_branch.chosen.tip,
         ],
         &[],
     )?;
@@ -61,25 +90,36 @@ pub(super) fn answer(m: &Machine, repo: &str, since: i64) -> Result<String, Stri
         return Err(git_error("log", &log.stderr, log.code));
     }
     let (commit_count, touches) = parse_log(&log.stdout);
-    let short_tip = &tip[..tip.len().min(12)];
-    let shallow_note = if shallow { ", shallow history" } else { "" };
 
     if commit_count == 0 || touches.is_empty() {
-        return Ok(format!(
-            "{repo} ({branch} @ {short_tip}{shallow_note}), since {} ({commit_count} commits, 0 code files touched):\nnone\n",
-            utc(since)
+        return Ok(format_report(
+            repo,
+            &default_branch,
+            shallow,
+            since,
+            commit_count,
+            &[],
         ));
     }
 
-    let tree = git_bytes(m, dir, &["ls-tree", "-r", "-z", &tip], &[])?;
+    let tree = git_bytes(
+        m,
+        dir,
+        &["ls-tree", "-r", "-z", &default_branch.chosen.tip],
+        &[],
+    )?;
     if tree.code != Some(0) {
         return Err(git_error("ls-tree", &tree.stderr, tree.code));
     }
     let candidates = collect_candidates(&tree.stdout, &touches);
     if candidates.is_empty() {
-        return Ok(format!(
-            "{repo} ({branch} @ {short_tip}{shallow_note}), since {} ({commit_count} commits, 0 code files touched):\nnone\n",
-            utc(since)
+        return Ok(format_report(
+            repo,
+            &default_branch,
+            shallow,
+            since,
+            commit_count,
+            &[],
         ));
     }
 
@@ -119,9 +159,8 @@ pub(super) fn answer(m: &Machine, repo: &str, since: i64) -> Result<String, Stri
 
     Ok(format_report(
         repo,
-        &branch,
-        short_tip,
-        shallow_note,
+        &default_branch,
+        shallow,
         since,
         commit_count,
         &entries,
@@ -220,45 +259,117 @@ fn find_repo(m: &Machine, repo: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("no local history for {repo}"))
 }
 
-/// Resolve the repo's default branch ref and tip commit SHA.
-fn resolve_default_branch(m: &Machine, repo: &str, dir: &str) -> Result<(String, String), String> {
-    let mut refs: Vec<String> = Vec::with_capacity(5);
-    if let Ok(sym) = git_text(m, dir, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
-        && sym.code == Some(0)
-    {
-        let r = sym.stdout.trim();
-        if !r.is_empty() {
-            refs.push(r.to_owned());
-        }
+/// Resolve one local ref to its commit SHA and committer timestamp.
+fn resolve_commit_ref(
+    m: &Machine,
+    dir: &str,
+    refname: &str,
+) -> Result<Option<ResolvedRef>, String> {
+    let target = format!("{refname}^{{commit}}");
+    let rev = git_text(
+        m,
+        dir,
+        &["rev-parse", "--verify", "-q", "--end-of-options", &target],
+    )?;
+    if rev.code != Some(0) {
+        return Ok(None);
     }
-    for fallback in [
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
-        "refs/heads/main",
-        "refs/heads/master",
-    ] {
-        if !refs.iter().any(|r| r == fallback) {
-            refs.push(fallback.to_owned());
-        }
+    let sha = rev.stdout.trim();
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
     }
-    for refname in refs {
-        let target = format!("{refname}^{{commit}}");
-        let rev = git_text(
-            m,
-            dir,
-            &["rev-parse", "--verify", "-q", "--end-of-options", &target],
-        )?;
-        if rev.code == Some(0) {
-            let sha = rev.stdout.trim();
-            if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-                let display = refname
-                    .strip_prefix("refs/remotes/")
-                    .or_else(|| refname.strip_prefix("refs/heads/"))
-                    .unwrap_or(&refname);
-                return Ok((display.to_owned(), sha.to_owned()));
+    let tip_time = git_text(m, dir, &["log", "-1", "--format=%ct", sha])
+        .ok()
+        .filter(|r| r.code == Some(0))
+        .and_then(|r| r.stdout.trim().parse::<i64>().ok());
+    let display = refname
+        .strip_prefix("refs/remotes/")
+        .or_else(|| refname.strip_prefix("refs/heads/"))
+        .unwrap_or(refname);
+    Ok(Some(ResolvedRef {
+        refname: refname.to_owned(),
+        display: display.to_owned(),
+        tip: sha.to_owned(),
+        tip_time,
+    }))
+}
+
+/// Resolve the repo's local default-branch ref, tip commit SHA, provenance, and
+/// any competing conventional default-branch refs pointing to a different
+/// commit. Never queries the remote or mutates local refs.
+fn resolve_default_branch(m: &Machine, repo: &str, dir: &str) -> Result<DefaultBranch, String> {
+    let remote_fallbacks = ["refs/remotes/origin/main", "refs/remotes/origin/master"];
+    let local_fallbacks = ["refs/heads/main", "refs/heads/master"];
+
+    let origin_head = git_text(m, dir, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
+        .ok()
+        .filter(|sym| sym.code == Some(0))
+        .map(|sym| sym.stdout.trim().to_owned())
+        .filter(|r| r.starts_with("refs/remotes/origin/") && r != "refs/remotes/origin/HEAD");
+
+    let resolved_origin_head = match origin_head {
+        Some(ref refname) => resolve_commit_ref(m, dir, refname)?,
+        None => None,
+    };
+
+    if let Some(chosen) = resolved_origin_head {
+        let mut competing = Vec::new();
+        for fallback in remote_fallbacks {
+            if fallback == chosen.refname {
+                continue;
+            }
+            if let Some(alt) = resolve_commit_ref(m, dir, fallback)?
+                && alt.tip != chosen.tip
+            {
+                competing.push(alt);
             }
         }
+        return Ok(DefaultBranch {
+            chosen,
+            source: RefSource::CachedOriginHead,
+            competing,
+        });
     }
+
+    let mut resolved_remotes = Vec::new();
+    for fallback in remote_fallbacks {
+        if let Some(r) = resolve_commit_ref(m, dir, fallback)? {
+            resolved_remotes.push(r);
+        }
+    }
+
+    if let Some((chosen, rest)) = resolved_remotes.split_first() {
+        let competing = rest
+            .iter()
+            .filter(|alt| alt.tip != chosen.tip)
+            .cloned()
+            .collect();
+        return Ok(DefaultBranch {
+            chosen: chosen.clone(),
+            source: RefSource::LocalFallback,
+            competing,
+        });
+    }
+
+    let mut resolved_locals = Vec::new();
+    for fallback in local_fallbacks {
+        if let Some(r) = resolve_commit_ref(m, dir, fallback)? {
+            resolved_locals.push(r);
+        }
+    }
+    if let Some((chosen, rest)) = resolved_locals.split_first() {
+        let competing = rest
+            .iter()
+            .filter(|alt| alt.tip != chosen.tip)
+            .cloned()
+            .collect();
+        return Ok(DefaultBranch {
+            chosen: chosen.clone(),
+            source: RefSource::LocalFallback,
+            competing,
+        });
+    }
+
     Err(format!(
         "no default branch found in local history for {repo}"
     ))
@@ -412,33 +523,81 @@ fn parse_cat_file_batch(buf: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> 
     Ok(blobs)
 }
 
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+fn format_ref_summary(r: &ResolvedRef) -> String {
+    let tip = short_sha(&r.tip);
+    match r.tip_time {
+        Some(ts) => format!("{} (@ {tip}, tip {})", r.display, utc(ts)),
+        None => format!("{} (@ {tip})", r.display),
+    }
+}
+
+fn format_competing_note(branch: &DefaultBranch) -> Option<String> {
+    if branch.competing.is_empty() {
+        return None;
+    }
+    let others: Vec<String> = branch.competing.iter().map(format_ref_summary).collect();
+    let list = others.join(", ");
+    let verb = if others.len() == 1 {
+        "also exists"
+    } else {
+        "also exist"
+    };
+    let line = match branch.source {
+        RefSource::CachedOriginHead => format!(
+            "note: cached origin/HEAD points to {}, while {list} {verb} locally; refresh with `git remote set-head origin -a`\n",
+            branch.chosen.display
+        ),
+        RefSource::LocalFallback => format!(
+            "note: no valid origin/HEAD; fell back to {}, while {list} {verb} locally; set with `git remote set-head origin -a`\n",
+            branch.chosen.display
+        ),
+    };
+    Some(line)
+}
+
 fn format_report(
     repo: &str,
-    branch: &str,
-    short_tip: &str,
-    shallow_note: &str,
+    branch: &DefaultBranch,
+    shallow: bool,
     since: i64,
     commit_count: usize,
     entries: &[Entry],
 ) -> String {
+    let short_tip = short_sha(&branch.chosen.tip);
+    let source_note = match branch.source {
+        RefSource::CachedOriginHead => "unverified local origin/HEAD",
+        RefSource::LocalFallback => "unverified local fallback",
+    };
+    let tip_note = branch
+        .chosen
+        .tip_time
+        .map_or_else(String::new, |ts| format!(", tip {}", utc(ts)));
+    let shallow_note = if shallow { ", shallow history" } else { "" };
+
     let total = entries.len();
-    if total == 0 {
-        return format!(
-            "{repo} ({branch} @ {short_tip}{shallow_note}), since {} ({commit_count} commits, 0 code files touched):\nnone\n",
-            utc(since)
-        );
-    }
     let shown = total.min(LIMIT);
-    let top = &entries[..shown];
     let scope = if total > shown {
         format!("{commit_count} commits, {total} code files touched, top {shown}")
     } else {
         format!("{commit_count} commits, {total} code files touched")
     };
     let mut out = format!(
-        "{repo} ({branch} @ {short_tip}{shallow_note}), since {} ({scope}):\n",
+        "{repo} ({} @ {short_tip}, {source_note}{tip_note}{shallow_note}), since {} ({scope}):\n",
+        branch.chosen.display,
         utc(since)
     );
+    if let Some(note) = format_competing_note(branch) {
+        out.push_str(&note);
+    }
+    if total == 0 {
+        out.push_str("none\n");
+        return out;
+    }
+    let top = &entries[..shown];
     let score_w = top
         .iter()
         .map(|e| e.score.to_string().len())

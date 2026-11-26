@@ -457,3 +457,182 @@ fn empty_window_reports_none() {
     assert!(out.contains("(0 commits, 0 code files touched):"), "{out}");
     assert!(out.ends_with("\nnone\n"), "{out}");
 }
+
+#[test]
+fn surfaces_unverified_cached_origin_head_and_competing_default_branch_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repo = root.join("projects/renamed");
+    init_repo(&repo, "https://github.com/sam/renamed.git");
+
+    let now = 1_800_000_000i64;
+    let day = 86_400i64;
+
+    // Initial history on legacy `master` (old commit outside the 30-day window).
+    git(&repo, &["branch", "-M", "master"], None);
+    write_file(&repo, "src/legacy.rs", &lines(40));
+    git(&repo, &["add", "."], None);
+    git(&repo, &["commit", "-qm", "legacy"], Some(now - 90 * day));
+    let master_sha = git(&repo, &["rev-parse", "refs/heads/master"], None);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/master", &master_sha],
+        None,
+    );
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        ],
+        None,
+    );
+
+    // Remote renamed default branch to `main`, fetched as `origin/main`, while
+    // cached `origin/HEAD` was never refreshed.
+    git(&repo, &["checkout", "-qb", "main"], None);
+    write_file(&repo, "src/active.rs", &lines(60));
+    git(&repo, &["add", "."], None);
+    git(&repo, &["commit", "-qm", "new main"], Some(now - 2 * day));
+    let main_sha = git(&repo, &["rev-parse", "refs/heads/main"], None);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", &main_sha],
+        None,
+    );
+
+    let cfg = probe_config(root);
+    let m = Machine {
+        cfg: &cfg,
+        root: root.to_owned(),
+        now,
+        uid: 1001,
+        run: &Commands,
+    };
+
+    // Even when the stale `origin/master` branch has 0 commits in the window,
+    // the report surfaces unverified local origin/HEAD, its tip date, and the
+    // competing `origin/main` ref with instructions to refresh.
+    let empty_window = answer(&m, "sam/renamed", now - 30 * day).unwrap();
+    assert!(
+        empty_window.contains("unverified local origin/HEAD, tip "),
+        "{empty_window}"
+    );
+    assert!(
+        empty_window
+            .contains("note: cached origin/HEAD points to origin/master, while origin/main (@ "),
+        "{empty_window}"
+    );
+    assert!(
+        empty_window.contains(&main_sha[..12]),
+        "missing competing short sha in:\n{empty_window}"
+    );
+    assert!(
+        empty_window.contains("git remote set-head origin -a"),
+        "{empty_window}"
+    );
+    assert!(empty_window.ends_with("\nnone\n"), "{empty_window}");
+
+    // When `origin/master` also has commits in a wider window, the warning note
+    // still appears above the table.
+    let wide_window = answer(&m, "sam/renamed", now - 120 * day).unwrap();
+    assert!(
+        wide_window.contains("note: cached origin/HEAD points to origin/master, while origin/main"),
+        "{wide_window}"
+    );
+    assert!(wide_window.contains("src/legacy.rs"), "{wide_window}");
+
+    // When `origin/main` points to the exact same commit as `origin/master`,
+    // no competing-ref note is emitted.
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", &master_sha],
+        None,
+    );
+    let same_tip = answer(&m, "sam/renamed", now - 120 * day).unwrap();
+    assert!(
+        same_tip.contains("unverified local origin/HEAD, tip "),
+        "{same_tip}"
+    );
+    assert!(!same_tip.contains("note:"), "{same_tip}");
+}
+
+#[test]
+fn handles_unset_or_invalid_origin_head_fallback_and_competing_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repo = root.join("projects/fallback");
+    init_repo(&repo, "https://github.com/sam/fallback.git");
+
+    let now = 1_800_000_000i64;
+    let day = 86_400i64;
+
+    write_file(&repo, "src/app.rs", &lines(30));
+    git(&repo, &["add", "."], None);
+    git(&repo, &["commit", "-qm", "init"], Some(now - 5 * day));
+    let main_sha = git(&repo, &["rev-parse", "refs/heads/main"], None);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", &main_sha],
+        None,
+    );
+
+    // Point `origin/HEAD` outside `refs/remotes/origin/`: must be ignored in
+    // favor of the remote fallback.
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/heads/main",
+        ],
+        None,
+    );
+
+    let cfg = probe_config(root);
+    let m = Machine {
+        cfg: &cfg,
+        root: root.to_owned(),
+        now,
+        uid: 1001,
+        run: &Commands,
+    };
+
+    let single = answer(&m, "sam/fallback", now - 30 * day).unwrap();
+    assert!(
+        single.contains("origin/main @") && single.contains("unverified local fallback, tip "),
+        "{single}"
+    );
+    assert!(!single.contains("note:"), "{single}");
+
+    // Add a competing `origin/master` at a different commit and delete
+    // `origin/HEAD`; fallback must surface the competing ref.
+    git(
+        &repo,
+        &["symbolic-ref", "-d", "refs/remotes/origin/HEAD"],
+        None,
+    );
+    write_file(&repo, "src/other.rs", &lines(15));
+    git(&repo, &["add", "."], None);
+    git(&repo, &["commit", "-qm", "other"], Some(now - 2 * day));
+    let other_sha = git(&repo, &["rev-parse", "HEAD"], None);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/master", &other_sha],
+        None,
+    );
+
+    let competing = answer(&m, "sam/fallback", now - 30 * day).unwrap();
+    assert!(
+        competing.contains("unverified local fallback, tip "),
+        "{competing}"
+    );
+    assert!(
+        competing.contains(
+            "note: no valid origin/HEAD; fell back to origin/main, while origin/master (@ "
+        ),
+        "{competing}"
+    );
+    assert!(competing.contains(&other_sha[..12]), "{competing}");
+}
