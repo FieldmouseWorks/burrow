@@ -99,12 +99,18 @@ struct Entry {
 
 impl Entry {
     fn read(text: &str) -> Self {
-        let mut lines = text.lines().map(str::trim);
-        let mut next = || lines.next().filter(|l| !l.is_empty()).map(str::to_owned);
-        let job = next().unwrap_or_default();
-        let (head, asked) = (next(), next());
-        let kept = next().as_deref() == Some("kept");
-        let handed = next().and_then(|n| n.parse().ok());
+        let mut lines = text.lines();
+        // Each positional line is one field; an empty line leaves that slot unset
+        // without advancing past it.
+        let mut field = || match lines.next().map(str::trim) {
+            Some("") | None => None,
+            Some(line) => Some(line.to_owned()),
+        };
+        let job = field().unwrap_or_default();
+        let head = field();
+        let asked = field();
+        let kept = field().as_deref() == Some("kept");
+        let handed = field().and_then(|n| n.parse().ok());
         Self {
             job,
             head,
@@ -846,5 +852,39 @@ impl Broker {
             (Some(sha), Some(branch)) => Ok((sha.to_owned(), branch.to_owned())),
             _ => Err(format!("GitHub says no head of {repo}#{pr}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::Entry;
+
+    #[test]
+    fn positional_blank_lines_round_trip() {
+        let kept = Entry {
+            job: "fix/sam/box/7/1".into(),
+            head: None,
+            asked: None,
+            kept: true,
+            handed: None,
+        };
+        assert_eq!(Entry::read(&kept.write()), kept);
+
+        let handed = Entry {
+            job: "stuck/sam/box/7/2".into(),
+            head: Some("1111".into()),
+            asked: Some("{\"pr\":7}".into()),
+            kept: false,
+            handed: Some(40),
+        };
+        assert_eq!(Entry::read(&handed.write()), handed);
+
+        assert_eq!(
+            Entry::read("fix/sam/box/7/old\n"),
+            Entry {
+                job: "fix/sam/box/7/old".into(),
+                ..Entry::default()
+            }
+        );
     }
 }
