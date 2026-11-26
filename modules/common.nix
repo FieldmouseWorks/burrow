@@ -197,6 +197,23 @@ inputs:
         config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
         }));
+
+        # Single owner of the machine's git packing and auto-maintenance policy
+        # (inherited by host, services, and microVM sandboxes alike). Unbounded
+        # detached auto-maintenance runs concurrently across shared worktrees,
+        # races on multi-pack-index.lock, and turns a stale lock into unbounded
+        # pack multiplication and 25+ GiB pack-objects OOM loops. proj runs a
+        # serialized, bounded geometric repack when it prunes finished job
+        # worktrees instead (crates/burrow-proj/src/scratch.rs).
+        config.programs.git.config = {
+          gc.auto = lib.mkDefault 0;
+          maintenance.auto = lib.mkDefault false;
+          pack = {
+            threads = lib.mkDefault 2;
+            windowMemory = lib.mkDefault "256m";
+            packSizeLimit = lib.mkDefault "512m";
+          };
+        };
       })
   ];
 }
