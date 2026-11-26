@@ -53,6 +53,14 @@ pub(crate) struct Request {
     pub project: String,
     #[serde(default, deserialize_with = "crate::engine::deserialize_opt_engine")]
     pub engine: Option<String>,
+    /// Optional per-job model override validated against the engine's declared
+    /// offers at `proj run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional per-job effort override validated against the engine's declared
+    /// offers at `proj run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub role: Option<String>,
     pub app: Option<String>,
     pub agent: Option<String>,
@@ -143,6 +151,8 @@ impl Request {
         Ok(Self {
             project: read("project").unwrap_or_default(),
             engine: named("engine").map(|e| parse_engine(&e)).transpose()?,
+            model: None,
+            effort: None,
             role: named("role"),
             app: named("app"),
             agent: named("agent"),

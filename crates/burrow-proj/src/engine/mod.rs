@@ -147,11 +147,18 @@ pub(crate) fn requested(
         let tuning = cfg.role_settings()?.tuning(role, repo.as_deref(), engine);
         return Ok(Choice {
             engine: engine.to_owned(),
-            model: tuning.model,
-            effort: tuning.effort,
+            model: request.model.clone().or(tuning.model),
+            effort: request.effort.clone().or(tuning.effort),
         });
     }
-    resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())
+    let mut choice = resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())?;
+    if request.model.is_some() {
+        choice.model = request.model.clone();
+    }
+    if request.effort.is_some() {
+        choice.effort = request.effort.clone();
+    }
+    Ok(choice)
 }
 
 /// The engine a new job's sandbox is made for: where its role's route, for

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-mod store;
+pub(crate) mod store;
 pub use store::{Migration, View, legacy_file};
 
 /// Retired engines whose legacy records are never routed or re-offered.
@@ -260,17 +260,22 @@ pub fn default_offers_for(configured: &[String]) -> BTreeMap<String, Offer> {
     offers
 }
 
-/// Merge persisted offers over the machine's default offers. Every persisted
-/// entry is checked for valid syntax and plain words; when `configured` is
-/// non-empty, only engines still present in `configured` remain routable in
-/// the merged offer map, so removing a plugin from machine config invalidates
-/// any route or tuning still targeting it while letting operators clear those
-/// references through the settings door.
-fn merge_offers(
+/// Merge persisted offers over the machine's default offers and any live
+/// installed engine plugins. Every persisted entry is checked for valid syntax
+/// and plain words; when `configured` is non-empty, only engines present in
+/// `configured` or `plugins` remain routable in the merged offer map, so
+/// removing a plugin invalidates any route or tuning still targeting it while
+/// letting operators clear those references through the settings door.
+pub(crate) fn merge_offers_with_plugins(
     offers: &BTreeMap<String, Offer>,
     configured: &[String],
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
 ) -> Result<BTreeMap<String, Offer>, String> {
     let mut offered = default_offers_for(configured);
+    for (name, plugin) in plugins {
+        engine_syntax(name)?;
+        offered.insert(name.clone(), plugin.offer());
+    }
     for (name, offer) in offers {
         engine_syntax(name)?;
         for word in offer.models.iter().chain(&offer.efforts) {
@@ -278,7 +283,7 @@ fn merge_offers(
                 return Err(format!("{name}: offers {word:?}, not a plain word"));
             }
         }
-        if offerable_engine(name, configured).is_ok() {
+        if offerable_engine(name, configured).is_ok() || plugins.contains_key(name) {
             offered.insert(name.clone(), offer.clone());
         }
     }
@@ -298,12 +303,22 @@ impl Roles {
         offers: &BTreeMap<String, Offer>,
         configured: &[String],
     ) -> Result<InForce, String> {
-        let offered = merge_offers(offers, configured)?;
+        self.in_force_with_plugins(offers, configured, &BTreeMap::new())
+    }
+
+    /// [`Self::in_force_for`], also seeding live installed engine plugins.
+    pub(crate) fn in_force_with_plugins(
+        &self,
+        offers: &BTreeMap<String, Offer>,
+        configured: &[String],
+        plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
+    ) -> Result<InForce, String> {
+        let offered = merge_offers_with_plugins(offers, configured, plugins)?;
         self.check(&offered)?;
         let mut roles = default_routes();
         roles.extend(self.roles.clone());
         let mut models = default_models();
-        for name in configured {
+        for name in configured.iter().chain(plugins.keys()) {
             if valid_engine_name(name) && !retired_engine(name) {
                 models.entry(format!("* {name}")).or_default();
             }
@@ -448,10 +463,13 @@ pub(crate) fn apply(
     offers: &mut BTreeMap<String, Offer>,
     setups: &mut Setups,
     configured_engines: &[String],
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
     args: &[&str],
 ) -> Result<String, String> {
     let before = active(roles, setups);
-    let offered = |offers: &BTreeMap<String, Offer>| merge_offers(offers, configured_engines);
+    let offered = |offers: &BTreeMap<String, Offer>| {
+        merge_offers_with_plugins(offers, configured_engines, plugins)
+    };
     match args {
         ["role", key, "unset"] => {
             roles.roles.remove(&Key::parse(key)?.canonical());
@@ -487,7 +505,11 @@ pub(crate) fn apply(
             *roles = next;
         }
         ["offer", on, what @ ("models" | "efforts"), words @ ..] => {
-            offerable_engine(on, configured_engines)?;
+            if !plugins.contains_key(*on) {
+                offerable_engine(on, configured_engines)?;
+            } else {
+                engine_syntax(on)?;
+            }
             if let Some(w) = words.iter().find(|w| !plain(w)) {
                 return Err(format!("{w:?} is not a plain word"));
             }

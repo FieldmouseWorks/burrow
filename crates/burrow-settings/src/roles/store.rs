@@ -13,21 +13,26 @@ use std::path::{Path, PathBuf};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Document {
+pub(crate) struct Document {
     #[serde(default)]
-    receipts: BTreeMap<String, String>,
+    pub(crate) receipts: BTreeMap<String, String>,
     /// Which engine, model and effort runs each role, over the schema's
     /// defaults.
     #[serde(default)]
-    routing: Roles,
+    pub(crate) routing: Roles,
     /// What each engine offers, where it isn't the schema's default.
     #[serde(default)]
-    offers: BTreeMap<String, Offer>,
+    pub(crate) offers: BTreeMap<String, Offer>,
     #[serde(default)]
-    setups: Setups,
+    pub(crate) setups: Setups,
     /// When proj's old roles and models files were moved in.
     #[serde(default)]
-    migrated: Option<i64>,
+    pub(crate) migrated: Option<i64>,
+    /// Pinned engine plugins installed through the owner write door. Left out
+    /// when empty so generations predating live plugin install still read this
+    /// document cleanly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) plugins: BTreeMap<String, crate::plugins::InstalledPlugin>,
 }
 
 impl live::Document for Document {
@@ -58,6 +63,8 @@ pub struct View {
     /// The saved setups and the one in force, as `settings show` gives
     /// them; None when none is saved.
     pub setups: Option<serde_json::Value>,
+    /// Pinned engine plugins installed through the owner write door.
+    pub plugins: BTreeMap<String, crate::plugins::InstalledPlugin>,
     /// Whether proj's old files were moved in.
     pub migrated: bool,
     pub file: PathBuf,
@@ -110,18 +117,28 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn ready_doc(&self, doc: &Document, mutation: bool) -> Result<(), String> {
+        self.ready(doc, mutation)
+    }
+
+    pub(crate) fn roles_answered_key(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.roles_doc()?.receipts.get(key).cloned())
+    }
+
     /// The role settings, read once and checked again: a document a hand
     /// edit broke fails the turn rather than running a default.
     pub fn role_view(&self) -> Result<View, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        let in_force = doc.routing.in_force_for(&doc.offers, &self.engines)?;
+        let in_force =
+            doc.routing
+                .in_force_with_plugins(&doc.offers, &self.engines, &doc.plugins)?;
         Ok(View {
             in_force,
             set: (
                 !doc.routing.roles.is_empty(),
-                !doc.routing.models.is_empty(),
-                !doc.offers.is_empty(),
+                !doc.routing.models.is_empty() || !doc.plugins.is_empty(),
+                !doc.offers.is_empty() || !doc.plugins.is_empty(),
             ),
             setups: (!doc.setups.saved.is_empty()).then(|| {
                 serde_json::json!({
@@ -129,6 +146,7 @@ impl Config {
                     "saved": doc.setups.saved,
                 })
             }),
+            plugins: doc.plugins,
             migrated: doc.migrated.is_some(),
             file: self.roles_file(),
         })
@@ -143,7 +161,8 @@ impl Config {
     pub fn engines(&self) -> Result<String, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        doc.routing.in_force_for(&doc.offers, &self.engines)?;
+        doc.routing
+            .in_force_with_plugins(&doc.offers, &self.engines, &doc.plugins)?;
         let active = active(&doc.routing, &doc.setups);
         Ok(status(active.as_deref(), &doc.routing, &doc.setups))
     }
@@ -202,6 +221,7 @@ impl Config {
                     &mut doc.offers,
                     &mut doc.setups,
                     &self.engines,
+                    &doc.plugins,
                     words,
                 )?;
                 // With no migration source configured this is a fresh store.

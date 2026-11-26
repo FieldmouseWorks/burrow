@@ -329,17 +329,8 @@ pub fn spawn(
     app_env: &str,
     choice: &Choice,
 ) -> Result<Running, SpawnError> {
-    let (plugin_path, sandbox_approved) = match agent {
-        Some(_) if let Some(vm) = cfg.vm_plugins.get(&choice.engine) => {
-            (&vm.plugin, Some(vm.capabilities.as_slice()))
-        }
-        _ => (
-            cfg.plugins
-                .get(&choice.engine)
-                .ok_or_else(|| format!("no engine plugin configured for {}", choice.engine))?,
-            cfg.sandbox_plugins.get(&choice.engine).map(Vec::as_slice),
-        ),
-    };
+    let (plugin_path, sandbox_approved_owned) = cfg.resolve_plugin(&choice.engine, agent)?;
+    let sandbox_approved = sandbox_approved_owned.as_deref();
 
     let request_record = crate::job::Request::load(job)?;
     let uses_credit = cfg.uses_credit_meter(&choice.engine);
@@ -353,7 +344,7 @@ pub fn spawn(
     .map_err(SpawnError::Refused)?;
     // Negotiate `describe` inside the job's sandbox for `--vm` turns so
     // sandbox plugins never execute on the host.
-    let mut described = describe(cfg, plugin_path, &choice.engine, agent)?;
+    let mut described = describe(cfg, &plugin_path, &choice.engine, agent)?;
     launch::placed(
         agent,
         request_record.agent_engine.as_deref(),
@@ -444,10 +435,13 @@ pub fn spawn(
         .stderr(Stdio::piped())
         .env("PROJ_STREAM_EVENTS", "1");
 
+    // Re-verify live-installed plugin artifact SHA-256 right before starting
+    // the job process.
+    cfg.verify_live_plugin(&choice.engine, agent)?;
     match agent {
-        Some(agent) => launch::sandboxed(&mut cmd, job, n, agent, must, plugin_path),
+        Some(agent) => launch::sandboxed(&mut cmd, job, n, agent, must, &plugin_path),
         None => {
-            launch::host(&mut cmd, cfg, job, n, waitdir, must, app_env, plugin_path);
+            launch::host(&mut cmd, cfg, job, n, waitdir, must, app_env, &plugin_path);
             if uses_credit {
                 cmd.env("PROJ_CREDIT_LEDGER_FILE", &stream_path);
             }

@@ -385,6 +385,7 @@ impl Config {
                 in_force: burrow_settings::roles::Roles::default().in_force(&BTreeMap::new())?,
                 set: (false, false, false),
                 setups: None,
+                plugins: BTreeMap::new(),
                 migrated: false,
                 file: self.jobs.join(".settings-unconfigured"),
             });
@@ -412,6 +413,51 @@ impl Config {
         crate::engine::parse_engine(&self.role_settings()?.route(role, repo).engine)
     }
 
+    /// Resolve the executable path and optional sandbox-approved capability
+    /// list for `engine`. Live plugins installed through the settings door are
+    /// re-verified against their pinned SHA-256 on every start.
+    pub fn resolve_plugin(
+        &self,
+        engine: &str,
+        agent: Option<&str>,
+    ) -> Result<(PathBuf, Option<Vec<String>>), String> {
+        if agent.is_some()
+            && let Some(vm) = self.vm_plugins.get(engine)
+        {
+            return Ok((vm.plugin.clone(), Some(vm.capabilities.clone())));
+        }
+        if let Some(path) = self.plugins.get(engine) {
+            return Ok((path.clone(), self.sandbox_plugins.get(engine).cloned()));
+        }
+        if let Some(settings) = &self.settings
+            && let Some(installed) = settings.installed_plugin(engine)?
+        {
+            let verified = settings.verify_installed_plugin(engine)?;
+            let sandbox_approved = match installed.capabilities.sandbox.as_str() {
+                "none" => None,
+                _ => Some(Vec::new()),
+            };
+            return Ok((verified, sandbox_approved));
+        }
+        Err(format!("no engine plugin configured for {engine}"))
+    }
+
+    /// Re-verify `engine` if it is a live-installed settings plugin right
+    /// before starting its process.
+    pub fn verify_live_plugin(&self, engine: &str, agent: Option<&str>) -> Result<(), String> {
+        if (agent.is_some() && self.vm_plugins.contains_key(engine))
+            || self.plugins.contains_key(engine)
+        {
+            return Ok(());
+        }
+        if let Some(settings) = &self.settings
+            && settings.installed_plugin(engine)?.is_some()
+        {
+            settings.verify_installed_plugin(engine)?;
+        }
+        Ok(())
+    }
+
     /// Validate the turn-start configuration without starting a job: the
     /// module's JSON (Config::load), configured engine plugins, and the role
     /// settings every turn reads. Runtime state (meters, usage holds and
@@ -433,14 +479,27 @@ impl Config {
             burrow_process::executable(&vm.plugin)
                 .map_err(|e| format!("vmPlugins.{engine} {}: {e}", vm.plugin.display()))?;
         }
+        let view = self.role_view()?;
+        if let Some(settings) = &self.settings {
+            for engine in view.plugins.keys() {
+                let path = settings.verify_installed_plugin(engine)?;
+                burrow_process::executable(&path)
+                    .map_err(|e| format!("enginePlugins.{engine} {}: {e}", path.display()))?;
+            }
+        }
         // An inbox label or the drain pins its jobs to an engine: one with no
         // plugin here would enroll issues whose every turn fails to start.
         let plugged = |what: String, engine: &str| -> Result<(), String> {
             crate::engine::parse_engine(engine).map_err(|e| format!("{what}: {e}"))?;
-            if self.plugins.contains_key(engine) {
+            if self.plugins.contains_key(engine) || view.plugins.contains_key(engine) {
                 return Ok(());
             }
-            let configured: Vec<&str> = self.plugins.keys().map(String::as_str).collect();
+            let configured: Vec<&str> = self
+                .plugins
+                .keys()
+                .chain(view.plugins.keys())
+                .map(String::as_str)
+                .collect();
             Err(format!(
                 "{what}: no engine plugin is configured for {engine} (plugins has {})",
                 configured.join(", ")
@@ -454,7 +513,7 @@ impl Config {
                 plugged("inbox.triage.drain".into(), drain)?;
             }
         }
-        self.role_view().map(|_| ())
+        Ok(())
     }
 
     /// How long a turn may wait in line, in seconds.

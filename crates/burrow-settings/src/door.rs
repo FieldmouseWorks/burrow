@@ -55,16 +55,38 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, landing OWNER/REPO steward|conaryd, pipeline TIMESTAMP, back, credit BUDGET RENEWS MONTHLY RESERVE or credit off.".into()
+        let (body, reason) = if !crate::valid_command(&args) {
+            (
+                "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, landing OWNER/REPO steward|conaryd, pipeline TIMESTAMP, back, credit BUDGET RENEWS MONTHLY RESERVE, credit off, or plugin list|show|picker|verify|install|update|remove.".into(),
+                "completed",
+            )
+        } else if args.first().map(String::as_str) == Some("plugin") {
+            let Some(opener_id) = issue.opener_id else {
+                continue;
+            };
+            let auth = crate::plugins::OwnerAuth {
+                id: opener_id,
+                login: issue.opener.clone(),
+                actor: format!(
+                    "github:{}#{}:id:{}:{}",
+                    cfg.repo, issue.number, opener_id, issue.opener
+                ),
+            };
+            match cfg.settings.request_as(&auth, &receipt, &args) {
+                Ok(said) => (said, "completed"),
+                Err(why) => (format!("Nothing changed: {why}"), "not_planned"),
+            }
         } else {
-            cfg.settings.request(
-                &receipt,
-                &args,
-                &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
-            )?
+            (
+                cfg.settings.request(
+                    &receipt,
+                    &args,
+                    &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
+                )?,
+                "completed",
+            )
         };
-        door.reply(api, issue.number, &fenced(&body), "completed")?;
+        door.reply(api, issue.number, &fenced(&body), reason)?;
     }
     Ok(())
 }

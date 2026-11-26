@@ -53,8 +53,14 @@ pub struct New {
     /// ended hands the key to the new job. Without it, a key a started job
     /// has is refused, however that job stands.
     pub join: bool,
-    /// Inbox label choice, kept for every turn.
+    /// Inbox label or explicit per-job engine choice, kept for every turn.
     pub engine: Option<String>,
+    /// Explicit per-job model choice, validated against the engine's declared
+    /// offers at launch.
+    pub model: Option<String>,
+    /// Explicit per-job effort choice, validated against the engine's declared
+    /// offers at launch.
+    pub effort: Option<String>,
     /// The kind of work it is, which picks its engine (Config::roles).
     pub role: Option<String>,
 }
@@ -319,6 +325,32 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
                 new.role = Some(r.to_owned());
                 i += 1;
             }
+            Some("--engine") => {
+                only_run("--engine: the job's own is kept")?;
+                let e = value
+                    .ok_or_else(|| Fail::new(2, "proj run --engine NAME"))
+                    .and_then(|e| {
+                        crate::engine::parse_engine(e).map_err(|err| Fail::new(2, err))
+                    })?;
+                new.engine = Some(e);
+                i += 1;
+            }
+            Some("--model") => {
+                only_run("--model: the job's own is kept")?;
+                let m = value
+                    .filter(|m| burrow_settings::roles::plain(m))
+                    .ok_or_else(|| Fail::new(2, "proj run --model MODEL"))?;
+                new.model = Some(m.to_owned());
+                i += 1;
+            }
+            Some("--effort") => {
+                only_run("--effort: the job's own is kept")?;
+                let e = value
+                    .filter(|e| burrow_settings::roles::plain(e))
+                    .ok_or_else(|| Fail::new(2, "proj run --effort EFFORT"))?;
+                new.effort = Some(e.to_owned());
+                i += 1;
+            }
             Some("--first") => new.first = true,
             Some("--cut-off") => {
                 let bad = || Fail::new(2, "proj reply --cut-off N ID \"message\"");
@@ -427,6 +459,44 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             "proj run --app with --vm: a sandbox has no GitHub login to act with",
         ));
     }
+    if new.engine.is_some() || new.model.is_some() || new.effort.is_some() {
+        let in_force = cfg.role_settings().map_err(|e| Fail::new(1, e))?;
+        let target_engine = match new.engine.as_deref() {
+            Some(engine) => {
+                crate::engine::parse_engine(engine).map_err(|e| Fail::new(2, e))?;
+                if !in_force.offers.contains_key(engine) {
+                    return Err(Fail::new(2, format!("proj run: unknown engine {engine}")));
+                }
+                engine.to_owned()
+            }
+            None => in_force
+                .route(new.role.as_deref().unwrap_or_default(), None)
+                .engine
+                .clone(),
+        };
+        let offer = in_force
+            .offers
+            .get(&target_engine)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(model) = new.model.as_deref()
+            && (!burrow_settings::roles::plain(model) || !offer.models.iter().any(|m| m == model))
+        {
+            return Err(Fail::new(
+                2,
+                format!("proj run: {target_engine} does not offer model {model:?}"),
+            ));
+        }
+        if let Some(effort) = new.effort.as_deref()
+            && (!burrow_settings::roles::plain(effort)
+                || !offer.efforts.iter().any(|e| e == effort))
+        {
+            return Err(Fail::new(
+                2,
+                format!("proj run: {target_engine} does not offer effort {effort:?}"),
+            ));
+        }
+    }
     let id = new_job(cfg, p)?;
     let job = Job::new(cfg, &id);
     // Held until its first turn has started or failed to, so what finds it
@@ -450,6 +520,8 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let mut request = crate::job::Request {
         project: project.clone(),
         engine: new.engine.clone(),
+        model: new.model.clone(),
+        effort: new.effort.clone(),
         role: new.role.clone(),
         app: new.app.clone(),
         agent: None,

@@ -37,6 +37,19 @@ fn main() -> ExitCode {
                 }
             });
         }
+        if matches!(
+            args.iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["plugin", "install" | "update" | "remove", ..]
+        ) {
+            let auth = burrow_settings::plugins::authenticate_cli_owner(
+                &cfg.owners,
+                cfg.auth_gh.as_deref(),
+            )?;
+            return cfg.command_as(&auth, &args);
+        }
         cfg.command(
             &args,
             &std::env::var("USER").unwrap_or_else(|_| "host".into()),
