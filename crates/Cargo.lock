@@ -830,6 +830,7 @@ dependencies = [
  "burrow-door",
  "burrow-events",
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-settings",
  "burrow-test",
