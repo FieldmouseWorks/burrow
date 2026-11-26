@@ -1,0 +1,77 @@
+From: FieldmouseWorks <burrow@fieldmouse.works>
+Subject: [PATCH] submodule--helper: re-validate gitdirs after parallel clone
+
+During `git clone --recurse-submodules --jobs=N`, `update_submodules()`
+spawns concurrent `git submodule--helper clone` children. Each child
+calls `validate_submodule_git_dir()` before and after its own clone,
+which checks whether any ancestor directory inside `.git/modules/` is
+already a git directory (`is_git_directory()`).
+
+With sibling submodules whose gitdirs nest (such as `hippo` and
+`hippo/hooks` in `t7450-bad-git-dotfiles.sh` test 48), the child cloning
+`hippo/hooks` can finish its post-clone `validate_submodule_git_dir()`
+while the sibling child cloning `hippo` has not yet created
+`.git/modules/hippo/HEAD`. `is_git_directory(".git/modules/hippo")`
+then returns 0, so the `hippo/hooks` child succeeds; the `hippo` child
+later creates `HEAD` and only checks ancestors of `hippo` (none), so it
+succeeds too. `update_submodules()` then proceeds to check out both
+submodules without re-checking their gitdirs, bypassing nested gitdir
+detection and making `t7450-bad-git-dotfiles.sh` test 48 flake under
+load.
+
+Re-validate every freshly cloned submodule's gitdir in
+`update_submodules()` after `run_processes_parallel()` finishes and
+before checking out any submodule, disabling any nested gitdir by
+unlinking its `HEAD` and aborting.
+
+---
+--- a/builtin/submodule--helper.c
++++ b/builtin/submodule--helper.c
+@@ -2937,6 +2937,47 @@
+ 		goto cleanup;
+ 	}
+ 
++	/*
++	 * Re-validate every freshly cloned submodule's gitdir once all parallel
++	 * clone children have finished. A child for `a/b` can complete its
++	 * post-clone validate_submodule_git_dir() before a sibling child for
++	 * `a` creates `a/HEAD`, so neither child observes the nested gitdir.
++	 * Checking again here before any checkout runs closes that race.
++	 */
++	for (i = 0; i < suc.update_clone_nr; i++) {
++		struct update_clone_data ucd = suc.update_clone[i];
++		struct strbuf sb = STRBUF_INIT;
++
++		if (!ucd.just_cloned)
++			continue;
++
++		if (!the_repository->repository_format_submodule_path_cfg) {
++			repo_git_path_append(the_repository, &sb, "modules/%s",
++					     ucd.sub->name);
++		} else {
++			const char *gitdir;
++			char *key = xstrfmt("submodule.%s.gitdir", ucd.sub->name);
++			int missing = repo_config_get_string_tmp(the_repository,
++								 key, &gitdir);
++			free(key);
++			if (missing)
++				continue;
++			strbuf_addstr(&sb, gitdir);
++		}
++
++		if (validate_submodule_git_dir(sb.buf, ucd.sub->name) < 0) {
++			char *head = xstrfmt("%s/HEAD", sb.buf);
++			unlink(head);
++			free(head);
++			ret = die_message(_("refusing to create/use '%s' in another submodule's git dir. "
++					    "Enabling extensions.submodulePathConfig should fix this."),
++					  sb.buf);
++		}
++		strbuf_release(&sb);
++	}
++	if (ret)
++		goto cleanup;
++
+ 	for (i = 0; i < suc.update_clone_nr; i++) {
+ 		struct update_clone_data ucd = suc.update_clone[i];
+ 		int code = 128;

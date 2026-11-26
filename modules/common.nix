@@ -191,16 +191,17 @@ inputs:
         # The git the machine and burrow's units run. curl 8.23 strips the
         # credentials from the URL it reports, and git 2.54 takes that for a
         # redirect and forgets them, so a clone with a token-only URL
-        # (Renovate's) fails. Drop the patch once nixpkgs' git has it (it then
-        # stops applying). Here and not an overlay: that would rebuild all
-        # that builds with git. Override doInstallCheck off: nixpkgs already
-        # ran upstream git's test suite, every httpd test is skipped in the
-        # Nix sandbox (checks/git-token-url.nix tests this patch), and
-        # parallel prove flakes on unrelated upstream tests (#1568).
-        config.programs.git.package = lib.mkDefault ((pkgs.git.override {
-          doInstallCheck = false;
-        }).overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
+        # (Renovate's) fails. git 2.54 also has a TOCTOU race in parallel
+        # submodule cloning where a nested gitdir (a/b) can pass
+        # validate_submodule_git_dir() before its sibling (a) writes HEAD,
+        # flaking t7450-bad-git-dotfiles.sh test 48 (#1568). Drop each patch
+        # once nixpkgs' git has it (it then stops applying). Here and not an
+        # overlay: that would rebuild all that builds with git.
+        config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [
+            ../patches/git-curl-effective-url.patch
+            ../patches/git-submodule-parallel-gitdir.patch
+          ];
         }));
       })
   ];
