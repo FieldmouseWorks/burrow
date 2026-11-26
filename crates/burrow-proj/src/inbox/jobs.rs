@@ -270,7 +270,7 @@ impl Pass<'_> {
                     eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
                     let partial = parsed
                         .as_ref()
-                        .map(|tasks| self.incomplete_split_partial(repo, n, tasks))
+                        .map(|tasks| self.incomplete_split_partial(repo, n, &input, tasks))
                         .unwrap_or_default();
                     let body = super::plans::invalid_split_message(&reason, &partial);
                     let marker =
@@ -280,7 +280,7 @@ impl Pass<'_> {
                         continue;
                     }
                     if let Ok(tasks) = &parsed
-                        && !self.abort_incomplete_split(repo, n, tasks)
+                        && !self.abort_incomplete_split(repo, n, &input, tasks)
                     {
                         self.retry(repo);
                         continue;

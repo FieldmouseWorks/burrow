@@ -584,7 +584,8 @@ fn abort_incomplete_split_removes_input_before_emptying_list_and_retries_on_fail
         fs::create_dir(&input_path).unwrap();
 
         assert!(
-            !b.pass().abort_incomplete_split("sam/box", "7", &tasks),
+            !b.pass()
+                .abort_incomplete_split("sam/box", "7", &input, &tasks),
             "non-NotFound input removal failure must trigger retry"
         );
         assert!(
@@ -600,7 +601,10 @@ fn abort_incomplete_split_removes_input_before_emptying_list_and_retries_on_fail
         // Once input can be removed, retrying abort_incomplete_split succeeds.
         fs::remove_dir(&input_path).unwrap();
         fs::write(&input_path, &input).unwrap();
-        assert!(b.pass().abort_incomplete_split("sam/box", "7", &tasks));
+        assert!(
+            b.pass()
+                .abort_incomplete_split("sam/box", "7", &input, &tasks)
+        );
         assert!(!input_path.exists());
         assert!(!b.pass().has_task_list(Some("sam/box"), "7"));
         assert!(!b.pass().approved_input("sam/box", "7", &input));
@@ -629,7 +633,8 @@ fn abort_incomplete_split_removes_input_before_emptying_list_and_retries_on_fail
         fs::create_dir(&swap_blocker).unwrap();
 
         assert!(
-            !b.pass().abort_incomplete_split("sam/box", "7", &tasks),
+            !b.pass()
+                .abort_incomplete_split("sam/box", "7", &input, &tasks),
             "save_list failure must trigger retry"
         );
         assert!(
@@ -642,12 +647,257 @@ fn abort_incomplete_split_removes_input_before_emptying_list_and_retries_on_fail
         // Retry after save_list can succeed: NotFound on `input` is fine and
         // partial receipts are retained.
         fs::remove_dir(&swap_blocker).unwrap();
-        assert!(b.pass().abort_incomplete_split("sam/box", "7", &tasks));
+        assert!(
+            b.pass()
+                .abort_incomplete_split("sam/box", "7", &input, &tasks)
+        );
         assert!(!b.pass().has_task_list(Some("sam/box"), "7"));
         assert!(!b.pass().approved_input("sam/box", "7", &input));
         let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(after.tasks.is_empty());
         assert_eq!(after.source, None);
         assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+    }
+}
+
+#[test]
+fn post_binding_split_retry_aborts_and_reports_retained_children_without_sequencing() {
+    // 1. Planner split: pass 1 created #100 and bound reused #99, then hit a
+    // transient error in a post-binding step. Before pass 2, #99 became
+    // ineligible (`outside text`). Retry must report #100, abort tasks.json and
+    // input, and prevent Pass::sequence from promoting #100.
+    {
+        let (b, mut parent, _) = parent_fixture();
+        parent["labels"] = json!([{"name":"tracker"}]);
+        parent["body"] = json!("Updated scope");
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        let child_100 = json!({
+            "number": 100,
+            "state": "open",
+            "user": burrow_github::fake::actor("workers[bot]"),
+            "labels": [{"name": "later"}],
+            "title": "already created child",
+            "body": "Body for already created child"
+        });
+        fs::write(b.path("repos_sam_box_issues_100"), child_100.to_string()).unwrap();
+        fs::write(
+            b.path("repos_sam_box_issues_99"),
+            issue(99, "sam", &["outside text"]).to_string(),
+        )
+        .unwrap();
+
+        let tasks = vec![
+            task("already created child", None),
+            task("reused issue", Some(99)),
+        ];
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+        let path = b.pass().plan_dir("sam/box", "7").join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].posting_id = Some(burrow_github::fake::author("workers[bot]").id);
+        list.children[0].number = Some(100);
+        list.children[1].number = Some(99);
+        assert!(b.pass().save_list("sam/box", "7", &list));
+
+        let answer = format!("split\n{}", serde_json::to_string(&tasks).unwrap());
+        b.job("planner", "done", &answer);
+        let record = b
+            .cfg
+            .inbox
+            .as_ref()
+            .unwrap()
+            .state
+            .join(".triage/sam_box-7");
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join(files::File::Job), "planner").unwrap();
+        Pass::hand(&record, &input).unwrap();
+        let plan = vec![
+            super::super::triage::Step::Priority("priority: medium".into()),
+            super::super::triage::Step::Split(tasks),
+            super::super::triage::Step::Label("tracker".into()),
+        ];
+        fs::write(
+            record.join(files::File::Plan),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        fs::write(record.join(files::File::Did), "1\n").unwrap();
+
+        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+        let mut p = b.pass();
+        p.verdicts("sam/box", t, std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+        assert!(!record.exists());
+        let posted = b.posted();
+        assert!(posted.contains("Invalid split:"), "{posted}");
+        assert!(
+            !posted.contains("No children created"),
+            "planner post-binding retry must not claim no children were created:\n{posted}"
+        );
+        assert!(posted.contains("Retained partial child #100"), "{posted}");
+        assert!(
+            posted.contains("no further children will be created; needs replanning."),
+            "{posted}"
+        );
+        assert!(b.log().contains("labels[]=later"));
+        assert!(!b.log().contains("labels[]=tracker"));
+        assert!(
+            !b.pass().has_task_list(Some("sam/box"), "7"),
+            "post-binding invalid split must empty tasks.json"
+        );
+        assert!(
+            !b.pass().plan_dir("sam/box", "7").join("input").exists(),
+            "post-binding invalid split must remove input approval"
+        );
+        let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(after.tasks.is_empty());
+        assert_eq!(after.source, None);
+        assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+
+        // Subsequent sequence pass must not promote #100 to ready.
+        let mut seq = b.pass();
+        seq.sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(
+            !b.log().contains("repos/sam/box/issues/100/labels"),
+            "sequence must not promote rejected split child #100:\n{}",
+            b.log()
+        );
+        assert_eq!(
+            seq.plan_hold("sam/box", "100"),
+            Some(Place::Superseded("sam/box#7".into()))
+        );
+    }
+
+    // 2. Worker split: pass 1 created #100 and bound reused #99, then hit a
+    // transient error in a post-binding step. Before pass 2, #99 was deleted
+    // (404). Retry must report #100, abort tasks.json and input, and prevent
+    // Pass::sequence from promoting #100.
+    {
+        let (mut b, mut parent, _) = parent_fixture();
+        b.cfg.scratch = b.path("scratch");
+        b.job_ending("j1", "done", Some("split"), "Splitting work");
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let record = b.record("j1");
+        parent["labels"] = json!([{"name":"claude"}]);
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        let child_100 = json!({
+            "number": 100,
+            "state": "open",
+            "user": burrow_github::fake::actor("workers[bot]"),
+            "labels": [{"name": "later"}],
+            "title": "already created child",
+            "body": "Body for already created child"
+        });
+        fs::write(b.path("repos_sam_box_issues_100"), child_100.to_string()).unwrap();
+        fs::write(b.path("gone"), "repos/sam/box/issues/99\n").unwrap();
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        Pass::hand(&record, &input).unwrap();
+
+        let tasks = vec![
+            task("already created child", None),
+            task("reused issue", Some(99)),
+        ];
+        fs::write(
+            job.turn("1", "split"),
+            serde_json::to_string(&tasks).unwrap(),
+        )
+        .unwrap();
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+        let path = b.pass().plan_dir("sam/box", "7").join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].posting_id = Some(burrow_github::fake::author("workers[bot]").id);
+        list.children[0].number = Some(100);
+        list.children[1].number = Some(99);
+        assert!(b.pass().save_list("sam/box", "7", &list));
+
+        let mut p = b.pass();
+        p.jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+        assert!(!record.exists());
+        let posted = b.posted();
+        assert!(posted.contains("Invalid split:"), "{posted}");
+        assert!(
+            !posted.contains("No children created"),
+            "worker post-binding retry must not claim no children were created:\n{posted}"
+        );
+        assert!(posted.contains("Retained partial child #100"), "{posted}");
+        assert!(
+            posted.contains("no further children will be created; needs replanning."),
+            "{posted}"
+        );
+        assert!(b.log().contains("labels[]=later"));
+        assert!(
+            !b.pass().has_task_list(Some("sam/box"), "7"),
+            "worker post-binding invalid split must empty tasks.json"
+        );
+        assert!(
+            !b.pass().plan_dir("sam/box", "7").join("input").exists(),
+            "worker post-binding invalid split must remove input approval"
+        );
+        let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(after.tasks.is_empty());
+        assert_eq!(after.source, None);
+        assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+
+        // Subsequent sequence pass must not promote #100 to ready.
+        let mut seq = b.pass();
+        seq.sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(
+            !b.log().contains("repos/sam/box/issues/100/labels"),
+            "sequence must not promote rejected split child #100:\n{}",
+            b.log()
+        );
+        assert_eq!(
+            seq.plan_hold("sam/box", "100"),
+            Some(Place::Superseded("sam/box#7".into()))
+        );
+    }
+
+    // 3. An unrelated completed/bound older plan on a different `input` (even
+    // if the rejected split happens to propose the same tasks) must not be
+    // reported or cleared.
+    {
+        let (b, mut parent, _) = parent_fixture();
+        let older_input = b.pass().issue_text("sam/box", &parent, &[]);
+        let tasks = vec![
+            task("already created child", None),
+            task("reused issue", Some(99)),
+        ];
+        assert!(b.pass().prepare_plan("sam/box", "7", &older_input, &tasks));
+        let d = b.pass().plan_dir("sam/box", "7");
+        let path = d.join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].number = Some(100);
+        list.children[1].number = Some(99);
+        assert!(b.pass().save_list("sam/box", "7", &list));
+        let before_tasks = fs::read(&path).unwrap();
+
+        parent["body"] = json!("Different updated scope");
+        let newer_input = b.pass().issue_text("sam/box", &parent, &[]);
+        assert_ne!(older_input, newer_input);
+
+        assert_eq!(
+            b.pass()
+                .incomplete_split_partial("sam/box", "7", &newer_input, &tasks),
+            RetainedPartial::default()
+        );
+        assert!(
+            b.pass()
+                .abort_incomplete_split("sam/box", "7", &newer_input, &tasks)
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before_tasks,
+            "unrelated older bound plan on a different input must remain intact"
+        );
+        assert!(
+            d.join("input").exists(),
+            "unrelated older plan input approval must remain intact"
+        );
     }
 }

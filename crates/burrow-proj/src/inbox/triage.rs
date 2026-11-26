@@ -664,7 +664,7 @@ impl Pass<'_> {
                         Err(super::plans::SplitFail::Retry) => return false,
                         Err(super::plans::SplitFail::Invalid(reason)) => {
                             eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
-                            let partial = self.incomplete_split_partial(repo, n, tasks);
+                            let partial = self.incomplete_split_partial(repo, n, &input, tasks);
                             let body = super::plans::invalid_split_message(&reason, &partial);
                             let engine = job.engine_label(&job.turns().unwrap_or_default());
                             let marker = super::plans::invalid_split_marker(repo, n, job.id, None);
@@ -673,7 +673,7 @@ impl Pass<'_> {
                                 n,
                                 &marker,
                                 &format!("**{engine} job**\n\n{body}"),
-                            ) || !self.abort_incomplete_split(repo, n, tasks)
+                            ) || !self.abort_incomplete_split(repo, n, &input, tasks)
                                 || !self.add_label(repo, n, LATER)
                             {
                                 return false;

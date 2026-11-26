@@ -14,12 +14,20 @@ pub(in crate::inbox) enum SplitFail {
     Invalid(String),
 }
 
-/// Partial child-creation receipts preserved from an incomplete split
-/// written by an earlier implementation before pre-flight validation existed.
+/// Partial child-creation receipts preserved from an aborted split (either a
+/// pre-existing incomplete plan or a post-binding retry whose reused issue
+/// became invalid before finalization completed).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::inbox) struct RetainedPartial {
     pub(in crate::inbox) created: Vec<u64>,
     pub(in crate::inbox) unconfirmed: usize,
+}
+
+fn list_matches_split(list: &List, input: &str, tasks: &[Task]) -> bool {
+    !list.tasks.is_empty()
+        && list.tasks == tasks
+        && (list.source.as_deref() == Some(input)
+            || list.children.iter().any(|c| c.number.is_none()))
 }
 
 impl RetainedPartial {
@@ -147,12 +155,14 @@ impl Pass<'_> {
         self.post(repo, n, &format!("{body}\n\n{marker}"))
     }
 
-    /// Inspect an incomplete active task list matching a rejected split for any
-    /// partial child-creation receipts that will be retained on abort.
+    /// Inspect an active task list belonging to a rejected split (same source
+    /// `input`, or incomplete with unbound children) for any partial
+    /// child-creation receipts that will be retained on abort.
     pub(in crate::inbox) fn incomplete_split_partial(
         &self,
         repo: &str,
         n: &str,
+        input: &str,
         tasks: &[Task],
     ) -> RetainedPartial {
         let d = self.plan_dir(repo, n);
@@ -162,7 +172,7 @@ impl Pass<'_> {
         let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
             return RetainedPartial::default();
         };
-        if list.tasks != tasks || !list.children.iter().any(|c| c.number.is_none()) {
+        if !list_matches_split(&list, input, tasks) {
             return RetainedPartial::default();
         }
         let mut partial = RetainedPartial::default();
@@ -177,13 +187,15 @@ impl Pass<'_> {
         partial
     }
 
-    /// Clear an incomplete active task list that matches a rejected split
-    /// (for example, written before pre-flight validation existed), while
-    /// preserving every retained and attempted creation receipt.
+    /// Clear an active task list belonging to a rejected split (same source
+    /// `input`, or incomplete with unbound children — for example, a
+    /// pre-existing partial plan or a post-binding retry), while preserving
+    /// every retained and attempted creation receipt.
     pub(in crate::inbox) fn abort_incomplete_split(
         &self,
         repo: &str,
         n: &str,
+        input: &str,
         tasks: &[Task],
     ) -> bool {
         let d = self.plan_dir(repo, n);
@@ -195,7 +207,7 @@ impl Pass<'_> {
         let Ok(mut list) = serde_json::from_slice::<List>(&bytes) else {
             return false;
         };
-        if list.tasks != tasks || !list.children.iter().any(|c| c.number.is_none()) {
+        if !list_matches_split(&list, input, tasks) {
             return true;
         }
         // Remove the input approval before emptying tasks.json: while the
