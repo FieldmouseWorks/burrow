@@ -631,6 +631,105 @@ cat {turn}
     );
 }
 
+/// A sandboxed `describe` may have to boot a stopped microVM over `agent sh`
+/// (up to `burrow_agent::ssh::BOOT`, 900s), so its timeout must cover the
+/// full boot window plus `describe` itself, not fail at a shorter cap.
+#[test]
+fn sandboxed_describe_allows_full_sandbox_boot_time() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let (_agent, _calls) = stand_in_sandbox(&tmp, &mut cfg);
+    let timeout_args = tmp.path().join("timeout-args");
+    let inner_timeout = cfg.tools.timeout.clone();
+    let wrapped_timeout = tmp.path().join("wrapped-timeout");
+    burrow_test::executable(
+        &wrapped_timeout,
+        format!(
+            "#!/bin/sh\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> {args}\nexec {inner} \"$@\"\n",
+            args = timeout_args.display(),
+            inner = inner_timeout.display(),
+        ),
+    );
+    cfg.tools.timeout = wrapped_timeout;
+
+    let desc_path = tmp.path().join("desc.json");
+    let turn_path = tmp.path().join("turn.json");
+    fs::write(
+        &desc_path,
+        describe_json_with("vm-engine", vec![], vec![], Sandbox::Needs),
+    )
+    .unwrap();
+    fs::write(
+        &turn_path,
+        job_json(
+            "vm-engine",
+            "sess-vm-timeout",
+            Context::Fresh,
+            None,
+            None,
+            "ok",
+            Next::Done,
+        ),
+    )
+    .unwrap();
+    let plugin = tmp.path().join("vm-engine-plugin");
+    burrow_test::executable(
+        &plugin,
+        format!(
+            "#!/bin/sh\nreq=\"$(cat)\"\nif printf '%s' \"$req\" | grep -q '\"kind\":\"describe\"'; then cat {desc}; exit 0; fi\ncat {turn}\n",
+            desc = desc_path.display(),
+            turn = turn_path.display(),
+        ),
+    );
+    cfg.plugins.insert("vm-engine".into(), plugin);
+
+    let id = format!("job-vm-boot-{}", std::process::id());
+    let job = make_job(&cfg, &project, &id);
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Check timeout\n").unwrap();
+    let choice = Choice {
+        engine: "vm-engine".into(),
+        model: None,
+        effort: None,
+    };
+
+    let mut running = spawn(
+        &cfg,
+        &job,
+        "1",
+        &prompt,
+        &waitdir,
+        Some("demo-4"),
+        true,
+        "",
+        &choice,
+    )
+    .unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    let res = running.finish(status, false, &cfg, &job, "1", 0);
+    assert_eq!(res.rc, 0);
+
+    let logged = fs::read_to_string(&timeout_args).unwrap();
+    let describe_line = logged
+        .lines()
+        .next()
+        .expect("expected timeout invocation for describe");
+    let words: Vec<&str> = describe_line.split_whitespace().collect();
+    assert_eq!(words[0], "-k");
+    assert_eq!(words[1], "10s");
+    let secs: u64 = words[2]
+        .strip_suffix('s')
+        .unwrap_or(words[2])
+        .parse()
+        .expect("numeric timeout seconds");
+    assert!(
+        secs >= 930,
+        "sandboxed describe timeout {secs}s must cover burrow-agent BOOT (900s) + describe (30s): {describe_line}"
+    );
+}
+
 /// A credit is admitted on the host, through a ledger no sandbox is given:
 /// a `--vm` turn on a credit-metered engine is refused before anything runs,
 /// so the turn's route takes it on rather than spend the credit unmetered.

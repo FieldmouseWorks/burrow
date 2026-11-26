@@ -48,8 +48,9 @@ pub(super) const VM_EXPOSED_CAPABILITIES: &[Capability] = &[
 /// Maximum wall-clock timeout for a host `describe` call.
 const DESCRIBE_TIMEOUT_SECS: &str = "30s";
 /// Maximum wall-clock timeout for a sandboxed `describe` call (allows a stopped
-/// microVM to boot over `agent sh`).
-const SANDBOX_DESCRIBE_TIMEOUT_SECS: &str = "180s";
+/// microVM to boot over `agent sh` up to `burrow_agent::ssh::BOOT`, 900s, plus
+/// `DESCRIBE_TIMEOUT_SECS`, 30s).
+const SANDBOX_DESCRIBE_TIMEOUT_SECS: &str = "930s";
 
 /// Why [`super::spawn`] started nothing.
 #[derive(Debug)]
