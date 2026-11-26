@@ -176,6 +176,17 @@ pub fn resolve(
                 socket.to_string_lossy().into_owned(),
             );
     }
+    if let Some(engine_home) = var(env, "PROJ_ENGINE_HOME") {
+        items
+            .iter_mut()
+            .find(|g| g.capability == Capability::JobState)
+            .unwrap()
+            .env
+            .insert(
+                "PROJ_ENGINE_HOME".into(),
+                engine_home.to_string_lossy().into_owned(),
+            );
+    }
     items
         .iter_mut()
         .find(|g| g.capability == Capability::Nix)
@@ -252,6 +263,7 @@ mod tests {
             "PROJ_HOST_JOBS_SOCKET" => {
                 Some(dir.path().join("scratch/host-jobs.sock").into_os_string())
             }
+            "PROJ_ENGINE_HOME" => Some(job.dir.join("engine-home").into_os_string()),
             _ => None,
         };
         let machine = machine::tests::machine_in(dir.path());
@@ -293,6 +305,10 @@ mod tests {
                 .join("scratch/host-jobs.sock")
                 .to_string_lossy()
                 .as_ref()
+        );
+        assert_eq!(
+            env_map["PROJ_ENGINE_HOME"],
+            job.dir.join("engine-home").to_string_lossy().as_ref()
         );
         assert!(grants.inherits_environment());
     }

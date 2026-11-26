@@ -27,6 +27,9 @@ pub const JSON_SCHEMA_ENV: &str = "BURROW_ANTIGRAVITY_JSON_SCHEMA";
 pub const JUDGE_SCHEMA_ENV: &str = "BURROW_JUDGE_JSON_SCHEMA";
 pub const JUDGE_DIR_ENV: &str = "BURROW_JUDGE_DIR";
 pub const PRINT_TIMEOUT_ENV: &str = "BURROW_ANTIGRAVITY_PRINT_TIMEOUT_SECS";
+/// Environment variable supplying a per-job isolated `$HOME` directory for
+/// host-mode runs so Antigravity conversation state persists across turns.
+pub const HOST_HOME_ENV: &str = "PROJ_ENGINE_HOME";
 
 /// Default outer wall-clock deadline (seconds) for one headless invocation.
 pub const DEFAULT_DEADLINE_SECS: u64 = 1800;
@@ -202,7 +205,8 @@ pub struct Config {
     pub mode: Option<Mode>,
     /// Run as a host-mode `proj` plugin (`Sandbox::None`) rather than inside a
     /// microVM sandbox (`Sandbox::Needs`). Refuses `dangerously_skip_permissions`
-    /// and isolates `$HOME` per turn so desktop/T3 userdata is never touched.
+    /// and isolates `$HOME` (persisted per job via `PROJ_ENGINE_HOME`, or a
+    /// per-turn tempdir when unset) so desktop/T3 userdata is never touched.
     pub host_mode: bool,
     /// Pass `--dangerously-skip-permissions` (intended only inside an isolated microVM).
     pub dangerously_skip_permissions: bool,

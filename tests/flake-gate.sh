@@ -196,7 +196,7 @@ grep -qx "env: TOOLS=$d/.github/flake-check" "$tmp/print" || fail "burrow's gate
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"
 grep -qx 'env: SKIP=agents' "$tmp/print" || fail "burrow's gate skips $(grep SKIP "$tmp/print")"
 # CI splits it across legs; here it runs whole, every leg's share at once.
-grep -q 'legs: [2-8]$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
+grep -qE 'legs: ([2-9]|1[0-2])$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
 for leg in LEGS LEG; do
   grep -qx "env: $leg=1" "$tmp/print" || fail "flake-gate runs one leg of several: $(grep LEG "$tmp/print")"
 done

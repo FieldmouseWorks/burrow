@@ -165,6 +165,11 @@ pub fn open_prs(api: &mut dyn Api, repo: &str) -> Result<Vec<Pr>, Error> {
     Ok(prs)
 }
 
+/// Whether a 422 answer's JSON `message` is `expected`.
+fn is_422_message(r: &burrow_github::Response, expected: &str) -> Result<bool, Error> {
+    Ok(r.status == 422 && r.json()?["message"] == json!(expected))
+}
+
 /// Closes a PR with a comment that says why, and deletes its branch when
 /// it's the repo's own (one already gone is fine), as `gh pr close
 /// --comment --delete-branch` does.
@@ -191,7 +196,7 @@ pub fn close(api: &mut dyn Api, repo: &str, pr: &Pr, why: &str) -> Result<(), Er
         let r = call_allowing(api, "DELETE", &path, None, None, &[422])?;
         // GitHub says a branch is gone with a 422, and says other refusals
         // with one too.
-        if r.status == 422 && r.json()?["message"] != json!("Reference does not exist") {
+        if r.status == 422 && !is_422_message(&r, "Reference does not exist")? {
             return Err(Error::said(format!(
                 "DELETE {path}: HTTP 422: {}",
                 r.body.trim()
@@ -205,7 +210,7 @@ pub fn close(api: &mut dyn Api, repo: &str, pr: &Pr, why: &str) -> Result<(), Er
 pub const TITLE: &str = "house: the house blocks, as burrow has them now";
 
 /// Opens the house PR: `branch` started over from `sha` (a run before this
-/// one may have left it), AGENTS.md written there, and the PR. Its URL.
+/// one may have left it), AGENTS.md written there, and the PR.
 pub struct Open<'a> {
     pub repo: &'a str,
     pub base: &'a str,
@@ -216,21 +221,35 @@ pub struct Open<'a> {
     pub rev: &'a str,
 }
 
-pub fn open(api: &mut dyn Api, o: &Open) -> Result<String, Error> {
+/// What `open` did: opened the PR, or hit a branch that existed on `POST`
+/// and was gone by `PATCH` (a concurrent PR merge or branch cleanup).
+pub enum Opened {
+    Url(String),
+    BranchGone(Error),
+}
+
+pub fn open(api: &mut dyn Api, o: &Open) -> Result<Opened, Error> {
     let repo = o.repo;
+    let refs = format!("repos/{repo}/git/refs");
     let made = json!({ "ref": format!("refs/heads/{}", o.branch), "sha": o.sha });
-    if call(
-        api,
-        "POST",
-        &format!("repos/{repo}/git/refs"),
-        Some(&made),
-        None,
-    )
-    .is_err()
-    {
+    let r = call_allowing(api, "POST", &refs, Some(&made), None, &[422])?;
+    if r.status == 422 {
+        if !is_422_message(&r, "Reference already exists")? {
+            return Err(Error::said(format!(
+                "POST {refs}: HTTP 422: {}",
+                r.body.trim()
+            )));
+        }
         let moved = json!({ "sha": o.sha, "force": true });
         let path = format!("repos/{repo}/git/refs/heads/{}", o.branch);
-        call(api, "PATCH", &path, Some(&moved), None)?;
+        let r = call_allowing(api, "PATCH", &path, Some(&moved), None, &[422])?;
+        if r.status == 422 {
+            let err = Error::said(format!("PATCH {path}: HTTP 422: {}", r.body.trim()));
+            if is_422_message(&r, "Reference does not exist")? {
+                return Ok(Opened::BranchGone(err));
+            }
+            return Err(err);
+        }
     }
     let file = json!({
         "branch": o.branch,
@@ -258,6 +277,6 @@ pub fn open(api: &mut dyn Api, o: &Open) -> Result<String, Error> {
     let made = call(api, "POST", &path, Some(&pr), None)?.json()?;
     made["html_url"]
         .as_str()
-        .map(String::from)
+        .map(|u| Opened::Url(u.into()))
         .ok_or_else(|| missing(&path, "html_url"))
 }

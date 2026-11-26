@@ -55,6 +55,11 @@ impl Memo<'_> {
     /// That HEAD's tree failed `what`, now.
     pub fn failed(&self, what: &str) -> Result<(), Broke> {
         let tree = self.tree("HEAD").unwrap_or_default();
+        self.failed_tree(what, &tree)
+    }
+
+    /// That `tree` failed `what`, now.
+    pub fn failed_tree(&self, what: &str, tree: &str) -> Result<(), Broke> {
         append(
             self.cfg,
             "failed-trees",
@@ -99,7 +104,7 @@ impl Memo<'_> {
         )
     }
 
-    fn tree(&self, commit: &str) -> Option<String> {
+    pub(crate) fn tree(&self, commit: &str) -> Option<String> {
         self.cfg
             .git(&["rev-parse", &format!("{commit}^{{tree}}")])
             .ok()
