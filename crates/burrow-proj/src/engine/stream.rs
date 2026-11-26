@@ -291,14 +291,23 @@ pub fn record_session(job: &Job, engine: &str, id: &str) {
 }
 
 /// Forget the recorded session for `engine`'s conversation so the next run
-/// starts fresh with a handoff of prior turns. Legacy unlabelled `session` is
-/// cleared only when `engine` is the default conversation and no
-/// `session.engine` exists.
+/// starts fresh with a handoff of prior turns. Also clears the shared `session`
+/// alias (and `session.engine`) when `session.engine` names this conversation,
+/// or when `engine` is the default conversation and no `session.engine` exists,
+/// while preserving an alias owned by another conversation.
 pub fn clear_session(job: &Job, engine: &str) {
     let conv = conversation_of(engine);
     let _ = crate::state_reads::remove(job.session_file(conv));
-    if conv == DEFAULT_ENGINE && !job.file(JobFile::SessionEngine).exists() {
+    let session_engine = read(&job.file(JobFile::SessionEngine));
+    let alias_belongs_to_conv = match session_engine.as_deref() {
+        Some(owner) => owner == conv,
+        None => conv == DEFAULT_ENGINE && !job.file(JobFile::SessionEngine).exists(),
+    };
+    if alias_belongs_to_conv {
         let _ = crate::state_reads::remove(job.file(JobFile::Session));
+        if session_engine.is_some() {
+            let _ = crate::state_reads::remove(job.file(JobFile::SessionEngine));
+        }
     }
 }
 

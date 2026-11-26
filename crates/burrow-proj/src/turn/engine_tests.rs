@@ -246,6 +246,8 @@ exit 1
     assert!(exec(&cfg, "job", "normal").is_err());
     let calls = fs::read_to_string(&capture).unwrap().lines().count();
     assert_eq!(calls, 2, "should retry at most once with a fresh handoff");
+    assert!(!job.file(crate::record::JobFile::Session).exists());
+    assert_eq!(engine::resume_for(&job, "antigravity"), None);
     assert!(
         read(&job.turn("2", "outcome"))
             .unwrap_or_default()
