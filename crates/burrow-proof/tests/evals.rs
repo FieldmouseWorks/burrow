@@ -1,10 +1,10 @@
 //! Integration tests for `burrow-proof eval-start|eval-run|eval-work|eval-end`.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -31,14 +31,14 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn write_exec(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(path, body);
 }
 
 fn which(name: &str) -> PathBuf {
-    let out = Command::new("which").arg(name).output().unwrap();
-    assert!(out.status.success(), "which {name} failed");
-    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+    env::split_paths(&env::var_os("PATH").expect("PATH unset"))
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("{name} not found on PATH"))
 }
 
 fn make_mirror(tmp: &Path) -> (PathBuf, String, String, String) {
