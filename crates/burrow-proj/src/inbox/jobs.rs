@@ -149,68 +149,76 @@ impl Pass<'_> {
             let mut rv = revived(&d);
             let streak = if rv.0 == Some(turns) { rv.1 } else { 0 };
             let mut revive = false;
+            // A failed turn with no session never started a conversation to
+            // reply to: restart it even if an earlier pass already posted its
+            // failure comment (k >= turns), bounded by streak < 2 unless an
+            // owner question is waiting.
+            let sessionless = !filled(&job.file(JobFile::Session));
             if !split_pending
                 && st == "failed"
-                && k < turns
                 && streak < 2
                 && let Some(listed_now) = now_open
             {
-                if !filled(&job.file(JobFile::Session)) {
-                    let Some(written) = self.written(repo, listed_now) else {
-                        self.miss(repo);
-                        continue;
-                    };
-                    if self.stop_parked(repo, n, &id, &d, &written.issue)? {
-                        continue;
+                if sessionless {
+                    if !crate::ask::host_path(&job, "question-needs-owner").exists() {
+                        let Some(written) = self.written(repo, listed_now) else {
+                            self.miss(repo);
+                            continue;
+                        };
+                        if self.stop_parked(repo, n, &id, &d, &written.issue)? {
+                            continue;
+                        }
+                        if written.issue["state"] != "open" || !self.eligible(repo, &written.issue)
+                        {
+                            continue;
+                        }
+                        let Some(new_id) = self.restart_without_session(
+                            repo,
+                            n,
+                            &job,
+                            &d,
+                            &written.issue,
+                            &written.comments,
+                        )?
+                        else {
+                            continue;
+                        };
+                        files::mark(&d, File::Revived).put(format!("1 {}\n", streak + 1))?;
+                        let newest = written
+                            .comments
+                            .iter()
+                            .filter_map(|c| c["id"].as_i64())
+                            .max()
+                            .unwrap_or(0);
+                        files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
+                        Self::hand(
+                            &d,
+                            &self.issue_text(repo, &written.issue, &written.comments),
+                        )?;
+                        let _ = new_id;
+                        continue 'jobs;
                     }
-                    if written.issue["state"] != "open" || !self.eligible(repo, &written.issue) {
-                        continue;
-                    }
-                    let Some(new_id) = self.restart_without_session(
-                        repo,
-                        n,
-                        &job,
-                        &d,
-                        &written.issue,
-                        &written.comments,
-                    )?
-                    else {
-                        continue;
-                    };
-                    files::mark(&d, File::Revived).put(format!("1 {}\n", streak + 1))?;
-                    let newest = written
-                        .comments
-                        .iter()
-                        .filter_map(|c| c["id"].as_i64())
-                        .max()
-                        .unwrap_or(0);
-                    files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
-                    Self::hand(
-                        &d,
-                        &self.issue_text(repo, &written.issue, &written.comments),
-                    )?;
-                    let _ = new_id;
-                    continue 'jobs;
-                }
-                match reply(self.cfg, &id, CUT_OFF, true, Some(&turns.to_string())) {
-                    Ok(()) => {
-                        revive = true;
-                        rv = (Some(turns + 1), streak + 1);
-                        files::mark(&d, File::Revived).put(format!(
-                            "{} {}\n",
-                            turns + 1,
-                            streak + 1
-                        ))?;
-                    }
-                    // Not cut off: its answer, or what it ended on, is posted.
-                    Err(f) if f.code == 3 => say(f),
-                    // Cut off, but its next turn couldn't start (proj said
-                    // why): neither posted nor counted, it's tried again in
-                    // five minutes.
-                    Err(f) => {
-                        say(f);
-                        self.retry(repo);
-                        continue;
+                } else if k < turns {
+                    match reply(self.cfg, &id, CUT_OFF, true, Some(&turns.to_string())) {
+                        Ok(()) => {
+                            revive = true;
+                            rv = (Some(turns + 1), streak + 1);
+                            files::mark(&d, File::Revived).put(format!(
+                                "{} {}\n",
+                                turns + 1,
+                                streak + 1
+                            ))?;
+                        }
+                        // Not cut off: its answer, or what it ended on, is posted.
+                        Err(f) if f.code == 3 => say(f),
+                        // Cut off, but its next turn couldn't start (proj said
+                        // why): neither posted nor counted, it's tried again in
+                        // five minutes.
+                        Err(f) => {
+                            say(f);
+                            self.retry(repo);
+                            continue;
+                        }
                     }
                 }
             }
