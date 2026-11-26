@@ -1,7 +1,8 @@
 # The steward's tools reach a pass however it's started: by hand or
 # a Claude job (`autoland-steward kick OWNER/REPO`), with no gh or
 # proj of its own, gets them from the wrapper, ahead of its own PATH.
-# Its gh is the machine's: in an App's env (a job's),
+# Its gh and git are the machine's, and so is the git its proof runs make
+# their worktrees with (the config's `git`). In an App's env (a job's),
 # `status` and a project's clone go through the socket, and a pass's
 # own calls with the steward's token as given.
 { self, pkgs, ... }:
@@ -22,7 +23,7 @@ let
         c.sendall(b"token from-the-socket\n")
         c.close()
   '';
-in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq ]; } ''
   w=${steward}/bin/autoland-steward
   # The wrapper, but showing the PATH it would run the steward with.
   grep -q '^exec .*steward.py' "$w" || { echo "autoland-steward doesn't exec the steward"; exit 1; }
@@ -40,6 +41,8 @@ in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 ];
   git=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v git')
   [ "$gh" = ${example.burrow.tools.gh}/bin/gh ] || { echo "the steward's gh isn't the machine's: $gh"; exit 1; }
   [ "$git" = ${example.programs.git.package}/bin/git ] || { echo "the steward's git isn't the machine's: $git"; exit 1; }
+  run=$(jq -r .git ${example.environment.etc."burrow/autoland.json".source})
+  [ "$run" = ${example.programs.git.package}/bin/git ] || { echo "the steward's proof runs' git isn't the machine's: $run"; exit 1; }
   # As a job with an App runs it: no token of its own, the socket's.
   python3 -I ${socket} $PWD/app.sock & while [ ! -e app.sock.up ]; do sleep 0.1; done
   mkdir no-login
