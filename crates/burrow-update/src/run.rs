@@ -543,7 +543,6 @@ impl Run<'_> {
                         &logs.join("build-all.log"),
                         &logs.join(format!("build-{i}.log")),
                     );
-                    self.memo.failed("build")?;
                 }
                 self.git(&["reset", "-q", "--hard", "HEAD~1"])?;
                 self.failed.push(i.to_string());
@@ -570,10 +569,7 @@ impl Run<'_> {
                 }
             }
         }
-        if !all_failed_before
-            && self.failed.len() > 1
-            && let Some(tree) = &all_tree
-        {
+        if !all_failed_before && let Some(tree) = &all_tree {
             self.memo.failed_tree("build", tree)?;
         }
         // What's left is whatever of the bump built; none of it is main
