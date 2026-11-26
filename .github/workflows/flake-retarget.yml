@@ -40,7 +40,7 @@ jobs:
     with:
       build-skip: agents
       eval-apart: true
-      legs: 8
+      legs: 12
       keep-builds: true
       docs-paths: >-
         README.md AGENTS.md CLAUDE.md docs/**
@@ -87,7 +87,7 @@ jobs:
     with:
       build-skip: agents
       eval-apart: true
-      legs: 8
+      legs: 12
       keep-builds: true
       docs-paths: >-
         README.md AGENTS.md CLAUDE.md docs/**
