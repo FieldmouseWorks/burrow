@@ -156,14 +156,19 @@ class Jobs:
             self.strike(step)
         return bool(jid)
 
-    def lost(self, kind, at=_HEAD):
+    def lost(self, kind, at=_HEAD, *, confirm=True):
         """This head's job of the kind ended without the answer it was for
-        (it crashed, timed out, or never posted it). Seen on two passes: the
-        first may have read the PR just before its answer went up."""
+        (it crashed, timed out, or never posted it). Seen on two passes when
+        confirm is true: the first may have read the PR just before a remote
+        job's answer went up. A local proof unit (build or run) writes only
+        end.json, which this pass already read, so confirm=False acts on the
+        first pass."""
         if at is _HEAD:
             at = self.head
         if self.st.get(kind) != at or not self.st.get(kind + "Job") or self.running(kind, at):
             return False
+        if not confirm:
+            return True
         seen = self.st.get(kind + "Lost") == at
         self.st[kind + "Lost"] = at
         if not seen:

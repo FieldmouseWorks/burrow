@@ -438,7 +438,7 @@ class Actions:
                 self.strike("status")
                 self.settle("pending", f"Settled; {names} {done} here, its verdict not posted yet"[:140], stage=S.PROOF)
                 return
-        retry = self.lost("proved")
+        retry = self.lost("proved", confirm=not unit)
         if not retry and self.st.get("proved") == self.head:
             running_now()
             return

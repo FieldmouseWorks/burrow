@@ -397,26 +397,27 @@ RED = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "FAI
 run(clean(checks=RED), 1000)
 assert [s["state"] for s in statuses("other")] == ["failure"] and "provedUnposted" not in pr_state(), (WROTE, pr_state())
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
-# A done build that kept no verdicts broke: built again, never a verdict.
+# A done build that kept no verdicts broke: handled on the first pass, never a
+# verdict, and built again once its retry is due.
 fresh_pr_state()
 BUILT.clear()
 tools()
 run(clean(checks=VM), 700)
 C.save(f"builds/{BUILT[0]}/end.json", {"state": "done", "exit": 0, "at": time.time()})
 STATES[BUILT[0]] = "done"
-run(clean(checks=VM), 900)
-run(clean(checks=VM), 960)
+status, _ = run(clean(checks=VM), 900)
+assert statuses() == [] and "Settled; the last build of vm crashed, so another starts at" in status, (status, BUILT)
 status, _ = run(clean(checks=VM), 1100)
 assert len(BUILT) == 2 and statuses() == [] and "building vm here again" in status, (status, BUILT, WROTE)
-# A build that stopped short is the machine's failure: no verdict, and
-# another builds it later.
+# A build that stopped short is the machine's failure: handled on the first
+# pass (no stale "building ... here" wait), no verdict, and another builds it
+# later.
 fresh_pr_state()
 BUILT.clear()
 tools()  # nothing built yet
 run(clean(checks=VM), 700)
 STATES[BUILT[0]] = "failed"
-run(clean(checks=VM), 900)
-status, _ = run(clean(checks=VM), 960)
+status, _ = run(clean(checks=VM), 900)
 assert statuses() == [] and "Settled; the last build of vm crashed, so another starts at" in status, (status, BUILT)
 status, _ = run(clean(checks=VM), 1100)
 assert len(BUILT) == 2 and "Settled; building vm here again (the last one crashed)" in status, (status, BUILT)

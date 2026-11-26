@@ -189,16 +189,15 @@ finish(long_jid, verdicts={"gate": PASSED}, comment="Serial replays passed on th
 status, _ = run(clean(sha=HEAD, checks=GATE), at + 100)
 assert statuses()[0]["state"] == "success" and "verdict posted" in status, (status, WROTE)
 assert JOBS == [] and STOPPED == [] and STARTED == [long_jid]
-# One that failed (stopped, timed out, ended short): no verdict, and
-# another runs it later.
+# One that failed (stopped, timed out, ended short): handled on the first
+# pass, no verdict, and another runs it later.
 for state in ("failed", "timed out"):
     fresh_pr_state()
     STARTED.clear()
     S.CFG["repos"]["sam/r"] = {"proofRuns": {"gate": "make gate"}}
     run(clean(sha=HEAD, checks=GATE), 700)
     finish(STARTED[0], state)
-    run(clean(sha=HEAD, checks=GATE), 900)
-    status, _ = run(clean(sha=HEAD, checks=GATE), 960)
+    status, _ = run(clean(sha=HEAD, checks=GATE), 900)
     assert statuses() == [] and "Settled; the last run of gate" in status and "another starts at" in status, (status, WROTE)
     status, _ = run(clean(sha=HEAD, checks=GATE), 1100)
     assert len(STARTED) == 2 and "Settled; running gate here again" in status, (status, STARTED)
