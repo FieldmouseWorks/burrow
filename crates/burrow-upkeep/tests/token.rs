@@ -10,7 +10,9 @@ use std::process::{Command, Output};
 
 use gh_token::fake::{self, Fake};
 
-const UPKEEP: &str = env!("CARGO_BIN_EXE_burrow-upkeep");
+fn program() -> &'static str {
+    burrow_test::program!("burrow-upkeep")
+}
 
 /// GitHub as the App sees it: Sam (as GitHub spells the login) on the
 /// first page of installations among 99 others, eve on the second, each
@@ -82,7 +84,7 @@ fn steward(dir: &Path, github: &Fake) {
 /// burrow-upkeep run with `words` after its config.
 fn upkeep(dir: &Path, words: &[&str]) -> Output {
     let config = dir.join("upkeep.json").display().to_string();
-    let mut argv = vec![UPKEEP, config.as_str()];
+    let mut argv = vec![program(), config.as_str()];
     argv.extend(words);
     run(dir, &argv)
 }
@@ -91,7 +93,8 @@ fn upkeep(dir: &Path, words: &[&str]) -> Output {
 /// added last.
 fn conary(dir: &Path, repo: &str) -> Output {
     let command = format!(
-        "{UPKEEP} {} token --bare",
+        "{} {} token --bare",
+        program(),
         dir.join("upkeep.json").display()
     );
     let mut argv: Vec<&str> = command.split_whitespace().collect();
