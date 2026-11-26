@@ -178,6 +178,14 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
+        # Each stage's `waiting: …` label (autoland/labels.nix), in Conary's
+        # snake_case keys: every stage in labels.waiting is rendered so a
+        # new or renamed stage reaches Conary's schema check too.
+        stage_labels = lib.mapAttrs' (stage: label:
+          lib.nameValuePair
+            (lib.replaceStrings lib.upperChars (map (c: "_${lib.toLower c}") lib.upperChars) stage)
+            label.name
+        ) cfg.labels.waiting;
         inherit people;
         require_ci = rc.requireCi;
         inherit proofs;

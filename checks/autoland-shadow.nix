@@ -61,14 +61,55 @@ let
   }).config;
   failed = map (a: a.message) (lib.filter (a: !a.assertion) taken.assertions);
   uncontrolled = builtins.tryEval (builtins.deepSeq (machine.burrow.ledger.flow.producer "x") true);
+  # A machine with another owner and customized waiting labels: every stage
+  # name in labels.nix must flow into settings.stage_labels, including the
+  # default owner label `waiting: ${owner}`.
+  customLabels = (self.nixosConfigurations.example.extendModules {
+    modules = [{
+      burrow.owner = lib.mkForce "Alice";
+      burrow.autoland.shadow = [ "sam/plain" ];
+      burrow.autoland.labels.waiting = {
+        review.name = "stage: review";
+        fix.name = "stage: fix";
+        ci.name = "stage: CI";
+        proofSlot.name = "stage: proof slot";
+        proof.name = "stage: machine checks";
+        releaseAge.name = "stage: release age";
+        train.name = "stage: train";
+        merge.name = "stage: merge";
+        base.name = "stage: base branch";
+      };
+    }];
+  }).config;
+  customPlain = "${customLabels.burrow.autoland.flow.base}/sam/plain.json";
+  # Expected settings.stage_labels directly from labels.nix (camelCase ->
+  # Conary's snake_case StageLabels fields).
+  expectedStageLabels = m: let
+    w = m.burrow.autoland.labels.waiting;
+  in {
+    review = w.review.name;
+    fix = w.fix.name;
+    ci = w.ci.name;
+    proof_slot = w.proofSlot.name;
+    proof = w.proof.name;
+    release_age = w.releaseAge.name;
+    train = w.train.name;
+    merge = w.merge.name;
+    owner = w.owner.name;
+    base = w.base.name;
+  };
+  expectedWaitingStages = [
+    "base" "ci" "fix" "merge" "owner" "proof" "proofSlot" "releaseAge" "review" "train"
+  ];
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
     settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
       "job_login" "job_timeout" "judge_engines" "major_key_file" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
-      "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
+      "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stage_labels" "stall_after"
       "train" "train_size" "train_stall_after" "verdict_authors" ];
+    stage_labels = [ "base" "ci" "fix" "merge" "owner" "proof" "proof_slot" "release_age" "review" "train" ];
   };
   # Every key a config has: all of Settings' but the seal keys (the
   # example runs renovate-sweep, whose key the config names by its file),
@@ -94,6 +135,7 @@ let
     packageCarriesGit = !(lib.elem machine.programs.git.package shadow.path);
     key = lib.any (lib.hasPrefix "app-key:") shadow.serviceConfig.LoadCredential;
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];
+    waitingStagesMapped = builtins.attrNames machine.burrow.autoland.labels.waiting == expectedWaitingStages;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
   # A flow config or policy beside burrow's, in the machine's environment or
@@ -126,12 +168,21 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   ${lib.concatMapStrings (w: "fail 'a Conary file set by hand beside the rendered ones is not refused: ${w}'\n") unrefused}
   [ "$(cd ${configs} && find . -type l -o -type f | sort | tr '\n' ' ')" = "./sam/homelab.json ./sam/plain.json " ] \
     || fail "configs aren't each shadowed repo's, lowercased: $(cd ${configs} && find . -type l -o -type f)"
-  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
+  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain} ${customPlain}; do
     jq -e --argjson k '${builtins.toJSON keys}' '
       (keys == $k.top) and (.settings | keys == $k.settings)
+      and (.settings.stage_labels | keys == $k.stage_labels)
       and (.evidence == null or (.evidence | keys == $k.evidence))' $f >/dev/null \
-      || fail "$f has keys Conary's doesn't: $(jq -c '[keys, (.settings | keys)]' $f)"
+      || fail "$f has keys Conary's doesn't: $(jq -c '[keys, (.settings | keys), (.settings.stage_labels | keys)]' $f)"
   done
+  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
+    jq -e --argjson want '${builtins.toJSON (expectedStageLabels machine)}' \
+      '.settings.stage_labels == $want and .settings.stage_labels.owner == "waiting: Sam"' $f >/dev/null \
+      || fail "$f stage_labels differ from labels.nix: $(jq -c .settings.stage_labels $f)"
+  done
+  jq -e --argjson want '${builtins.toJSON (expectedStageLabels customLabels)}' \
+    '.settings.stage_labels == $want and .settings.stage_labels.owner == "waiting: Alice"' ${customPlain} >/dev/null \
+    || fail "custom stage_labels differ from labels.nix: $(jq -c .settings.stage_labels ${customPlain})"
   jq -e '.evidence.negative == "negative" and .settings.train and .settings.train_size == 3' ${withApp.homelab} >/dev/null \
     || fail "homelab's overrides (its train, negative and train size) are lost to its name's case"
   jq -e '.evidence == null and (.settings.train | not)' ${withApp.plain} >/dev/null || fail "plain has evidence with no train negative"
@@ -158,15 +209,20 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
     jq -e '.settings.major_key_file == "/run/autoland-flow-keys/major-seal"' $f >/dev/null \
       || fail "$f doesn't name renovate-sweep's key by its file"
   done
-  ${flowFiles} flow --stand-in-keys ${withApp.homelab} ${withApp.plain} ${noApp.plain} || fail "Conary's flow::Config refuses a rendered config"
+  ${flowFiles} flow --stand-in-keys ${withApp.homelab} ${withApp.plain} ${noApp.plain} ${customPlain} || fail "Conary's flow::Config refuses a rendered config"
   ${flowFiles} policy ${policy} || fail "Conary's Policy refuses the machine's class policy"
   # And they refuse what the machine's cn would: a key Conary doesn't know,
-  # a value of the wrong type, a policy with a key it doesn't take.
+  # a value of the wrong type, an unknown or colliding stage label, a policy
+  # with a key it doesn't take.
   jq '.settings.bogus = 1' ${withApp.homelab} > key.json
   jq '.settings.rounds = "two"' ${withApp.homelab} > type.json
+  jq '.settings.stage_labels.bogus = "waiting: bogus"' ${withApp.homelab} > stage-key.json
+  jq '.settings.stage_labels.owner = .settings.hold_label' ${withApp.homelab} > stage-collide.json
   jq '. + {bogus: []}' ${policy} > policy.json
   ! ${flowFiles} flow --stand-in-keys key.json || fail "a flow config with a key Conary doesn't know was taken"
   ! ${flowFiles} flow --stand-in-keys type.json || fail "a flow config with a value of the wrong type was taken"
+  ! ${flowFiles} flow --stand-in-keys stage-key.json || fail "a flow config with a stage_labels key Conary doesn't know was taken"
+  ! ${flowFiles} flow --stand-in-keys stage-collide.json || fail "a flow config with colliding stage_labels was taken"
   ! ${flowFiles} policy policy.json || fail "a policy with a key Conary doesn't know was taken"
   touch $out
 ''
