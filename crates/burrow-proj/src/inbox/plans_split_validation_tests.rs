@@ -566,3 +566,88 @@ fn invalid_split_recovery_reports_retained_partial_children_without_claiming_non
         assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
     }
 }
+
+#[test]
+fn abort_incomplete_split_removes_input_before_emptying_list_and_retries_on_failure() {
+    // 1. If removing `input` fails, abort_incomplete_split must return false
+    // without emptying tasks.json so has_task_list keeps blocking admission.
+    {
+        let (b, parent, _) = parent_fixture();
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        let tasks = vec![task("first", None), task("bot flaky", Some(99))];
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+
+        let d = b.pass().plan_dir("sam/box", "7");
+        let before_tasks = fs::read(d.join("tasks.json")).unwrap();
+        let input_path = d.join("input");
+        fs::remove_file(&input_path).unwrap();
+        fs::create_dir(&input_path).unwrap();
+
+        assert!(
+            !b.pass().abort_incomplete_split("sam/box", "7", &tasks),
+            "non-NotFound input removal failure must trigger retry"
+        );
+        assert!(
+            b.pass().has_task_list(Some("sam/box"), "7"),
+            "nonempty task list must stay intact while input removal fails"
+        );
+        assert_eq!(
+            fs::read(d.join("tasks.json")).unwrap(),
+            before_tasks,
+            "tasks.json must not be modified before input is removed"
+        );
+
+        // Once input can be removed, retrying abort_incomplete_split succeeds.
+        fs::remove_dir(&input_path).unwrap();
+        fs::write(&input_path, &input).unwrap();
+        assert!(b.pass().abort_incomplete_split("sam/box", "7", &tasks));
+        assert!(!input_path.exists());
+        assert!(!b.pass().has_task_list(Some("sam/box"), "7"));
+        assert!(!b.pass().approved_input("sam/box", "7", &input));
+    }
+
+    // 2. `input` must be removed before `save_list` writes the emptied list:
+    // if saving `tasks.json` fails (or crashes), `input` is already gone,
+    // `has_task_list` still blocks admission, and a retry finishes cleanly.
+    {
+        let (b, parent, _) = parent_fixture();
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        let tasks = vec![
+            task("already created child", None),
+            task("bot flaky", Some(99)),
+        ];
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+
+        let d = b.pass().plan_dir("sam/box", "7");
+        let path = d.join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].number = Some(100);
+        assert!(b.pass().save_list("sam/box", "7", &list));
+
+        let swap_blocker = d.join("tasks.json.new");
+        fs::create_dir(&swap_blocker).unwrap();
+
+        assert!(
+            !b.pass().abort_incomplete_split("sam/box", "7", &tasks),
+            "save_list failure must trigger retry"
+        );
+        assert!(
+            !d.join("input").exists(),
+            "input approval must already be removed before save_list runs"
+        );
+        assert!(b.pass().has_task_list(Some("sam/box"), "7"));
+        assert!(!b.pass().approved_input("sam/box", "7", &input));
+
+        // Retry after save_list can succeed: NotFound on `input` is fine and
+        // partial receipts are retained.
+        fs::remove_dir(&swap_blocker).unwrap();
+        assert!(b.pass().abort_incomplete_split("sam/box", "7", &tasks));
+        assert!(!b.pass().has_task_list(Some("sam/box"), "7"));
+        assert!(!b.pass().approved_input("sam/box", "7", &input));
+        let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(after.tasks.is_empty());
+        assert_eq!(after.source, None);
+        assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+    }
+}

@@ -1,6 +1,7 @@
 //! Pre-flight validation, idempotent rejection, and recovery for `split` proposals.
 use super::{List, Retained};
 use crate::inbox::Pass;
+use crate::inbox::record::files;
 use crate::planning::Task;
 use std::fs;
 
@@ -197,6 +198,14 @@ impl Pass<'_> {
         if list.tasks != tasks || !list.children.iter().any(|c| c.number.is_none()) {
             return true;
         }
+        // Remove the input approval before emptying tasks.json: while the
+        // nonempty task list remains on disk, has_task_list blocks worker
+        // admission even if removing `input` fails and is retried.
+        match files::mark(&d, files::File::Input).remove() {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return false,
+        }
         for (task, child) in std::mem::take(&mut list.tasks)
             .into_iter()
             .zip(std::mem::take(&mut list.children))
@@ -206,11 +215,7 @@ impl Pass<'_> {
             }
         }
         list.source = None;
-        if !self.save_list(repo, n, &list) {
-            return false;
-        }
-        let _ = fs::remove_file(d.join("input"));
-        true
+        self.save_list(repo, n, &list)
     }
 
     pub(in crate::inbox) fn clear_worker_split(&self, repo: &str, n: &str) {
