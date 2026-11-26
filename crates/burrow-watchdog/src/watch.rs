@@ -1,6 +1,6 @@
 //! The sources' watch files, and what's past its deadline in them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -132,16 +132,34 @@ pub struct Watch {
     pub found: BTreeMap<String, Overdue>,
     /// When the next item falls due.
     pub due: Option<f64>,
-    /// The (source, key) of each item a run is at work on (`refresh`),
-    /// overdue or not: a stall of one hasn't moved until that run has ended.
-    pub under_way: BTreeSet<(String, String)>,
+    /// Each `(source, key)` a run is at work on (`refresh`), overdue or not,
+    /// with its current `link`: a stall of one hasn't moved until that run has
+    /// ended or its compare range has moved on to a newer deployed commit.
+    pub under_way: BTreeMap<(String, String), Option<String>>,
+}
+
+impl Watch {
+    /// Whether an existing stall is still held by a run currently under way.
+    /// Two differing GitHub `/compare/` links mean the deployed commit moved
+    /// on before the next run started, so the old stall has cleared.
+    pub fn still_under_way(&self, source: &str, key: &str, link: Option<&str>) -> bool {
+        let Some(cur) = self.under_way.get(&(source.to_owned(), key.to_owned())) else {
+            return false;
+        };
+        match (link, cur.as_deref()) {
+            (Some(was), Some(now)) if was.contains("/compare/") && now.contains("/compare/") => {
+                was == now
+            }
+            _ => true,
+        }
+    }
 }
 
 /// What every source waits on now. A source with no watch file to read is
 /// noted in `missing`, since when.
 pub fn overdue(cfg: &Config, now: f64, missing: &mut BTreeMap<String, f64>) -> Watch {
     let mut found = BTreeMap::new();
-    let mut under_way = BTreeSet::new();
+    let mut under_way = BTreeMap::new();
     let mut due: Vec<f64> = Vec::new();
     for (name, src) in &cfg.sources {
         let got = watched(src);
@@ -202,7 +220,7 @@ pub fn overdue(cfg: &Config, now: f64, missing: &mut BTreeMap<String, f64>) -> W
                 continue;
             }
             if it.refresh {
-                under_way.insert((name.clone(), key.clone()));
+                under_way.insert((name.clone(), key.clone()), it.link.clone());
             }
             if it.due <= now {
                 found.insert(

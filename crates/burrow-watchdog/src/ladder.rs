@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::state::{Stall, State, load, published, save};
-use crate::watch::{Watch, overdue, watched};
+use crate::watch::{overdue, watched};
 use crate::words::{clock, day, entry, line, notice as notice_words, task};
 use crate::world::World;
 use crate::{GRACE, MIN, PROJ, RENOTIFY, RETRY, SNOOZE_MAX, START, STEWARD};
@@ -44,23 +44,22 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             .collect()
     });
     let before = published(&stalls);
-    let Watch {
-        found,
-        due,
-        under_way,
-    } = overdue(cfg, now, &mut missing);
-    let mut wakes: Vec<f64> = due.into_iter().collect();
+    let watch = overdue(cfg, now, &mut missing);
+    let mut wakes: Vec<f64> = watch.due.into_iter().collect();
 
     // One a run has taken up isn't over: it stays as it was, no step taken,
-    // till that run ends. Forgotten, it would be a new stall when the run
-    // failed, kicked again for another run, without end.
+    // till that run ends (or moves on to a later deployed commit). Forgotten,
+    // it would be a new stall when the run failed, kicked again for another
+    // run, without end.
     let gone: Vec<String> = stalls
         .iter()
         .filter(|(s, st)| {
-            !found.contains_key(*s) && !under_way.contains(&(st.source.clone(), st.key.clone()))
+            !watch.found.contains_key(*s)
+                && !watch.still_under_way(&st.source, &st.key, st.item.link.as_deref())
         })
         .map(|(s, _)| s.clone())
         .collect();
+    let found = watch.found;
     for s in gone {
         let st = stalls.remove(&s).expect("a stall it has");
         println!("moving again: {}", line(&st.item));

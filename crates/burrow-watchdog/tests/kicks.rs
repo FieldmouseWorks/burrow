@@ -120,3 +120,65 @@ fn a_run_that_goes_through_clears_it() {
     assert!(stalls.len() == 2 && want.iter().all(|s| stalls.contains_key(s)));
     assert_eq!(m.kicks(), ["update", "update", "update"]);
 }
+
+// A deploy run whose compare base has moved on (the earlier commit went live
+// and another run started straight after for later commits) clears the old
+// stall from the stuck issue, while a run on the same base or an unreadable
+// live record still holds it.
+#[test]
+fn a_run_for_a_later_commit_clears_the_old_stall() {
+    let deploy_at = |since: f64, link: &str, refresh: bool| {
+        let mut it = if refresh {
+            named(
+                "sam/r's main going live",
+                "box-update has been putting it live since then",
+                since,
+                since + 2.0 * H,
+            )
+        } else {
+            named(
+                "sam/r's main going live",
+                "2 commits; behind box-update's own PR #1631",
+                since,
+                since + 30.0 * MIN,
+            )
+        };
+        it["link"] = link.into();
+        it["kick"] = if refresh { "dispatch" } else { "update" }.into();
+        it["refresh"] = refresh.into();
+        json!({"deploy/sam/r": it})
+    };
+    let old = "https://github.com/sam/r/compare/aaaa1111...main";
+    let unknown = "https://github.com/sam/r";
+    let next = "https://github.com/sam/r/compare/bbbb2222...main";
+
+    let m = Machine::new();
+    let since = T - 2.0 * H;
+    m.write(&m.steward, deploy_at(since, old, false), T);
+    m.run(T);
+    m.run(T + GRACE);
+    m.run(T + GRACE + MIN);
+    m.run(T + 2.0 * GRACE + MIN);
+    let entries = m.escalated();
+    assert_eq!(entries.len(), 1);
+
+    // Same compare base still holds the stall while the run works.
+    let at = T + 3.0 * GRACE;
+    m.write(&m.steward, deploy_at(at, old, true), at);
+    let (_, stalls) = m.run(at);
+    assert_eq!((stalls.len(), m.escalated()), (1, entries.clone()));
+
+    // Falling back to the repo link (live record unreadable) still holds it.
+    let at = at + MIN;
+    m.write(&m.steward, deploy_at(at, unknown, true), at);
+    let (_, stalls) = m.run(at);
+    assert_eq!((stalls.len(), m.escalated()), (1, entries));
+
+    // Once the deployed commit advances and a fresh run starts straight away,
+    // the old stall clears instead of staying frozen on the stuck issue.
+    let at = at + MIN;
+    m.write(&m.steward, deploy_at(at, next, true), at);
+    let (_, stalls) = m.run(at);
+    assert!(stalls.is_empty(), "old stall stayed held: {stalls:?}");
+    assert!(m.escalated().is_empty(), "stuck issue kept old entry");
+}
