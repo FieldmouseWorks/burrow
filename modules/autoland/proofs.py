@@ -639,29 +639,35 @@ def run(jid):
 
 def realise(jid):
     """The build's derivations built, inside its heavy slot (`autoland-steward
-    realise ID`, run): one `nix-store --realise --add-root` each, all at
-    once, so nix roots each one's outputs in the build's folder before its
-    process ends and its temporary roots go. Nothing can collect a pass
-    between its build and its verdict (one realise of them all would root
-    none of them when any failed). How each ended goes in realised.json;
-    the exit is the machine's failure when any had one, else the worst
-    build failure, else 0."""
+    realise ID`, run): one `nix-store --realise --max-jobs 1 --add-root` each,
+    one at a time, so nix roots each one's outputs in the build's folder before
+    its process ends and its temporary roots go, without multiplying VM builds
+    inside one heavy slot. Nothing can collect a pass between its build and
+    its verdict (one realise of them all would root none of them when any
+    failed). How each ended goes in realised.json; the exit is the machine's
+    failure when any had one, else the worst build failure, else 0."""
     b = load(f"builds/{jid}/build.json", None)
     here = os.path.join(STATE, "builds", jid)
-    ps, stopped = {}, []
+    rcs, active, stopped = {}, [], []
 
     def stop(*_):
         stopped.append(True)
-        for p in ps.values():
+        for p in active:
             p.terminate()
 
     signal.signal(signal.SIGTERM, stop)
     for i, d in enumerate(sorted(set(b["drvs"].values()))):
-        ps[d] = subprocess.Popen([f"{CFG['nix']}/nix-store", "--realise", "--add-root", os.path.join(here, f"out-{i}"),
-                                  "--indirect", d], stdin=subprocess.DEVNULL)
-    if stopped:  # stopped while they started: the late ones too
-        stop()
-    rcs = {d: 128 - rc if rc < 0 else rc for d, p in ps.items() for rc in [p.wait()]}
+        if stopped:
+            break
+        p = subprocess.Popen([f"{CFG['nix']}/nix-store", "--realise", "--max-jobs", "1",
+                              "--add-root", os.path.join(here, f"out-{i}"), "--indirect", d],
+                             stdin=subprocess.DEVNULL)
+        active[:] = [p]
+        if stopped:
+            p.terminate()
+        rc = p.wait()
+        active.clear()
+        rcs[d] = 128 - rc if rc < 0 else rc
     save(f"builds/{jid}/realised.json", rcs)
     broke = [rc for rc in rcs.values() if rc and rc not in BUILD_FAILED]
     return broke[0] if broke else max(rcs.values(), default=0)
