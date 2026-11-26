@@ -193,8 +193,13 @@ inputs:
         # redirect and forgets them, so a clone with a token-only URL
         # (Renovate's) fails. Drop the patch once nixpkgs' git has it (it then
         # stops applying). Here and not an overlay: that would rebuild all
-        # that builds with git.
-        config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
+        # that builds with git. Override doInstallCheck off: nixpkgs already
+        # ran upstream git's test suite, every httpd test is skipped in the
+        # Nix sandbox (checks/git-token-url.nix tests this patch), and
+        # parallel prove flakes on unrelated upstream tests (#1568).
+        config.programs.git.package = lib.mkDefault ((pkgs.git.override {
+          doInstallCheck = false;
+        }).overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
         }));
       })
