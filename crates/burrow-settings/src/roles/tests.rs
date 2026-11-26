@@ -852,11 +852,19 @@ fn engines_delete_removes_saved_setup_refuses_active_and_clears_previous() {
     );
 
     // Duplicate setups with identical roles: deleting the non-active duplicate
-    // keeps the active one, and deleting a non-`previous` duplicate keeps `previous`.
+    // keeps the active one, and deleting a `previous` duplicate preserves
+    // `previous` while another equivalent saved setup remains.
     set(&cfg, "engines save alpha").unwrap();
     set(&cfg, "engines save beta").unwrap(); // active is beta
-    set(&cfg, "engines delete alpha").unwrap();
+    set(&cfg, "role triage claude").unwrap();
+    set(&cfg, "engines save gamma").unwrap(); // active is gamma
+    set(&cfg, "engines use alpha").unwrap(); // active is alpha, previous is gamma
+    set(&cfg, "engines use gamma").unwrap(); // active is gamma, previous is alpha/beta
+    let said = set(&cfg, "engines delete alpha").unwrap();
+    assert!(said.contains("Previous: beta\n"), "{said}");
+    set(&cfg, "engines use back").unwrap();
     assert!(cfg.engines().unwrap().contains("Active: beta\n"));
+    set(&cfg, "engines delete gamma").unwrap();
     // Even if `roles` matches `beta` only by value after editing away and back,
     // `beta` is active and cannot be deleted.
     set(&cfg, "role judge claude").unwrap();

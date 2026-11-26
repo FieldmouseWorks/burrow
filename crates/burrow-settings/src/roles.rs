@@ -546,10 +546,15 @@ pub(crate) fn apply(
             if before.as_deref() == Some(*name) {
                 return Err(format!("cannot delete active setup: {name}"));
             }
-            if previous_name(setups) == Some(*name) {
+            let removed = setups.saved.remove(*name);
+            if setups
+                .previous
+                .as_ref()
+                .is_some_and(|prev| removed.as_ref() == Some(prev))
+                && previous_name(setups).is_none()
+            {
                 setups.previous = None;
             }
-            setups.saved.remove(*name);
             if setups.active.as_deref() == Some(*name) {
                 setups.active = None;
             }
