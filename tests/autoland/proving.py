@@ -239,6 +239,15 @@ tools(systemctl={"rc": 1})
 assert C.build_state(made({"vm": X + ".drv"})) is None
 assert ran("systemctl")[0]["args"][:4] == ["--user", "show", "-P", "ActiveState"], ran("systemctl")
 assert ran("systemctl")[0]["env"]["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}", ran("systemctl")
+# A policy-paused build, or one mid-restoration whose unit isn't active yet,
+# reports parked rather than failed; once the restored unit is active it is running.
+for marker, active, want in (("policy-paused", "inactive", "parked"),
+                             ("policy-restoring", "inactive", "parked"),
+                             ("policy-restoring", "active", "running")):
+    jid = made({"vm": X + ".drv"})
+    open(f"{tmp}/state/builds/{jid}/{marker}", "w").close()
+    tools(systemctl={"active": active})
+    assert C.build_state(jid) == want, (marker, active, C.build_state(jid))
 # Stopped like a job: its unit is, and it's over once systemd says so.
 jid = made({"vm": X + ".drv"})
 tools(systemctl={"active": "inactive"})
@@ -424,6 +433,27 @@ assert len(BUILT) == 2 and "Settled; building vm here again (the last one crashe
 assert statuses() == [] and JOBS == [], WROTE
 # Its deadline is proofTimeout's, not a Claude job's.
 assert min(C.WAKE.values()) >= C.NOW + S.CFG["proofTimeout"] * 60, C.WAKE
+# A parked proof build awaiting policy restoration after its repo is
+# re-allowed is never treated as lost or broken, even across passes past the
+# retry delay, so reconciliation never races a duplicate build.
+fresh_pr_state()
+BUILT.clear()
+tools()
+run(clean(checks=VM), 700)
+parked_jid = BUILT[0]
+STATES[parked_jid] = "parked"
+for at in (900, 1100):
+    status, _ = run(clean(checks=VM), at)
+    assert "Settled; build of vm awaits policy restoration" in status, (at, status)
+    assert BUILT == [parked_jid] and statuses() == [], (at, BUILT, WROTE)
+    assert "provedBroke" not in pr_state() and "provedLost" not in pr_state() and not pr_state().get("strikes"), pr_state()
+    assert C.WAKE["sam/r"] == C.NOW + 61, C.WAKE
+STATES[parked_jid] = "running"
+status, _ = run(clean(checks=VM), 1200)
+assert "Settled; building vm here" in status and BUILT == [parked_jid], (status, BUILT)
+finish(parked_jid, [X], 0)
+status, _ = run(clean(checks=VM), 1300)
+assert statuses()[0]["state"] == "success" and "verdict posted" in status and BUILT == [parked_jid], (status, WROTE, BUILT)
 # A Claude job from before its check had a build, on this head: stopped
 # while it's at work, and a build starts afresh, the job's lost answer and
 # retries not carried over; one that ended without its verdict, the same.

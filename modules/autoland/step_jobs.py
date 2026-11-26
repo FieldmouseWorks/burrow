@@ -32,20 +32,21 @@ class Jobs:
 
     def running(self, kind, at=_HEAD):
         """This head's job of the kind (at: on its base, for the judge's and
-        the fix it asks for) while it's still queued or running, or proj
-        can't say: "queued", "running" or "unknown"; else "", and how it
-        ended goes in ends. One that is keeps its deadline, since each pass
-        replaces the repo's wake-ups. A job of any kind whose turn ended
-        holding something open (C.job_lifecycle: a question for a person,
-        or a PR or issue other than this one it awaits, the upstream fix it
-        needs, say) is "awaiting", what it waits on in awaits: still at work
-        here, since proj resumes it once that's answered or changes, so it's
-        neither lost nor started again (remi#881: two jobs that ended
-        without fixing it, while both waited on burrow's PR with the fix,
-        and a question's job taken for ended, so a second fixed the same
-        branch while the first's question timed out and resumed it). One
-        look a job a pass: asked again, it says the same, and a run of
-        broken jobs is counted once (breaking)."""
+        the fix it asks for) while it's still queued, running, parked by
+        policy awaiting restoration, or proj can't say: "queued", "running",
+        "parked" or "unknown"; else "", and how it ended goes in ends. One
+        that is keeps its deadline (or a short recheck wake while parked),
+        since each pass replaces the repo's wake-ups. A job of any kind whose
+        turn ended holding something open (C.job_lifecycle: a question for a
+        person, or a PR or issue other than this one it awaits, the upstream
+        fix it needs, say) is "awaiting", what it waits on in awaits: still at
+        work here, since proj resumes it once that's answered or changes, so
+        it's neither lost nor started again (remi#881: two jobs that ended
+        without fixing it, while both waited on burrow's PR with the fix, and
+        a question's job taken for ended, so a second fixed the same branch
+        while the first's question timed out and resumed it). One look a job a
+        pass: asked again, it says the same, and a run of broken jobs is
+        counted once (breaking)."""
         if at is _HEAD:
             at = self.head
         jid = self.st.get(kind + "Job")
@@ -95,13 +96,16 @@ class Jobs:
             # No deadline: its wake is proj's resume, whose end kicks a pass.
             self.awaits[kind] = target
             return "awaiting"
-        live = state in (None, "queued", "running")
+        live = state in (None, "queued", "running", "parked")
         if not live:
             self.ends[kind] = state
         if live or self.broke(kind):
             self.breaking(kind)
         if not live:
             return ""
+        if state == "parked":
+            C.wake(self.repo, C.NOW + MIN + 1)  # ends: policy reconciliation restores the parked job or proof
+            return "parked"
         self.deadline(kind)
         return state or "unknown"
 
@@ -120,6 +124,8 @@ class Jobs:
             return f"a Claude job is queued for {doing}"
         if state == "awaiting":
             return f"the Claude job {doing} awaits {self.awaits[kind]}"
+        if state == "parked":
+            return f"the Claude job {doing} awaits policy restoration"
         return f"a Claude job is {doing}"
 
     def started(self, kind, task, at=_HEAD, broken=False, begin=None):

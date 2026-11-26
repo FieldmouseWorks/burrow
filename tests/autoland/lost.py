@@ -100,6 +100,21 @@ for state in ("running", None):
     for t in (800, 900):
         status, digest = run(clean(**gated), t)
     assert JOBS == [] and "judging it" in status and digest == [], (state, status)
+# A parked judge or fix job awaiting policy restoration after its repo is
+# re-allowed is never lost or duplicated across passes.
+fresh_pr_state()
+run(clean(**gated), 700)
+ends("parked")
+for t in (800, 900, 1100):
+    status, digest = run(clean(**gated), t)
+    assert JOBS == [] and "the Claude job judging it awaits policy restoration" in status and digest == [], (t, status)
+fresh_pr_state()
+run(clean(threads=[False]), 0)
+run(clean(threads=[False]), 7200)
+ends("parked")
+for t in (7300, 7400, 7600):
+    status, digest = run(clean(threads=[False]), t)
+    assert JOBS == [] and "its Claude job awaits policy restoration" in status and digest == [], (t, status)
 STATES.clear()
 
 # So do findings', red CI's and a dependency update's fix jobs that end

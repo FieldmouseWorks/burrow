@@ -80,6 +80,8 @@ class Actions:
         elif state == "awaiting":
             awaited = self.awaits[kind]
             who = f"its Claude job awaits {awaited}"
+        elif state == "parked":
+            who = "its Claude job awaits policy restoration"
         elif state:
             who = f"a Claude job {'is queued for it' if state == 'queued' else 'has it'} since {clock(self.st[kind + 'At'])}"
         elif retry and not gone:
@@ -385,8 +387,12 @@ class Actions:
 
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if self.st.get("provedFree") == self.head else ""
-            busy = f"{VERB[unit]} {names} here" if unit else self.at_work("proved", doing)
-            held = not unit and self.running("proved") == "awaiting"
+            state = self.running("proved")
+            if unit and state == "parked":
+                busy = f"{unit} of {names} awaits policy restoration"
+            else:
+                busy = f"{VERB[unit]} {names} here" if unit else self.at_work("proved", doing)
+            held = not unit and state == "awaiting"
             self.settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140], stage=S.PROOF, wait=waits.HOLD if held else waits.STEWARD)
 
         # What this proof is: a build, a run or a Claude job, of which

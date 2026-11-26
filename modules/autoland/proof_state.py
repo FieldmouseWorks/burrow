@@ -28,13 +28,15 @@ def user_systemctl_run(unit, cmd):
 
 def build_state(jid):
     """A proof build's state, as lifecycle says a job's: running while its
-    unit is; done once it built all it could, each check's verdict then in
-    whether its outputs are valid (proofs.verdicts); failed when it stopped
-    short of that (stopped, killed, or nix couldn't build at all), timed out
-    past proofTimeout; None when systemd can't say."""
+    unit is; parked while policy holds or is restoring it; done once it
+    built all it could, each check's verdict then in whether its outputs
+    are valid (proofs.verdicts); failed when it stopped short of that
+    (stopped, killed, or nix couldn't build at all), timed out past
+    proofTimeout; None when systemd can't say."""
     import common as C
 
-    if os.path.exists(os.path.join(C.STATE, "builds", jid, "policy-paused")):
+    here = os.path.join(C.STATE, "builds", jid)
+    if os.path.exists(os.path.join(here, "policy-paused")):
         return "parked"
     end = C.load(f"builds/{jid}/end.json", None)
     if end is not None:
@@ -44,6 +46,12 @@ def build_state(jid):
         return None
     if p.stdout.strip() in ("active", "activating", "deactivating", "reloading", "refreshing"):
         return "running"
-    # Gone, with no end: unless it wrote one just after the first look.
+    # Gone, with no end: unless it wrote one just after the first look, or
+    # policy paused or is restoring it (policy-restoring exists while
+    # reconcile launches the unit or awaits another restore attempt).
     end = C.load(f"builds/{jid}/end.json", None)
-    return end["state"] if end else "failed"
+    if end is not None:
+        return end["state"]
+    if any(os.path.exists(os.path.join(here, f"policy-{s}")) for s in ("paused", "restoring")):
+        return "parked"
+    return "failed"
