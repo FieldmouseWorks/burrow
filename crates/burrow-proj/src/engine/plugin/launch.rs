@@ -46,11 +46,11 @@ pub(super) const VM_EXPOSED_CAPABILITIES: &[Capability] = &[
 ];
 
 /// Maximum wall-clock timeout for a host `describe` call.
-const DESCRIBE_TIMEOUT_SECS: &str = "30s";
-/// Maximum wall-clock timeout for a sandboxed `describe` call (allows a stopped
-/// microVM to boot over `agent sh` up to `burrow_agent::ssh::BOOT`, 900s, plus
-/// `DESCRIBE_TIMEOUT_SECS`, 30s).
-const SANDBOX_DESCRIBE_TIMEOUT_SECS: &str = "930s";
+pub(super) const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum wall-clock timeout for a sandboxed `describe` call: allows a
+/// stopped microVM to boot over `agent sh` up to [`burrow_agent::ssh::BOOT`]
+/// plus [`DESCRIBE_TIMEOUT`] for `describe` itself.
+const SANDBOX_DESCRIBE_TIMEOUT: Duration = burrow_agent::ssh::BOOT.saturating_add(DESCRIBE_TIMEOUT);
 
 /// Why [`super::spawn`] started nothing.
 #[derive(Debug)]
@@ -252,11 +252,12 @@ pub(super) fn run_describe(
 fn describe_command(cfg: &Config, plugin_path: &Path, agent: Option<&str>) -> Command {
     let mut cmd = Command::new(&cfg.tools.timeout);
     let timeout = if agent.is_some() {
-        SANDBOX_DESCRIBE_TIMEOUT_SECS
+        SANDBOX_DESCRIBE_TIMEOUT
     } else {
-        DESCRIBE_TIMEOUT_SECS
+        DESCRIBE_TIMEOUT
     };
-    cmd.args(["-k", "10s", timeout]);
+    let timeout_arg = format!("{}s", timeout.as_secs());
+    cmd.args(["-k", "10s", &timeout_arg]);
     if let Some(agent) = agent {
         cmd.args(["agent", "sh", agent]);
     } else {

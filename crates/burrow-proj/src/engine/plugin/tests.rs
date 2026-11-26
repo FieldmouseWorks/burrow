@@ -632,8 +632,8 @@ cat {turn}
 }
 
 /// A sandboxed `describe` may have to boot a stopped microVM over `agent sh`
-/// (up to `burrow_agent::ssh::BOOT`, 900s), so its timeout must cover the
-/// full boot window plus `describe` itself, not fail at a shorter cap.
+/// (up to [`burrow_agent::ssh::BOOT`]), so its timeout must cover the full
+/// boot window plus [`launch::DESCRIBE_TIMEOUT`], not fail at a shorter cap.
 #[test]
 fn sandboxed_describe_allows_full_sandbox_boot_time() {
     let tmp = TempDir::new().unwrap();
@@ -724,9 +724,14 @@ fn sandboxed_describe_allows_full_sandbox_boot_time() {
         .unwrap_or(words[2])
         .parse()
         .expect("numeric timeout seconds");
+    let expected = burrow_agent::ssh::BOOT
+        .saturating_add(launch::DESCRIBE_TIMEOUT)
+        .as_secs();
     assert!(
-        secs >= 930,
-        "sandboxed describe timeout {secs}s must cover burrow-agent BOOT (900s) + describe (30s): {describe_line}"
+        secs >= expected,
+        "sandboxed describe timeout {secs}s must cover burrow_agent::ssh::BOOT ({}s) + DESCRIBE_TIMEOUT ({}s): {describe_line}",
+        burrow_agent::ssh::BOOT.as_secs(),
+        launch::DESCRIBE_TIMEOUT.as_secs(),
     );
 }
 

@@ -871,6 +871,7 @@ name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
  "boon",
+ "burrow-agent",
  "burrow-events",
  "burrow-github",
  "burrow-grants",
