@@ -69,12 +69,25 @@ impl Account for ClaudeCode {
 }
 
 /// The weekly meter from CLAUDE's `get_usage`, run in DIR, only if it can be
-/// shown to be fresh (read_fresh).
+/// shown to be fresh (read_fresh). Runs with a private debug log so a failure
+/// names what its usage endpoint answered.
 pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
-    read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, TIMEOUT, None)
+    let logs = tempfile::Builder::new()
+        .prefix("debug-")
+        .tempdir_in(dir)
+        .map_err(|e| format!("a folder for Claude Code's debug log: {e}"))?;
+    let log = logs.path().join("claude.log");
+    read_fresh(&mut copied_at, &mut crate::now, &mut |on_answer| {
+        ask_usage(claude, dir, TIMEOUT, Some(&log), EXIT_GRACE, on_answer)
     })
-    .map_err(Unread::said)
+    .map_err(|e| {
+        let failed = e.said();
+        let text = String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned();
+        match endpoint_failure(&text) {
+            Some(why) => format!("{failed} (its usage endpoint: {why})"),
+            None => failed,
+        }
+    })
 }
 
 /// How long check_login may take in all: a copy of the meter waited out
@@ -87,9 +100,19 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(140);
 const ASK_LEAST: Duration = Duration::from_secs(10);
 /// The most Claude Code is left up after an answer its endpoint didn't give,
 /// for its debug log to say why: 2.1.330 appends that behind its answer, so
-/// killed on it, the line is lost. An answer from the endpoint gets none, as
-/// Claude Code would then write its copy of it (read_fresh).
+/// killed on it, the line is lost.
 const LOGGED: Duration = Duration::from_secs(3);
+/// How long `ask_usage` waits for Claude Code to exit cleanly on its closed
+/// stdin after answering, before killing it: an in-flight OAuth refresh
+/// finishes writing `.credentials.json` instead of dying mid-rotation.
+const EXIT_GRACE: Duration = Duration::from_secs(10);
+
+/// A live reading from `check_login`, and when it was asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checked {
+    pub requested_at: f64,
+    pub reading: Reading,
+}
 
 /// Why check_login didn't show the login working.
 #[derive(Debug, PartialEq)]
@@ -106,8 +129,9 @@ pub enum Unshown {
 /// login, so only a fresh answer from its endpoint shows it, and a copy's
 /// recency shows nothing about the login now (login_within). A reading that
 /// fails on the endpoint's rate limit alone doesn't fail the login
-/// (login_shown): Claude Code's debug log says which it was.
-pub fn check_login(claude: &Path, dir: &Path) -> Result<(), Unshown> {
+/// (login_shown): Claude Code's debug log says which it was. Returns the
+/// live reading when the endpoint answered, or None on a rate limit.
+pub fn check_login(claude: &Path, dir: &Path) -> Result<Option<Checked>, Unshown> {
     let start = Instant::now();
     // Its debug log, in a private folder of its own, removed on drop.
     let logs = tempfile::Builder::new()
@@ -121,10 +145,17 @@ pub fn check_login(claude: &Path, dir: &Path) -> Result<(), Unshown> {
         &mut crate::now,
         &mut || start.elapsed(),
         &mut thread::sleep,
-        &mut |left| {
+        &mut |left, on_answer| {
             // Each asking's log on its own: an earlier one's says nothing.
             let _ = std::fs::remove_file(&log);
-            ask_usage(claude, dir, left, Some(&log))
+            ask_usage(
+                claude,
+                dir,
+                left,
+                Some(&log),
+                EXIT_GRACE.min(left),
+                on_answer,
+            )
         },
         &mut || String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned(),
     )
@@ -140,15 +171,18 @@ pub fn check_login(claude: &Path, dir: &Path) -> Result<(), Unshown> {
 /// ASK_LEAST to ask with. A copy dated ahead of this clock proves nothing and
 /// is not waited out: the reading refuses it. A reading that failed is
 /// judged by login_shown.
+/// Callback invoked once `control_response` arrives, before waiting for exit.
+type OnAnswer<'a> = &'a mut dyn FnMut();
+
 fn login_within(
     budget: Duration,
     copied: &mut dyn FnMut() -> Result<Option<f64>, String>,
     clock: &mut dyn FnMut() -> f64,
     elapsed: &mut dyn FnMut() -> Duration,
     sleep: &mut dyn FnMut(Duration),
-    ask: &mut dyn FnMut(Duration) -> Result<Value, String>,
+    ask: &mut dyn FnMut(Duration, OnAnswer<'_>) -> Result<Value, String>,
     log: &mut dyn FnMut() -> String,
-) -> Result<(), Unshown> {
+) -> Result<Option<Checked>, Unshown> {
     loop {
         let seen = copied().map_err(Unshown::Unknown)?;
         if let Some(at) = seen {
@@ -172,17 +206,23 @@ fn login_within(
                 budget.as_secs()
             )));
         }
+        let requested_at = clock();
         let mut answer = Value::Null;
-        let failed = match read_fresh(copied, clock, &mut || {
-            answer = ask(left)?;
+        let failed = match read_fresh(copied, clock, &mut |on_answer| {
+            answer = ask(left, on_answer)?;
             Ok(answer.clone())
         }) {
-            Ok(_) => return Ok(()),
+            Ok(reading) => {
+                return Ok(Some(Checked {
+                    requested_at,
+                    reading,
+                }));
+            }
             Err(e) => e,
         };
         let copy = matches!(failed, Unread::Copy(_));
         match login_shown(Err(failed.said()), &answer, &log()) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(None),
             // Another session's copy, written since it was looked at, may be
             // what answered: wait that one out.
             Err(_) if copy && copied().map_err(Unshown::Unknown)? != seen => continue,
@@ -291,12 +331,16 @@ fn usage_statuses(log: &str) -> Vec<u16> {
 
 /// Claude Code's answer to `get_usage`, without the scan of local
 /// transcripts the meter has no use for. It makes no model call. With a
-/// LOG, Claude Code writes its debug log there.
+/// LOG, Claude Code writes its debug log there. Invokes ON_ANSWER as soon as
+/// `control_response` arrives, then lets Claude Code exit cleanly on its
+/// closed stdin for up to EXIT_GRACE before killing it.
 fn ask_usage(
     claude: &Path,
     dir: &Path,
     timeout: Duration,
     log: Option<&Path>,
+    exit_grace: Duration,
+    on_answer: OnAnswer<'_>,
 ) -> Result<Value, String> {
     {
         let mut command = Command::new(claude);
@@ -330,13 +374,15 @@ fn ask_usage(
         let (tx, rx) = mpsc::channel();
         if let Some(stdout) = child.stdout.take() {
             thread::spawn(move || {
+                let mut answered = false;
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Ok(v) = serde_json::from_str::<Value>(&line)
+                    if !answered
+                        && let Ok(v) = serde_json::from_str::<Value>(&line)
                         && v["type"] == "control_response"
                         && v["response"]["request_id"] == "usage"
                     {
                         let _ = tx.send(v["response"].clone());
-                        return;
+                        answered = true;
                     }
                 }
             });
@@ -352,6 +398,9 @@ fn ask_usage(
                 }
             })
         });
+        if answer.is_ok() {
+            on_answer();
+        }
         if let Some(log) = log
             && answer.as_ref().is_ok_and(|a| unfetched(&a["response"]))
         {
@@ -362,11 +411,25 @@ fn ask_usage(
                 ))
                 .is_none()
             {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
                 thread::sleep(LOG_POLL);
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        if answer.is_ok() {
+            let exiting = Instant::now();
+            while exiting.elapsed() < exit_grace {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                thread::sleep(LOG_POLL);
+            }
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let answer = answer?;
         if answer["subtype"] != "success" {
             return Err(format!(
@@ -568,19 +631,20 @@ impl Unread {
 /// picks its answer after all of them, so a copy already past SNAPSHOT by this
 /// clock can't be what answers, however long the asking takes. One dated ahead
 /// of this clock could be, once the clock catches up, so it counts as under
-/// SNAPSHOT. A copy that
-/// changed while it was asked may be what answered, and there's no telling, so
-/// that's no reading either. (A read of its own doesn't change it: it's killed
-/// on its answer, before it writes the copy.)
+/// SNAPSHOT. A copy that changed while it was asked may be what answered, and
+/// there's no telling, so that's no reading either. The copy is checked again
+/// as soon as `control_response` arrives, before Claude Code finishes exiting,
+/// so its own persisted copy on shutdown doesn't invalidate a fresh reading.
 fn read_fresh(
     copied: &mut dyn FnMut() -> Result<Option<f64>, String>,
     clock: &mut dyn FnMut() -> f64,
-    ask: &mut dyn FnMut() -> Result<Value, String>,
+    ask: &mut dyn FnMut(OnAnswer<'_>) -> Result<Value, String>,
 ) -> Result<Reading, Unread> {
     let before = copied().map_err(Unread::Not)?;
     let asked = clock();
-    let answer = ask().map_err(Unread::Not)?;
-    let after = copied().map_err(Unread::Not)?;
+    let mut after = None;
+    let answer = ask(&mut || after = Some(copied())).map_err(Unread::Not)?;
+    let after = after.unwrap_or_else(copied).map_err(Unread::Not)?;
     if after != before {
         return Err(Unread::Copy(
             "Claude Code's cached meter changed while get_usage was answering, so its answer may be that copy"

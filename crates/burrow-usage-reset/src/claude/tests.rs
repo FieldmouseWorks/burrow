@@ -382,7 +382,7 @@ fn asked_through(copies: Vec<Result<Option<f64>, String>>, start: f64) -> Result
             clock += 60.0;
             clock - 60.0
         },
-        &mut || {
+        &mut |_| {
             asked = true;
             Ok(fetched(95.0))
         },
@@ -427,7 +427,7 @@ fn login_through(
     first: Option<f64>,
     rewrites: &[f64],
     answer: Value,
-) -> (Result<(), Unshown>, Vec<f64>) {
+) -> (Result<Option<Checked>, Unshown>, Vec<f64>) {
     login_logged(first, rewrites, answer, "")
 }
 
@@ -437,7 +437,7 @@ fn login_logged(
     rewrites: &[f64],
     answer: Value,
     log: &str,
-) -> (Result<(), Unshown>, Vec<f64>) {
+) -> (Result<Option<Checked>, Unshown>, Vec<f64>) {
     const ASKING: f64 = 2.0;
     let t = std::cell::Cell::new(0.0);
     let copy = || {
@@ -455,7 +455,7 @@ fn login_logged(
         &mut || NOW + t.get(),
         &mut || Duration::from_secs_f64(t.get()),
         &mut |wait| t.set(t.get() + wait.as_secs_f64()),
-        &mut |left| {
+        &mut |left, _| {
             assert!(left >= ASK_LEAST, "{left:?}");
             asked.push(t.get());
             t.set(t.get() + ASKING);
@@ -469,16 +469,25 @@ fn login_logged(
 
 #[test]
 fn another_sessions_copy_is_waited_out_in_turn() {
+    let ok_at = |at: f64| {
+        Ok(Some(Checked {
+            requested_at: NOW + at,
+            reading: usage(&fetched(5.0), None, NOW).unwrap(),
+        }))
+    };
     // No copy, or one too old to answer: asked at once.
-    assert_eq!(login_through(None, &[], fetched(5.0)), (Ok(()), vec![0.0]));
+    assert_eq!(
+        login_through(None, &[], fetched(5.0)),
+        (ok_at(0.0), vec![0.0])
+    );
     assert_eq!(
         login_through(Some(NOW - 90.0), &[], fetched(5.0)),
-        (Ok(()), vec![0.0])
+        (ok_at(0.0), vec![0.0])
     );
     // A copy 30s old: waited out, then asked.
     assert_eq!(
         login_through(Some(NOW - 30.0), &[], fetched(5.0)),
-        (Ok(()), vec![31.0])
+        (ok_at(31.0), vec![31.0])
     );
     // Another session writes a copy 20s into that wait. Asked once the first
     // copy is out, Claude Code would answer from the new one (as the check
@@ -486,7 +495,7 @@ fn another_sessions_copy_is_waited_out_in_turn() {
     let e = read_fresh(
         &mut || Ok(Some(NOW + 20.0)),
         &mut || NOW + 31.0,
-        &mut || Ok(fetched(5.0)),
+        &mut |_| Ok(fetched(5.0)),
     )
     .unwrap_err();
     assert!(
@@ -495,12 +504,12 @@ fn another_sessions_copy_is_waited_out_in_turn() {
     );
     assert_eq!(
         login_through(Some(NOW - 30.0), &[20.0], fetched(5.0)),
-        (Ok(()), vec![81.0])
+        (ok_at(81.0), vec![81.0])
     );
     // Or writes one while it's being asked: the answer may be that copy.
     assert_eq!(
         login_through(Some(NOW - 30.0), &[32.0], fetched(5.0)),
-        (Ok(()), vec![31.0, 93.0])
+        (ok_at(93.0), vec![31.0, 93.0])
     );
     // A login that fails says so, even when a copy raced its first asking.
     let none =
@@ -510,7 +519,7 @@ fn another_sessions_copy_is_waited_out_in_turn() {
     assert_eq!(asked, [0.0, 62.0]);
     // A rate-limited endpoint answering from a copy that changed while it
     // was asked shows the login working, as on its own (login_shown): not
-    // waited out again.
+    // waited out again, and returns no live reading to record.
     assert_eq!(
         login_logged(
             Some(NOW - 30.0),
@@ -518,7 +527,7 @@ fn another_sessions_copy_is_waited_out_in_turn() {
             from_the_copy(10.0),
             &refused_with(429)
         ),
-        (Ok(()), vec![31.0])
+        (Ok(None), vec![31.0])
     );
     let (e, asked) = login_logged(None, &[1.0], from_the_copy(10.0), &refused_with(401));
     assert!(e.is_err());
@@ -680,4 +689,80 @@ fn keys_of(notices: &[Notice]) -> Vec<&'static str> {
             Notice::Close(..) => None,
         })
         .collect()
+}
+
+#[test]
+fn ask_usage_lets_claude_exit_cleanly_before_killing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("finished");
+    let script = dir.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nread -r _req\nprintf '%s\\n' '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{{\"rate_limits_available\":true,\"rate_limits\":{{\"seven_day\":{{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"}},\"five_hour\":null,\"limits\":[]}}}}}}}}'\nsleep 0.2\n: > '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut answered = false;
+    let answer = ask_usage(
+        &script,
+        dir.path(),
+        Duration::from_secs(5),
+        None,
+        Duration::from_secs(2),
+        &mut || {
+            answered = true;
+            // Sampled on control_response, before the child finishes its shutdown write.
+            assert!(!marker.exists(), "on_answer ran after child exited");
+        },
+    )
+    .unwrap();
+    assert!(answered);
+    assert_eq!(answer["rate_limits_available"], true);
+    assert!(
+        marker.exists(),
+        "ask_usage killed Claude Code before it could finish exiting cleanly"
+    );
+
+    // A hung child that never exits on EOF is still killed after exit_grace.
+    let hung = dir.path().join("claude-hung");
+    std::fs::write(
+        &hung,
+        "#!/bin/sh\nread -r _req\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true}}}'\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let t0 = Instant::now();
+    let answer = ask_usage(
+        &hung,
+        dir.path(),
+        Duration::from_secs(5),
+        None,
+        Duration::from_millis(150),
+        &mut || {},
+    )
+    .unwrap();
+    assert_eq!(answer["rate_limits_available"], true);
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn read_usage_reports_the_endpoints_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nlog=/dev/null\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in --debug-file) log=$2; shift ;; esac\n  shift\ndone\nread -r _req\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true,\"rate_limits\":{\"seven_day\":{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"},\"five_hour\":null}}}}'\necho '[ERROR] Failed to load usage data: Request failed with status code 429' >>\"$log\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = read_usage(&script, dir.path()).unwrap_err();
+    assert!(
+        err.contains("status code 429"),
+        "read_usage dropped the endpoint failure: {err}"
+    );
 }

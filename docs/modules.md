@@ -382,7 +382,10 @@ see [README.md](../README.md).
   It books its own next look, sooner the faster the week is going, and never
   more than 15 minutes on: no timer. Each pass also keeps Claude's meters,
   its five-hour session and week, for proj's usage holds. Each fresh reading replaces
-  `meters/ENGINE.json` and appends to `meters/log` in its state dir.
+  `meters/ENGINE.json` and appends to `meters/log` in its state dir;
+  `burrow-claude-login` records its live readings there too, and `usage-reset`
+  reuses a newer fresh one when the week still has room instead of asking the
+  rate-limited endpoint twice.
 
 ## Review and landing
 

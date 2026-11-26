@@ -723,9 +723,11 @@ in
         claude-login = let
           probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
           claude = lib.getExe' config.burrow.claude.package "claude";
+          meters = lib.optionalString (config.burrow.usageReset.enable or false)
+            " --meters ${lib.escapeShellArg "${config.burrow.stateDir}/usage-reset/meters"}";
         in ''
-          if [ "$(id -un)" = ${user} ]; then ${probe} ${claude} ${user}
-          else runuser -u ${user} -- env HOME=${account.home} ${probe} ${claude} ${user}; fi
+          if [ "$(id -un)" = ${user} ]; then ${probe} ${claude} ${user}${meters}
+          else runuser -u ${user} -- env HOME=${account.home} ${probe} ${claude} ${user}${meters}; fi
         '';
       });
 

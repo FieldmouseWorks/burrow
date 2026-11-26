@@ -7,6 +7,8 @@ struct Fake {
     reads: Vec<Result<Reading, String>>,
     resets: Vec<Reset>,
     asked: usize,
+    /// What another reader already recorded in the shared meters file.
+    recorded: Option<(f64, Reading)>,
     /// What another reader last fetched, and when, for each read that fails.
     copies: Vec<Option<(f64, Reading)>>,
 }
@@ -14,6 +16,9 @@ struct Fake {
 impl Account for Fake {
     fn read(&mut self) -> Result<Reading, String> {
         self.reads.remove(0)
+    }
+    fn recorded(&mut self) -> Option<(f64, Reading)> {
+        self.recorded.clone()
     }
     fn copy(&mut self) -> Option<(f64, Reading)> {
         (!self.copies.is_empty())
@@ -37,6 +42,7 @@ fn fake(reads: Vec<Result<Reading, String>>, resets: Vec<Reset>) -> Fake {
         reads,
         resets,
         asked: 0,
+        recorded: None,
         copies: vec![],
     }
 }
@@ -640,4 +646,55 @@ fn a_copy_counts_only_while_it_says_more_than_the_passes_know() {
     // No copy at all: a failed read, as before.
     let o = refused(read_at(10_000.0, 56.0), None, 10_300.0);
     assert_eq!(o.state.failed_reads, 1);
+}
+
+#[test]
+fn a_fresh_recorded_meter_is_reused_without_asking_the_endpoint() {
+    let mut state = read_at(10_000.0, 1.0);
+    state.failed_reads = TRIES;
+    // Another reader (e.g. claude-login) wrote a fresh reading 15s ago:
+    // reused without calling read(), closing usage-reset-blind, and not
+    // capped to RETRY because meters/claude.json is already fresh.
+    let mut a = fake(vec![], vec![]);
+    a.recorded = Some((10_305.0, at(1.0)));
+    let o = run(&mut a, state, 10_320.0);
+    assert_eq!(o.state.failed_reads, 0);
+    assert_eq!(o.state.last, Some((10_305.0, 1.0)));
+    assert_eq!(
+        keys(&o.notices),
+        ["close usage-reset-blind", "close usage-reset-failed"]
+    );
+    assert!(o.wake > 10_320.0 + RETRY, "wake={}", o.wake);
+
+    // Past the reset line, unsettled, older than last, or older than METERED:
+    // still asks live.
+    for (st, rec, now) in [
+        (read_at(10_000.0, 97.0), (10_050.0, at(99.0)), 10_060.0),
+        (
+            State {
+                unsettled: Some(Unsettled {
+                    used: 99.0,
+                    at: "then".to_owned(),
+                    week: WEEK.to_owned(),
+                    ends: ENDS,
+                    said: None,
+                }),
+                pressed: true,
+                ..read_at(10_000.0, 97.0)
+            },
+            (10_050.0, at(3.0)),
+            10_060.0,
+        ),
+        (read_at(10_000.0, 1.0), (10_000.0, at(1.0)), 10_060.0),
+        (
+            read_at(10_000.0, 1.0),
+            (10_100.0, at(1.0)),
+            10_100.0 + crate::meter::METERED,
+        ),
+    ] {
+        let mut a = fake(vec![Err("asked live".to_owned())], vec![]);
+        a.recorded = Some(rec);
+        let o = run(&mut a, st, now);
+        assert_eq!(o.state.failed_reads, 1, "should have asked live at {now}");
+    }
 }

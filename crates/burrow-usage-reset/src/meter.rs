@@ -144,6 +144,20 @@ impl Snapshot {
         self.credits || self.windows.values().all(|w| w.used < 100.0)
     }
 
+    /// As a weekly reading for the usage watcher, when `seven_day` is there
+    /// and its reset time formats as a UTC timestamp.
+    pub fn reading(&self) -> Option<Reading> {
+        let week_window = self.windows.get("seven_day")?;
+        let ends = week_window.resets_at;
+        let ts = jiff::Timestamp::from_second(ends.round() as i64).ok()?;
+        Some(Reading {
+            used: week_window.used,
+            week: ts.to_string().chars().take(16).collect(),
+            ends,
+            session: self.windows.get("five_hour").cloned(),
+        })
+    }
+
     /// Keep it as ENGINE's reading in DIR, and add it to the log.
     pub fn record(&self, dir: &Path, engine: &str) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -193,17 +207,26 @@ pub fn claude(reading: &Reading, at: f64) -> Snapshot {
 pub struct Meter<A> {
     pub inner: A,
     pub dir: PathBuf,
+    /// When `read()` last recorded `claude.json` in this pass.
+    pub recorded_at: Option<f64>,
 }
 impl<A: Account> Account for Meter<A> {
     fn read(&mut self) -> Result<Reading, String> {
         let started = crate::now();
         let reading = self.inner.read()?;
-        let mut snapshot = claude(&reading, crate::now());
+        let at = crate::now();
+        let mut snapshot = claude(&reading, at);
         snapshot.requested_at = Some(started);
         if let Err(e) = snapshot.record(&self.dir, "claude") {
             eprintln!("couldn't record Claude's meter: {e}");
+        } else {
+            self.recorded_at = Some(at);
         }
         Ok(reading)
+    }
+    fn recorded(&mut self) -> Option<(f64, Reading)> {
+        let snapshot = Snapshot::read(&self.dir, "claude", crate::now())?;
+        Some((snapshot.read_at, snapshot.reading()?))
     }
     /// A copy isn't kept: nothing says when it was asked for, so it can't
     /// show proj a refusal over, and it would take the place of a reading
@@ -338,12 +361,45 @@ mod tests {
         let mut metered = Meter {
             inner: Delayed { observed: 0.0 },
             dir: dir.path().into(),
+            recorded_at: None,
         };
         metered.read().unwrap();
         let snapshot = Snapshot::read(dir.path(), "claude", crate::now()).unwrap();
+        assert_eq!(metered.recorded_at, Some(snapshot.read_at));
         assert!(
             snapshot.requested_at.unwrap() <= metered.inner.observed,
             "a delayed response must not postdate an intervening refusal"
         );
+    }
+
+    #[test]
+    fn recorded_reads_back_a_fresh_shared_meter() {
+        struct Uncalled;
+        impl Account for Uncalled {
+            fn read(&mut self) -> Result<Reading, String> {
+                panic!("should not read live")
+            }
+            fn copy(&mut self) -> Option<(f64, Reading)> {
+                None
+            }
+            fn reset(&mut self, _: &mut dyn FnMut() -> Result<(), String>) -> Reset {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let reading = Reading {
+            used: 12.5,
+            week: "2026-11-04T19:00".into(),
+            ends: 1_793_818_800.0,
+            session: Some(window(25.0)),
+        };
+        let at = crate::now() - 10.0;
+        claude(&reading, at).record(dir.path(), "claude").unwrap();
+        let mut metered = Meter {
+            inner: Uncalled,
+            dir: dir.path().into(),
+            recorded_at: None,
+        };
+        assert_eq!(metered.recorded(), Some((at, reading)));
     }
 }
