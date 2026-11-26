@@ -146,8 +146,14 @@ def live(st):
 
 
 def nix(*args, timeout=60):
-    """nix's stdout (for fast store queries; evals run in their own unit)."""
-    p = subprocess.run([f"{CFG['nix']}/{args[0]}", *args[1:]], capture_output=True, text=True, timeout=timeout)
+    """nix's stdout (for fast store queries; evals run in their own unit).
+    Inside a pass (REMOTE_DEADLINE set), runs through common.remote so a
+    stalled store can't carry a step past systemd's TimeoutStartSec."""
+    cmd = [f"{CFG['nix']}/{args[0]}", *args[1:]]
+    if C.REMOTE_DEADLINE is not None:
+        p = C.remote(cmd, capture_output=True, text=True, timeout=timeout)
+    else:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
     return p.stdout
@@ -440,6 +446,8 @@ def unbuilt(paths):
         return set()
     try:
         return set(nix("nix-store", "--check-validity", "--print-invalid", *sorted(paths)).split())
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"can't tell which store paths are built: {e}")
         return set(paths)
@@ -523,6 +531,8 @@ def build(repo, pr, checks, st):
         # Each check's outputs, while its derivation is surely in the store
         # (just worked out): the build's verdicts are read from them alone.
         outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what the build of {', '.join(checks)} makes: {e}")
         return None
@@ -580,6 +590,8 @@ def prebuild(repo, pr, checks, st, stage):
         return building(repo, rec) if rec.get("job") and running(rec["job"]) else None
     try:
         ins, outs = inputs(drvs)
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what {', '.join(checks)} is built from: {e}")
         st["proofInputs"] = {"for": key, "job": None}

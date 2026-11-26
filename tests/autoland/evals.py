@@ -345,6 +345,28 @@ st7_upd = line(7, 820)
 assert "brought up to date with main, which has remi-proof built here already" in st7_upd, st7_upd
 del info["defaultBranchRef"]["target"]
 
+# 6. Remaining synchronous nix-store queries clamp to the pass deadline via
+# common.remote and propagate C.Unavailable instead of burning 60s past it.
+with C.pass_deadline(0):
+    try:
+        P.unbuilt([X])
+    except C.Unavailable:
+        pass
+    else:
+        raise AssertionError("P.unbuilt ignored expired pass_deadline")
+seen_timeouts = []
+real_run = C.subprocess.run
+
+
+def capture_timeout(cmd, *args, **kwargs):
+    seen_timeouts.append(kwargs.get("timeout"))
+    return real_run(cmd, *args, **kwargs)
+
+
+with C.pass_deadline(5), patch.object(C.subprocess, "run", side_effect=capture_timeout):
+    P.unbuilt([X])
+assert seen_timeouts and seen_timeouts[0] <= 5, seen_timeouts
+
 # Restore harness globals.
 del S.CFG["repos"]["sam/r"]
 os.environ["PATH"], S.CFG["nix"], P.build = kept_path, kept_nix, kept_build
