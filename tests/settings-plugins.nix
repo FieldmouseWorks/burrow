@@ -102,6 +102,10 @@ pkgs.testers.runNixOSTest {
         inherit gh;
       };
     };
+    # The test drives the settings door directly via systemctl start, more
+    # often than systemd's start limit allows, and without the boot timer.
+    systemd.services.burrow-settings-door.startLimitIntervalSec = 0;
+    systemd.timers.burrow-settings-door.wantedBy = lib.mkForce [ ];
     environment.systemPackages = [
       pkgs.jq
       pkgs.check-jsonschema
@@ -125,7 +129,6 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("user@1001.service")
     machine.wait_for_unit("proj-settings-migrate.service")
-    machine.succeed("systemctl stop burrow-settings-door.timer")
     machine.succeed("su - dev -c 'mkdir -p /data/dev/src/demo && cd /data/dev/src/demo && git init -q -b main'")
 
     def sha256(path):
