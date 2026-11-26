@@ -657,25 +657,29 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
         "{quota_out:?}"
     );
 
-    // 5. Empty response with `denied_actions` surfaces the denied action in InvalidOutput.
+    // 5. Empty response with `denied_actions` surfaces the denied action in InvalidOutput,
+    //    even when `--json-schema` is active (such as `burrow-judge` looks).
     let denied = concat!(
         r#"{"event":"result","result":{"conversation_id":"conv-deny-1","status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#,
         "\n"
     );
-    let denied_out = normalize_output(
-        OutputFormat::StreamJson,
-        denied.as_bytes(),
-        b"jetski: command permission auto-denied\n",
-        Some(0),
-        None,
-        None,
-        &[],
-    );
-    assert!(
-        matches!(
-            denied_out.error,
-            Some(RunError::InvalidOutput(ref msg)) if msg.contains("denied actions: command")
-        ),
-        "{denied_out:?}"
-    );
+    for active_schema in [None, Some(&schema)] {
+        let denied_out = normalize_output(
+            OutputFormat::StreamJson,
+            denied.as_bytes(),
+            b"jetski: command permission auto-denied\n",
+            Some(0),
+            None,
+            active_schema,
+            &[],
+        );
+        assert!(
+            matches!(
+                denied_out.error,
+                Some(RunError::InvalidOutput(ref msg)) if msg.contains("denied actions: command")
+            ),
+            "schema={:?}: {denied_out:?}",
+            active_schema.is_some()
+        );
+    }
 }
