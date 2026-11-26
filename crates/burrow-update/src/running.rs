@@ -56,6 +56,14 @@ pub enum Already {
     Current,
 }
 
+/// How a `nix build` went: its store path, a flake/build failure, or a
+/// `nix-daemon` disconnect that says nothing about the tree.
+pub enum Build {
+    Ok(String),
+    Failed,
+    DaemonLost,
+}
+
 /// HEAD's system, built: its store path, or nothing when it doesn't build.
 /// What nix says goes to logs/build.log, in place of the last build's, each
 /// build's own output as it comes: burrow-dispatch takes a write there for
@@ -68,21 +76,57 @@ pub enum Already {
 /// starts when the disk runs low, can take it away in between (it did on
 /// 2026-11-23, and the switch found no system there).
 pub fn build(cfg: &Config) -> Option<String> {
-    let log = File::create(cfg.state.join("logs/build.log"))
-        .map_err(|e| eprintln!("{}: logs/build.log: {e}", cfg.update))
-        .ok()?;
+    match build_checked(cfg) {
+        Build::Ok(path) => Some(path),
+        Build::Failed | Build::DaemonLost => None,
+    }
+}
+
+/// [`build`], distinguishing a `nix-daemon` disconnect from a flake failure.
+pub fn build_checked(cfg: &Config) -> Build {
+    let log_path = cfg.state.join("logs/build.log");
+    let Ok(log) =
+        File::create(&log_path).map_err(|e| eprintln!("{}: logs/build.log: {e}", cfg.update))
+    else {
+        return Build::Failed;
+    };
     let toplevel = format!(
         "{}#nixosConfigurations.{}.config.system.build.toplevel",
         cfg.work.display(),
         cfg.configuration
     );
-    last_line(
+    match last_line(
         nix(cfg, log)
             .args(["build", "-L", "--print-out-paths", "--out-link"])
             .arg(built(cfg))
             .arg(&toplevel)
             .output(),
-    )
+    ) {
+        Some(path) => Build::Ok(path),
+        None if daemon_lost(&log_path) => Build::DaemonLost,
+        None => Build::Failed,
+    }
+}
+
+fn daemon_lost(log: &std::path::Path) -> bool {
+    let Ok(text) = fs::read_to_string(log) else {
+        return false;
+    };
+    text.lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(5)
+        .any(|l| {
+            l.starts_with("error: ")
+                && [
+                    "Connection reset by peer",
+                    "Broken pipe",
+                    "unexpected end-of-file",
+                    "cannot connect to socket",
+                ]
+                .iter()
+                .any(|p| l.contains(p))
+        })
 }
 
 /// The root that holds the last system a run built: beside the run's

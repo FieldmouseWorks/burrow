@@ -154,6 +154,11 @@ else
   stamp="\"$commit\""
 fi
 git -C "$dir" rev-parse "$commit^{tree}" >>"$HOME/built"
+if [ -f "$HOME/build-disconnects" ]; then
+  rm -f "$HOME/build-disconnects"
+  echo "error: read of 32768 bytes: Connection reset by peer" >&2
+  exit 1
+fi
 ! breaks build-breaks "$dir" "$commit" || { echo "error: build failed" >&2; exit 1; }
 sys=${HOME%/home}/store/$(printf '%s\n' "$(git -C "$dir" ls-tree "$commit" -- flake.lock system.nix claude-code.json)" "$stamp" | sha256sum | cut -c1-32)-nixos-system
 if [ ! -d "$sys" ]; then

@@ -940,3 +940,26 @@ fn a_fallback_input_that_cant_be_committed_is_never_deployed() {
     assert!(!switched(&m));
     assert_eq!(m.recorded("deployed-main"), None);
 }
+
+#[test]
+fn a_daemon_disconnect_does_not_hold_back_an_input_or_poison_failed_trees() {
+    let m = machine();
+    m.upstream("burrow", &sha('e'));
+    fs::write(m.home("build-disconnects"), "").unwrap();
+    assert_eq!(go(&m), 1);
+    assert_eq!(
+        said(&m),
+        ("failed".into(), "nix-daemon disconnected".into())
+    );
+    assert!(!m.cfg.state.join("failed-trees").exists());
+    assert!(!m.cfg.state.join("jobs/build-inputs").exists());
+    // Next run, with nix-daemon back up, deploys burrow without holding it back.
+    assert_eq!(go(&m), 0);
+    assert_eq!(
+        said(&m),
+        (
+            "ok".into(),
+            "live and confirmed: burrow bbbbbbb -> eeeeeee".into()
+        )
+    );
+}
