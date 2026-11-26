@@ -37,6 +37,7 @@ pub(crate) const CALLERS: [(&str, &str); 2] = [
 ];
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn the_jobs_are_wired_as_autoland_reads_them() {
     let wf = workflow(FLAKE_CHECK);
     let inputs = &wf["on"]["workflow_call"]["inputs"];

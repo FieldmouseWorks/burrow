@@ -144,6 +144,7 @@ mod tests {
     use super::*;
     use std::fs;
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn only_transport_evidence_can_hold_and_observation_never_changes_outcomes() {
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");

@@ -91,6 +91,7 @@ fn line(h: &str, a: &str, w: &str) -> (String, String, String) {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn each_issue_goes_to_one_job_at_a_time_then_the_stuck_issue() {
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());

@@ -147,6 +147,11 @@ pub fn run(
     if ask.only.is_some() {
         return Ok(pass.failed.is_empty());
     }
+    notify_pass(&pass, whole, notify)?;
+    Ok(true)
+}
+
+fn notify_pass(pass: &Pass<'_>, whole: bool, notify: &mut dyn Notify) -> Result<(), String> {
     let mut tell = |args: &[&str]| notify.notify(args);
     if !pass.mangled.is_empty() {
         tell(&[
@@ -169,7 +174,7 @@ pub fn run(
     }
     if pass.failed.is_empty() {
         if !whole {
-            return Ok(true);
+            return Ok(());
         }
         tell(&[
             "close",
@@ -187,7 +192,7 @@ pub fn run(
             ),
         ])?;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// The time now, in seconds since the epoch, as wake files have it.

@@ -466,6 +466,7 @@ impl Sweep<'_> {
     }
 
     /// One of its Renovate PRs: what it's handed over for, if it is.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     fn pr(&mut self, pr: Pr, pass: &mut Pass) -> Result<Option<Handed>, Broke> {
         let (cfg, repo, who) = (self.cfg, self.repo, self.who);
         let n = pr.text("number");

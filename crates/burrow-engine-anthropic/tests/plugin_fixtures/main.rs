@@ -62,6 +62,7 @@ fn both_modes_pass_conarys_describe_and_conformance_check() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn claude_mode_fresh_continuation_model_effort_and_capability_grants() {
     let dir = tempfile::tempdir().unwrap();
     let workdir = dir.path().join("repo");
@@ -248,6 +249,7 @@ fn claude_mode_fresh_continuation_model_effort_and_capability_grants() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn claude_mode_refusals_failures_and_usage_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
     let workdir = dir.path().join("repo");
@@ -392,6 +394,7 @@ fn claude_mode_refusals_failures_and_usage_diagnostics() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn cancellation_kills_entire_harness_process_group_with_no_survivors() {
     let dir = tempfile::tempdir().unwrap();
     let workdir = dir.path().join("repo");

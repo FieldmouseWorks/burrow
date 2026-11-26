@@ -249,6 +249,7 @@ fn unposted(e: Error) -> Unposted {
 /// a new comment) went, so a job awaiting the PR may have been woken even
 /// when the write's answer was lost, and the description it wrote, which is
 /// the PR's now whatever came of the rest.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unposted> {
     let Some(text) = &h.answers else {
         return Ok(Posted::Nothing);

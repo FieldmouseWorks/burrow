@@ -347,6 +347,7 @@ pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
 }
 /// Recover an await after the reset, without asking the engine to repeat it.
 /// The intent survives partial API failure and process/reboot boundaries.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryError> {
     if owner_question(job).map_err(|e| crate::Fail::new(1, e))? {
         if let Some(n) = job.turns() {

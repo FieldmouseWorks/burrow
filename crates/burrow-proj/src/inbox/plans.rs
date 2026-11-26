@@ -507,6 +507,7 @@ impl Pass<'_> {
     /// Reconcile a POST whose answer was lost by its immutable receipt.
     /// Never re-POST an ambiguous creation: if it is not found, retain the
     /// task and retry reconciliation, rather than run or lose it.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn split_children(&self, repo: &str, n: &str, tasks: &[Task]) -> bool {
         let d = self.plan_dir(repo, n);
         if fs::create_dir_all(&d).is_err() {
@@ -706,6 +707,7 @@ impl Pass<'_> {
 
     /// Moves parent N's list on by one step where it can, and says what, if
     /// anything, holds it.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     fn sequence_one(&mut self, repo: &str, n: &str, d: &Path, parent: &Value) -> Hold {
         if !self.eligible(repo, parent) {
             return Hold::Yes("its parent isn't one the inbox may read".into());

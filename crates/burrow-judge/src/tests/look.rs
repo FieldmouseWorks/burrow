@@ -671,6 +671,7 @@ fn a_judgment_a_look_cant_take_is_refused_before_it_burns_a_generation() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_look_dispatches_to_a_routed_non_claude_engine_with_its_own_login_and_egress() {
     let r = rig();
     // Register a second modular engine surface (`custom`) alongside `claude`,

@@ -94,124 +94,9 @@ impl Run<'_> {
             return Err(Broke(format!("{} snapshot: failed", name(&tools.health))).into());
         }
         let claude_before = self.claude_version();
-        let (out, err) = to(&log, false)?;
-        let mut switch_cmd = Command::new(&tools.switch);
-        switch_cmd
-            .env("BURROW_CONFIRM_WITHIN", &cfg.within)
-            // Decided under the switch's own lock: one that went pending
-            // while this built is someone's, mid-change, and stays.
-            .args(["--toplevel", &self.new, "--unless-pending"]);
-        if self.leaves_old_bump() {
-            switch_cmd.arg("--allow-downgrade");
-        }
-        let switched = switch_cmd
-            .stdin(Stdio::null())
-            .stdout(out)
-            .stderr(err)
-            .status()
-            .ok();
-        let switch = name(&tools.switch);
         let what = self.what()?;
-        match switched.and_then(|s| if s.success() { Some(0) } else { s.code() }) {
-            Some(0) => {}
-            // Nothing to take back: what's pending isn't this run's.
-            Some(c) if c == i32::from(PENDING) => {
-                return Err(self.end(
-                    Outcome::Held,
-                    &format!("a {switch} went pending while it built; trying again next run"),
-                ));
-            }
-            Some(c) if c == i32::from(DOWNGRADE) => {
-                let e = self.end(
-                    Outcome::Failed,
-                    "the switch refused it as a downgrade; nothing changed",
-                );
-                self.dispatch(
-                    "switch",
-                    &format!(
-                        "{}: {switch} refused {} ({what}) as built from an older nixpkgs than the running system, so nothing went live. The output is {}. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. {}",
-                        cfg.update,
-                        self.new,
-                        log.display(),
-                        self.rules
-                    ),
-                );
-                return Err(e);
-            }
-            _ => {
-                let back = if self.back(&log) {
-                    "reverted"
-                } else {
-                    "a switch since replaced it, and stays"
-                };
-                let e = self.end(Outcome::Failed, &format!("activation failed; {back}"));
-                self.dispatch(
-                    "activation",
-                    &format!(
-                        "{}: switching to {} ({what}) failed during activation; {back}. The output is {}; journalctl has the rest. Fix it. {}",
-                        cfg.update,
-                        self.new,
-                        log.display(),
-                        self.rules
-                    ),
-                );
-                return Err(e);
-            }
-        }
-        let compared = Command::new(&tools.health)
-            .arg("compare")
-            .arg(&before)
-            .arg(SETTLE)
-            .stdin(Stdio::null())
-            .output();
-        let (healthy, said) = compared.map_or((false, String::new()), |o| {
-            let said = String::from_utf8_lossy(&o.stdout)
-                .trim_end_matches('\n')
-                .to_string();
-            (o.status.success(), said)
-        });
-        if healthy {
-            // What it didn't count against the switch (what can't pass
-            // while a check fails, such as the Remote Control servers while
-            // Claude Code isn't logged in) goes in the journal; the
-            // heartbeat tells the owner about the failing check itself.
-            for line in said.lines().skip(1) {
-                self.warn(&format!("not the switch's doing: {line}"));
-            }
-        } else {
-            let bad = said;
-            if !self.back(&log) {
-                // What it measured was partly that one's: nothing to say
-                // about its own.
-                return Err(self.replaced());
-            }
-            let e = self.end(
-                Outcome::Failed,
-                &format!("unhealthy after the switch ({bad}); reverted"),
-            );
-            self.dispatch(
-                "health",
-                &format!(
-                    "{} switched {} to {} ({what}) and these regressed: {bad}. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures {} {}) and fix it. {}",
-                    cfg.update,
-                    cfg.host,
-                    self.new,
-                    self.running.current,
-                    self.new,
-                    self.rules
-                ),
-            );
-            open(
-                cfg,
-                "health",
-                "An update broke something and was rolled back",
-                &format!(
-                    "{} switched to {what} and then: {bad}. {} went straight back to the previous system. A Claude job is on it; this closes when an update goes through.",
-                    cfg.update, cfg.host
-                ),
-            );
-            return Err(e);
-        }
+        self.run_switch(&log, &what)?;
+        self.verify_health(&before, &log, &what)?;
 
         // Claude Code itself: if it changed, it still answers. A failure
         // here is noted, not reverted: it can be Anthropic's side as easily
@@ -248,6 +133,130 @@ impl Run<'_> {
             settled(cfg, "untested", "An update passed every VM test again.");
         }
         Ok(())
+    }
+
+    fn run_switch(&mut self, log: &Path, what: &str) -> Step {
+        let cfg = self.cfg;
+        let tools = &cfg.tools;
+        let (out, err) = to(log, false)?;
+        let mut switch_cmd = Command::new(&tools.switch);
+        switch_cmd
+            .env("BURROW_CONFIRM_WITHIN", &cfg.within)
+            // Decided under the switch's own lock: one that went pending
+            // while this built is someone's, mid-change, and stays.
+            .args(["--toplevel", &self.new, "--unless-pending"]);
+        if self.leaves_old_bump() {
+            switch_cmd.arg("--allow-downgrade");
+        }
+        let switched = switch_cmd
+            .stdin(Stdio::null())
+            .stdout(out)
+            .stderr(err)
+            .status()
+            .ok();
+        let switch = name(&tools.switch);
+        match switched.and_then(|s| if s.success() { Some(0) } else { s.code() }) {
+            Some(0) => Ok(()),
+            // Nothing to take back: what's pending isn't this run's.
+            Some(c) if c == i32::from(PENDING) => Err(self.end(
+                Outcome::Held,
+                &format!("a {switch} went pending while it built; trying again next run"),
+            )),
+            Some(c) if c == i32::from(DOWNGRADE) => {
+                let e = self.end(
+                    Outcome::Failed,
+                    "the switch refused it as a downgrade; nothing changed",
+                );
+                self.dispatch(
+                    "switch",
+                    &format!(
+                        "{}: {switch} refused {} ({what}) as built from an older nixpkgs than the running system, so nothing went live. The output is {}. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. {}",
+                        cfg.update,
+                        self.new,
+                        log.display(),
+                        self.rules
+                    ),
+                );
+                Err(e)
+            }
+            _ => {
+                let back = if self.back(log) {
+                    "reverted"
+                } else {
+                    "a switch since replaced it, and stays"
+                };
+                let e = self.end(Outcome::Failed, &format!("activation failed; {back}"));
+                self.dispatch(
+                    "activation",
+                    &format!(
+                        "{}: switching to {} ({what}) failed during activation; {back}. The output is {}; journalctl has the rest. Fix it. {}",
+                        cfg.update,
+                        self.new,
+                        log.display(),
+                        self.rules
+                    ),
+                );
+                Err(e)
+            }
+        }
+    }
+
+    fn verify_health(&mut self, before: &Path, log: &Path, what: &str) -> Step {
+        let cfg = self.cfg;
+        let compared = Command::new(&cfg.tools.health)
+            .arg("compare")
+            .arg(before)
+            .arg(SETTLE)
+            .stdin(Stdio::null())
+            .output();
+        let (healthy, said) = compared.map_or((false, String::new()), |o| {
+            let said = String::from_utf8_lossy(&o.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            (o.status.success(), said)
+        });
+        if healthy {
+            // What it didn't count against the switch (what can't pass
+            // while a check fails, such as the Remote Control servers while
+            // Claude Code isn't logged in) goes in the journal; the
+            // heartbeat tells the owner about the failing check itself.
+            for line in said.lines().skip(1) {
+                self.warn(&format!("not the switch's doing: {line}"));
+            }
+            return Ok(());
+        }
+        let bad = said;
+        if !self.back(log) {
+            // What it measured was partly that one's: nothing to say
+            // about its own.
+            return Err(self.replaced());
+        }
+        let e = self.end(
+            Outcome::Failed,
+            &format!("unhealthy after the switch ({bad}); reverted"),
+        );
+        self.dispatch(
+            "health",
+            &format!(
+                "{} switched {} to {} ({what}) and these regressed: {bad}. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures {} {}) and fix it. {}",
+                cfg.update,
+                cfg.host,
+                self.new,
+                self.running.current,
+                self.new,
+                self.rules
+            ),
+        );
+        open(
+            cfg,
+            "health",
+            "An update broke something and was rolled back",
+            &format!(
+                "{} switched to {what} and then: {bad}. {} went straight back to the previous system. A Claude job is on it; this closes when an update goes through.",
+                cfg.update, cfg.host
+            ),
+        );
+        Err(e)
     }
 
     /// Its own switch taken back, saying so in its log: whatever that says,

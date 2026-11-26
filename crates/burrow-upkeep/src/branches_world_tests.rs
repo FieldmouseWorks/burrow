@@ -135,6 +135,7 @@ pub fn paged(
 }
 
 impl World {
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     pub fn request(
         &mut self,
         method: &str,

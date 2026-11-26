@@ -192,6 +192,7 @@ mod tests {
     use crate::fake;
     use serde_json::json;
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn only_host_fetched_responses_authorize_the_selected_installation() {
         let server = fake::serve(|r| {
             if !r.path.starts_with("/app/") {

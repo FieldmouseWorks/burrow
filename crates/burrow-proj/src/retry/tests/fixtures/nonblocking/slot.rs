@@ -308,6 +308,7 @@ pub fn take_engine(
 /// Wait in line for a slot, then hold it: the slot is this process's until
 /// the file returned is closed, or the process ends. With `may_hand_over`, a
 /// switch meanwhile hands the wait to the deployed proj ([`successor`]).
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 pub fn take(
     cfg: &Config,
     id: &str,

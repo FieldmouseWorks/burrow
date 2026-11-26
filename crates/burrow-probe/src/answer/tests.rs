@@ -551,6 +551,7 @@ fn why_asks_proj_as_the_user() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     use std::fs::FileTimes;
     use std::time::{Duration, UNIX_EPOCH};

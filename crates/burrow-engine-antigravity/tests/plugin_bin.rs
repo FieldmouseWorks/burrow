@@ -146,6 +146,7 @@ fi
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn conary_runner_v5_end_to_end_check_fresh_and_continue() {
     let dir = TempDir::new().unwrap();
     let fixture = write_executable(
@@ -260,6 +261,7 @@ fi
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn home_file_mode_materializes_oauth_token_strips_envs_and_classifies_login_refusal() {
     let dir = TempDir::new().unwrap();
     let fake_home = TempDir::new().unwrap();
@@ -504,6 +506,7 @@ fn a_job_gets_the_turns_instructions_and_says_its_at_work_while_the_cli_runs() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_leading_dash_prompt() {
     use burrow_engine_antigravity::{
         Invocation, Refusal, RunError, Schema, build_args, normalize_output,

@@ -339,6 +339,7 @@ fn nothing_pending(m: &Machine, system: &str) {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting() {
     let arm = |m: &Machine| {
         format!(

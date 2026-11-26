@@ -404,103 +404,7 @@ impl Config {
             actor,
             receipt,
             args,
-            |state: &mut Overlay| {
-                match words.as_slice() {
-                    [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
-                        let repo = repo.to_ascii_lowercase();
-                        if *verb == "pause" {
-                            // A pause is newer than any handoff in its repo.
-                            let prefix = format!("{repo}#");
-                            state.handoffs.retain(|pr, _| !pr.starts_with(&prefix));
-                        }
-                        state.repos.insert(repo, *verb == "allow");
-                    }
-                    ["land", target, head] if commit(head) => {
-                        let (key, repo, n) = handoff(target).ok_or("land needs OWNER/REPO#N")?;
-                        // A handoff is the steward landing a PR: never in a
-                        // repo it doesn't hold, or two would land there.
-                        if !self.record()?.holding(&repo).lands(landing::Owner::Steward) {
-                            return Err(format!(
-                                "{repo}'s landing isn't the steward's (settings show says whose): \
-                                 a handoff would have the steward land beside it"
-                            ));
-                        }
-                        let head = head.to_ascii_lowercase();
-                        state.handoffs.insert(
-                            key.clone(),
-                            Handed {
-                                pr: n,
-                                head: head.clone(),
-                                at: now(),
-                                actor: actor.into(),
-                            },
-                        );
-                        return Ok(Some(format!(
-                            "Handed {key} to the steward at {}: it lands once that head passes every check, \
-                             then the handoff ends. The rest of its repo stays as it is.",
-                            &head[..7]
-                        )));
-                    }
-                    // The steward's: the handoff is used up (its PR landed or
-                    // closed). Only the head it was given, so a newer request
-                    // for another head stays.
-                    ["spent", target, head] => {
-                        let (key, _, _) = handoff(target).ok_or("spent needs OWNER/REPO#N")?;
-                        if state
-                            .handoffs
-                            .get(&key)
-                            .is_none_or(|h| !h.head.eq_ignore_ascii_case(head))
-                        {
-                            return Ok(None);
-                        }
-                        state.handoffs.remove(&key);
-                    }
-                    ["landing", repo, owner] if burrow_github::repo_name(repo) => {
-                        let owner = landing::Owner::parse(owner)
-                            .ok_or("landing needs OWNER/REPO steward|conaryd")?;
-                        let repo = repo.to_ascii_lowercase();
-                        if owner == landing::Owner::Conaryd && !self.may_have(&repo) {
-                            return Err(format!(
-                                "conaryd has no flow configuration for {repo}: add it to burrow.landing.conaryd first"
-                            ));
-                        }
-                        if owner == landing::Owner::Steward {
-                            state.landing.remove(&repo);
-                        } else {
-                            state.landing.insert(repo.clone(), owner);
-                        }
-                        return Ok(Some(format!(
-                            "{repo}'s landing goes to the {}: the one holding it lets go of its work there first, \
-                             and neither lands meanwhile. settings show says where it stands.",
-                            if owner == landing::Owner::Conaryd {
-                                "conaryd flow"
-                            } else {
-                                "steward"
-                            }
-                        )));
-                    }
-                    ["pipeline", until] => {
-                        let t: i64 = until
-                            .parse()
-                            .map_err(|_| "pipeline needs a Unix timestamp")?;
-                        if t <= now() {
-                            return Err("pipeline deadline must be in the future".into());
-                        }
-                        state.pipeline_until = Some(t);
-                    }
-                    ["back"] => state.pipeline_until = None,
-                    _ => {
-                        return Err(format!(
-                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | landing OWNER/REPO steward|conaryd | pipeline UNTIL | back
-{}
-{}",
-                            roles::USAGE,
-                            credit::USAGE
-                        ));
-                    }
-                }
-                Ok(Some(String::new()))
-            },
+            |state: &mut Overlay| self.apply_overlay_command(state, &words, actor),
         )?;
         match answer {
             Some(said) if !said.is_empty() => Ok(said),
@@ -509,6 +413,109 @@ impl Config {
             }
             _ => self.show(),
         }
+    }
+
+    fn apply_overlay_command(
+        &self,
+        state: &mut Overlay,
+        words: &[&str],
+        actor: &str,
+    ) -> Result<Option<String>, String> {
+        match words {
+            [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
+                let repo = repo.to_ascii_lowercase();
+                if *verb == "pause" {
+                    // A pause is newer than any handoff in its repo.
+                    let prefix = format!("{repo}#");
+                    state.handoffs.retain(|pr, _| !pr.starts_with(&prefix));
+                }
+                state.repos.insert(repo, *verb == "allow");
+            }
+            ["land", target, head] if commit(head) => {
+                let (key, repo, n) = handoff(target).ok_or("land needs OWNER/REPO#N")?;
+                // A handoff is the steward landing a PR: never in a
+                // repo it doesn't hold, or two would land there.
+                if !self.record()?.holding(&repo).lands(landing::Owner::Steward) {
+                    return Err(format!(
+                        "{repo}'s landing isn't the steward's (settings show says whose): \
+                         a handoff would have the steward land beside it"
+                    ));
+                }
+                let head = head.to_ascii_lowercase();
+                state.handoffs.insert(
+                    key.clone(),
+                    Handed {
+                        pr: n,
+                        head: head.clone(),
+                        at: now(),
+                        actor: actor.into(),
+                    },
+                );
+                return Ok(Some(format!(
+                    "Handed {key} to the steward at {}: it lands once that head passes every check, \
+                     then the handoff ends. The rest of its repo stays as it is.",
+                    &head[..7]
+                )));
+            }
+            // The steward's: the handoff is used up (its PR landed or
+            // closed). Only the head it was given, so a newer request
+            // for another head stays.
+            ["spent", target, head] => {
+                let (key, _, _) = handoff(target).ok_or("spent needs OWNER/REPO#N")?;
+                if state
+                    .handoffs
+                    .get(&key)
+                    .is_none_or(|h| !h.head.eq_ignore_ascii_case(head))
+                {
+                    return Ok(None);
+                }
+                state.handoffs.remove(&key);
+            }
+            ["landing", repo, owner] if burrow_github::repo_name(repo) => {
+                let owner = landing::Owner::parse(owner)
+                    .ok_or("landing needs OWNER/REPO steward|conaryd")?;
+                let repo = repo.to_ascii_lowercase();
+                if owner == landing::Owner::Conaryd && !self.may_have(&repo) {
+                    return Err(format!(
+                        "conaryd has no flow configuration for {repo}: add it to burrow.landing.conaryd first"
+                    ));
+                }
+                if owner == landing::Owner::Steward {
+                    state.landing.remove(&repo);
+                } else {
+                    state.landing.insert(repo.clone(), owner);
+                }
+                return Ok(Some(format!(
+                    "{repo}'s landing goes to the {}: the one holding it lets go of its work there first, \
+                     and neither lands meanwhile. settings show says where it stands.",
+                    if owner == landing::Owner::Conaryd {
+                        "conaryd flow"
+                    } else {
+                        "steward"
+                    }
+                )));
+            }
+            ["pipeline", until] => {
+                let t: i64 = until
+                    .parse()
+                    .map_err(|_| "pipeline needs a Unix timestamp")?;
+                if t <= now() {
+                    return Err("pipeline deadline must be in the future".into());
+                }
+                state.pipeline_until = Some(t);
+            }
+            ["back"] => state.pipeline_until = None,
+            _ => {
+                return Err(format!(
+                    "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | landing OWNER/REPO steward|conaryd | pipeline UNTIL | back
+{}
+{}",
+                    roles::USAGE,
+                    credit::USAGE
+                ));
+            }
+        }
+        Ok(Some(String::new()))
     }
 }
 

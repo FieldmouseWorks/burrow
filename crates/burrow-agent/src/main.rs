@@ -80,6 +80,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "subcommand dispatch")]
 fn run(agent: &Agent, w: &[String]) -> Result<(), Stop> {
     let cfg = agent.cfg;
     let word = w.first().map_or("ls", String::as_str);

@@ -45,6 +45,7 @@ fn show(cfg: &Config) -> Value {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
     let overlay = d.path().join("settings/overlay.json");

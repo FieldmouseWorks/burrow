@@ -357,12 +357,10 @@ impl Broker {
         })
     }
 
-    /// One request for the stuck role: its answer, or why there's none.
-    pub fn handle_job(&self, request: Request, work: &Work) -> Result<Response, String> {
-        let starter = self
-            .stuck
-            .as_deref()
-            .ok_or("the broker serves no job kind: no stuck role is configured")?;
+    fn validate_stuck_request<'a>(
+        &self,
+        request: &'a Request,
+    ) -> Result<(&'a str, Ask, &std::path::Path), String> {
         let role = self
             .cfg
             .stuck
@@ -409,12 +407,22 @@ impl Broker {
             &jobs::offered(&self.cfg.settings, role)?,
             choice,
         )?;
-        let pr = ask.pr;
         let flow = self
             .cfg
             .flow
             .as_deref()
             .ok_or("the broker has no flow configurations to read a repo's authors from")?;
+        Ok((repo, ask, flow))
+    }
+
+    /// One request for the stuck role: its answer, or why there's none.
+    pub fn handle_job(&self, request: Request, work: &Work) -> Result<Response, String> {
+        let starter = self
+            .stuck
+            .as_deref()
+            .ok_or("the broker serves no job kind: no stuck role is configured")?;
+        let (repo, ask, flow) = self.validate_stuck_request(&request)?;
+        let pr = ask.pr;
         let accounts = discussion::accounts(flow, repo)?;
         let held = self.hold(
             stuck_key(repo, pr),

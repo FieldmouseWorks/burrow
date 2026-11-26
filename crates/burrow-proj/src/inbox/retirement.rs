@@ -32,6 +32,7 @@ impl Pass<'_> {
         Ok(())
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn retire(&mut self, repo: &str, n: &str, id: &str, d: &Path) -> Result<(), Fail> {
         // Always try to clear the old job's waits, even when GitHub is down.
         let stopped = if !self.cfg.jobs.join(id).is_dir() {

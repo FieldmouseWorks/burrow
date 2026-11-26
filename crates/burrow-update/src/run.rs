@@ -396,6 +396,11 @@ impl Run<'_> {
             &format!("{} is back on main.", cfg.host),
         );
 
+        self.check_train_pr()
+    }
+
+    fn check_train_pr(&mut self) -> Step {
+        let cfg = self.cfg;
         let Some(t) = &cfg.train else { return Ok(()) };
         let pr = match train::open(t, self.api) {
             Ok(pr) => pr,

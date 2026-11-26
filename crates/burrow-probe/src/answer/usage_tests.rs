@@ -260,6 +260,7 @@ fn usage_shows_the_api_credit_meter_in_both_forms_and_it_survives_the_scrubber()
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn usage_aggregates_normalized_records_across_engines_without_reading_streams() {
     let tmp = tempfile::tempdir().unwrap();
     let state = tmp.path().join("state");
@@ -483,6 +484,7 @@ fn normalized_turn_usage_round_trips_multi_turn_claude_cost_recovery_without_str
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn usage_groups_normalized_failover_runs_by_invocation_engine_keeping_turn_counts_separate() {
     let tmp = tempfile::tempdir().unwrap();
     let jobs = tmp.path().join("jobs");

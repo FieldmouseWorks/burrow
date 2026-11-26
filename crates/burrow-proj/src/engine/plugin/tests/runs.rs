@@ -151,6 +151,7 @@ fn an_engine_runs_only_where_the_turn_can_give_it_what_it_needs() {
 /// `proj --vm` job VM exposes (e.g. `workspace`) as well as any extra
 /// capability its `describe` declares (e.g. `kvm`).
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn sandboxed_turn_enforces_owner_approved_plugin_grants() {
     let all_vm_caps: Vec<String> = super::super::launch::VM_EXPOSED_CAPABILITIES
         .iter()

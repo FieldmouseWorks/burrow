@@ -18,6 +18,7 @@ use crate::{GRACE, MIN, PROJ, RENOTIFY, RETRY, SNOOZE_MAX, START, STEWARD};
 /// rather than queued or over.
 const LIVE: [&str; 2] = ["running", ""];
 
+#[expect(clippy::too_many_lines, reason = "subcommand dispatch")]
 pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     let dir = &cfg.state_dir;
     let State {

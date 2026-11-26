@@ -12,6 +12,7 @@ use crate::harness::read;
 /// With legs, each leg evaluates its own share of the outputs, said in the
 /// plan's order, and builds only its checks: together, each once.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn each_leg_takes_its_own_share() {
     let g = Gate::new();
     let d = g.flake(

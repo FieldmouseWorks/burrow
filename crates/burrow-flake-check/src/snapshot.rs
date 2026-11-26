@@ -43,20 +43,7 @@ pub fn submodule_base(top: &Path) -> Result<(String, bool)> {
     }
     Ok((s(top).to_owned(), false))
 }
-pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
-    let common = string(git(
-        top,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ))?;
-    let gitdir = string(git(
-        top,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
-    ))?;
-    let format = string(git(top, &["rev-parse", "--show-object-format"]))?;
-    checked(cmd(
-        "git",
-        &["init", "-q", &format!("--object-format={format}"), s(to)],
-    ))?;
+fn copy_git_config(top: &Path, to: &Path) -> Result<()> {
     let config = to.join(".git/config");
     fs::write(&config, [])?;
     for scope in ["--global", "--local", "--worktree"] {
@@ -79,13 +66,31 @@ pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
         "git",
         &["config", "-f", s(&config), "core.bare", "false"],
     ))?;
-    let reference = head_reference(top)?;
     if !submodule_base(top)?.1 {
         checked(cmd(
             "git",
             &["config", "-f", s(&config), "remote.origin.url", s(top)],
         ))?;
     }
+    Ok(())
+}
+
+pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
+    let common = string(git(
+        top,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ))?;
+    let gitdir = string(git(
+        top,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    ))?;
+    let format = string(git(top, &["rev-parse", "--show-object-format"]))?;
+    checked(cmd(
+        "git",
+        &["init", "-q", &format!("--object-format={format}"), s(to)],
+    ))?;
+    copy_git_config(top, to)?;
+    let reference = head_reference(top)?;
     // Alternate files are line-oriented, and libgit2 does not decode Git's
     // quoted paths. Keep caller path bytes in a filesystem link instead of
     // putting them into that format; new objects still stay in this snapshot.

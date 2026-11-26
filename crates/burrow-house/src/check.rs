@@ -70,6 +70,7 @@ struct Seen {
 }
 
 /// A rule's verdict on the PR, and its diff.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
     let Seen { title, body, .. } = pr;
     let (broke, mut what, hint) = match rule {

@@ -44,6 +44,7 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 /// The steps that restore the kept builds and let nix take them, and the
 /// three that keep them, last.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
@@ -229,6 +230,7 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
 /// has (the workspace's dependencies, the machines' patched packages) again
 /// for every PR that adds a test.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_negative_restores_every_legs_kept_builds() {
     let wf = workflow(".github/workflows/flake-check.yml");
     let neg = &wf["jobs"]["negative"];

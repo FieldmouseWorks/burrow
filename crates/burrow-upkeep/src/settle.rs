@@ -81,36 +81,7 @@ pub fn settle(p: &mut Pass, cfg: &Settle, repo: &Repo) -> bool {
     due
 }
 
-fn keep(
-    p: &mut Pass,
-    cfg: &Settle,
-    rules: Rules,
-    repo: &Repo,
-    st: &mut State,
-    name: &str,
-    due: bool,
-) -> Result<(), String> {
-    // The labels: without them a hold can't be set, a judge can't hand a PR
-    // to the owner, no PR can go first in its proof line and none can say
-    // what it waits on. Made again with the daily settings too, in case one
-    // was deleted.
-    let about = labels(p.cfg);
-    let want: Vec<String> = about.iter().map(|(n, _, _)| n.clone()).collect();
-    if st.labels.as_ref() != Some(&want) || due {
-        let mut made = true;
-        for (label_name, color, text) in &about {
-            let one = label(p, label_name, color, text);
-            made = made && one;
-        }
-        if made {
-            eprintln!("{}: labels {}", p.repo, want.join(", "));
-            st.labels = Some(want);
-            p.save(name, st)?;
-        }
-    }
-    if !due {
-        return Ok(());
-    }
+fn keep_repo_settings(p: &mut Pass, repo: &Repo, st: &mut State) -> Result<(), String> {
     let info = call(p.api, "GET", &format!("repos/{}", p.repo), None, None)
         .and_then(|r| r.json())
         .map_err(|e| p.github(e))?;
@@ -161,6 +132,40 @@ fn keep(
         &format!("repos/{}/vulnerability-alerts", p.repo),
         None,
     );
+    Ok(())
+}
+
+fn keep(
+    p: &mut Pass,
+    cfg: &Settle,
+    rules: Rules,
+    repo: &Repo,
+    st: &mut State,
+    name: &str,
+    due: bool,
+) -> Result<(), String> {
+    // The labels: without them a hold can't be set, a judge can't hand a PR
+    // to the owner, no PR can go first in its proof line and none can say
+    // what it waits on. Made again with the daily settings too, in case one
+    // was deleted.
+    let about = labels(p.cfg);
+    let want: Vec<String> = about.iter().map(|(n, _, _)| n.clone()).collect();
+    if st.labels.as_ref() != Some(&want) || due {
+        let mut made = true;
+        for (label_name, color, text) in &about {
+            let one = label(p, label_name, color, text);
+            made = made && one;
+        }
+        if made {
+            eprintln!("{}: labels {}", p.repo, want.join(", "));
+            st.labels = Some(want);
+            p.save(name, st)?;
+        }
+    }
+    if !due {
+        return Ok(());
+    }
+    keep_repo_settings(p, repo, st)?;
 
     // Every page, an org's rulesets included. Only the repo's own baseline
     // counts as its baseline: the steward can't pin what the org keeps, so

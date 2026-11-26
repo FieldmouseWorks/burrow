@@ -56,6 +56,7 @@ fn case(cfg: &Config, want: &str, specs: &[&str]) {
 // A backlog of pipeline work doesn't starve the others: with none of theirs
 // running, a pipeline or lead turn leaves them the last free ordinary slot.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_backlog_leaves_the_others_a_slot() {
     let mut cfg = config();
     case(
@@ -230,6 +231,7 @@ fn a_backlog_leaves_the_others_a_slot() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn picks() {
     let mut cfg = config();
     // The head of the line takes the lowest free slot.

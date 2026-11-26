@@ -42,6 +42,7 @@ fn the_schema_is_checked_in() {
 }
 
 /// A snapshot with every field filled and every kind of slot.
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn full() -> Snapshot {
     let holder = Holder {
         job: Some("j1".into()),

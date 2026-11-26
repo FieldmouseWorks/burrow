@@ -512,6 +512,7 @@ pub fn handle_request(
 
 /// [`handle_request`], invoking `on_stream` for each stdout line emitted while
 /// the harness runs.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn handle_request_with_stream(
     config: &PluginConfig,
     request: &Request,

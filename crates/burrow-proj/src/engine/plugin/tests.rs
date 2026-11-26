@@ -119,6 +119,7 @@ fn job_json(
 /// engine enum) negotiates `describe`, runs fresh and continued turns, emits
 /// normalized usage and `Next::Ask`, and persists its engine-scoped session.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn third_party_conary_v5_plugin_runs_fresh_continue_usage_and_next_ask() {
     let tmp = TempDir::new().unwrap();
     let (mut cfg, project) = setup(&tmp);
@@ -341,6 +342,7 @@ fn plugin_rejects_mismatched_engine_identity_and_provenance() {
 /// are classified purely from plugin diagnostics, never provider text scraping;
 /// pre-start credit refusals leave `N.jsonl` untouched so retries keep prior answers.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn structured_stderr_refusals_classify_without_provider_strings() {
     let tmp = TempDir::new().unwrap();
     let (mut cfg, project) = setup(&tmp);
@@ -505,6 +507,7 @@ exec "$@"
 /// guest's `proj` declares the next step, a stale declaration removed first;
 /// what the plugin declares there is what the host collects into the job.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn sandboxed_turn_runs_its_plugin_in_the_jobs_sandbox_with_the_turns_context() {
     let tmp = TempDir::new().unwrap();
     let (mut cfg, project) = setup(&tmp);

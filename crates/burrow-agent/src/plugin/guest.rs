@@ -57,7 +57,7 @@ pub fn plugin(image: &Image) -> Result<(), String> {
     send(&mut *to, &last)
 }
 
-fn run(image: &Image, spec: &Spec, to: &Arc<Mutex<File>>) -> Result<String, String> {
+fn prepare_guest(spec: &Spec) -> Result<(PathBuf, Vec<Child>), String> {
     let io = |e: io::Error| e.to_string();
     let mut cwd = PathBuf::from(spec.env.get("HOME").map_or("/", String::as_str));
     if let Some(workspace) = &spec.workspace {
@@ -107,6 +107,12 @@ fn run(image: &Image, spec: &Spec, to: &Arc<Mutex<File>>) -> Result<String, Stri
         bridges.push(bridge);
         listened?;
     }
+    Ok((cwd, bridges))
+}
+
+fn run(image: &Image, spec: &Spec, to: &Arc<Mutex<File>>) -> Result<String, String> {
+    let io = |e: io::Error| e.to_string();
+    let (cwd, mut bridges) = prepare_guest(spec)?;
 
     // Files, as Conary's runner gives a plugin: a child that never reads,
     // or one it leaves behind holding them, can't hang the run.

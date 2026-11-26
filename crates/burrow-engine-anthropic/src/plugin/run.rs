@@ -61,6 +61,7 @@ pub fn execute(
 
 /// [`execute`], forwarding each complete stdout line from Claude Code to
 /// `on_line` in real time as it arrives.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn execute_with_stream(
     config: &PluginConfig,
     grants: &command::Grants,

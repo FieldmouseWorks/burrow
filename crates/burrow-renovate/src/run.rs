@@ -352,6 +352,33 @@ impl Config {
         }
     }
 
+    fn acquire_token(&self, repo: &str) -> Result<String, u8> {
+        let mut asked = match &self.app {
+            Some(app) => {
+                let mut c = self.command(&app.gh_token);
+                c.args(["get", repo.split('/').next().unwrap_or_default()]);
+                c
+            }
+            None => {
+                let mut c = self.command(&self.tools.gh);
+                c.args(["auth", "token"]);
+                c
+            }
+        };
+        match asked.stderr(Stdio::inherit()).output() {
+            Ok(out) if out.status.success() => Ok(trimmed(out.stdout)),
+            Ok(out) => Err(exit_of(out.status)),
+            Err(e) => {
+                complain(&format!(
+                    "{}: {}: {e}",
+                    self.name,
+                    asked.get_program().display()
+                ));
+                Err(NOT_RUN)
+            }
+        }
+    }
+
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
     /// empty), in its turn, with a token asked for once it's its turn, and
     /// merging only where the record says it may then. Renovate's exit,
@@ -382,29 +409,9 @@ impl Config {
         }
         // Read in its turn: a handover while it waited counts.
         let (merges, unread) = self.merges(repo);
-        let mut asked = match &self.app {
-            Some(app) => {
-                let mut c = self.command(&app.gh_token);
-                c.args(["get", repo.split('/').next().unwrap_or_default()]);
-                c
-            }
-            None => {
-                let mut c = self.command(&self.tools.gh);
-                c.args(["auth", "token"]);
-                c
-            }
-        };
-        let token = match asked.stderr(Stdio::inherit()).output() {
-            Ok(out) if out.status.success() => trimmed(out.stdout),
-            Ok(out) => return Ok((exit_of(out.status), Vec::new())),
-            Err(e) => {
-                complain(&format!(
-                    "{}: {}: {e}",
-                    self.name,
-                    asked.get_program().display()
-                ));
-                return Ok((NOT_RUN, Vec::new()));
-            }
+        let token = match self.acquire_token(repo) {
+            Ok(token) => token,
+            Err(code) => return Ok((code, Vec::new())),
         };
         // An unlinked private file keeps the structured errors separate from
         // the normal journal output. Pass its inherited descriptor rather

@@ -388,6 +388,7 @@ fn an_answer_too_big_for_a_comment_keeps_its_newest_lines() {
 /// who changed, runs nothing; one only authors changed runs what it says
 /// now, whatever the list said.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn what_runs_is_text_only_authors_wrote() {
     let refused = |said: Value| {
         let mut gh = Fake::default();
@@ -748,6 +749,7 @@ fn usage_totals_survive_multiple_questions_and_oversized_tables() {
     usage_totals_survive(65, 8, true);
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let jobs = tmp.path().join("jobs");

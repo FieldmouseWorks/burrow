@@ -129,6 +129,11 @@ impl Run<'_> {
         if self.untested.is_empty() {
             return Ok(());
         }
+        self.check_untested_vulns()
+    }
+
+    fn check_untested_vulns(&mut self) -> Step {
+        let cfg = self.cfg;
         let scanned = vulns(cfg, &self.running.current)
             .and_then(|before| Some((before, vulns(cfg, &self.new)?)));
         self.fixes = match scanned {

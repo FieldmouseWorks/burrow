@@ -29,3 +29,4 @@ mod reuse;
 mod test_executables;
 mod timeouts;
 mod train;
+mod workspace_lints;

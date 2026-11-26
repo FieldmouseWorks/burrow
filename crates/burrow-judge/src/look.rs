@@ -285,6 +285,94 @@ impl Looks {
         }
         Ok((engine, model, effort, engine_cfg))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_look(
+        &self,
+        id: &str,
+        dir: &Path,
+        repo: &str,
+        head: &str,
+        base: &str,
+        spec: &Spec,
+        hosts: &[String],
+        work: &Work,
+    ) -> Result<Looked, String> {
+        let engine_units = self.units.get(&spec.engine).ok_or_else(|| {
+            format!(
+                "no look unit manager is configured for engine {}",
+                spec.engine
+            )
+        })?;
+        let ran = lay(&self.cfg, id, repo, head, base, spec).and_then(|()| {
+            let gate = Gate::open(&dir.join(GATE), hosts, self.dial.clone())
+                .map_err(|e| format!("its gate: {e}"))?;
+            let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
+            let ended = engine_units.run(id, work, until);
+            drop(gate);
+            ended
+        });
+        // Stopped, and read, once nothing of it is left running; its folder
+        // goes either way.
+        let stopped = engine_units.stop(id);
+        let said = fs::read(dir.join(ANSWER));
+        let _ = fs::remove_dir_all(dir);
+        match ran? {
+            Ended::Exited(0) => {}
+            Ended::Exited(n) => return Err(format!("the judge's look failed ({n})")),
+            Ended::Broke(why) => return Err(format!("the judge's look broke: {why}")),
+        }
+        stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
+        Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)
+    }
+
+    fn build_response(
+        contract: &str,
+        spec: &Spec,
+        built: &[Built],
+        looked: Looked,
+    ) -> Result<Response, String> {
+        if looked.engine != spec.engine {
+            return Err(format!(
+                "the judge's look answered as {}, not {}",
+                looked.engine, spec.engine
+            ));
+        }
+        if looked.model != spec.model {
+            return Err(format!(
+                "the judge's look ran {}, not {}",
+                looked.model, spec.model
+            ));
+        }
+        if looked.verdict == Judgment::Pass && !built.is_empty() && !build::passed(built) {
+            return Err(
+                "the judge's look passed a head none of whose checks passed when it was built: nothing is judged unbuilt"
+                    .into(),
+            );
+        }
+        // What was built, recorded by the producer, whatever the look said.
+        let why = if built.is_empty() {
+            looked.why
+        } else {
+            format!("{}\n\n{}", looked.why.trim(), build::summary(built))
+        };
+        Ok(Response {
+            contract: contract.to_owned(),
+            by: Identity {
+                engine: looked.engine,
+                session: Some(looked.session),
+            },
+            execution: Some(Executed {
+                model: Some(looked.model),
+                effort: spec.effort.clone(),
+                context: Context::Fresh,
+            }),
+            answer: Answer::Judge {
+                verdict: looked.verdict,
+                why,
+            },
+        })
+    }
 }
 
 impl Judges for Looks {
@@ -383,70 +471,17 @@ impl Judges for Looks {
             model,
             effort,
         };
-        let engine_units = self
-            .units
-            .get(&engine)
-            .ok_or_else(|| format!("no look unit manager is configured for engine {engine}"))?;
-        let ran = lay(&self.cfg, &id, repo, head, &pull.base.sha, &spec).and_then(|()| {
-            let gate = Gate::open(&dir.join(GATE), &engine_cfg.hosts, self.dial.clone())
-                .map_err(|e| format!("its gate: {e}"))?;
-            let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
-            let ended = engine_units.run(&id, work, until);
-            drop(gate);
-            ended
-        });
-        // Stopped, and read, once nothing of it is left running; its folder
-        // goes either way.
-        let stopped = engine_units.stop(&id);
-        let said = fs::read(dir.join(ANSWER));
-        let _ = fs::remove_dir_all(&dir);
-        match ran? {
-            Ended::Exited(0) => {}
-            Ended::Exited(n) => return Err(format!("the judge's look failed ({n})")),
-            Ended::Broke(why) => return Err(format!("the judge's look broke: {why}")),
-        }
-        stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
-        let looked = Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)?;
-        if looked.engine != spec.engine {
-            return Err(format!(
-                "the judge's look answered as {}, not {}",
-                looked.engine, spec.engine
-            ));
-        }
-        if looked.model != spec.model {
-            return Err(format!(
-                "the judge's look ran {}, not {}",
-                looked.model, spec.model
-            ));
-        }
-        if looked.verdict == Judgment::Pass && !built.is_empty() && !build::passed(built) {
-            return Err(
-                "the judge's look passed a head none of whose checks passed when it was built: nothing is judged unbuilt"
-                    .into(),
-            );
-        }
-        // What was built, recorded by the producer, whatever the look said.
-        let why = if built.is_empty() {
-            looked.why
-        } else {
-            format!("{}\n\n{}", looked.why.trim(), build::summary(built))
-        };
-        Ok(Response {
-            contract: request.contract.clone(),
-            by: Identity {
-                engine: looked.engine,
-                session: Some(looked.session),
-            },
-            execution: Some(Executed {
-                model: Some(looked.model),
-                effort: spec.effort,
-                context: Context::Fresh,
-            }),
-            answer: Answer::Judge {
-                verdict: looked.verdict,
-                why,
-            },
-        })
+        let looked = self.run_look(
+            &id,
+            &dir,
+            repo,
+            head,
+            &pull.base.sha,
+            &spec,
+            &engine_cfg.hosts,
+            work,
+        )?;
+        Self::build_response(&request.contract, &spec, built, looked)
     }
 }
 

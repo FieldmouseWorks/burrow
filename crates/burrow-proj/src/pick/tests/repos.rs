@@ -97,6 +97,7 @@ fn dem(cfg: &Config, dir: &Path, want: &str) {
 // it to its project's cap and off the pipeline's slots: one repo's PRs can't
 // fill the machine.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn pipeline_repos() {
     let mut cfg = config();
     let t = Scratch::new();

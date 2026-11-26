@@ -41,68 +41,7 @@ fn main() -> ExitCode {
             ("plugin", None) => {
                 plugin(&cfg)?.answer(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
             }
-            ("producer", None) => {
-                let signer = Signer::load(&cfg.producer, &cfg.credential)?;
-                let seal = seal_key(&cfg.seal)?;
-                let controller = Controller::named(&cfg.controller)?;
-                let server = Server::bind(&cfg.socket, controller)
-                    .map_err(|e| format!("{}: {e}", cfg.socket.display()))?;
-                let gh = cfg.gh.clone();
-                let github: GitHub = Box::new(move || {
-                    Box::new(burrow_github::Gh {
-                        program: Some(gh.clone().into_os_string()),
-                        ..Default::default()
-                    })
-                });
-                let units: std::collections::BTreeMap<
-                    String,
-                    Box<dyn burrow_producer::units::Units>,
-                > = cfg
-                    .engines
-                    .iter()
-                    .map(|(name, eng)| {
-                        (
-                            name.clone(),
-                            Box::new(Systemd {
-                                systemctl: cfg.systemctl.clone(),
-                                unit: eng.unit.clone(),
-                            })
-                                as Box<dyn burrow_producer::units::Units>,
-                        )
-                    })
-                    .collect();
-                let builds = Box::new(Systemd {
-                    systemctl: cfg.systemctl.clone(),
-                    unit: cfg.build.clone(),
-                });
-                let looks = Looks::new(
-                    cfg.clone(),
-                    conary(&cfg.api, &cfg.token)?,
-                    units,
-                    builds,
-                    Arc::new(dial),
-                )?;
-                let stopped = looks.reconcile()?;
-                if stopped > 0 {
-                    eprintln!("stopped {stopped} looks and builds whose requests a restart lost");
-                }
-                let read = conary(&cfg.api, &cfg.token)?;
-                let producer = Arc::new(Producer::new(
-                    cfg,
-                    read,
-                    github,
-                    Box::new(looks),
-                    signer,
-                    seal,
-                )?);
-                let finished = producer.reconcile()?;
-                if finished > 0 {
-                    eprintln!("finished {finished} judgments a restart interrupted");
-                }
-                server
-                    .serve(move |request, work: &Work| producer.handle(request, work))
-                    .map_err(|e| e.to_string())
-            }
+            ("producer", None) => serve_producer(cfg),
             ("look", Some(id)) => {
                 if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                     return Err(format!("{id:?} isn't a look's id"));
@@ -129,6 +68,65 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn serve_producer(cfg: Config) -> Result<(), String> {
+    let signer = Signer::load(&cfg.producer, &cfg.credential)?;
+    let seal = seal_key(&cfg.seal)?;
+    let controller = Controller::named(&cfg.controller)?;
+    let server = Server::bind(&cfg.socket, controller)
+        .map_err(|e| format!("{}: {e}", cfg.socket.display()))?;
+    let gh = cfg.gh.clone();
+    let github: GitHub = Box::new(move || {
+        Box::new(burrow_github::Gh {
+            program: Some(gh.clone().into_os_string()),
+            ..Default::default()
+        })
+    });
+    let units: std::collections::BTreeMap<String, Box<dyn burrow_producer::units::Units>> = cfg
+        .engines
+        .iter()
+        .map(|(name, eng)| {
+            (
+                name.clone(),
+                Box::new(Systemd {
+                    systemctl: cfg.systemctl.clone(),
+                    unit: eng.unit.clone(),
+                }) as Box<dyn burrow_producer::units::Units>,
+            )
+        })
+        .collect();
+    let builds = Box::new(Systemd {
+        systemctl: cfg.systemctl.clone(),
+        unit: cfg.build.clone(),
+    });
+    let looks = Looks::new(
+        cfg.clone(),
+        conary(&cfg.api, &cfg.token)?,
+        units,
+        builds,
+        Arc::new(dial),
+    )?;
+    let stopped = looks.reconcile()?;
+    if stopped > 0 {
+        eprintln!("stopped {stopped} looks and builds whose requests a restart lost");
+    }
+    let read = conary(&cfg.api, &cfg.token)?;
+    let producer = Arc::new(Producer::new(
+        cfg,
+        read,
+        github,
+        Box::new(looks),
+        signer,
+        seal,
+    )?);
+    let finished = producer.reconcile()?;
+    if finished > 0 {
+        eprintln!("finished {finished} judgments a restart interrupted");
+    }
+    server
+        .serve(move |request, work: &Work| producer.handle(request, work))
+        .map_err(|e| e.to_string())
 }
 
 /// Build `id`, in its unit: burrow-proof's worker on the producer's bench,

@@ -134,6 +134,7 @@ fn a_hook_is_known_by_the_hash_a_python_pass_kept() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_repos_hook_is_added_moved_and_left_alone() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config(dir.path());
@@ -582,6 +583,7 @@ fn github_not_answering_changes_nothing_known() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_repo_no_longer_seen_to_has_its_hook_taken_off() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());

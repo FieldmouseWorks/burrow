@@ -284,6 +284,7 @@ fn unread_fresh_repo() {
 // at work, they wait on it, due `run` after it started. A live repo, or
 // one built from no commit, waits on nothing.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn deploy() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
@@ -437,6 +438,7 @@ fn deploy() {
 // it. While any run is at work, it waits on that, and a run that fails
 // leaves it as old as it was.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn deploy_unknown() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());

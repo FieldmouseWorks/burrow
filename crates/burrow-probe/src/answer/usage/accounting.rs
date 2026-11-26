@@ -200,44 +200,7 @@ pub fn decode(
         // result's, never an answer.
         if kind == "result" || kind == "burrow.usage" {
             any = true;
-            let tokens = FIELDS.map(|k| v["usage"][k].as_u64().unwrap_or(0));
-            let cost = v["total_cost_usd"].as_f64();
-            let execution_crash = v["subtype"] == "error_during_execution";
-            if v["usage"].is_object() && !(execution_crash && tokens == [0; 4]) {
-                report.add(tokens);
-                for (sum, value) in report.invocation().tokens.iter_mut().zip(tokens) {
-                    *sum += value;
-                }
-            } else {
-                partial_tokens(&mut run, &mut report);
-            }
-            if session != report.identity {
-                report.invocation().session = Some(session.clone());
-            }
-            let previous = sessions.entry(session.clone()).or_default();
-            if let Some(total) = cost
-                && total >= previous.cost
-                && !(execution_crash && total == 0.0)
-            {
-                let cost = (total - previous.cost).max(0.0);
-                let had_gap = !previous.gaps.is_empty();
-                report.prior_gap |= had_gap;
-                let gaps = std::mem::take(&mut previous.gaps);
-                previous.cost = total;
-                report.cost += cost;
-                report.recovered.extend(gaps.iter().cloned());
-                let invocation = report.invocation();
-                invocation.cost += cost;
-                invocation.cumulative_cost = Some(total);
-                invocation.prior_gap |= had_gap;
-                invocation.recovered.extend(gaps);
-            } else {
-                // Missing or zeroed crash fields and regressed counters never
-                // erase the last trustworthy cumulative total.
-                report.cost_partial = true;
-                report.invocation().cost_partial = true;
-                missing(&session, sessions, &mut report);
-            }
+            record_result(&v, &mut run, &session, sessions, &mut report);
             run = Run::default();
         }
     }
@@ -245,6 +208,53 @@ pub fn decode(
         partial(&mut run, &session, sessions, &mut report);
     }
     report
+}
+
+fn record_result(
+    v: &Value,
+    run: &mut Run,
+    session: &str,
+    sessions: &mut BTreeMap<String, Session>,
+    report: &mut Report,
+) {
+    let tokens = FIELDS.map(|k| v["usage"][k].as_u64().unwrap_or(0));
+    let cost = v["total_cost_usd"].as_f64();
+    let execution_crash = v["subtype"] == "error_during_execution";
+    if v["usage"].is_object() && !(execution_crash && tokens == [0; 4]) {
+        report.add(tokens);
+        for (sum, value) in report.invocation().tokens.iter_mut().zip(tokens) {
+            *sum += value;
+        }
+    } else {
+        partial_tokens(run, report);
+    }
+    if session != report.identity {
+        report.invocation().session = Some(session.to_owned());
+    }
+    let previous = sessions.entry(session.to_owned()).or_default();
+    if let Some(total) = cost
+        && total >= previous.cost
+        && !(execution_crash && total == 0.0)
+    {
+        let cost = (total - previous.cost).max(0.0);
+        let had_gap = !previous.gaps.is_empty();
+        report.prior_gap |= had_gap;
+        let gaps = std::mem::take(&mut previous.gaps);
+        previous.cost = total;
+        report.cost += cost;
+        report.recovered.extend(gaps.iter().cloned());
+        let invocation = report.invocation();
+        invocation.cost += cost;
+        invocation.cumulative_cost = Some(total);
+        invocation.prior_gap |= had_gap;
+        invocation.recovered.extend(gaps);
+    } else {
+        // Missing or zeroed crash fields and regressed counters never
+        // erase the last trustworthy cumulative total.
+        report.cost_partial = true;
+        report.invocation().cost_partial = true;
+        missing(session, sessions, report);
+    }
 }
 #[cfg(test)]
 mod tests;

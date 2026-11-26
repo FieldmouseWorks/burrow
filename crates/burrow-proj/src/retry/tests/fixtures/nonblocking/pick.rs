@@ -133,6 +133,7 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
 }
 
 /// Allocate reserved shares within the available admission budget.
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 pub fn pick_budget(
     cfg: &Config,
     slots: &[Slot],

@@ -112,6 +112,7 @@ fn a_sandboxs_turn_takes_a_slot_past_this_machines_login_hold() {
 // stay stuck behind the old engine's usage hold: slot admission refreshes its
 // choice from host-owned settings and lets it take a free slot immediately.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn a_queued_turn_moves_off_a_held_engine_when_its_role_reroutes() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);

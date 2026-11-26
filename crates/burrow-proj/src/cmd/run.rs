@@ -225,6 +225,7 @@ const SINCE: &str = "proj run --since TIME (Unix seconds, not after now)";
 const KEY: &str = "proj run --key KEY (letters, digits and ._/:-, at most 200)";
 
 /// `proj run` and `proj reply`.
+#[expect(clippy::too_many_lines, reason = "subcommand dispatch")]
 pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
     let mut new = New::default();
     let mut cutoff = None;
@@ -375,6 +376,7 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
 }
 
 /// A new job in the project, its first turn started with the task: its id.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String, Fail> {
     // A repo, OWNER/NAME, is its own clone among the projects (no folder's
     // name has a slash): what a starter that knows the repo alone names.

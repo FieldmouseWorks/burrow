@@ -436,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn quota_uses_the_token_apps_identity_and_preserves_failed_exit() {
         if let Some(gh) = std::env::var_os("PROJ_TEST_QUOTA_GH") {
             let socket = std::env::var_os("GH_TOKEN_SOCKET").unwrap();

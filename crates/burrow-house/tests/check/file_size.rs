@@ -230,6 +230,7 @@ fn rust_inline_cfg_test_is_excluded() {
 // semicolon-terminated items containing braces never swallows production code
 // that follows them.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn rust_cfg_test_never_swallows_production_code() {
     let big_body = "    fn prod() {}\n".repeat(LINES + 1);
     let big_fns = "fn prod() {}\n".repeat(LINES + 1);

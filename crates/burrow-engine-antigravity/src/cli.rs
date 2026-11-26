@@ -438,6 +438,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
 ///
 /// When `stop()` returns `true` or the outer deadline elapses, the entire child
 /// process group is killed and reaped immediately via `burrow-process`.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn run_invocation(
     config: &Config,
     invocation: &Invocation,
