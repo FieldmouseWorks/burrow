@@ -41,11 +41,16 @@ fn extra_nix_config(job_name: &str, url: &str, key: &str, probe_outcome: &str) -
     value(text(&install["with"]["extra_nix_config"]), &c).text()
 }
 
-/// Real Nix on a chroot store of its own (no `nix build` stub) with a signed
-/// HTTP binary cache beside it.
+/// Real Nix on a non-diverted local store of its own (no `nix build` stub)
+/// with a signed HTTP binary cache beside it. Using `local?store=...` rather
+/// than a chroot store (`local?root=...`) keeps `realStoreDir == storeDir`,
+/// so Nix can build cold derivations inside a Nix build sandbox where nested
+/// namespaces are unavailable.
 struct RealStore {
     s: Scratch,
-    root: PathBuf,
+    store: PathBuf,
+    state: PathBuf,
+    log: PathBuf,
     cache: PathBuf,
     sk: PathBuf,
     pk: String,
@@ -55,17 +60,26 @@ struct RealStore {
 impl RealStore {
     fn new() -> Self {
         let s = Scratch::default();
-        let root = s.join("root");
+        let store = s.join("store");
+        let state = s.join("state");
+        let log = s.join("log");
         let cache = s.join("cache");
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&log).unwrap();
         fs::create_dir_all(&cache).unwrap();
+        let store = store.canonicalize().unwrap();
         let cfg = format!(
-            "experimental-features = nix-command flakes\nstore = local?root={}\nsubstituters =\nsubstitute = true\nflake-registry =\nsandbox = false",
-            root.display()
+            "experimental-features = nix-command flakes\nstore = local?store={}&state={}&log={}\nsubstituters =\nsubstitute = true\nflake-registry =\nsandbox = false",
+            store.display(),
+            state.display(),
+            log.display(),
         );
         let run = |program: &str, args: &[&str]| {
             let mut c = s.command(which(program));
             c.args(args)
                 .env("NIX_CONFIG", &cfg)
+                .env("NIX_STORE_DIR", &store)
                 .env("XDG_CACHE_HOME", s.join("xdg-cache"))
                 .stdin(Stdio::null());
             let o = output(c);
@@ -88,10 +102,15 @@ impl RealStore {
             ],
         );
         let pk = read(&pk_file).trim().to_owned();
-        write(&cache.join("nix-cache-info"), "StoreDir: /nix/store\n");
+        write(
+            &cache.join("nix-cache-info"),
+            &format!("StoreDir: {}\n", store.display()),
+        );
         Self {
             s,
-            root,
+            store,
+            state,
+            log,
             cache,
             sk,
             pk,
@@ -99,21 +118,32 @@ impl RealStore {
         }
     }
 
-    fn base_config(&self, root: &Path) -> String {
+    fn base_config(&self, state: &Path, log: &Path) -> String {
         format!(
-            "experimental-features = nix-command flakes\nstore = local?root={}\nsubstituters =\nsubstitute = true\nflake-registry =\nsandbox = false",
-            root.display()
+            "experimental-features = nix-command flakes\nstore = local?store={}&state={}&log={}\nsubstituters =\nsubstitute = true\nflake-registry =\nsandbox = false",
+            self.store.display(),
+            state.display(),
+            log.display(),
         )
+    }
+
+    /// Remove every entry from `self.store` so the next isolated run starts
+    /// with an empty store directory and its own fresh state/log directories.
+    fn clear_store(&self) {
+        make_writable(&self.store);
+        fs::remove_dir_all(&self.store).unwrap();
+        fs::create_dir_all(&self.store).unwrap();
     }
 
     /// Pre-populate and sign the output of `drv` in `self.cache`, then
     /// delete it from the helper store so only the HTTP build store has it.
     fn populate_signed(&self, drv: &str, contents: &str) -> String {
-        let cfg = self.base_config(&self.root);
+        let cfg = self.base_config(&self.state, &self.log);
         let run = |program: &str, args: &[&str]| {
             let mut c = self.s.command(which(program));
             c.args(args)
                 .env("NIX_CONFIG", &cfg)
+                .env("NIX_STORE_DIR", &self.store)
                 .env("XDG_CACHE_HOME", self.s.join("xdg-cache"))
                 .stdin(Stdio::null());
             let o = output(c);
@@ -125,7 +155,7 @@ impl RealStore {
             String::from_utf8(o.stdout).unwrap().trim().to_owned()
         };
         let out = run("nix-store", &["--query", "--outputs", drv]);
-        let dst = self.root.join(out.trim_start_matches('/'));
+        let dst = PathBuf::from(&out);
         fs::create_dir_all(dst.parent().unwrap()).unwrap();
         write(&dst, contents);
         let mut reg = self
@@ -133,6 +163,7 @@ impl RealStore {
             .command(which("nix-store"))
             .args(["--register-validity", "--reregister"])
             .env("NIX_CONFIG", &cfg)
+            .env("NIX_STORE_DIR", &self.store)
             .env("XDG_CACHE_HOME", self.s.join("xdg-cache"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -172,7 +203,8 @@ impl RealStore {
     fn instantiate(&self, expr: &str) -> String {
         let mut c = self.s.command(which("nix-instantiate"));
         c.args(["--expr", expr])
-            .env("NIX_CONFIG", self.base_config(&self.root))
+            .env("NIX_CONFIG", self.base_config(&self.state, &self.log))
+            .env("NIX_STORE_DIR", &self.store)
             .env("XDG_CACHE_HOME", self.s.join("xdg-cache"))
             .stdin(Stdio::null());
         let o = output(c);
@@ -213,6 +245,31 @@ printf '%s\n' '{}'
                 self.s.join("compiler").display()
             ),
         );
+    }
+}
+
+impl Drop for RealStore {
+    fn drop(&mut self) {
+        make_writable(&self.store);
+    }
+}
+
+fn make_writable(p: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Ok(meta) = fs::symlink_metadata(p) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    let _ = fs::set_permissions(p, fs::Permissions::from_mode(mode | 0o700));
+    if meta.is_dir()
+        && let Ok(entries) = fs::read_dir(p)
+    {
+        for entry in entries.flatten() {
+            make_writable(&entry.path());
+        }
     }
 }
 
@@ -257,10 +314,10 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     rs.s.git(&leg_flake, &["add", "flake.nix"]);
     rs.s.git(&leg_flake, &["commit", "-qm", "flake"]);
 
-    let leg_root = rs.s.join("leg-root");
+    rs.clear_store();
     let leg_cfg = format!(
         "{}\n{}",
-        rs.base_config(&leg_root),
+        rs.base_config(&rs.s.join("leg-state"), &rs.s.join("leg-log")),
         extra_nix_config("check", &url, &rs.pk, "success")
     );
     let wf = workflow(".github/workflows/flake-check.yml");
@@ -270,6 +327,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         &leg_flake,
         &[
             ("NIX_CONFIG", &leg_cfg),
+            ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
             ("XDG_CACHE_HOME", rs.s.join("leg-xdg").to_str().unwrap()),
             ("APART", "true"),
             ("SKIP", ""),
@@ -283,7 +341,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     );
     assert_eq!(ran.code, 0, "leg failed to substitute:\n{}", ran.said());
     assert!(
-        leg_root.join(cached_out.trim_start_matches('/')).is_file(),
+        Path::new(&cached_out).is_file(),
         "cached output wasn't substituted into leg store:\n{}",
         ran.said()
     );
@@ -345,10 +403,10 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     );
     rs.s.git(&co, &["checkout", "-q", "--detach", &head]);
 
-    let neg_root = rs.s.join("neg-root");
+    rs.clear_store();
     let neg_cfg = format!(
         "{}\n{}",
-        rs.base_config(&neg_root),
+        rs.base_config(&rs.s.join("neg-state"), &rs.s.join("neg-log")),
         extra_nix_config("negative", &url, &rs.pk, "success")
     );
     let neg_temp = rs.s.mkdtemp();
@@ -358,6 +416,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         &co,
         &[
             ("NIX_CONFIG", &neg_cfg),
+            ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
             ("XDG_CACHE_HOME", rs.s.join("neg-xdg").to_str().unwrap()),
             ("RUNNER_TEMP", neg_temp.to_str().unwrap()),
             ("TOOLS", repo_file(".github/flake-check").to_str().unwrap()),
@@ -374,6 +433,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         &co,
         &[
             ("NIX_CONFIG", &neg_cfg),
+            ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
             ("XDG_CACHE_HOME", rs.s.join("neg-xdg").to_str().unwrap()),
             ("RUNNER_TEMP", neg_temp.to_str().unwrap()),
             ("TOOLS", repo_file(".github/flake-check").to_str().unwrap()),
@@ -393,7 +453,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         serde_json::from_str(&read(&neg_temp.join("negative.json"))).unwrap();
     assert_eq!(found["result"], "fail", "{found}");
     assert!(
-        neg_root.join(cached_out.trim_start_matches('/')).is_file(),
+        Path::new(&cached_out).is_file(),
         "dep wasn't substituted into negative store:\n{}",
         neg.said()
     );
@@ -450,10 +510,13 @@ fn the_store_down_builds_cold() {
         ("mid-run-drop", down_url.as_str(), "success", true),
         ("nar-fails", broken_nar_url.as_str(), "success", false),
     ] {
-        let root = rs.s.join(&format!("root-{case}"));
+        rs.clear_store();
         let cfg = format!(
             "{}\nconnect-timeout = 2\ndownload-attempts = 1\n{}",
-            rs.base_config(&root),
+            rs.base_config(
+                &rs.s.join(&format!("state-{case}")),
+                &rs.s.join(&format!("log-{case}")),
+            ),
             extra_nix_config("check", url, &rs.pk, probe_outcome)
         );
         let temp = rs.s.mkdtemp();
@@ -462,6 +525,7 @@ fn the_store_down_builds_cold() {
             &flake,
             &[
                 ("NIX_CONFIG", &cfg),
+                ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
                 (
                     "XDG_CACHE_HOME",
                     rs.s.join(&format!("xdg-{case}")).to_str().unwrap(),

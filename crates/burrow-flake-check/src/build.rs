@@ -79,7 +79,7 @@ pub fn cold_drvs(dry_run_stderr: &str) -> Vec<String> {
             building = true;
         } else if l.contains("will be fetched") || l.contains("don't know how to build") {
             building = false;
-        } else if building && l.starts_with("/nix/store/") {
+        } else if building && l.starts_with('/') && l.ends_with(".drv") {
             drvs.push(l.to_owned());
         }
     }
@@ -260,5 +260,8 @@ mod tests {
         let out = "this derivation will be built:\n  /nix/store/aaa-codex-1.0.drv\nthese 2 derivations will be built:\n  /nix/store/bbb-x.drv\n  /nix/store/ccc-y.drv\nthese 3 paths will be fetched (1 MiB download):\n  /nix/store/ddd-z\n";
         assert_eq!(super::cold_names(out), ["codex-1.0", "x", "y"]);
         assert!(super::cold_names("this path will be fetched:\n  /nix/store/d-z\n").is_empty());
+        let custom = "this derivation will be built:\n  /tmp/alt-store/aaa-cold.drv\nthis path will be fetched:\n  /tmp/alt-store/bbb-cached\n";
+        assert_eq!(super::cold_drvs(custom), ["/tmp/alt-store/aaa-cold.drv"]);
+        assert_eq!(super::cold_names(custom), ["cold"]);
     }
 }
