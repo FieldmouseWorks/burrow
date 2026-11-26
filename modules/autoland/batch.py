@@ -165,13 +165,16 @@ class Batch:
     def seen_to(self, repo):
         return not self.state["repos"].get(repo.lower(), {}).get("unseen")
 
-    def note(self, repo, pr, mine, seen_to, info, stopped=None):
+    def note(self, repo, pr, mine, seen_to, info, stopped=None, revisit=False):
         st = self.state["repos"].setdefault(repo.lower(), {"done": {}})
         st["sequence"] = st.get("sequence", 1) + 1
-        st.setdefault("visits", {})[str(pr["number"])] = st["sequence"]
-        st["done"][str(pr["number"])] = self.rev(pr, info)
-        st["digest"] = mine
         key = str(pr["number"])
+        if revisit:
+            st["done"].pop(key, None)
+        else:
+            st.setdefault("visits", {})[key] = st["sequence"]
+            st["done"][key] = self.rev(pr, info)
+        st["digest"] = mine
         st.setdefault("stops", {}).pop(key, None)
         if stopped:
             st["stops"][key] = stopped

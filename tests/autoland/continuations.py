@@ -545,3 +545,27 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
+
+    # A PR whose step posted answers and asked for an immediate re-read must
+    # remain due and pending across a yielded slice instead of waiting out the
+    # rest of the round behind slower PRs.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(1), pr(2), pr(3)]
+        prs[0]['labels'] = {'nodes': [{'name': 'first'}]}
+        seen = []
+
+        def handle_reread(repo, p, *args):
+            seen.append(p['number'])
+            if p['number'] == 1 and seen.count(1) == 1:
+                C.wake(repo, C.NOW)
+                return True
+            if p['number'] == 2:
+                clock[0] += 9 * 60
+            return False
+
+        with patch.object(S.step, 'handle', handle_reread):
+            S.run_pass(['sam/r'])
+            assert seen == [1, 2], seen
+            S.run_pass(['sam/r'], continuing=True)
+            assert seen == [1, 2, 1, 3], seen
+    print('immediate re-reads stay due across yielded slices: passed')
