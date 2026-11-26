@@ -434,6 +434,45 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
     }
 }
 
+fn resolve_proj_engine_home() -> Result<Option<PathBuf>, String> {
+    let Some(raw) = std::env::var_os("PROJ_ENGINE_HOME").filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to follow symlink at PROJ_ENGINE_HOME {}",
+                    path.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "PROJ_ENGINE_HOME {} is not a directory",
+                    path.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+                .map_err(|e| {
+                    format!("failed to create PROJ_ENGINE_HOME {}: {e}", path.display())
+                })?;
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to access PROJ_ENGINE_HOME {}: {e}",
+                path.display()
+            ));
+        }
+    }
+    Ok(Some(path))
+}
+
 /// Run one headless `antigravity` invocation in its own process group.
 ///
 /// When `stop()` returns `true` or the outer deadline elapses, the entire child
@@ -466,24 +505,19 @@ pub fn run_invocation(
     let orig_home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    // In host mode, always run in a private per-turn `$HOME` (regardless of
-    // credential mode) so interactive desktop or T3 userdata in the real
-    // `$HOME` is never read or overwritten.
-    let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
-        match tempfile::Builder::new()
-            .prefix("antigravity-host-home-")
-            .tempdir()
-            .and_then(|dir| {
-                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
-                Ok(dir)
-            }) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
+    // In host mode, prefer the persistent per-job `PROJ_ENGINE_HOME` when set
+    // (so continuation sessions survive across turns) and otherwise fall back
+    // to a private per-turn `$HOME` so interactive desktop or T3 userdata in
+    // the real `$HOME` is never read or overwritten.
+    let proj_engine_home = if config.host_mode && invocation.home_dir.is_none() {
+        match resolve_proj_engine_home() {
+            Ok(home) => home,
+            Err(why) => {
                 return TurnOutput {
                     error: Some(RunError::ProcessFailed {
                         exit_code: None,
                         signal: None,
-                        message: format!("failed to create isolated host HOME: {e}"),
+                        message: why,
                     }),
                     ..TurnOutput::default()
                 };
@@ -492,9 +526,34 @@ pub fn run_invocation(
     } else {
         None
     };
+    let isolated_host_home =
+        if config.host_mode && invocation.home_dir.is_none() && proj_engine_home.is_none() {
+            match tempfile::Builder::new()
+                .prefix("antigravity-host-home-")
+                .tempdir()
+                .and_then(|dir| {
+                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                    Ok(dir)
+                }) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    return TurnOutput {
+                        error: Some(RunError::ProcessFailed {
+                            exit_code: None,
+                            signal: None,
+                            message: format!("failed to create isolated host HOME: {e}"),
+                        }),
+                        ..TurnOutput::default()
+                    };
+                }
+            }
+        } else {
+            None
+        };
     let effective_home = invocation
         .home_dir
         .clone()
+        .or_else(|| proj_engine_home.clone())
         .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
     let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
     let prepared = match prepare_credential(config, resolved_home.as_deref()) {
@@ -518,7 +577,7 @@ pub fn run_invocation(
 
     if let Some(home) = &effective_home {
         command.env("HOME", home);
-        if isolated_host_home.is_some()
+        if (isolated_host_home.is_some() || proj_engine_home.is_some())
             && let Some(real_home) = &orig_home
         {
             let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")

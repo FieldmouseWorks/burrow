@@ -185,3 +185,53 @@ fn changed_continuation_session_emits_session_lost_refusal_with_null_session() {
         );
     }
 }
+
+#[test]
+fn host_mode_continue_uses_populated_proj_engine_home_as_child_home() {
+    let dir = TempDir::new().unwrap();
+    let seen_home_file = dir.path().join("seen-home");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-continue-home",
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s' \"$HOME\" > \"{}\"\nprintf '{{\"type\":\"result\",\"conversation_id\":\"ag-old-1\",\"result\":\"continued\"}}\\n'\n",
+            seen_home_file.display()
+        ),
+    );
+    let populated_home = dir.path().join("populated-home");
+    fs::create_dir_all(&populated_home).unwrap();
+    let marker = populated_home.join("marker");
+    fs::write(&marker, "prior-state").unwrap();
+
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        credential_mode: CredentialMode::Env,
+        credential_env: None,
+        target_credential_env: None,
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let output = run_continue(&cfg_path, &cfg, dir.path(), "ag-old-1", |cmd| {
+        cmd.env("PROJ_ENGINE_HOME", &populated_home);
+    });
+    assert!(
+        output.status.success(),
+        "expected continuation with populated PROJ_ENGINE_HOME to succeed, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen_home = PathBuf::from(fs::read_to_string(&seen_home_file).unwrap());
+    assert_eq!(
+        seen_home, populated_home,
+        "child HOME must be PROJ_ENGINE_HOME rather than a fresh tempdir"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        "prior-state",
+        "populated PROJ_ENGINE_HOME state must be preserved"
+    );
+}
