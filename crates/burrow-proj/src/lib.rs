@@ -201,10 +201,12 @@ pub mod watch;
 /// Seconds the stall watchdog gives proj to have acted on a deadline of its
 /// own before it does.
 pub const GRACE: i64 = 600;
-/// How long a failed turn has to be resumed before it's a stall: proj-inbox
-/// resumes an issue's job once its pass runs, which may wait behind an
-/// in-flight full pass (~10m) and `LISTING_GAP` (120s).
-pub const RESUME_GRACE: i64 = 900;
+/// How long a non-inbox failed turn has to be resumed before it's a stall.
+pub const RESUME_GRACE: i64 = 120;
+/// How long an inbox-managed job's failed turn has to be resumed before it's a
+/// stall: proj-inbox resumes an issue's job once its pass runs, which may wait
+/// behind an in-flight full pass (~10m) and `LISTING_GAP` (120s).
+pub const INBOX_RESUME_GRACE: i64 = 900;
 
 /// How a command ends when it doesn't succeed: its exit status, and what it
 /// says on stderr, if anything.

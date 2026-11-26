@@ -557,6 +557,55 @@ mod tests {
         owned.mark_ended();
         assert!(wait(&owned).is_none());
 
+        // Inbox-managed jobs (marked by inbox-issue, host-side inbox-issue, or
+        // an active legacy inbox record) get INBOX_RESUME_GRACE; regular
+        // non-inbox jobs keep RESUME_GRACE (120s).
+        let mut inbox_v = example();
+        inbox_v["jobs"] = tmp.path().to_str().unwrap().into();
+        let inbox_state = tmp.path().join("inbox-state");
+        fs::create_dir_all(&inbox_state).unwrap();
+        inbox_v["inbox"]["state"] = inbox_state.to_str().unwrap().into();
+        let inbox_cfg: Config = serde_json::from_value(inbox_v).unwrap();
+        let new_in = |id: &'static str| {
+            let job = Job::new(&inbox_cfg, id);
+            fs::create_dir(&job.dir).unwrap();
+            job.set_turns(1).unwrap();
+            set_mtime(&job.path("prompt.1"), 1000);
+            set_mtime(&job.turn("1", "ended"), 5000);
+            job
+        };
+        let times_in = |job: &Job| {
+            let w = job_wait(&inbox_cfg, &job.facts().unwrap()).unwrap();
+            (w.since as i64, w.due as i64)
+        };
+        let inbox_marked = new_in("inbox-marked");
+        fs::write(inbox_marked.path("inbox-issue"), "true\n").unwrap();
+        assert_eq!(
+            times_in(&inbox_marked),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let inbox_host = new_in("inbox-host");
+        crate::ask::ensure(&inbox_host).unwrap();
+        fs::write(
+            crate::ask::host_path(&inbox_host, "inbox-issue"),
+            "sam/web#1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            times_in(&inbox_host),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let inbox_legacy = new_in("inbox-legacy");
+        let rec = inbox_state.join("sam_web-7");
+        fs::create_dir_all(&rec).unwrap();
+        fs::write(rec.join("job"), "inbox-legacy\n").unwrap();
+        assert_eq!(
+            times_in(&inbox_legacy),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let non_inbox = new_in("non-inbox");
+        assert_eq!(times_in(&non_inbox), (5000, 5120));
+
         // Still going: no end to record.
         let going = new("going");
         set_mtime(&going.turn("1", "jsonl"), 2000);
