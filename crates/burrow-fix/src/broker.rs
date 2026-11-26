@@ -6,7 +6,8 @@
 //!   the plugin names itself by, before anything starts.
 //! - It starts the fix as a proj job on the fixing role, under a key of its
 //!   own beneath the PR's. At most one live fix runs a PR: one held here,
-//!   and none left over from before a restart ([`Broker::reconcile`]).
+//!   or one a request was waiting on when the broker last stopped
+//!   ([`Broker::reconcile`]).
 //! - It waits on the job through its record, books its own deadline from
 //!   the record's `overdue_at`, and stops the job when the request ends
 //!   first (the plugin killed, past its deadline, cancelled).
@@ -23,10 +24,17 @@
 //! hands the job its number: the job never looks for it, so it never reads
 //! or edits one anyone else opened.
 //!
-//! The fixes it's waiting on are kept, by their keys, until each ends: a
-//! restart stops the jobs whose connections it lost ([`Broker::reconcile`]).
-//! A push that already happened stands; the next pass reads the head that
-//! moved.
+//! The fixes it's waiting on are kept in `live/`, by their keys, with the
+//! head each was handed and what it was asked, until each ends. A job is a
+//! proj job and outlives the broker: a restart leaves it at work and
+//! re-adopts it ([`Broker::reconcile`]). The flow, its connection lost,
+//! asks again; a request that asks the same of the same PR is answered from
+//! that job, at work or ended, and starts no second one. One that asks
+//! anything else is refused while that job is at work, as beside any live
+//! fix, and once it has ended, starts afresh. A re-adopted job no one asks
+//! about again ends by its own turn's timeout and idle limit, which proj
+//! keeps. A push that already happened stands; the next pass reads the
+//! head that moved.
 use crate::answers::Said;
 use crate::stuck::{self, Ask, Outcome};
 use crate::{Config, brief, discussion};
@@ -56,10 +64,68 @@ pub struct Broker {
     pub github: GitHub,
     /// How often it reads a job's record while it waits.
     pub look: Duration,
-    /// The PRs with a live fix here, by [`key`]: a request's own, or the
-    /// job key of one that wouldn't stop ([`Held::keep`]), stopped again
-    /// before the PR's next fix starts.
-    live: Mutex<HashMap<String, Option<String>>>,
+    /// The PRs with a live fix here, by [`key`].
+    live: Mutex<HashMap<String, Live>>,
+}
+
+/// A PR's live work, as the broker holds it.
+enum Live {
+    /// A request here is waiting on its job.
+    Asked,
+    /// The job of a request that ended, which wouldn't stop
+    /// ([`Held::keep`]): stopped before the PR's next job starts.
+    Kept(String),
+    /// The job a request was waiting on when the broker last stopped,
+    /// re-adopted at start ([`Broker::reconcile`]): the one a request
+    /// that asks the same joins.
+    Adopted(Entry),
+}
+
+/// What `live/` keeps of a PR's job, a line each: its proj key, the head
+/// it was handed, what it was asked ([`asked`]), and `kept` once its
+/// request ended and it wouldn't stop. A head or ask left out (as an older
+/// broker wrote it, the key alone) is one no request asks again.
+#[derive(Debug, Default, PartialEq)]
+struct Entry {
+    job: String,
+    head: Option<String>,
+    asked: Option<String>,
+    kept: bool,
+}
+
+impl Entry {
+    fn read(text: &str) -> Self {
+        let mut lines = text.lines().map(str::trim);
+        let mut next = || lines.next().filter(|l| !l.is_empty()).map(str::to_owned);
+        let job = next().unwrap_or_default();
+        let (head, asked) = (next(), next());
+        Self {
+            job,
+            head,
+            asked,
+            kept: next().as_deref() == Some("kept"),
+        }
+    }
+
+    fn write(&self) -> String {
+        let line = |l: &Option<String>| l.clone().unwrap_or_default();
+        format!(
+            "{}\n{}\n{}\n{}",
+            self.job,
+            line(&self.head),
+            line(&self.asked),
+            if self.kept { "kept\n" } else { "" }
+        )
+    }
+}
+
+/// What a request asks of its PR, as one line, for [`Entry::asked`]: two
+/// requests are the same when these are, so a re-made request joins the
+/// job of the one it repeats. A fix is its head and its problems, since
+/// its job answers the findings it was handed by their index; a stuck-role
+/// job is its prompt.
+fn asked(what: &impl serde::Serialize) -> Result<String, String> {
+    serde_json::to_string(what).map_err(|e| format!("a request that won't write: {e}"))
 }
 
 /// A PR's live fix, here, and the proj key its job is held under: let go
@@ -69,15 +135,37 @@ struct Held<'a> {
     broker: &'a Broker,
     pr: String,
     job: String,
+    /// The job it joined, re-adopted from before a restart: its id and the
+    /// head it was handed. None when this request starts its own.
+    joined: Option<(String, Option<String>)>,
 }
 
 impl Held<'_> {
+    /// Kept on disk until its request ends, with what it was handed and
+    /// asked, so a restart re-adopts its job ([`Broker::reconcile`]).
+    fn record(&self, head: &str, asked: &str) -> Result<(), String> {
+        let kept = self.broker.kept(&self.job);
+        let entry = Entry {
+            job: self.job.clone(),
+            head: Some(head.to_owned()),
+            asked: Some(asked.to_owned()),
+            kept: false,
+        };
+        fs::write(&kept, entry.write()).map_err(|e| format!("{}: {e}", kept.display()))
+    }
+
     /// Its job wouldn't stop: the PR stays held by its job's key, kept on
     /// disk too, so no second fix starts beside it until that job is
-    /// stopped ([`Broker::hold`], [`Broker::reconcile`]).
+    /// stopped, here or after a restart ([`Broker::hold`]).
     fn keep(self) {
+        let entry = Entry {
+            job: self.job.clone(),
+            kept: true,
+            ..Entry::default()
+        };
+        let _ = fs::write(self.broker.kept(&self.job), entry.write());
         if let Ok(mut live) = self.broker.live.lock() {
-            live.insert(self.pr.clone(), Some(self.job.clone()));
+            live.insert(self.pr.clone(), Live::Kept(self.job.clone()));
         }
         std::mem::forget(self);
     }
@@ -181,32 +269,33 @@ impl Broker {
         self.cfg.state.join("live").join(key.replace('/', "+"))
     }
 
-    /// At startup: stop each job a fix was waiting on when the broker
-    /// stopped, its connection lost with it. How many it stopped. One that
-    /// won't stop keeps its PR held, as it would have before the restart,
-    /// and the rest are served.
+    /// At startup: hold each PR whose job was live when the broker stopped,
+    /// as it was held before. A job a request was waiting on is re-adopted,
+    /// never stopped: it's a proj job, still at work or ended, and the
+    /// flow's next request for the same work is answered from it
+    /// ([`Broker::hold`]). One whose request had ended and that wouldn't
+    /// stop is still stopped before the PR's next job. How many it holds.
     pub fn reconcile(&self) -> Result<usize, String> {
         let dir = self.cfg.state.join("live");
-        let mut stopped = 0;
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| "the broker's lock is poisoned")?;
         for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let path = entry.map_err(|e| e.to_string())?.path();
-            let job = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let job = job.trim();
-            match self.let_go(job) {
-                Ok(found) => {
-                    stopped += usize::from(found);
-                    fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                }
-                Err(e) => {
-                    eprintln!("burrow-fix: {job} wouldn't stop, so its PR stays held: {e}");
-                    self.live
-                        .lock()
-                        .map_err(|_| "the broker's lock is poisoned")?
-                        .insert(pr_of(job).to_owned(), Some(job.to_owned()));
-                }
-            }
+            let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let entry = Entry::read(&text);
+            let pr = pr_of(&entry.job).to_owned();
+            live.insert(
+                pr,
+                if entry.kept {
+                    Live::Kept(entry.job)
+                } else {
+                    Live::Adopted(entry)
+                },
+            );
         }
-        Ok(stopped)
+        Ok(live.len())
     }
 
     /// Stop the job held under `job`, if there is one: whether there was.
@@ -270,17 +359,25 @@ impl Broker {
             &jobs::offered(&self.cfg.settings, &self.cfg.role)?,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
-        let held = self.hold(key(repo, *pr), &format!("a fix of {repo}#{pr}"))?;
-        let branch = self.handed(repo, *pr, head)?;
-        let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
-        let kept = self.kept(&held.job);
-        fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
-        // Stopped before the answer is let go of, so no fix is left at work
-        // for a request that's over: a start that read as failed may have
-        // started all the same.
-        let id = match self.jobs.start(repo, &held.job, &task) {
-            Ok(id) => id,
-            Err(why) => return Err(self.ended(held, None, why)),
+        let asks = asked(&(head, problems))?;
+        let mut held = self.hold(key(repo, *pr), &format!("a fix of {repo}#{pr}"), &asks)?;
+        // The job it repeats was handed this head, which it may have moved
+        // since: what it pushed is held to that head below, as its own
+        // request's would have been.
+        let id = match held.joined.take() {
+            Some((id, _)) => id,
+            None => {
+                let branch = self.handed(repo, *pr, head)?;
+                let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
+                held.record(head, &asks)?;
+                // Stopped before the answer is let go of, so no fix is left
+                // at work for a request that's over: a start that read as
+                // failed may have started all the same.
+                match self.jobs.start(repo, &held.job, &task) {
+                    Ok(id) => id,
+                    Err(why) => return Err(self.ended(held, None, why)),
+                }
+            }
         };
         let record = match jobs::wait(&*self.jobs, &id, work, self.look) {
             Ok(record) => record,
@@ -331,30 +428,80 @@ impl Broker {
         })
     }
 
-    /// The PR's live work under `key` ([`key`], [`stuck_key`]), here, or
-    /// why there's `what` at work already.
-    fn hold(&self, key: String, what: &str) -> Result<Held<'_>, String> {
+    /// The PR's live work under `key` ([`key`], [`stuck_key`]) for a
+    /// request that `asks` ([`asked`]), here, or why there's `what` at work
+    /// already. A job re-adopted from before a restart that was asked the
+    /// same is joined ([`Held::joined`]), at work or ended; one asked
+    /// anything else holds the PR while it's at work, and is let go of once
+    /// it has ended.
+    fn hold(&self, key: String, what: &str, asks: &str) -> Result<Held<'_>, String> {
         let mut live = self
             .live
             .lock()
             .map_err(|_| "the broker's lock is poisoned")?;
+        let (mut job, mut joined) = (job_key(&key), None);
         match live.get(&key) {
             None => {}
-            Some(None) => return Err(format!("{what} is at work already")),
+            Some(Live::Asked) => return Err(format!("{what} is at work already")),
             // Work whose job wouldn't stop: stopped now, or still held.
-            Some(Some(job)) => {
+            Some(Live::Kept(job)) => {
                 self.let_go(job).map_err(|e| {
                     format!("{what} is at work already, and its job {job} won't stop: {e}")
                 })?;
                 let _ = fs::remove_file(self.kept(job));
             }
+            Some(Live::Adopted(entry)) => {
+                let found = self
+                    .jobs
+                    .find(&entry.job)
+                    .map_err(|e| format!("{what} may be at work already, as {}: {e}", entry.job))?;
+                match found {
+                    Some(id) if entry.asked.as_deref() == Some(asks) => {
+                        job.clone_from(&entry.job);
+                        joined = Some((id, entry.head.clone()));
+                    }
+                    Some(id) => self.outlived(&id, what)?,
+                    // It never started: nothing to join or stop.
+                    None => {}
+                }
+                if joined.is_none() {
+                    let _ = fs::remove_file(self.kept(&entry.job));
+                }
+            }
         }
-        live.insert(key.clone(), None);
+        live.insert(key.clone(), Live::Asked);
         Ok(Held {
             broker: self,
-            job: job_key(&key),
+            job,
             pr: key,
+            joined,
         })
+    }
+
+    /// A re-adopted job `id` that a request asking something else of its PR
+    /// finds: why there's `what` at work already while it's at work; once
+    /// its turn has ended, nothing, after stopping it if it ended holding
+    /// anything open (a question, an await), so it can't take up again
+    /// beside the PR's next job.
+    fn outlived(&self, id: &str, what: &str) -> Result<(), String> {
+        let record = self
+            .jobs
+            .why(id)
+            .map_err(|e| format!("{what} may be at work already, as {id}: {e}"))?;
+        if record.live() {
+            return Err(format!(
+                "{what} is at work already, as {id}, from before the broker's restart"
+            ));
+        }
+        if !record.done() {
+            self.jobs.stop(id).map_err(|e| {
+                format!(
+                    "{what} ended {}, and its job {id} won't stop: {e}",
+                    record.stage
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// One request for the stuck role: its answer, or why there's none.
@@ -416,28 +563,41 @@ impl Broker {
             .as_deref()
             .ok_or("the broker has no flow configurations to read a repo's authors from")?;
         let accounts = discussion::accounts(flow, repo)?;
-        let held = self.hold(
+        let asks = asked(prompt)?;
+        let mut held = self.hold(
             stuck_key(repo, pr),
             &format!("a stuck-role job on {repo}#{pr}"),
+            &asks,
         )?;
-        let (head, branch) = self.pr(repo, pr)?;
-        let shown = discussion::read(&mut *(self.github)(), repo, pr, &accounts.discussion)?;
-        let handed = self.find_followup(repo, pr, &accounts)?;
-        let task = brief::stuck(
-            repo,
-            pr,
-            &head,
-            &branch,
-            &ask,
-            &shown,
-            handed,
-            &self.cfg.jobs,
-        );
-        let kept = self.kept(&held.job);
-        fs::write(&kept, &held.job).map_err(|e| format!("{}: {e}", kept.display()))?;
-        let id = match starter.start(repo, &held.job, &task) {
-            Ok(id) => id,
-            Err(why) => return Err(self.ended(held, None, why)),
+        let (id, head, handed) = match held.joined.take() {
+            // The job it repeats, held to the head it was handed and to the
+            // follow-up it would have been handed, which is still the
+            // first of the PR's open ones.
+            Some((id, head)) => {
+                let head = head.ok_or_else(|| format!("the stuck-role job {id} names no head"))?;
+                (id, head, self.find_followup(repo, pr, &accounts)?)
+            }
+            None => {
+                let (head, branch) = self.pr(repo, pr)?;
+                let shown =
+                    discussion::read(&mut *(self.github)(), repo, pr, &accounts.discussion)?;
+                let handed = self.find_followup(repo, pr, &accounts)?;
+                let task = brief::stuck(
+                    repo,
+                    pr,
+                    &head,
+                    &branch,
+                    &ask,
+                    &shown,
+                    handed,
+                    &self.cfg.jobs,
+                );
+                held.record(&head, &asks)?;
+                match starter.start(repo, &held.job, &task) {
+                    Ok(id) => (id, head, handed),
+                    Err(why) => return Err(self.ended(held, None, why)),
+                }
+            }
         };
         let record = match jobs::wait(&*self.jobs, &id, work, self.look) {
             Ok(record) => record,
