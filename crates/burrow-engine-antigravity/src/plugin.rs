@@ -1,8 +1,5 @@
 //! Conary `conary-plugin v5` (`describe` + `work` for `job`) handler.
 
-use std::fs::{self, DirBuilder};
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
 use conary_core::plugin::{
@@ -324,8 +321,7 @@ fn answer_detailed(
                 }
             };
 
-            let host_home = resolve_host_home_dir(config).map_err(DetailedError::other)?;
-            let mut invocation = Invocation::from_config(
+            let invocation = Invocation::from_config(
                 config,
                 PathBuf::from(workdir),
                 prompt.clone(),
@@ -333,7 +329,6 @@ fn answer_detailed(
                 resolved_effort,
                 conversation.clone(),
             );
-            invocation.home_dir = host_home;
             let turn = run_invocation(config, &invocation, stop);
 
             if let Some(err) = turn.error {
@@ -411,48 +406,6 @@ fn answer_detailed(
             "antigravity plugin serves describe and job requests alone".to_owned(),
         )),
     }
-}
-
-/// Resolve a persistent per-job isolated `$HOME` under `$PROJ_SCRATCH` for
-/// host-mode turns so multi-turn continuations keep session state without
-/// touching the real `$HOME`. Returns `None` outside host mode or when
-/// `PROJ_SCRATCH` is unset (falling back to a per-turn `TempDir` in `cli.rs`).
-fn resolve_host_home_dir(config: &Config) -> Result<Option<PathBuf>, String> {
-    if !config.host_mode {
-        return Ok(None);
-    }
-    let Some(scratch) = std::env::var_os("PROJ_SCRATCH").filter(|v| !v.is_empty()) else {
-        return Ok(None);
-    };
-    let home = PathBuf::from(scratch).join(".antigravity-home");
-    match fs::symlink_metadata(&home) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(format!(
-                "refusing to follow symlink at host HOME {}",
-                home.display()
-            ));
-        }
-        Ok(meta) if !meta.is_dir() => {
-            return Err(format!("host HOME {} is not a directory", home.display()));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            DirBuilder::new()
-                .mode(0o700)
-                .recursive(true)
-                .create(&home)
-                .map_err(|e| format!("failed to create host HOME {}: {e}", home.display()))?;
-        }
-        Err(e) => {
-            return Err(format!(
-                "failed to inspect host HOME {}: {e}",
-                home.display()
-            ));
-        }
-    }
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("failed to secure host HOME {}: {e}", home.display()))?;
-    Ok(Some(home))
 }
 
 fn resolve_execution(

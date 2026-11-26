@@ -681,10 +681,10 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
 }
 
 #[test]
-fn host_mode_persists_isolated_home_across_turns_in_proj_scratch() {
+fn host_mode_persists_isolated_home_across_turns_in_proj_engine_home() {
     let dir = TempDir::new().unwrap();
-    let scratch = dir.path().join("proj-scratch");
-    fs::create_dir_all(&scratch).unwrap();
+    let engine_home = dir.path().join("job-dir").join("engine-home");
+    fs::create_dir_all(engine_home.parent().unwrap()).unwrap();
     let fake_real_home = dir.path().join("real-home");
     fs::create_dir_all(fake_real_home.join(".cargo")).unwrap();
     fs::write(fake_real_home.join(".gitconfig"), "[user]\nname = Test\n").unwrap();
@@ -763,7 +763,7 @@ fi
         let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
             .env(CONFIG_ENV, &cfg_path)
             .env("HOME", &fake_real_home)
-            .env("PROJ_SCRATCH", &scratch)
+            .env("PROJ_ENGINE_HOME", &engine_home)
             .env("BURROW_AG_TEST_IN", "secret-token")
             .env_remove("GIT_CONFIG_GLOBAL")
             .env_remove("CARGO_HOME")
