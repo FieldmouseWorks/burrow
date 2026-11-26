@@ -65,9 +65,9 @@ jobs:
       eval-apart: true
       # One runner took 55 minutes over burrow's gate (10-31): its outputs
       # evaluated one after another for 10, then its builds and fifteen VM
-      # tests sharing four cores for 45. Four legs share them out over four
+      # tests sharing four cores for 45. Twelve legs share them out over twelve
       # runners, which public repos get free.
-      legs: 8
+      legs: 12
       # And on an empty store each leg built what no public cache has: the
       # patched git (modules/common.nix), about 16 of a leg's 22-29 minutes,
       # and every check, changed or not. main's gate keeps those builds for
@@ -115,7 +115,7 @@ jobs:
           echo "train=$train" >> "$GITHUB_OUTPUT"
   # The train's candidates, on GitHub's hosted runners (a VM of its own for
   # each job, which Conary counts as started fresh for it), and a PR to main's
-  # negative run. The same gate as `check`, its four legs and all; main's
+  # negative run. The same gate as `check`, its twelve legs and all; main's
   # copy, which Renovate leaves at main (renovate.json): a pin would need a
   # PR after every merge.
   train:
@@ -131,7 +131,7 @@ jobs:
     with:
       build-skip: agents
       eval-apart: true
-      legs: 8
+      legs: 12
       keep-builds: true
       docs-paths: >-
         README.md AGENTS.md CLAUDE.md docs/**
