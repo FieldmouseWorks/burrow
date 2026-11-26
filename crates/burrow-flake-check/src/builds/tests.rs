@@ -444,7 +444,33 @@ fn a_slow_store_fetches_narinfos_concurrently_within_its_deadline() {
     let to = format!("file://{}", h.join("cache").display());
     let cache_signed = |name: &str, key: &Path| {
         let drv = h.drv(&built(name));
-        let out = h.ok("nix-store", &["--realise", &drv]);
+        let out = h.ok("nix-store", &["--query", "--outputs", &drv]);
+        let dst = h.join("root").join(out.trim_start_matches('/'));
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        fs::write(&dst, format!("{name}\n")).unwrap();
+        let mut reg = Command::new("nix-store")
+            .args(["--register-validity", "--reregister"])
+            .env("NIX_CONFIG", h.config())
+            .env("HOME", &h.dir)
+            .env("XDG_CACHE_HOME", h.join("cache-home"))
+            .env_remove("NIX_USER_CONF_FILES")
+            .env_remove("NIX_REMOTE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = reg.stdin.take().unwrap();
+            writeln!(stdin, "{out}\n\n0").unwrap();
+        }
+        let reg = reg.wait_with_output().unwrap();
+        assert!(
+            reg.status.success(),
+            "nix-store --register-validity: {}",
+            String::from_utf8_lossy(&reg.stderr)
+        );
         h.ok("nix", &["store", "sign", "--key-file", s(key), &out]);
         h.ok("nix", &["copy", "--to", &to, &out]);
         h.ok("nix", &["store", "delete", &out]);
