@@ -296,8 +296,6 @@ fn host_mode_continue_defers_invalid_proj_engine_home_to_path_validation() {
 #[cfg(unix)]
 #[test]
 fn host_mode_continue_does_not_treat_unreadable_proj_engine_home_as_session_lost() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = TempDir::new().unwrap();
     let fixture = write_executable(
         dir.path(),
@@ -307,11 +305,11 @@ fn host_mode_continue_does_not_treat_unreadable_proj_engine_home_as_session_lost
     let unreadable_home = dir.path().join("unreadable-home");
     fs::create_dir_all(&unreadable_home).unwrap();
     fs::write(unreadable_home.join("marker"), "prior-state").unwrap();
-    fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o000)).unwrap();
+    burrow_test::permissions(&unreadable_home, 0o000);
 
     // If running as root (e.g., privileged container), read_dir still succeeds.
     if fs::read_dir(&unreadable_home).is_ok() {
-        fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o700)).unwrap();
+        burrow_test::permissions(&unreadable_home, 0o700);
         return;
     }
 
@@ -332,7 +330,7 @@ fn host_mode_continue_does_not_treat_unreadable_proj_engine_home_as_session_lost
         cmd.env("PROJ_ENGINE_HOME", &unreadable_home);
     });
 
-    fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o700)).unwrap();
+    burrow_test::permissions(&unreadable_home, 0o700);
 
     assert!(
         refusal_event(&output.stderr).is_none(),
