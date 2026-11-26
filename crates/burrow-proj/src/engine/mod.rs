@@ -174,7 +174,7 @@ pub(crate) fn requested(
         && let Some(engine) = request.agent_engine.as_deref()
     {
         let tuning = settings.tuning(role, repo.as_deref(), engine);
-        return Ok(apply_overrides(
+        let candidate = apply_overrides(
             Choice {
                 engine: engine.to_owned(),
                 model: tuning.model,
@@ -182,9 +182,17 @@ pub(crate) fn requested(
             },
             request.model.as_deref(),
             request.effort.as_deref(),
-        ));
+        );
+        if cfg.settings.is_some() && (request.model.is_some() || request.effort.is_some()) {
+            settings.validate_choice(
+                &candidate.engine,
+                candidate.model.as_deref(),
+                candidate.effort.as_deref(),
+            )?;
+        }
+        return Ok(candidate);
     }
-    let (mut choice, fell_back) = resolve_with(
+    let (choice, fell_back) = resolve_with(
         cfg,
         &settings,
         role,
@@ -192,23 +200,22 @@ pub(crate) fn requested(
         pinned,
         request.agent.is_some(),
     )?;
-    if !fell_back && (request.model.is_some() || request.effort.is_some()) {
-        let candidate = apply_overrides(
-            choice.clone(),
-            request.model.as_deref(),
-            request.effort.as_deref(),
-        );
-        if cfg.settings.is_none()
-            || settings
-                .validate_choice(
-                    &candidate.engine,
-                    candidate.model.as_deref(),
-                    candidate.effort.as_deref(),
-                )
-                .is_ok()
-        {
-            choice = candidate;
+    let override_fell_back = fell_back
+        || request
+            .override_engine
+            .as_deref()
+            .is_some_and(|orig| orig != choice.engine && settings.fallback_for(orig).is_some());
+    if !override_fell_back && (request.model.is_some() || request.effort.is_some()) {
+        let candidate =
+            apply_overrides(choice, request.model.as_deref(), request.effort.as_deref());
+        if cfg.settings.is_some() {
+            settings.validate_choice(
+                &candidate.engine,
+                candidate.model.as_deref(),
+                candidate.effort.as_deref(),
+            )?;
         }
+        return Ok(candidate);
     }
     Ok(choice)
 }

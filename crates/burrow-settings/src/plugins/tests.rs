@@ -805,3 +805,101 @@ fn removal_records_fallbacks_including_transitive_chains_and_clears_on_reinstall
     assert_eq!(force.fallback_for("third"), None);
     assert_eq!(force.fallback_for("fourth"), Some("claude"));
 }
+
+#[test]
+fn sandbox_needs_plugins_are_rejected_at_install_and_update_while_brings_succeeds() {
+    let (dir, cfg, _) = rig();
+
+    // 1. Installing a plugin declaring `sandbox: needs` fails closed and never
+    //    appears in installed plugins, picker data, or live JSON Schema.
+    let needs_bin = dir.path().join("needs-v1");
+    let needs_hash = write_plugin_fixture(
+        &needs_bin,
+        "needs-eng",
+        r#"[{"id":"n1","efforts":["low"]}]"#,
+        "needs",
+        true,
+        None,
+        None,
+    );
+    let err = cfg
+        .command_as(
+            &owner_auth(),
+            &words(&format!(
+                "plugin install needs-eng release {} 1.0.0 {needs_hash}",
+                needs_bin.display()
+            )),
+        )
+        .unwrap_err();
+    assert!(err.contains("Sandbox::Needs"), "{err}");
+    assert!(err.contains("burrow.agents.engines.needs-eng"), "{err}");
+    assert!(cfg.installed_plugin("needs-eng").unwrap().is_none());
+    assert!(!cfg.picker().unwrap().engines.contains_key("needs-eng"));
+    let schema = cfg.live_schema().unwrap();
+    let variants = schema
+        .pointer("/$defs/jobChoice/oneOf")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(
+        !variants
+            .iter()
+            .any(|v| v.pointer("/properties/engine/const") == Some(&json!("needs-eng")))
+    );
+    assert!(!cfg.plugins_dir().join("needs-eng").exists());
+
+    // 2. Installing a plugin declaring `sandbox: brings` succeeds.
+    let brings_v1 = dir.path().join("brings-v1");
+    let brings_hash = write_plugin_fixture(
+        &brings_v1,
+        "brings-eng",
+        r#"[{"id":"b1","efforts":["low"]}]"#,
+        "brings",
+        true,
+        None,
+        None,
+    );
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install brings-eng release {} 1.0.0 {brings_hash}",
+            brings_v1.display()
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.installed_plugin("brings-eng")
+            .unwrap()
+            .unwrap()
+            .capabilities
+            .sandbox,
+        "brings"
+    );
+
+    // 3. Updating that plugin to a v2 declaring `sandbox: needs` is rejected
+    //    and preserves the prior `brings` v1 installation untouched.
+    let brings_v2_needs = dir.path().join("brings-v2-needs");
+    let v2_hash = write_plugin_fixture(
+        &brings_v2_needs,
+        "brings-eng",
+        r#"[{"id":"b1","efforts":["low"]}]"#,
+        "needs",
+        true,
+        None,
+        None,
+    );
+    let err = cfg
+        .command_as(
+            &owner_auth(),
+            &words(&format!(
+                "plugin update brings-eng release {} 2.0.0 {v2_hash}",
+                brings_v2_needs.display()
+            )),
+        )
+        .unwrap_err();
+    assert!(err.contains("Sandbox::Needs"), "{err}");
+    let kept = cfg.installed_plugin("brings-eng").unwrap().unwrap();
+    assert_eq!(kept.version, "1.0.0");
+    assert_eq!(kept.sha256, brings_hash);
+    assert_eq!(kept.capabilities.sandbox, "brings");
+}

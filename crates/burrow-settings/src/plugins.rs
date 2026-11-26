@@ -651,6 +651,12 @@ pub(crate) fn sandboxed_check(
         .ok_or_else(|| format!("{engine}: plugin must speak conary-plugin v2+ with offers"))?
         .clone();
 
+    if offers.capabilities.sandbox == Sandbox::Needs {
+        return Err(format!(
+            "sandboxed cn plugin check rejected {engine}: plugin requires a sandbox (Sandbox::Needs), which has no live capability approval path; wire sandbox plugins under burrow.agents.engines.{engine} instead"
+        ));
+    }
+
     for model in &offers.models {
         if !plain(&model.id) {
             return Err(format!(

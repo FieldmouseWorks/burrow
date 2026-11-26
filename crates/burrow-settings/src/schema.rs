@@ -252,7 +252,7 @@ const PLUGIN_MODEL: Kind = Kind::Record(&[
         kind: &MAYBE_COUNT,
     },
 ]);
-const PLUGIN_SANDBOX: Kind = Kind::OneOf(&["none", "brings", "needs"]);
+const PLUGIN_SANDBOX: Kind = Kind::OneOf(&["none", "brings"]);
 const PLUGIN_CAPS: Kind = Kind::Record(&[
     Field {
         name: "sandbox",

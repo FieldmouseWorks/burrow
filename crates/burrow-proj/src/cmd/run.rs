@@ -459,6 +459,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             "proj run --app with --vm: a sandbox has no GitHub login to act with",
         ));
     }
+    let mut override_engine = None;
     if new.engine.is_some() || new.model.is_some() || new.effort.is_some() {
         let in_force = cfg.role_settings().map_err(|e| Fail::new(1, e))?;
         if let Some(engine) = new.engine.as_deref() {
@@ -498,6 +499,9 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
                 effective.effort.as_deref(),
             )
             .map_err(|e| Fail::new(2, format!("proj run: {e}")))?;
+        if new.model.is_some() || new.effort.is_some() {
+            override_engine = Some(effective.engine);
+        }
     }
     let id = new_job(cfg, p)?;
     let job = Job::new(cfg, &id);
@@ -524,6 +528,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         engine: new.engine.clone(),
         model: new.model.clone(),
         effort: new.effort.clone(),
+        override_engine,
         role: new.role.clone(),
         app: new.app.clone(),
         agent: None,

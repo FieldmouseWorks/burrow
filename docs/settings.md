@@ -344,7 +344,9 @@ settings plugin remove ENGINE [--fallback ENGINE]
   before execution during staging and re-verified on every `proj` turn start
   and `proj check-config`. Before activation, `burrow-settings` runs Conary's
   `cn plugin check` inside an isolated `bubblewrap` sandbox (`--unshare-all`,
-  `--clearenv`, read-only plugin mount, no network or host state).
+  `--clearenv`, read-only plugin mount, no network or host state) and rejects
+  plugins declaring `sandbox: needs` (which have no live VM capability approval
+  path and belong under `burrow.agents.engines.<name>` instead).
 - **Immediate schema choices and picker data:** once conformance passes, the
   plugin's validated `describe` models, efforts, and capabilities are published
   atomically into `proj.enginePlugins` and `proj.engineOffers` (see the

@@ -745,13 +745,9 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         ..Default::default()
     };
     let id = start_job(&cfg, &right_for_repo, "demo", "task").unwrap();
-    assert_eq!(
-        crate::job::Request::load(&Job::new(&cfg, &id))
-            .unwrap()
-            .model
-            .as_deref(),
-        Some("third-m1")
-    );
+    let req = crate::job::Request::load(&Job::new(&cfg, &id)).unwrap();
+    assert_eq!(req.model.as_deref(), Some("third-m1"));
+    assert_eq!(req.override_engine.as_deref(), Some("third"));
 
     // Also verify repository resolution from the project's git origin remote
     // when `admission` is not pre-supplied.
@@ -842,11 +838,7 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         ..Default::default()
     };
     let id2 = start_job(&cfg, &right_for_hop, "demo", "task").unwrap();
-    assert_eq!(
-        crate::job::Request::load(&Job::new(&cfg, &id2))
-            .unwrap()
-            .model
-            .as_deref(),
-        Some("third-m1")
-    );
+    let req2 = crate::job::Request::load(&Job::new(&cfg, &id2)).unwrap();
+    assert_eq!(req2.model.as_deref(), Some("third-m1"));
+    assert_eq!(req2.override_engine.as_deref(), Some("third"));
 }

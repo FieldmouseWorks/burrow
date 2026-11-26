@@ -61,6 +61,15 @@ pub(crate) struct Request {
     /// offers at `proj run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Engine against which `model`/`effort` overrides were validated at
+    /// `proj run`, so `plugin remove` fallback knows when a role's engine moved
+    /// because that plugin was removed rather than updated.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::engine::deserialize_opt_engine"
+    )]
+    pub override_engine: Option<String>,
     pub role: Option<String>,
     pub app: Option<String>,
     pub agent: Option<String>,
@@ -153,6 +162,7 @@ impl Request {
             engine: named("engine").map(|e| parse_engine(&e)).transpose()?,
             model: None,
             effort: None,
+            override_engine: None,
             role: named("role"),
             app: named("app"),
             agent: named("agent"),
