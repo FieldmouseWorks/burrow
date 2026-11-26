@@ -349,6 +349,194 @@ fn a_store_that_stalls_holds_a_leg_one_deadline_not_one_per_output() {
     assert!(e.contains("past the 2s deadline"), "{e}");
 }
 
+/// A slow HTTP store answers each request after `delay`, tracking peak
+/// in-flight concurrency and every path requested.
+fn slow_store(
+    dir: PathBuf,
+    delay: std::time::Duration,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use std::io::{BufRead, BufReader};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/builds", l.local_addr().unwrap());
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (peak_t, seen_t) = (Arc::clone(&peak), Arc::clone(&seen));
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            let (dir, active, peak, seen) = (
+                dir.clone(),
+                Arc::clone(&active),
+                Arc::clone(&peak_t),
+                Arc::clone(&seen_t),
+            );
+            std::thread::spawn(move || {
+                let Ok(read) = c.try_clone() else { return };
+                let mut r = BufReader::new(read);
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut w = line.split_whitespace();
+                let (method, target) = (w.next().unwrap_or(""), w.next().unwrap_or(""));
+                let mut h = String::new();
+                while r.read_line(&mut h).is_ok_and(|n| n > 0) && h != "\r\n" {
+                    h.clear();
+                }
+                seen.lock().unwrap().push(target.to_owned());
+                let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
+                std::thread::sleep(delay);
+                active.fetch_sub(1, Ordering::SeqCst);
+                let file = target
+                    .strip_prefix("/builds/")
+                    .filter(|f| !f.split('/').any(|p| p == ".." || p.is_empty()))
+                    .and_then(|f| fs::read(dir.join(f)).ok());
+                let (status, body) = match file {
+                    Some(b) => ("200 OK", b),
+                    None => ("404 Not Found", Vec::new()),
+                };
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if method != "HEAD" {
+                    let _ = c.write_all(&body);
+                }
+            });
+        }
+    });
+    (url, peak, seen)
+}
+
+/// Many cold paths against a store with per-request latency finish well
+/// inside the deadline because narinfos are fetched concurrently (bounded)
+/// and verified offline from the narinfos already fetched: signed outputs
+/// and fixed outputs count, unsigned or differently signed ones don't.
+#[test]
+fn a_slow_store_fetches_narinfos_concurrently_within_its_deadline() {
+    let h = Here::new();
+    let (sk, pk) = (h.join("sk"), h.join("pk"));
+    let (other_sk, other_pk) = (h.join("other-sk"), h.join("other-pk"));
+    h.ok(
+        "nix-store",
+        &["--generate-binary-cache-key", "machine-1", s(&sk), s(&pk)],
+    );
+    h.ok(
+        "nix-store",
+        &[
+            "--generate-binary-cache-key",
+            "other-1",
+            s(&other_sk),
+            s(&other_pk),
+        ],
+    );
+    let to = format!("file://{}", h.join("cache").display());
+    let cache_signed = |name: &str, key: &Path| {
+        let drv = h.drv(&built(name));
+        let out = h.ok("nix-store", &["--query", "--outputs", &drv]);
+        let dst = h.join("root").join(out.trim_start_matches('/'));
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        fs::write(&dst, format!("{name}\n")).unwrap();
+        let mut reg = Command::new("nix-store")
+            .args(["--register-validity", "--reregister"])
+            .env("NIX_CONFIG", h.config())
+            .env("HOME", &h.dir)
+            .env("XDG_CACHE_HOME", h.join("cache-home"))
+            .env_remove("NIX_USER_CONF_FILES")
+            .env_remove("NIX_REMOTE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = reg.stdin.take().unwrap();
+            writeln!(stdin, "{out}\n\n0").unwrap();
+        }
+        let reg = reg.wait_with_output().unwrap();
+        assert!(
+            reg.status.success(),
+            "nix-store --register-validity: {}",
+            String::from_utf8_lossy(&reg.stderr)
+        );
+        h.ok("nix", &["store", "sign", "--key-file", s(key), &out]);
+        h.ok("nix", &["copy", "--to", &to, &out]);
+        h.ok("nix", &["store", "delete", &out]);
+        drv
+    };
+    let signed = cache_signed("signed", &sk);
+    let wrong_key = cache_signed("wrong-key", &other_sk);
+    let (hash, _) = h.cached("fixed", "fixed output\n");
+    let fixed_drv = h.drv(&fixed("fixed", &hash));
+    let unsigned = h.drv(&built("unsigned"));
+    let unsigned_out = h.ok("nix-store", &["--query", "--outputs", &unsigned]);
+    let unsigned_base = unsigned_out.rsplit('/').next().unwrap();
+    fs::write(
+        h.join(&format!("cache/{}.narinfo", &unsigned_base[..32])),
+        format!(
+            "StorePath: {unsigned_out}\nURL: nar/none.nar\nCompression: none\nNarHash: sha256:{}\nNarSize: 1\nReferences: \n",
+            "0".repeat(52)
+        ),
+    )
+    .unwrap();
+    let missing_expr = r#"builtins.genList (i: derivation { name = "miss-${toString i}"; system = "x86_64-linux"; builder = "/bin/sh"; args = [ "-c" "echo ${toString i} > $out" ]; }) 36"#;
+    let missing: Vec<String> = h
+        .ok("nix-instantiate", &["--expr", missing_expr])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(missing.len(), 36);
+    let mut cold = vec![signed, wrong_key, fixed_drv, unsigned];
+    cold.extend(missing);
+    assert_eq!(cold.len(), 40);
+
+    // 40 requests * 200ms = 8s serially, well past the 4s deadline.
+    let (url, peak, seen) = slow_store(h.join("cache"), std::time::Duration::from_millis(200));
+    let store = Store {
+        url,
+        key: fs::read_to_string(&pk).unwrap().trim().to_owned(),
+        temp: h.dir.clone(),
+        nix_config: Some(h.config()),
+        deadline: "4",
+    };
+    let r = store.ask(&cold).unwrap();
+    assert_eq!(r.served, ["fixed", "signed"]);
+    assert_eq!(r.untrusted, 2);
+    assert_eq!(r.unserved.len(), 38);
+    assert!(r.bytes > 0 && r.sample.is_some());
+
+    let max_in_flight = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        max_in_flight > 1 && max_in_flight <= 32,
+        "expected bounded concurrent fetches (2..=32), saw {max_in_flight}"
+    );
+    let narinfo_reqs: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.ends_with(".narinfo"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        narinfo_reqs.len(),
+        40,
+        "expected each narinfo fetched once (no second fetch during verify), got {}",
+        narinfo_reqs.len()
+    );
+}
+
 #[test]
 fn the_report_says_none_and_unknowns_plainly() {
     let r = Report {
