@@ -545,3 +545,29 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
+
+    # A PR whose GitHub inputs changed since its last visit (for example, a
+    # fresh review) must be visited ahead of unchanged PRs on a kicked pass,
+    # even when it already had its look in the current round.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs.append(pr(3))
+        from batch import Batch
+        batch = Batch(['sam/r'], continuing=True)
+        batch.note('sam/r', prs[1], [], True, info)
+        batch.note('sam/r', prs[2], [], True, info)
+        batch.state['repos']['sam/r']['round'] = batch.state['repos']['sam/r']['sequence']
+        batch.note('sam/r', prs[0], [], True, info)
+        batch.end(False, ['sam/r'])
+        prs[0]['reviews'] = {'nodes': [{'state': 'COMMENTED'}]}
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        assert handled[0][0] == 1, handled
+        S.run_pass(['sam/r'], continuing=True)
+        assert [n for n, _, _ in handled] == [1, 2, 3], handled
+    print('changed PRs go ahead of unchanged ones in the same round: passed')

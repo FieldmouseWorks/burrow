@@ -43,6 +43,7 @@ class Batch:
             self.state[key] = sorted({r.lower() for r in self.state[key]})
         self.state["retry"] = {k.lower(): v for k, v in self.state.get("retry", {}).items()}
         self.done = set()
+        self._changed = {}
         self.left = False  # PRs or repos still unvisited, not only retries
         self.later = None  # when an unavailable operation may be retried
         self.traversal_full = self.state.get("full", False) or (self.full and not continuing)
@@ -116,7 +117,11 @@ class Batch:
         live = {str(pr["number"]) for pr in prs}
         st["stops"] = {k: v for k, v in st.get("stops", {}).items() if k in live}
         st["unseen"] = [k for k in st.get("unseen", []) if k in live]
-        pending = [pr for pr in prs if done.get(str(pr["number"])) != self.rev(pr, info)]
+        st["revs"] = {k: v for k, v in st.get("revs", {}).items() if k in live}
+        revs = st["revs"]
+        cur = {str(pr["number"]): self.rev(pr, info) for pr in prs}
+        self._changed[repo.lower()] = {pr["number"] for pr in prs if revs.get(str(pr["number"])) != cur[str(pr["number"])]}
+        pending = [pr for pr in prs if done.get(str(pr["number"])) != cur[str(pr["number"])]]
         # A closed or changed PR's old owner line mustn't suppress its new
         # watchdog wait. Repo-wide notices survive until its traversal ends.
         keep = {f"[{repo}#{pr['number']}](" for pr in prs if pr not in pending}
@@ -143,6 +148,11 @@ class Batch:
         key = str(pr["number"])
         return st.get("visits", {}).get(key, 1) if key in st.get("done", {}) else 0
 
+    def changed(self, repo, pr):
+        """Whether PR's GitHub/repo decision inputs changed since its last
+        visit, even if its receipts were invalidated for a fresh look."""
+        return pr["number"] in self._changed.get(repo.lower(), ())
+
     def due(self, repo, pr):
         """Whether PR hasn't had its look this round. A kicked pass starts
         every PR over (pending), so without rounds the ones it puts first
@@ -168,10 +178,12 @@ class Batch:
     def note(self, repo, pr, mine, seen_to, info, stopped=None):
         st = self.state["repos"].setdefault(repo.lower(), {"done": {}})
         st["sequence"] = st.get("sequence", 1) + 1
-        st.setdefault("visits", {})[str(pr["number"])] = st["sequence"]
-        st["done"][str(pr["number"])] = self.rev(pr, info)
-        st["digest"] = mine
         key = str(pr["number"])
+        st.setdefault("visits", {})[key] = st["sequence"]
+        rev = self.rev(pr, info)
+        st["done"][key] = rev
+        st.setdefault("revs", {})[key] = rev
+        st["digest"] = mine
         st.setdefault("stops", {}).pop(key, None)
         if stopped:
             st["stops"][key] = stopped
