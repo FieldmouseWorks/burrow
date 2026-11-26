@@ -120,6 +120,9 @@ impl State {
 pub struct Line {
     /// How far apart one pass's starts are, at least.
     gap: f64,
+    /// Serializes reading a wake file with applying its deadlines so a
+    /// delayed read of an older file cannot overwrite a newer deadline.
+    wake_lock: Mutex<()>,
     state: Mutex<State>,
     cond: Condvar,
 }
@@ -134,6 +137,7 @@ impl Line {
     pub fn new(gap: f64) -> Line {
         Line {
             gap,
+            wake_lock: Mutex::new(()),
             state: Mutex::default(),
             cond: Condvar::new(),
         }
@@ -170,11 +174,7 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The wake file: only a wake-up booked after the pass's last start is
-    /// new (that pass rewrote its own). Each entry replaces any prior wake
-    /// booking for that pass, so a stale wake read while a pass ran is
-    /// superseded once the pass finishes and rewrites its wake file.
-    pub fn wakes(&self, booked: &Map<String, Value>) {
+    fn apply_wakes(&self, booked: &Map<String, Value>) {
         let mut s = self.lock();
         for (key, at) in booked {
             if !(key.is_empty() || burrow_github::repo_name(key)) {
@@ -191,6 +191,24 @@ impl Line {
         }
         s.news = true;
         self.cond.notify_all();
+    }
+
+    /// Read a wake file and apply its wake-ups in one serialized step for
+    /// this line, so concurrent refreshes cannot let a delayed older read
+    /// replace a newer deadline.
+    pub fn refresh_wakes(&self, read: impl FnOnce() -> Map<String, Value>) {
+        let _guard = self.wake_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let booked = read();
+        self.apply_wakes(&booked);
+    }
+
+    /// The wake file: only a wake-up booked after the pass's last start is
+    /// new (that pass rewrote its own). Each entry replaces any prior wake
+    /// booking for that pass, so a stale wake read while a pass ran is
+    /// superseded once the pass finishes and rewrites its wake file.
+    pub fn wakes(&self, booked: &Map<String, Value>) {
+        let _guard = self.wake_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.apply_wakes(booked);
     }
 
     /// The passes that start now, each with what it looks at, and how long
@@ -744,6 +762,68 @@ mod tests {
         // The catch-up pass finishes at 1010 and books 15 minutes on.
         line.done(&Pass::Full, true, 1010.0);
         line.wakes(&booked(json!({"": 1910})));
+        assert_eq!(line.due(), due(&[(Pass::Full, 1910.0)]));
+        assert_eq!(took(&line, 1022.0), (vec![], Some(888.0)));
+    }
+
+    // Two threads refreshing the same wake file concurrently cannot let a
+    // thread that read the old file replace a newer deadline applied by the
+    // other thread.
+    #[test]
+    fn concurrent_wake_refreshes_never_replace_newer_with_older() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        std::fs::write(&wake, r#"{"": 1021}"#).unwrap();
+        let line = Arc::new(Line::default());
+        line.event(Pass::Full, 997.0);
+        assert_eq!(took(&line, 1002.0).0, vec![Pass::Full]);
+
+        let (entered_read, wait_entered) = mpsc::channel();
+        let (release_read, wait_release) = mpsc::channel();
+        let t1 = {
+            let (line, wake) = (line.clone(), wake.clone());
+            thread::spawn(move || {
+                line.refresh_wakes(|| {
+                    let data = std::fs::read(&wake).unwrap();
+                    let parsed = serde_json::from_slice::<Value>(&data)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .clone();
+                    entered_read.send(()).unwrap();
+                    wait_release.recv().unwrap();
+                    parsed
+                });
+            })
+        };
+        wait_entered.recv().unwrap();
+        // The catch-up pass finishes, rewrites wake.json for later, and another
+        // thread refreshes before the first thread finishes applying its read.
+        line.done(&Pass::Full, true, 1010.0);
+        std::fs::write(&wake, r#"{"": 1910}"#).unwrap();
+        let t2 = {
+            let (line, wake) = (line.clone(), wake.clone());
+            thread::spawn(move || {
+                line.refresh_wakes(|| {
+                    let data = std::fs::read(&wake).unwrap();
+                    serde_json::from_slice::<Value>(&data)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                });
+            })
+        };
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !t2.is_finished(),
+            "newer refresh must wait for the in-flight wake read"
+        );
+        release_read.send(()).unwrap();
+        t1.join().unwrap();
+        t2.join().unwrap();
         assert_eq!(line.due(), due(&[(Pass::Full, 1910.0)]));
         assert_eq!(took(&line, 1022.0), (vec![], Some(888.0)));
     }

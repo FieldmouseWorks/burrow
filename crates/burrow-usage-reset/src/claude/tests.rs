@@ -693,19 +693,16 @@ fn keys_of(notices: &[Notice]) -> Vec<&'static str> {
 
 #[test]
 fn ask_usage_lets_claude_exit_cleanly_before_killing() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("finished");
     let script = dir.path().join("claude");
-    std::fs::write(
+    burrow_test::executable(
         &script,
         format!(
             "#!/bin/sh\nread -r _req\nprintf '%s\\n' '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{{\"rate_limits_available\":true,\"rate_limits\":{{\"seven_day\":{{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"}},\"five_hour\":null,\"limits\":[]}}}}}}}}'\nsleep 0.2\n: > '{}'\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut answered = false;
     let answer = ask_usage(
         &script,
@@ -729,12 +726,10 @@ fn ask_usage_lets_claude_exit_cleanly_before_killing() {
 
     // A hung child that never exits on EOF is still killed after exit_grace.
     let hung = dir.path().join("claude-hung");
-    std::fs::write(
+    burrow_test::executable(
         &hung,
         "#!/bin/sh\nread -r _req\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true}}}'\nsleep 30\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let t0 = Instant::now();
     let answer = ask_usage(
         &hung,
@@ -751,15 +746,12 @@ fn ask_usage_lets_claude_exit_cleanly_before_killing() {
 
 #[test]
 fn read_usage_reports_the_endpoints_failure() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("claude");
-    std::fs::write(
+    burrow_test::executable(
         &script,
         "#!/bin/sh\nlog=/dev/null\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in --debug-file) log=$2; shift ;; esac\n  shift\ndone\nread -r _req\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true,\"rate_limits\":{\"seven_day\":{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"},\"five_hour\":null}}}}'\necho '[ERROR] Failed to load usage data: Request failed with status code 429' >>\"$log\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let err = read_usage(&script, dir.path()).unwrap_err();
     assert!(
         err.contains("status code 429"),
