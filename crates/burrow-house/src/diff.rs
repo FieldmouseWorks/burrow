@@ -165,8 +165,9 @@ pub fn read(
         let became_code = status == "renamed"
             && (rules::is_test(previous)
                 || rules::by_name(previous).is_some_and(|lang| !rules::is_code(previous, lang)));
+        let maybe_grew = added > removed || (added > 0 && file.ends_with(".rs"));
         if status != "removed"
-            && (new_file || added > removed || became_code)
+            && (new_file || maybe_grew || became_code)
             && !rules::is_test(file)
             && !file_size_allow.matches(file)
         {

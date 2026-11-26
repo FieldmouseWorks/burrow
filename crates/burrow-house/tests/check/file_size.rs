@@ -160,11 +160,11 @@ fn already_over_and_not_grown() {
     let long = long();
     let o = passes(
         &case(vec![
-            change("modified", "src/big.rs", 5, 20),
-            change("modified", "src/even.rs", 5, 5),
+            change("modified", "src/big.ts", 5, 20),
+            change("modified", "src/even.ts", 5, 5),
         ])
-        .tree("4ead", "src/big.rs", &long)
-        .tree("3e7b", "src/big.rs", &long),
+        .tree("4ead", "src/big.ts", &long)
+        .tree("3e7b", "src/big.ts", &long),
     );
     assert!(
         !o.calls.iter().any(|c| c.starts_with("content")),
@@ -183,6 +183,31 @@ fn already_over_and_not_grown() {
         &case(vec![change("modified", "src/big.rs", 2, 0)])
             .tree("4ead", "src/big.rs", &with_more_tests)
             .tree("3e7b", "src/big.rs", &before_tests),
+    );
+    // At the limit in production code, replacing a `#[cfg(test)]` line with a
+    // production line (added == removed, or even added < removed) crosses the
+    // non-test code limit and must fail `file-size`.
+    let at_limit_prod = "fn prod() {}\n".repeat(LINES);
+    let at_limit_with_tests = format!(
+        "{at_limit_prod}#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t1() {{}}\n    #[test]\n    fn t2() {{}}\n}}\n"
+    );
+    let crossed_swapped_equal = format!(
+        "{at_limit_prod}fn extra() {{}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t1() {{}}\n    #[test]\n}}\n"
+    );
+    fails(
+        &case(vec![change("modified", "src/swap.rs", 1, 1)])
+            .tree("4ead", "src/swap.rs", &crossed_swapped_equal)
+            .tree("3e7b", "src/swap.rs", &at_limit_with_tests),
+        "file-size",
+    );
+    let crossed_swapped_fewer = format!(
+        "{at_limit_prod}fn extra() {{}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t1() {{}}\n}}\n"
+    );
+    fails(
+        &case(vec![change("modified", "src/swap_shrink.rs", 1, 2)])
+            .tree("4ead", "src/swap_shrink.rs", &crossed_swapped_fewer)
+            .tree("3e7b", "src/swap_shrink.rs", &at_limit_with_tests),
+        "file-size",
     );
     passes(&case(vec![change("modified", "src/big.rs", 20, 5)]).tree(
         "4ead",
