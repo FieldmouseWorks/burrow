@@ -402,4 +402,16 @@ mod tests {
         };
         assert_eq!(metered.recorded(), Some((at, reading)));
     }
+
+    #[test]
+    fn snapshot_timestamps_round_trip_without_ulp_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exact epoch timestamp that drifted by 1 ULP without serde_json's
+        // float_roundtrip feature (1795712392.5840235 -> 1795712392.5840237).
+        let at = 1_795_712_392.584_023_5_f64;
+        let expected = snapshot(&[("seven_day", 12.5)], false, at);
+        expected.record(dir.path(), "claude").unwrap();
+        let read_back = Snapshot::read(dir.path(), "claude", at + 10.0).unwrap();
+        assert_eq!(read_back, expected);
+    }
 }
