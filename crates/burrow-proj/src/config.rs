@@ -434,7 +434,7 @@ impl Config {
         {
             let verified = settings.verify_installed_plugin(engine)?;
             let sandbox_approved = match installed.capabilities.sandbox.as_str() {
-                "none" => None,
+                "none" | "brings" => None,
                 _ => Some(Vec::new()),
             };
             return Ok((verified, sandbox_approved));

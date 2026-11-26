@@ -106,13 +106,30 @@ impl Config {
         let mut engines = BTreeMap::new();
         for (name, offer) in &view.in_force.offers {
             if let Some(installed) = view.plugins.get(name) {
+                let models = view
+                    .in_force
+                    .plugin_models
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        offer
+                            .models
+                            .iter()
+                            .map(|id| PluginModel {
+                                id: id.clone(),
+                                efforts: offer.efforts.clone(),
+                                context_tokens: None,
+                                max_output_tokens: None,
+                            })
+                            .collect()
+                    });
                 engines.insert(
                     name.clone(),
                     PickerEngine {
                         engine: name.clone(),
                         installed: true,
                         removable: true,
-                        models: installed.models.clone(),
+                        models,
                         efforts: offer.efforts.clone(),
                         capabilities: Some(installed.capabilities.clone()),
                         meters: installed.meters.clone(),
@@ -426,12 +443,19 @@ impl Config {
                 let mut next_offers = doc.offers.clone();
                 // The plugin's validated describe offers take immediate effect.
                 next_offers.remove(engine);
+                // Reinstalling an engine clears any previous removal fallback.
+                let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
+                next_removed_fallbacks.remove(engine);
 
                 // Validate existing roles and tunings against the new offers so
                 // an incompatible update fails cleanly and preserves the prior
                 // active installation.
-                doc.routing
-                    .in_force_with_plugins(&next_offers, &self.engines, &next_plugins)?;
+                doc.routing.in_force_with_plugins(
+                    &next_offers,
+                    &self.engines,
+                    &next_plugins,
+                    &next_removed_fallbacks,
+                )?;
 
                 if let Some(prev) = &previous
                     && prev.source_kind == SourceKind::Release
@@ -442,6 +466,7 @@ impl Config {
 
                 doc.plugins = next_plugins;
                 doc.offers = next_offers;
+                doc.removed_fallbacks = next_removed_fallbacks;
                 doc.migrated.get_or_insert_with(now);
 
                 let mut audit = Map::new();
@@ -587,11 +612,29 @@ impl Config {
                     rewrite_roles_for_removal(prev, engine, &fallback)?;
                 }
 
+                // Record the fallback for persisted job pins (from `--engine`
+                // or inbox labels), updating any transitive chains that pointed
+                // to the engine being removed.
+                let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
+                for target in next_removed_fallbacks.values_mut() {
+                    if target == engine {
+                        *target = fallback.clone();
+                    }
+                }
+                next_removed_fallbacks.insert(engine.to_owned(), fallback.clone());
+
                 // Validate complete post-removal document before committing.
-                next_routing.in_force_with_plugins(&next_offers, &self.engines, &next_plugins)?;
+                let remaining_plugin_models =
+                    crate::roles::plugin_models_for(&next_offers, &next_plugins);
+                next_routing.in_force_with_plugins(
+                    &next_offers,
+                    &self.engines,
+                    &next_plugins,
+                    &next_removed_fallbacks,
+                )?;
                 for (setup_name, setup) in &next_setups.saved {
                     setup
-                        .check(&remaining_offers)
+                        .check_with_plugins(&remaining_offers, &remaining_plugin_models)
                         .map_err(|e| format!("setup {setup_name}: {e}"))?;
                 }
 
@@ -603,6 +646,7 @@ impl Config {
                 doc.offers = next_offers;
                 doc.routing = next_routing;
                 doc.setups = next_setups;
+                doc.removed_fallbacks = next_removed_fallbacks;
                 doc.migrated.get_or_insert_with(now);
 
                 let mut audit = Map::new();
@@ -814,6 +858,39 @@ pub(crate) fn enrich_schema(picker: &PickerData) -> Value {
         }
         if let Some(sha256) = &eng.sha256 {
             variant["x-sha256"] = json!(sha256);
+        }
+        // Preserve per-model effort pairs for installed plugins so JSON Schema
+        // rejects cross-model effort combinations that `resolve_model_effort`
+        // would refuse at turn start.
+        if eng.installed {
+            let null_or_enum = |items: &[String]| {
+                if items.is_empty() {
+                    json!({"type": "null"})
+                } else {
+                    json!({"anyOf": [{"type": "null"}, {"enum": items}]})
+                }
+            };
+            let default_effort = if eng.models.len() == 1 {
+                null_or_enum(&eng.models[0].efforts)
+            } else {
+                json!({"type": "null"})
+            };
+            let mut pairs = vec![json!({
+                "properties": {
+                    "model": {"type": "null"},
+                    "effort": default_effort,
+                }
+            })];
+            for model in &eng.models {
+                pairs.push(json!({
+                    "required": ["model"],
+                    "properties": {
+                        "model": {"const": model.id},
+                        "effort": null_or_enum(&model.efforts),
+                    }
+                }));
+            }
+            variant["anyOf"] = Value::Array(pairs);
         }
         job_variants.push(variant);
         engine_choices.insert(name.clone(), json!(eng));

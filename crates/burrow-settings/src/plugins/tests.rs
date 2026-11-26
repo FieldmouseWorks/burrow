@@ -574,3 +574,234 @@ fn github_settings_door_authenticates_owner_by_account_id_for_plugins() {
     assert_eq!(installed.version, "1.0.0");
     assert!(installed.actor.contains(&format!("id:{sam_id}:sam")));
 }
+
+#[test]
+fn model_specific_efforts_are_enforced_in_roles_updates_and_live_schema() {
+    let (dir, cfg, _) = rig();
+
+    let plugin_v1 = dir.path().join("third-v1");
+    let models_v1 = r#"[{"id":"m1","efforts":["low"]},{"id":"m2","efforts":["high","max"]},{"id":"m3","efforts":[]}]"#;
+    let hash_v1 = write_plugin_fixture(&plugin_v1, "third", models_v1, "none", true, None, None);
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install third release {} 1.0.0 {hash_v1}",
+            plugin_v1.display()
+        )),
+    )
+    .unwrap();
+
+    // Valid per-model pairs succeed.
+    cfg.command(&words("model work third m1 low"), "host")
+        .unwrap();
+    cfg.command(&words("model fix third m2 max"), "host")
+        .unwrap();
+    cfg.command(&words("model judge third m3 -"), "host")
+        .unwrap();
+
+    // Cross-model effort pairs and effort-without-model on a multi-model plugin are refused.
+    let err = cfg
+        .command(&words("model work third m1 high"), "host")
+        .unwrap_err();
+    assert!(err.contains("m1") && err.contains("high"), "{err}");
+    assert!(
+        cfg.command(&words("model work third m2 low"), "host")
+            .is_err()
+    );
+    assert!(
+        cfg.command(&words("model work third m3 low"), "host")
+            .is_err()
+    );
+    let err = cfg
+        .command(&words("model work third - low"), "host")
+        .unwrap_err();
+    assert!(err.contains("requires a model"), "{err}");
+
+    let force = cfg.roles().unwrap();
+    assert!(
+        force
+            .validate_choice("third", Some("m1"), Some("low"))
+            .is_ok()
+    );
+    assert!(
+        force
+            .validate_choice("third", Some("m1"), Some("high"))
+            .is_err()
+    );
+    assert!(force.validate_choice("third", None, Some("low")).is_err());
+
+    // Updating the plugin to drop "low" from m1 (even while moving "low" onto m2)
+    // is rejected because role `work` is tuned to (m1, low), preserving v1.
+    let plugin_v2_bad = dir.path().join("third-v2-bad");
+    let models_v2_bad = r#"[{"id":"m1","efforts":["medium"]},{"id":"m2","efforts":["low","high","max"]},{"id":"m3","efforts":[]}]"#;
+    let hash_v2_bad = write_plugin_fixture(
+        &plugin_v2_bad,
+        "third",
+        models_v2_bad,
+        "none",
+        true,
+        None,
+        None,
+    );
+    let err = cfg
+        .command_as(
+            &owner_auth(),
+            &words(&format!(
+                "plugin update third release {} 2.0.0 {hash_v2_bad}",
+                plugin_v2_bad.display()
+            )),
+        )
+        .unwrap_err();
+    assert!(err.contains("m1") && err.contains("low"), "{err}");
+    assert_eq!(
+        cfg.installed_plugin("third").unwrap().unwrap().version,
+        "1.0.0"
+    );
+
+    // Live schema `$defs.jobChoice` preserves exact per-model effort pairs via `anyOf`.
+    let schema = cfg.live_schema().unwrap();
+    let variants = schema
+        .pointer("/$defs/jobChoice/oneOf")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let third = variants
+        .iter()
+        .find(|v| v.pointer("/properties/engine/const") == Some(&json!("third")))
+        .expect("third variant");
+    let pairs = third["anyOf"].as_array().expect("per-model anyOf pairs");
+    assert_eq!(pairs.len(), 4, "{pairs:?}");
+    // Multi-model plugin requires effort to be null when model is null/omitted.
+    assert_eq!(pairs[0]["properties"]["model"], json!({"type": "null"}));
+    assert_eq!(pairs[0]["properties"]["effort"], json!({"type": "null"}));
+    // Each model branch restricts effort to that model's declared efforts alone.
+    let branch = |id: &str| {
+        pairs
+            .iter()
+            .find(|p| p.pointer("/properties/model/const") == Some(&json!(id)))
+            .unwrap_or_else(|| panic!("missing branch for {id}: {pairs:?}"))
+    };
+    assert_eq!(
+        branch("m1").pointer("/properties/effort/anyOf/1/enum"),
+        Some(&json!(["low"]))
+    );
+    assert_eq!(
+        branch("m2").pointer("/properties/effort/anyOf/1/enum"),
+        Some(&json!(["high", "max"]))
+    );
+    assert_eq!(
+        branch("m3").pointer("/properties/effort"),
+        Some(&json!({"type": "null"}))
+    );
+
+    // Single-model plugin allows selecting its efforts without repeating the model.
+    let single = dir.path().join("single-v1");
+    let single_hash = write_plugin_fixture(
+        &single,
+        "solo",
+        r#"[{"id":"only","efforts":["low"]}]"#,
+        "none",
+        true,
+        None,
+        None,
+    );
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install solo release {} 1.0.0 {single_hash}",
+            single.display()
+        )),
+    )
+    .unwrap();
+    let force = cfg.roles().unwrap();
+    assert!(force.validate_choice("solo", None, Some("low")).is_ok());
+    assert!(force.validate_choice("solo", None, Some("high")).is_err());
+    let schema = cfg.live_schema().unwrap();
+    let solo = schema
+        .pointer("/$defs/jobChoice/oneOf")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.pointer("/properties/engine/const") == Some(&json!("solo")))
+        .expect("solo variant");
+    assert_eq!(
+        solo.pointer("/anyOf/0/properties/effort/anyOf/1/enum"),
+        Some(&json!(["low"]))
+    );
+}
+
+#[test]
+fn removal_records_fallbacks_including_transitive_chains_and_clears_on_reinstall() {
+    let (dir, cfg, _) = rig();
+
+    let third_bin = dir.path().join("third");
+    let third_hash = write_plugin_fixture(
+        &third_bin,
+        "third",
+        r#"[{"id":"m3","efforts":["low"]}]"#,
+        "none",
+        true,
+        None,
+        None,
+    );
+    let fourth_bin = dir.path().join("fourth");
+    let fourth_hash = write_plugin_fixture(
+        &fourth_bin,
+        "fourth",
+        r#"[{"id":"m4","efforts":["high"]}]"#,
+        "none",
+        true,
+        None,
+        None,
+    );
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install third release {} 1.0.0 {third_hash}",
+            third_bin.display()
+        )),
+    )
+    .unwrap();
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install fourth release {} 1.0.0 {fourth_hash}",
+            fourth_bin.display()
+        )),
+    )
+    .unwrap();
+
+    // Remove fourth with fallback third.
+    cfg.command_as(
+        &owner_auth(),
+        &words("plugin remove fourth --fallback third"),
+    )
+    .unwrap();
+    let force = cfg.roles().unwrap();
+    assert_eq!(force.fallback_for("fourth"), Some("third"));
+    assert_eq!(force.fallback_for("third"), None);
+
+    // Removing third with fallback claude updates fourth's transitive fallback too.
+    cfg.command_as(
+        &owner_auth(),
+        &words("plugin remove third --fallback claude"),
+    )
+    .unwrap();
+    let force = cfg.roles().unwrap();
+    assert_eq!(force.fallback_for("third"), Some("claude"));
+    assert_eq!(force.fallback_for("fourth"), Some("claude"));
+
+    // Reinstalling third clears third's removal fallback while preserving fourth's.
+    cfg.command_as(
+        &owner_auth(),
+        &words(&format!(
+            "plugin install third release {} 1.0.0 {third_hash}",
+            third_bin.display()
+        )),
+    )
+    .unwrap();
+    let force = cfg.roles().unwrap();
+    assert_eq!(force.fallback_for("third"), None);
+    assert_eq!(force.fallback_for("fourth"), Some("claude"));
+}

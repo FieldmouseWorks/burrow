@@ -632,7 +632,7 @@ pub(crate) fn sandboxed_check(
         deadline: Duration::from_secs(timeout_secs.max(1)),
         response_bytes: CHECK_RESPONSE_BYTES,
     };
-    let plugin = Plugin::describe(&wrapper, limits)
+    let plugin = retry_etxtbsy(|| Plugin::describe(&wrapper, limits))
         .map_err(|e| format!("sandboxed cn plugin check describe failed for {engine}: {e}"))?;
 
     if plugin.identity.engine != engine {
@@ -668,8 +668,7 @@ pub(crate) fn sandboxed_check(
         }
     }
 
-    let checked_kinds = plugin
-        .check()
+    let checked_kinds = retry_etxtbsy(|| plugin.check())
         .map_err(|e| format!("sandboxed cn plugin check failed for {engine}: {e}"))?;
     if !checked_kinds.contains(&Kind::Job) {
         return Err(format!(
@@ -768,6 +767,27 @@ fn write_bwrap_wrapper(
 
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Retry briefly on transient Linux `ETXTBSY` (`os error 26`) when another
+/// thread in the process forked while the staged binary or wrapper was open
+/// for writing and has not yet completed `exec`.
+fn retry_etxtbsy<T, E: std::fmt::Display>(mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    for attempt in 0..8 {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < 7 && is_etxtbsy(&e) => {
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    f()
+}
+
+fn is_etxtbsy(err: &impl std::fmt::Display) -> bool {
+    let text = err.to_string();
+    text.contains("Text file busy") || text.contains("os error 26")
 }
 
 #[cfg(test)]

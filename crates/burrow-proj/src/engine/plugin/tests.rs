@@ -12,6 +12,7 @@ use crate::config::{Config, tests::example};
 use crate::job::Job;
 use crate::record::{JobFile, TurnFile};
 
+mod installed;
 mod runs;
 
 fn setup(tmp: &TempDir) -> (Config, PathBuf) {

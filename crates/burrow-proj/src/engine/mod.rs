@@ -93,10 +93,38 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     if let Some(n) = job.turns()
         && let Some(identity) = crate::retry::Identity::load(job, &n)?
     {
-        return Ok(identity.choice);
+        let removed = cfg
+            .settings
+            .as_ref()
+            .and_then(|_| cfg.role_settings().ok())
+            .is_some_and(|s| s.fallback_for(&identity.choice.engine).is_some());
+        if !removed {
+            return Ok(identity.choice);
+        }
     }
     let request = crate::job::Request::load(job)?;
     requested(cfg, job, &request, request.engine.as_deref())
+}
+
+/// Apply per-job `--model` and `--effort` overrides onto a resolved base choice.
+/// When `--model` selects a different model without an explicit `--effort`,
+/// clear the role's tuned effort for the old model rather than carrying an
+/// incompatible pair onto the overridden model.
+pub(crate) fn apply_overrides(
+    mut base: Choice,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Choice {
+    if let Some(m) = model {
+        if effort.is_none() && base.model.as_deref() != Some(m) {
+            base.effort = None;
+        }
+        base.model = Some(m.to_owned());
+    }
+    if let Some(e) = effort {
+        base.effort = Some(e.to_owned());
+    }
+    base
 }
 
 /// Re-resolve a waiting turn against live host settings so a queued turn
@@ -139,24 +167,48 @@ pub(crate) fn requested(
     } else {
         crate::policy::repository(job)
     };
+    let settings = cfg.role_settings()?;
     // A sandbox has its engine's login and hosts alone: its turns run on
     // that engine, whatever the route says now.
     if request.agent.is_some()
         && let Some(engine) = request.agent_engine.as_deref()
     {
-        let tuning = cfg.role_settings()?.tuning(role, repo.as_deref(), engine);
-        return Ok(Choice {
-            engine: engine.to_owned(),
-            model: request.model.clone().or(tuning.model),
-            effort: request.effort.clone().or(tuning.effort),
-        });
+        let tuning = settings.tuning(role, repo.as_deref(), engine);
+        return Ok(apply_overrides(
+            Choice {
+                engine: engine.to_owned(),
+                model: tuning.model,
+                effort: tuning.effort,
+            },
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        ));
     }
-    let mut choice = resolve(cfg, role, repo.as_deref(), pinned, request.agent.is_some())?;
-    if request.model.is_some() {
-        choice.model = request.model.clone();
-    }
-    if request.effort.is_some() {
-        choice.effort = request.effort.clone();
+    let (mut choice, fell_back) = resolve_with(
+        cfg,
+        &settings,
+        role,
+        repo.as_deref(),
+        pinned,
+        request.agent.is_some(),
+    )?;
+    if !fell_back && (request.model.is_some() || request.effort.is_some()) {
+        let candidate = apply_overrides(
+            choice.clone(),
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        );
+        if cfg.settings.is_none()
+            || settings
+                .validate_choice(
+                    &candidate.engine,
+                    candidate.model.as_deref(),
+                    candidate.effort.as_deref(),
+                )
+                .is_ok()
+        {
+            choice = candidate;
+        }
     }
     Ok(choice)
 }
@@ -176,6 +228,46 @@ pub(crate) fn for_sandbox(
     resolve(cfg, role, repo, request.engine.as_deref(), true).map(|c| c.engine)
 }
 
+/// Resolve using an already-loaded [`burrow_settings::roles::InForce`] snapshot,
+/// also returning whether a removed pinned engine fell back to its recorded
+/// fallback.
+pub(crate) fn resolve_with(
+    cfg: &Config,
+    settings: &burrow_settings::roles::InForce,
+    role: &str,
+    repo: Option<&str>,
+    pinned: Option<&str>,
+    sandboxed: bool,
+) -> Result<(Choice, bool), String> {
+    let parsed_pin = pinned.map(parse_engine).transpose()?;
+    let (effective_pin, fell_back) = match parsed_pin.as_deref() {
+        Some(pin) => match settings.fallback_for(pin) {
+            Some(fb) => (Some(fb.to_owned()), true),
+            None => (Some(pin.to_owned()), false),
+        },
+        None => (None, false),
+    };
+    let meters = route::Live {
+        cfg,
+        sandboxed,
+        now: crate::now(),
+    };
+    let engine = route::engine(
+        settings.route(role, repo),
+        effective_pin.as_deref(),
+        &meters,
+    )?;
+    let tuning = settings.tuning(role, repo, &engine);
+    Ok((
+        Choice {
+            engine,
+            model: tuning.model,
+            effort: tuning.effort,
+        },
+        fell_back,
+    ))
+}
+
 /// Turn startup, a refused run's retry and drain admission share role
 /// scopes, pins and routes: the engine is where the role's route runs a
 /// turn now ([`route`]), from the pinned engine on when the route names it,
@@ -190,19 +282,7 @@ pub(crate) fn resolve(
     // One version of the settings: the engine and its tuning can't come
     // from either side of an `engines use`.
     let settings = cfg.role_settings()?;
-    let pinned = pinned.map(parse_engine).transpose()?;
-    let meters = route::Live {
-        cfg,
-        sandboxed,
-        now: crate::now(),
-    };
-    let engine = route::engine(settings.route(role, repo), pinned.as_deref(), &meters)?;
-    let tuning = settings.tuning(role, repo, &engine);
-    Ok(Choice {
-        engine,
-        model: tuning.model,
-        effort: tuning.effort,
-    })
+    resolve_with(cfg, &settings, role, repo, pinned, sandboxed).map(|(c, _)| c)
 }
 
 /// Conversation key for any engine name: `claude` and `claude-api` share the

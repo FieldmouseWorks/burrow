@@ -461,41 +461,43 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     }
     if new.engine.is_some() || new.model.is_some() || new.effort.is_some() {
         let in_force = cfg.role_settings().map_err(|e| Fail::new(1, e))?;
-        let target_engine = match new.engine.as_deref() {
-            Some(engine) => {
-                crate::engine::parse_engine(engine).map_err(|e| Fail::new(2, e))?;
-                if !in_force.offers.contains_key(engine) {
-                    return Err(Fail::new(2, format!("proj run: unknown engine {engine}")));
-                }
-                engine.to_owned()
+        if let Some(engine) = new.engine.as_deref() {
+            crate::engine::parse_engine(engine).map_err(|e| Fail::new(2, e))?;
+            if !in_force.offers.contains_key(engine) {
+                return Err(Fail::new(2, format!("proj run: unknown engine {engine}")));
             }
-            None => in_force
-                .route(new.role.as_deref().unwrap_or_default(), None)
-                .engine
-                .clone(),
+        }
+        let role = new.role.as_deref().unwrap_or_default();
+        let repo_owned = if role.is_empty() {
+            None
+        } else {
+            match &new.admission {
+                Some(crate::policy::Identity::Repository(repo)) => Some(repo.clone()),
+                Some(crate::policy::Identity::Local) => None,
+                None => {
+                    let r = crate::pick::github_repo(cfg, &project);
+                    (!r.is_empty()).then_some(r)
+                }
+            }
         };
-        let offer = in_force
-            .offers
-            .get(&target_engine)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(model) = new.model.as_deref()
-            && (!burrow_settings::roles::plain(model) || !offer.models.iter().any(|m| m == model))
-        {
-            return Err(Fail::new(
-                2,
-                format!("proj run: {target_engine} does not offer model {model:?}"),
-            ));
-        }
-        if let Some(effort) = new.effort.as_deref()
-            && (!burrow_settings::roles::plain(effort)
-                || !offer.efforts.iter().any(|e| e == effort))
-        {
-            return Err(Fail::new(
-                2,
-                format!("proj run: {target_engine} does not offer effort {effort:?}"),
-            ));
-        }
+        let (base, _) = crate::engine::resolve_with(
+            cfg,
+            &in_force,
+            role,
+            repo_owned.as_deref(),
+            new.engine.as_deref(),
+            new.vm,
+        )
+        .map_err(|e| Fail::new(2, format!("proj run: {e}")))?;
+        let effective =
+            crate::engine::apply_overrides(base, new.model.as_deref(), new.effort.as_deref());
+        in_force
+            .validate_choice(
+                &effective.engine,
+                effective.model.as_deref(),
+                effective.effort.as_deref(),
+            )
+            .map_err(|e| Fail::new(2, format!("proj run: {e}")))?;
     }
     let id = new_job(cfg, p)?;
     let job = Job::new(cfg, &id);

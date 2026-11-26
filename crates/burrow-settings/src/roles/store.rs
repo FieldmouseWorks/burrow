@@ -33,6 +33,11 @@ pub(crate) struct Document {
     /// document cleanly.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) plugins: BTreeMap<String, crate::plugins::InstalledPlugin>,
+    /// Fallback engines recorded when installed plugins are removed, so jobs
+    /// with persisted engine pins fall back cleanly instead of failing. Left
+    /// out when empty so older generations still read this document cleanly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) removed_fallbacks: BTreeMap<String, String>,
 }
 
 impl live::Document for Document {
@@ -130,9 +135,12 @@ impl Config {
     pub fn role_view(&self) -> Result<View, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        let in_force =
-            doc.routing
-                .in_force_with_plugins(&doc.offers, &self.engines, &doc.plugins)?;
+        let in_force = doc.routing.in_force_with_plugins(
+            &doc.offers,
+            &self.engines,
+            &doc.plugins,
+            &doc.removed_fallbacks,
+        )?;
         Ok(View {
             in_force,
             set: (
@@ -161,8 +169,12 @@ impl Config {
     pub fn engines(&self) -> Result<String, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        doc.routing
-            .in_force_with_plugins(&doc.offers, &self.engines, &doc.plugins)?;
+        doc.routing.in_force_with_plugins(
+            &doc.offers,
+            &self.engines,
+            &doc.plugins,
+            &doc.removed_fallbacks,
+        )?;
         let active = active(&doc.routing, &doc.setups);
         Ok(status(active.as_deref(), &doc.routing, &doc.setups))
     }

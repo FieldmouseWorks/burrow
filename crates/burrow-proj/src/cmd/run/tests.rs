@@ -531,3 +531,322 @@ fn a_jobs_sandbox_is_made_for_its_routed_engine_and_recorded() {
     assert_eq!(recorded.agent.as_deref(), Some("web-7"));
     assert_eq!(recorded.agent_engine.as_deref(), Some("claude-api"));
 }
+
+/// Helper: install a fixture plugin into `cfg`'s settings with `models_json`.
+fn install_run_plugin(
+    tmp: &std::path::Path,
+    cfg: &mut crate::config::Config,
+    engine: &str,
+    models_json: &str,
+) {
+    use burrow_github::Author;
+    use burrow_settings::plugins::{OwnerAuth, sha256_file};
+    let bwrap = tmp.join("fake-bwrap");
+    if !bwrap.exists() {
+        burrow_test::executable(
+            &bwrap,
+            r#"#!/bin/sh
+set -eu
+target=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ro-bind) if [ "$3" = "/plugin/bin" ]; then target="$2"; fi; shift 3 ;;
+    --ro-bind-try|--setenv) shift 3 ;;
+    --tmpfs|--proc|--dev|--chdir) shift 2 ;;
+    --unshare-all|--die-with-parent|--new-session|--clearenv) shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+exec env -i PATH="/bin:/usr/bin" "$target"
+"#,
+        );
+    }
+    let first_model = serde_json::from_str::<Vec<serde_json::Value>>(models_json)
+        .unwrap()
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .map(|m| format!(r#""{m}""#))
+        .unwrap_or_else(|| "null".into());
+    let src = tmp.join(format!("{engine}-fixture"));
+    burrow_test::executable(
+        &src,
+        format!(
+            r#"#!/bin/sh
+set -eu
+IFS= read -r req || true
+case "$req" in
+  *'"kind":"describe"'*)
+    printf '%s\n' '{{"contract":"conary-plugin v1","by":{{"engine":"{engine}","session":null}},"kind":"describe","versions":["conary-plugin v1","conary-plugin v2","conary-plugin v3","conary-plugin v4","conary-plugin v5"],"kinds":[],"v2_kinds":["job"],"v4_kinds":[],"models":{models_json},"capabilities":{{"sandbox":"none","network":false,"devices":[],"mcp":false}},"meters":[]}}'
+    ;;
+  *)
+    printf '%s\n' '{{"contract":"conary-plugin v5","by":{{"engine":"{engine}","session":null}},"execution":{{"model":{first_model},"effort":null,"context":{{"kind":"fresh"}}}},"kind":"job","summary":"ok","next":{{"step":"done"}}}}'
+    ;;
+esac
+"#
+        ),
+    );
+    let hash = sha256_file(&src).unwrap();
+    let systemd_run = tmp.join("fake-systemd-run");
+    if !systemd_run.exists() {
+        burrow_test::executable(&systemd_run, "#!/bin/sh\nexit 0\n");
+    }
+    cfg.tools.systemd_run = systemd_run;
+    let settings = cfg.settings.as_mut().unwrap();
+    settings.overlay = tmp.join("settings/overlay.json");
+    settings.engines = vec!["claude".into(), "claude-api".into()];
+    settings.owners = vec![Author {
+        login: "sam".into(),
+        id: 42,
+    }];
+    settings.plugins_dir = Some(tmp.join("settings/plugins"));
+    settings.plugin_fallback = Some("claude".into());
+    settings.plugin_sandbox = Some(bwrap);
+    let auth = OwnerAuth {
+        id: 42,
+        login: "sam".into(),
+        actor: "host:id:42:sam".into(),
+    };
+    settings
+        .command_as(
+            &auth,
+            &[
+                "plugin",
+                "install",
+                engine,
+                "release",
+                src.to_str().unwrap(),
+                "1.0.0",
+                &hash,
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+}
+
+/// `proj run` rejects model-effort pairs that are not offered together by an
+/// installed plugin, and rejects effort-without-model on a multi-model plugin.
+#[test]
+fn proj_run_validates_per_model_effort_pairs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = keyed(tmp.path(), "not-found");
+    cfg.host_state = Some(tmp.path().join("host"));
+    fs::create_dir_all(cfg.projects.join("demo")).unwrap();
+    install_run_plugin(
+        tmp.path(),
+        &mut cfg,
+        "third",
+        r#"[{"id":"m1","efforts":["low"]},{"id":"m2","efforts":["high"]}]"#,
+    );
+
+    // Cross-model effort pair (m1 with m2's effort "high") is rejected up front.
+    let bad_pair = New {
+        engine: Some("third".into()),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    let fail = start_job(&cfg, &bad_pair, "demo", "task").unwrap_err();
+    assert_eq!(fail.code, 2, "{:?}", fail.say);
+    assert!(
+        fail.say.as_deref().unwrap_or_default().contains("m1"),
+        "{:?}",
+        fail.say
+    );
+
+    // Effort without model on a multi-model plugin is rejected up front.
+    let missing_model = New {
+        engine: Some("third".into()),
+        effort: Some("low".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    let fail = start_job(&cfg, &missing_model, "demo", "task").unwrap_err();
+    assert_eq!(fail.code, 2, "{:?}", fail.say);
+    assert!(
+        fail.say
+            .as_deref()
+            .unwrap_or_default()
+            .contains("requires a model"),
+        "{:?}",
+        fail.say
+    );
+
+    // Valid (m1, low) pair passes validation and creates the job.
+    let ok = New {
+        engine: Some("third".into()),
+        model: Some("m1".into()),
+        effort: Some("low".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    let id = start_job(&cfg, &ok, "demo", "task").unwrap();
+    let recorded = crate::job::Request::load(&Job::new(&cfg, &id)).unwrap();
+    assert_eq!(recorded.engine.as_deref(), Some("third"));
+    assert_eq!(recorded.model.as_deref(), Some("m1"));
+    assert_eq!(recorded.effort.as_deref(), Some("low"));
+}
+
+/// `proj run` validates `--model` and `--effort` against the job's effective
+/// route engine, taking repository-scoped routes and live meter hops into
+/// account.
+#[test]
+fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = keyed(tmp.path(), "not-found");
+    cfg.host_state = Some(tmp.path().join("host"));
+    cfg.tools.git = "git".into();
+    cfg.meters = Some(tmp.path().join("meters"));
+    fs::create_dir_all(cfg.meters.as_ref().unwrap()).unwrap();
+    fs::create_dir_all(cfg.projects.join("demo")).unwrap();
+    install_run_plugin(
+        tmp.path(),
+        &mut cfg,
+        "third",
+        r#"[{"id":"third-m1","efforts":["low"]},{"id":"third-m2","efforts":["high"]}]"#,
+    );
+    let settings = cfg.settings.as_ref().unwrap();
+    settings
+        .command(
+            &["offer", "claude", "models", "claude-m1"].map(String::from),
+            "host",
+        )
+        .unwrap();
+    settings
+        .command(&["role", "work", "claude"].map(String::from), "host")
+        .unwrap();
+    settings
+        .command(&["role", "work@sam/box", "third"].map(String::from), "host")
+        .unwrap();
+
+    // Case 1: repo-scoped route (`work@sam/box -> third`).
+    // A claude-only model must be rejected because sam/box routes to `third`.
+    let wrong_for_repo = New {
+        role: Some("work".into()),
+        model: Some("claude-m1".into()),
+        admission: Some(crate::policy::Identity::Repository("sam/box".into())),
+        ..Default::default()
+    };
+    let fail = start_job(&cfg, &wrong_for_repo, "demo", "task").unwrap_err();
+    assert_eq!(fail.code, 2, "{:?}", fail.say);
+    assert!(
+        fail.say.as_deref().unwrap_or_default().contains("third"),
+        "{:?}",
+        fail.say
+    );
+
+    // A valid model-effort pair for `third` must be accepted for sam/box.
+    let right_for_repo = New {
+        role: Some("work".into()),
+        model: Some("third-m1".into()),
+        effort: Some("low".into()),
+        admission: Some(crate::policy::Identity::Repository("sam/box".into())),
+        ..Default::default()
+    };
+    let id = start_job(&cfg, &right_for_repo, "demo", "task").unwrap();
+    assert_eq!(
+        crate::job::Request::load(&Job::new(&cfg, &id))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("third-m1")
+    );
+
+    // Also verify repository resolution from the project's git origin remote
+    // when `admission` is not pre-supplied.
+    let git_proj = cfg.projects.join("box");
+    fs::create_dir_all(&git_proj).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&git_proj)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new("git")
+        .args(["remote", "add", "origin", "https://github.com/sam/box.git"])
+        .current_dir(&git_proj)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let wrong_for_git_repo = New {
+        role: Some("work".into()),
+        model: Some("claude-m1".into()),
+        ..Default::default()
+    };
+    let fail = start_job(&cfg, &wrong_for_git_repo, "box", "task").unwrap_err();
+    assert_eq!(fail.code, 2, "{:?}", fail.say);
+    assert!(
+        fail.say.as_deref().unwrap_or_default().contains("third"),
+        "{:?}",
+        fail.say
+    );
+    let right_for_git_repo = New {
+        role: Some("work".into()),
+        model: Some("third-m1".into()),
+        effort: Some("low".into()),
+        ..Default::default()
+    };
+    let id_git = start_job(&cfg, &right_for_git_repo, "box", "task").unwrap();
+    assert_eq!(
+        crate::job::Request::load(&Job::new(&cfg, &id_git))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("third-m1")
+    );
+
+    // Case 2: live meter hop (`work` routes `claude over 80 third`, with
+    // `claude` at 90% and `third` at 10% so turn startup selects `third`).
+    settings
+        .command(
+            &["role", "work", "claude", "over", "80", "third"].map(String::from),
+            "host",
+        )
+        .unwrap();
+    let now = crate::now();
+    for (eng, used) in [("claude", 90.0), ("third", 10.0)] {
+        fs::write(
+            cfg.meters.as_ref().unwrap().join(format!("{eng}.json")),
+            serde_json::json!({
+                "windows": {"seven_day": {"used": used, "resets_at": now + 86400}},
+                "credits": false,
+                "read_at": now,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    // Primary engine's model is rejected because live meters hop to `third`.
+    let wrong_for_hop = New {
+        role: Some("work".into()),
+        model: Some("claude-m1".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    let fail = start_job(&cfg, &wrong_for_hop, "demo", "task").unwrap_err();
+    assert_eq!(fail.code, 2, "{:?}", fail.say);
+    assert!(
+        fail.say.as_deref().unwrap_or_default().contains("third"),
+        "{:?}",
+        fail.say
+    );
+
+    // Effective hopped engine's model is accepted.
+    let right_for_hop = New {
+        role: Some("work".into()),
+        model: Some("third-m1".into()),
+        effort: Some("low".into()),
+        local_work: true,
+        ..Default::default()
+    };
+    let id2 = start_job(&cfg, &right_for_hop, "demo", "task").unwrap();
+    assert_eq!(
+        crate::job::Request::load(&Job::new(&cfg, &id2))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("third-m1")
+    );
+}
