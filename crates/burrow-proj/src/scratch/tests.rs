@@ -331,3 +331,42 @@ fn clearing_skips_repack_when_locked_and_preserves_fresh_midx_lock() {
         "fresh multi-pack-index.lock was deleted"
     );
 }
+
+fn loose_objects(repo: &Path) -> usize {
+    let mut total = 0;
+    for entry in fs::read_dir(repo.join(".git/objects")).unwrap().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            total += fs::read_dir(entry.path()).unwrap().count();
+        }
+    }
+    total
+}
+
+#[test]
+fn clearing_repacks_excess_loose_objects_without_excess_packs() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    let many = web.join("many");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..2100 {
+        fs::write(many.join(format!("f{i}")), format!("blob-{i}\n")).unwrap();
+    }
+    git(&web, &["add", "many"]);
+    git(&web, &["commit", "-q", "-m", "many loose objects"]);
+    assert!(loose_objects(&web) > 2048);
+    assert_eq!(pack_files(&web).len(), 0);
+
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-loose", &a.join("web"));
+    clear(cfg, "a");
+
+    assert_eq!(
+        loose_objects(&web),
+        0,
+        "expected excess loose objects to be packed and pruned"
+    );
+    assert_eq!(pack_files(&web).len(), 1);
+}
