@@ -839,6 +839,20 @@ P.build_inputs = stub_inputs
 assert PRE in line(1, 900) and not pr_state(1)["strikes"], pr_state(1)
 P.build_inputs = kept_inputs
 
+# A wrapper check (like linkFarm over vm-test-run-* derivations) unwraps
+# vm-test-run-* in inputs() so prebuild builds what the VMs boot, not the
+# VM tests themselves outside proofSlots.
+VM_TEST = "/nix/store/" + "v" * 32 + "-vm-test-run-agents"
+VM_SYS = "/nix/store/" + "s" * 32 + "-nixos-system-host"
+nix_knows(refs={
+    X: [VM_TEST, A],
+    VM_TEST: [VM_SYS, B],
+})
+ins, outs = P.inputs([X + ".drv"])
+assert ins == sorted([A + ".drv", B + ".drv", VM_SYS + ".drv"]), ins
+assert VM_TEST + ".drv" not in ins, ins
+assert outs == sorted([A, B, VM_SYS]), outs
+
 del S.CFG["repos"]["sam/r"]
 C.job, P.build = kept, kept_build
 C.gh, C.write = kept_gh, kept_write

@@ -470,8 +470,23 @@ def start_run(repo, pr, checks, st):
 
 def inputs(drvs):
     """The derivations drvs are built from, and every output of them:
-    ([drv, ...], [path, ...]). Raises when the store can't say."""
-    ins = sorted(p for p in nix("nix-store", "--query", "--references", *drvs).split() if p.endswith(".drv"))
+    ([drv, ...], [path, ...]). Raises when the store can't say. Wrapper
+    checks (like linkFarm over vm-test-run-*) unwrap VM test derivations
+    so prebuild builds what the VMs boot, never the VM tests themselves
+    outside proofSlots."""
+    ins, queue, seen = set(), list(drvs), set(drvs)
+    while queue:
+        refs = [p for p in nix("nix-store", "--query", "--references", *queue).split() if p.endswith(".drv")]
+        queue = []
+        for p in refs:
+            if p in seen:
+                continue
+            seen.add(p)
+            if re.match(r"^[0-9a-z]{32}-vm-test-run-", os.path.basename(p)):
+                queue.append(p)
+            else:
+                ins.add(p)
+    ins = sorted(ins)
     return ins, sorted(set(nix("nix-store", "--query", "--outputs", *ins).split())) if ins else []
 
 
