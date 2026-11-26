@@ -24,9 +24,13 @@ pub struct Diff {
     /// shell counts its whole length here, so glue passes and a feature in
     /// bash doesn't, however it got there.
     pub growth: i64,
-    /// Code files the PR leaves longer than it found them and past the limit
-    /// at its head, with their length there.
-    pub big: Vec<(String, usize)>,
+    /// Non-test code files pushed across the limit by this PR (over it at
+    /// the head, and at or under it, absent, non-code or test at the merge
+    /// base), with their length at the head.
+    pub crossed: Vec<(String, usize)>,
+    /// Unwaived non-test code files already over the limit at the merge base
+    /// whose non-test code grew further at the head, with their length there.
+    pub already_over: Vec<(String, usize)>,
     /// AGENTS.md files whose own part (outside the house blocks) the PR
     /// leaves longer than it found it and past `rules::GUIDE` lines at its
     /// head, with their own lines there.
@@ -158,8 +162,11 @@ pub fn read(
                 (None, None) => {}
             }
         }
+        let became_code = status == "renamed"
+            && (rules::is_test(previous)
+                || rules::by_name(previous).is_some_and(|lang| !rules::is_code(previous, lang)));
         if status != "removed"
-            && (new_file || added > removed)
+            && (new_file || added > removed || became_code)
             && !rules::is_test(file)
             && !file_size_allow.matches(file)
         {
@@ -170,7 +177,21 @@ pub fn read(
             if rules::is_code(file, now) {
                 let length = contents.code_length(file, head)?;
                 if length > lines {
-                    diff.big.push((file.to_owned(), length));
+                    let had = if new_file || rules::is_test(previous) {
+                        0
+                    } else {
+                        let prev_lang = contents.language(previous, origin)?;
+                        if rules::is_code(previous, prev_lang) {
+                            contents.code_length(previous, origin)?
+                        } else {
+                            0
+                        }
+                    };
+                    if had <= lines {
+                        diff.crossed.push((file.to_owned(), length));
+                    } else if length > had {
+                        diff.already_over.push((file.to_owned(), length));
+                    }
                 }
             }
         }
