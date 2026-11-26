@@ -84,15 +84,17 @@ enum Live {
 }
 
 /// What `live/` keeps of a PR's job, a line each: its proj key, the head
-/// it was handed, what it was asked ([`asked`]), and `kept` once its
-/// request ended and it wouldn't stop. A head or ask left out (as an older
-/// broker wrote it, the key alone) is one no request asks again.
+/// it was handed, what it was asked ([`asked`]), `kept` once its request
+/// ended and it wouldn't stop, and (for a stuck-role job) the follow-up
+/// issue number it was handed. A head or ask left out (as an older broker
+/// wrote it, the key alone) is one no request asks again.
 #[derive(Debug, Default, PartialEq)]
 struct Entry {
     job: String,
     head: Option<String>,
     asked: Option<String>,
     kept: bool,
+    handed: Option<u64>,
 }
 
 impl Entry {
@@ -101,24 +103,45 @@ impl Entry {
         let mut next = || lines.next().filter(|l| !l.is_empty()).map(str::to_owned);
         let job = next().unwrap_or_default();
         let (head, asked) = (next(), next());
+        let kept = next().as_deref() == Some("kept");
+        let handed = next().and_then(|n| n.parse().ok());
         Self {
             job,
             head,
             asked,
-            kept: next().as_deref() == Some("kept"),
+            kept,
+            handed,
         }
     }
 
     fn write(&self) -> String {
         let line = |l: &Option<String>| l.clone().unwrap_or_default();
-        format!(
-            "{}\n{}\n{}\n{}",
-            self.job,
-            line(&self.head),
-            line(&self.asked),
-            if self.kept { "kept\n" } else { "" }
-        )
+        match self.handed {
+            Some(n) => format!(
+                "{}\n{}\n{}\n{}\n{n}\n",
+                self.job,
+                line(&self.head),
+                line(&self.asked),
+                if self.kept { "kept" } else { "" },
+            ),
+            None => format!(
+                "{}\n{}\n{}\n{}",
+                self.job,
+                line(&self.head),
+                line(&self.asked),
+                if self.kept { "kept\n" } else { "" },
+            ),
+        }
     }
+}
+
+/// A re-adopted job that a repeated request joined: its proj id, the head
+/// it was handed, and (for a stuck-role job) the follow-up issue it was
+/// handed.
+struct Joined {
+    id: String,
+    head: Option<String>,
+    handed: Option<u64>,
 }
 
 /// What a request asks of its PR, as one line, for [`Entry::asked`]: two
@@ -137,21 +160,22 @@ struct Held<'a> {
     broker: &'a Broker,
     pr: String,
     job: String,
-    /// The job it joined, re-adopted from before a restart: its id and the
-    /// head it was handed. None when this request starts its own.
-    joined: Option<(String, Option<String>)>,
+    /// The job it joined, re-adopted from before a restart. None when this
+    /// request starts its own.
+    joined: Option<Joined>,
 }
 
 impl Held<'_> {
     /// Kept on disk until its request ends, with what it was handed and
     /// asked, so a restart re-adopts its job ([`Broker::reconcile`]).
-    fn record(&self, head: &str, asked: &str) -> Result<(), String> {
+    fn record(&self, head: &str, asked: &str, handed: Option<u64>) -> Result<(), String> {
         let kept = self.broker.kept(&self.job);
         let entry = Entry {
             job: self.job.clone(),
             head: Some(head.to_owned()),
             asked: Some(asked.to_owned()),
             kept: false,
+            handed,
         };
         fs::write(&kept, entry.write()).map_err(|e| format!("{}: {e}", kept.display()))
     }
@@ -374,7 +398,7 @@ impl Broker {
         // since: what it pushed is held to that head below, as its own
         // request's would have been.
         let id = match held.joined.take() {
-            Some((id, _)) => id,
+            Some(Joined { id, .. }) => id,
             None => {
                 if current.is_none() {
                     return Err(format!(
@@ -382,7 +406,7 @@ impl Broker {
                     ));
                 }
                 let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
-                held.record(head, &asks)?;
+                held.record(head, &asks, None)?;
                 // Stopped before the answer is let go of, so no fix is left
                 // at work for a request that's over: a start that read as
                 // failed may have started all the same.
@@ -481,7 +505,11 @@ impl Broker {
                 match found {
                     Some(id) if entry.asked.as_deref() == Some(asks) => {
                         job.clone_from(&entry.job);
-                        joined = Some((id, entry.head.clone()));
+                        joined = Some(Joined {
+                            id,
+                            head: entry.head.clone(),
+                            handed: entry.handed,
+                        });
                     }
                     Some(id)
                         if now
@@ -626,12 +654,11 @@ impl Broker {
             Some(&now),
         )?;
         let (id, head, handed) = match held.joined.take() {
-            // The job it repeats, held to the head it was handed and to the
-            // follow-up it would have been handed, which is still the
-            // first of the PR's open ones.
-            Some((id, head)) => {
+            // The job it repeats, held to the head and follow-up it was
+            // originally handed before the restart.
+            Some(Joined { id, head, handed }) => {
                 let head = head.ok_or_else(|| format!("the stuck-role job {id} names no head"))?;
-                (id, head, self.find_followup(repo, pr, &accounts)?)
+                (id, head, handed)
             }
             None => {
                 let head = now;
@@ -648,7 +675,7 @@ impl Broker {
                     handed,
                     &self.cfg.jobs,
                 );
-                held.record(&head, &asks)?;
+                held.record(&head, &asks, handed)?;
                 match starter.start(repo, &held.job, &task) {
                     Ok(id) => (id, head, handed),
                     Err(why) => return Err(self.ended(held, None, why)),

@@ -796,3 +796,41 @@ fn a_restart_leaves_the_stuck_job_at_work_and_answers_the_remade_request_from_it
     assert!(r.runner.lock().unwrap().stopped.is_empty());
     assert_eq!(count(&r.cfg.state.join("live")), 0);
 }
+
+#[test]
+fn a_readopted_stuck_job_keeps_the_followup_it_was_handed() {
+    let r = rig();
+    let gone = r.serve();
+    r.github(&[HEAD, PUSHED]);
+    r.script("running", json!({}));
+    let why = Stuck::ALL[0].word();
+    {
+        let (plugin, log) = (r.plugin.clone(), r.log.clone());
+        thread::spawn(move || {
+            let limits = Limits {
+                deadline: Duration::from_secs(30),
+                response_bytes: 1 << 20,
+            };
+            let runner = Plugin::describe(&plugin, limits).unwrap();
+            let _ = call(&runner, &log, handoff(why, None));
+        });
+    }
+    wait_for(|| !r.started().is_empty());
+    gone.store(true, Ordering::SeqCst);
+    // While the broker is down, an older matching follow-up (37) is reopened ahead of 40.
+    r.github_listing(&[HEAD, PUSHED], json!([issue(37), issue(40)]));
+    r.serve();
+    r.script(
+        "done",
+        json!({"pushed": PUSHED, "unable": null, "followup": 40, "summary": "fixed the blocker"}),
+    );
+    let got = call(&r.runner(), &r.log, handoff(why, None)).unwrap();
+    let Answer::Job { summary, .. } = &got.answer else {
+        panic!("{:?}", got.answer)
+    };
+    assert!(
+        summary.contains("follow-up: https://github.com/sam/box/issues/40\n"),
+        "{summary}"
+    );
+    assert_eq!(r.started().len(), 1, "a second stuck-role job started");
+}
