@@ -304,7 +304,7 @@ fn flaky_runs_around_the_gate_only_when_asked() {
 fn a_hit_with_legs_runs_no_leg() {
     let wf = wf();
     let (check, gate) = (&wf["jobs"]["check"], &wf["jobs"]["gate"]);
-    for legs in [2, 4, 8] {
+    for legs in [2, 4, 8, 12] {
         let mut c = push(MAIN, legs, true, "true".into());
         assert!(!job_runs(check, &c), "{legs} legs: a leg runs");
         c.insert("needs.check.result".into(), "skipped".into());

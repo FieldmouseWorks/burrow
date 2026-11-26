@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use burrow_house::check::{self, Event};
 use burrow_house::github::{GitHub, Status};
+use burrow_house::rules::AllowList;
 use serde_json::{Value, json};
 
 /// The defaults a caller gets.
@@ -209,6 +210,8 @@ pub struct Case {
     pub growth: i64,
     pub lines: usize,
     pub model_names: bool,
+    pub rust_first_allow: AllowList,
+    pub file_size_allow: AllowList,
     pub fork: Fork,
     pub changes: BTreeMap<usize, Change>,
     pub restless: bool,
@@ -231,6 +234,8 @@ pub fn case(files: Vec<Value>) -> Case {
         growth: GROWTH,
         lines: LINES,
         model_names: true,
+        rust_first_allow: AllowList::default(),
+        file_size_allow: AllowList::default(),
         fork: Fork::No,
         changes: BTreeMap::new(),
         restless: false,
@@ -254,6 +259,16 @@ impl Case {
 
     pub fn branch(mut self, branch: &'static str) -> Self {
         self.branch = branch;
+        self
+    }
+
+    pub fn rust_first_allow(mut self, raw: &str) -> Self {
+        self.rust_first_allow = AllowList::parse(raw).unwrap();
+        self
+    }
+
+    pub fn file_size_allow(mut self, raw: &str) -> Self {
+        self.file_size_allow = AllowList::parse(raw).unwrap();
         self
     }
 
@@ -332,6 +347,8 @@ impl Case {
             growth: self.growth,
             lines: self.lines,
             model_names: self.model_names,
+            rust_first_allow: self.rust_first_allow.clone(),
+            file_size_allow: self.file_size_allow.clone(),
             run_url: "https://github.example/sam/r/actions/runs/99".into(),
         };
         let mut out = Vec::new();

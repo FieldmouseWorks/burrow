@@ -22,10 +22,10 @@ fn grown() {
             .tree("4ead", "src/b.rs", &long),
         case(vec![
             change("modified", "modules/x.nix", 5, 0),
-            change("modified", "tests/x.py", 5, 0),
+            change("modified", "tools/x.py", 5, 0),
         ])
         .tree("4ead", "modules/x.nix", &long)
-        .tree("4ead", "tests/x.py", &long),
+        .tree("4ead", "tools/x.py", &long),
         // A script with no extension is code by its shebang.
         case(vec![change("modified", "bin/tool", 5, 0)])
             .tree("4ead", "bin/tool", &format!("#!/bin/sh\n{long}"))
@@ -131,4 +131,236 @@ fn fork() {
         case(vec![change("modified", "src/big.rs", 20, 5)]).tree("4ead", "src/big.rs", &long());
     c.fork = Fork::Yes;
     fails(&c, "file-size");
+}
+
+// Test files don't count toward file-size, and aren't fetched for it; non-test
+// lookalikes still fail.
+#[test]
+fn test_files_are_exempt() {
+    let long = long();
+    for path in [
+        "tests/x.py",
+        "crates/a/tests/it.rs",
+        "crates/a/src/tests.rs",
+        "crates/a/src/inbox/drain_tests.rs",
+        "a_tests.rs",
+        "tools/x/test_y.py",
+        "src/parser_test.py",
+        "pkg/z_test.go",
+        "web/src/app.test.ts",
+        "web/src/app.spec.tsx",
+        "src/test/java/A.java",
+    ] {
+        let o = passes(
+            &case(vec![change("modified", path, 20, 5)])
+                .tree("4ead", path, &long)
+                .tree("3e7b", path, &long),
+        );
+        assert!(
+            !o.calls.iter().any(|c| c.starts_with("content")),
+            "{path}: {:?}",
+            o.calls
+        );
+    }
+    for path in ["src/testing.rs", "src/contests.rs", "tools/load_tester.py"] {
+        fails(
+            &case(vec![change("modified", path, 20, 5)])
+                .tree("4ead", path, &long)
+                .tree("3e7b", path, &long),
+            "file-size",
+        );
+    }
+}
+
+// Inline `#[cfg(test)]` items in Rust files don't count toward file-size;
+// strings/comments mentioning `#[cfg(test)]` in production code still count.
+#[test]
+fn rust_inline_cfg_test_is_excluded() {
+    let prod = "fn prod() {}\n".repeat(300);
+    let tests = format!(
+        "#[cfg(test)]\nmod tests {{\n    const BRACE: char = '}}';\n    const STR: &str = \"}} #[cfg(test)]\";\n    const RAW: &str = r#\"}} \"#;\n    /* nested /* }} */ comment */\n{} }}\n",
+        "    #[test]\n    fn t() {}\n".repeat(400)
+    );
+    let combined = format!("{prod}\n{tests}");
+    assert!(combined.lines().count() > LINES);
+    passes(&case(vec![change("modified", "src/cram.rs", 20, 5)]).tree(
+        "4ead",
+        "src/cram.rs",
+        &combined,
+    ));
+
+    // A `#[cfg(test)]` const struct literal with trailing semicolon and a
+    // `#[cfg(test)] mod tests;` declaration are also stripped cleanly.
+    let mid_test = format!(
+        "#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod tests;\n#[cfg(test)]\nconst C: S = S {{ a: 1 }};\n{}",
+        "fn prod() {}\n".repeat(LINES)
+    );
+    passes(&case(vec![change("modified", "src/mid.rs", 5, 0)]).tree(
+        "4ead",
+        "src/mid.rs",
+        &mid_test,
+    ));
+
+    // Production code past the limit still fails even with a `#[cfg(test)]`
+    // block, or when `#[cfg(test)]` only appears in a string literal.
+    let too_much_prod = format!("{}{tests}", "fn prod() {}\n".repeat(LINES + 1));
+    fails(
+        &case(vec![change("modified", "src/big.rs", 20, 5)]).tree(
+            "4ead",
+            "src/big.rs",
+            &too_much_prod,
+        ),
+        "file-size",
+    );
+    let fake_attr_in_string = format!(
+        "const S: &str = r#\"\n#[cfg(test)]\nmod fake {{\nlet x = 1;{}\n}}\n\"#;\n",
+        "\n".repeat(LINES)
+    );
+    fails(
+        &case(vec![change("modified", "src/str.rs", 20, 5)]).tree(
+            "4ead",
+            "src/str.rs",
+            &fake_attr_in_string,
+        ),
+        "file-size",
+    );
+}
+
+// `#[cfg(test)]` on fields, variants, match arms, expressions, and
+// semicolon-terminated items containing braces never swallows production code
+// that follows them.
+#[test]
+fn rust_cfg_test_never_swallows_production_code() {
+    let big_body = "    fn prod() {}\n".repeat(LINES + 1);
+    let big_fns = "fn prod() {}\n".repeat(LINES + 1);
+
+    for (name, src) in [
+        (
+            "struct field with comma",
+            format!(
+                "struct Config {{\n    #[cfg(test)]\n    fake: bool,\n    real: String,\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "last struct field without trailing comma",
+            format!(
+                "struct Config {{\n    real: String,\n    #[cfg(test)]\n    pub(crate) fake: bool\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "weak-keyword struct fields (union, default)",
+            format!(
+                "struct Config {{\n    #[cfg(test)]\n    union: bool,\n    #[cfg(test)]\n    default: bool,\n    real: String,\n}}\nimpl Config {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "tuple struct fields including fn pointer types",
+            format!(
+                "struct Callbacks(\n    #[cfg(test)]\n    fn(i32) -> i32,\n    #[cfg(test)]\n    extern \"C\" fn(i32),\n    #[cfg(test)]\n    bool\n);\nimpl Callbacks {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "enum unit, tuple, and struct variants",
+            format!(
+                "enum Mode {{\n    #[cfg(test)]\n    Unit,\n    #[cfg(test)]\n    Tuple(i32),\n    #[cfg(test)]\n    Struct {{ a: i32 }},\n    #[cfg(test)]\n    Last\n}}\nimpl Mode {{\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "const slice containing struct literal",
+            format!("#[cfg(test)]\nconst ITEMS: &[S] = &[S {{ a: 1 }}];\n{big_fns}"),
+        ),
+        (
+            "static slice containing struct literal",
+            format!("#[cfg(test)]\nstatic ITEMS: &[S] = &[S {{ a: 1 }}];\n{big_fns}"),
+        ),
+        (
+            "const with multiple block expressions",
+            format!("#[cfg(test)]\nconst N: usize = {{ let a = 1; a }} + {{ 2 }};\n{big_fns}"),
+        ),
+        (
+            "use group with alias",
+            format!("#[cfg(test)]\nuse foo::{{a, b}} as c;\n{big_fns}"),
+        ),
+        (
+            "type alias with const array block",
+            format!("#[cfg(test)]\ntype Arr = [u8; {{ 1 + 1 }}];\n{big_fns}"),
+        ),
+        (
+            "let statement with struct literal inside function",
+            format!(
+                "fn prod_outer() {{\n    #[cfg(test)]\n    let x = S {{ a: 1 }};\n{big_body}}}\n"
+            ),
+        ),
+        (
+            "macro call with braces inside parens",
+            format!("#[cfg(test)]\nmy_macro!(S {{ a: 1 }});\n{big_fns}"),
+        ),
+        (
+            "match arm with comparison before big production arm",
+            format!(
+                "fn decide(n: i32) {{\n    match n {{\n        #[cfg(test)]\n        x if x < 5 => 1,\n        _ => {{\n{big_body}        }}\n    }}\n}}\n"
+            ),
+        ),
+        (
+            "inline const block inside array literal",
+            format!(
+                "const ARR: &[usize] = &[\n    #[cfg(test)]\n    const {{ 1 + 1 }},\n    3,\n];\n{big_fns}"
+            ),
+        ),
+    ] {
+        let path = "src/prod.rs";
+        fails(
+            &case(vec![change("modified", path, 20, 5)]).tree("4ead", path, &src),
+            "file-size",
+        );
+        let _ = name;
+    }
+
+    // Large `#[cfg(test)]` items using those same constructs are still excluded
+    // cleanly without tripping file-size.
+    let big_const = format!(
+        "#[cfg(test)]\nconst ITEMS: &[S] = &[\n{}];\nfn prod() {{}}\n",
+        "    S { a: 1 },\n".repeat(LINES + 1)
+    );
+    let big_const_generic_fn = format!(
+        "#[cfg(test)]\nfn helper() -> Foo<{{ 1 }}> {{\n{}}}\nfn prod() {{}}\n",
+        "    let _ = 1;\n".repeat(LINES + 1)
+    );
+    for (name, src) in [
+        ("large cfg(test) const slice", big_const),
+        (
+            "large cfg(test) fn with const-generic block",
+            big_const_generic_fn,
+        ),
+    ] {
+        assert!(src.lines().count() > LINES, "{name}");
+        passes(&case(vec![change("modified", "src/ok.rs", 20, 5)]).tree("4ead", "src/ok.rs", &src));
+    }
+}
+
+// Standing waivers in file-size-allow exempt matching paths without a body line.
+#[test]
+fn standing_waiver() {
+    let long = long();
+    let allow = "# legacy modules\nmodules/autoland.nix # single NixOS module\nlegacy/**\n";
+    let o = passes(
+        &case(vec![
+            change("modified", "modules/autoland.nix", 20, 5),
+            change("modified", "legacy/sub/table.ts", 20, 5),
+        ])
+        .file_size_allow(allow)
+        .tree("4ead", "modules/autoland.nix", &long)
+        .tree("4ead", "legacy/sub/table.ts", &long),
+    );
+    assert!(
+        !o.calls.iter().any(|c| c.starts_with("content")),
+        "{:?}",
+        o.calls
+    );
+    fails(
+        &case(vec![change("modified", "modules/other.nix", 20, 5)])
+            .file_size_allow(allow)
+            .tree("4ead", "modules/other.nix", &long),
+        "file-size",
+    );
 }

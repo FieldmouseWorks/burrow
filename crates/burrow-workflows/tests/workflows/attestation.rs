@@ -520,7 +520,7 @@ fn with_legs_the_gate_job_attests_for_them() {
         leg_up["with"],
         yaml("{name: '${{ steps.leg.outputs.name }}', path: '${{ runner.temp }}/flake.log'}")
     );
-    let outputs: String = (1..=8)
+    let outputs: String = (1..=12)
         .map(|k| format!("leg-{k}: '${{{{ steps.leg.outputs.leg-{k} }}}}'\n"))
         .collect();
     assert_eq!(job["outputs"], yaml(&outputs));

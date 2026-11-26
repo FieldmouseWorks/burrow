@@ -9,12 +9,15 @@
 //!     gets.
 //!   - rust-first: a PR that adds Python, or grows Python and shell by more
 //!     than a fix does, says why it isn't Rust on a line starting
-//!     `Why not Rust:`. A new shell script counts its lines, so glue passes.
+//!     `Why not Rust:` unless the path has a standing waiver in
+//!     `rust-first-allow`. A new shell script counts its lines, so glue passes.
 //!   - timers: work starts from events, so a PR that adds a timer (a systemd
 //!     timer, `startAt`, a cron schedule) says why on a `Why a timer:` line.
-//!   - file-size: a PR that grows a code file past its limit, or grows one
-//!     already past it, splits it or says why not on a `Why not split:`
-//!     line.
+//!   - file-size: a PR that grows a non-test code file past its limit, or
+//!     grows one already past it, splits it or says why not on a
+//!     `Why not split:` line unless the path has a standing waiver in
+//!     `file-size-allow`. Test files and Rust inline `#[cfg(test)]` blocks
+//!     don't count.
 //!   - model-names: tracked files never name a model, so a PR that adds a
 //!     line naming one says why on a `Why a model name:` line. A repo whose
 //!     subject is models (wend records which one wrote each fix) turns it
@@ -45,3 +48,4 @@ pub mod check;
 pub mod diff;
 pub mod github;
 pub mod rules;
+mod rust_cfg_test;

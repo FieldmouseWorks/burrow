@@ -120,20 +120,21 @@ Every repo with code gets a `flake.nix` from the template
   whenever its title or body is edited. It holds the PR to the house rules a
   machine can read ([which, and how](../crates/burrow-house/src/lib.rs)): its
   title is `area: plain sentence`, and a PR that adds Python or grows Python
-  and shell past a fix, adds a timer, grows a code file past 1,000 lines,
-  grows an AGENTS.md's own part past 100 lines or names a model has the line
-  in its body that says why, with a reason. A PR whose head is under
-  `renovate/` fails unless Renovate opened it, since Renovate takes every
-  branch there as its own, and so does one whose title or body writes the
-  review connector's mention, even in backticks, which the connector reads
-  as a task instead of reviewing the PR. Each
-  rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
-  by the next run's, so fixing the title or body clears it; a fork's PR,
-  whose token can't post them, gets them as the job's result. A repo can set
-  the action's `growth` and `lines`, and one whose subject is models turns
-  off `model-names`. A private repo runs it on its self-hosted runner, as it
-  does the gate: the action builds the check with the runner's cargo and
-  runs it with gh.
+  and shell past a fix, adds a timer, grows a non-test code file past 1,000
+  lines (test files and Rust inline `#[cfg(test)]` blocks don't count), grows
+  an AGENTS.md's own part past 100 lines or names a model has the line in its
+  body that says why, with a reason. A PR whose head is under `renovate/` fails
+  unless Renovate opened it, since Renovate takes every branch there as its
+  own, and so does one whose title or body writes the review connector's
+  mention, even in backticks, which the connector reads as a task instead of
+  reviewing the PR. Each rule is a commit status for the PR of its own,
+  `house/RULE (#N)`, replaced by the next run's, so fixing the title or body
+  clears it; a fork's PR, whose token can't post them, gets them as the job's
+  result. A repo can set the action's `growth`, `lines`, `rust-first-allow`
+  and `file-size-allow` (standing per-path waivers, one path or glob per line,
+  with `#` comments), and one whose subject is models turns off `model-names`.
+  A private repo runs it on its self-hosted runner, as it does the gate: the
+  action builds the check with the runner's cargo and runs it with gh.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
   when burrow's do. Change a Rust version in `rust-toolchain.toml` only.
 - The template also brings `.editorconfig`. Rust crates forbid `unsafe` in

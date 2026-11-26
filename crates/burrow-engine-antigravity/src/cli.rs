@@ -535,10 +535,33 @@ pub fn run_invocation_streaming(
         if isolated_host_home.is_some()
             && let Some(real_home) = &orig_home
         {
+            let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| real_home.join(".config"));
             if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
                 let gitconfig = real_home.join(".gitconfig");
+                let xdg_gitconfig = xdg_config_home.join("git").join("config");
                 if gitconfig.is_file() {
                     command.env("GIT_CONFIG_GLOBAL", gitconfig);
+                } else if xdg_gitconfig.is_file() {
+                    command.env("GIT_CONFIG_GLOBAL", xdg_gitconfig);
+                }
+            }
+            if [
+                "GH_CONFIG_DIR",
+                "GH_TOKEN_SOCKET",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ]
+            .iter()
+            .all(|key| std::env::var_os(key).filter(|v| !v.is_empty()).is_none())
+            {
+                let gh_config = xdg_config_home.join("gh");
+                if gh_config.is_dir() {
+                    command.env("GH_CONFIG_DIR", gh_config);
                 }
             }
             if std::env::var_os("CARGO_HOME").is_none() {

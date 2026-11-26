@@ -382,8 +382,11 @@ fn check(mode: Mode) -> Result<bool> {
     let legs = var("LEGS");
     let leg = var("LEG");
     let parse = |v: &str| {
-        if v.len() == 1 {
-            v.parse::<usize>().ok().filter(|v| (1..=8).contains(v))
+        if (1..=2).contains(&v.len())
+            && v.bytes().all(|b| b.is_ascii_digit())
+            && !v.starts_with('0')
+        {
+            v.parse::<usize>().ok().filter(|v| (1..=12).contains(v))
         } else {
             None
         }
@@ -392,7 +395,7 @@ fn check(mode: Mode) -> Result<bool> {
         (Some(ls), Some(l)) if l <= ls => (ls, l),
         _ => {
             return Err(failed(format!(
-                "can't run leg {leg} of {legs}: there are 1 to 8 legs, numbered from 1"
+                "can't run leg {leg} of {legs}: there are 1 to 12 legs, numbered from 1"
             )));
         }
     };
