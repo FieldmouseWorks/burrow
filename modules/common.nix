@@ -198,16 +198,14 @@ inputs:
           patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
         }));
 
-        # Single owner of the machine's git packing and auto-maintenance policy
-        # (inherited by host, services, and microVM sandboxes alike). Unbounded
-        # detached auto-maintenance runs concurrently across shared worktrees,
-        # races on multi-pack-index.lock, and turns a stale lock into unbounded
-        # pack multiplication and 25+ GiB pack-objects OOM loops. proj runs a
-        # serialized, bounded geometric repack when it prunes finished job
-        # worktrees instead (crates/burrow-proj/src/scratch.rs).
+        # Single owner of the machine's git packing bounds (inherited by host,
+        # services, and microVM sandboxes alike). Unbounded pack-objects uses
+        # every core and unbounded delta window memory, which can OOM-kill a
+        # shared host. Repos outside proj keep git's own automatic maintenance
+        # under these bounds; concurrent proj jobs disable auto-maintenance via
+        # their GitMetadata grant and run serialized geometric repacks when
+        # finished job worktrees are pruned (crates/burrow-proj/src/scratch.rs).
         config.programs.git.config = {
-          gc.auto = lib.mkDefault 0;
-          maintenance.auto = lib.mkDefault false;
           pack = {
             threads = lib.mkDefault 2;
             windowMemory = lib.mkDefault "256m";
