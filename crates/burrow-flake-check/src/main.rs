@@ -223,7 +223,7 @@ fn nix_string(v: &str) -> String {
 /// A build that prints nothing for this long has stopped making progress:
 /// nix kills it (its `max-silent-time`) and the gate fails, rather than hold
 /// its runner until the run's own limit ([`RUN_SECONDS`]) runs out (#1102). The rest of the
-/// builds go on (`--keep-going`), and a push's leg still keeps what they
+/// builds go on (`--keep-going`), and the leg still uploads what they
 /// built. burrow's longest quiet stretch in a build that went on to pass
 /// was 14 to 16 minutes, codex linking on a hosted runner.
 const SILENT_SECONDS: u32 = 60 * 60;
@@ -312,17 +312,6 @@ fn main() {
         let args: Vec<_> = env::args().skip(2).collect();
         let result = build::checks(None, &args[1..], Path::new(&args[0]));
         match result {
-            Ok(true) => return,
-            Ok(false) => std::process::exit(1),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        }
-    }
-    // The wait step runs its own plan and prints to the step's log.
-    if mode == "cold" {
-        match gate::plan() {
             Ok(true) => return,
             Ok(false) => std::process::exit(1),
             Err(e) => {

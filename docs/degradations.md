@@ -12,22 +12,21 @@ readable through the Actions jobs API without downloading logs or artifacts.
 A `continue-on-error` step has an ID, a name `soft/KEY`, and an `always()`
 reporter for its failed outcome. `burrow-workflows` tests every shared
 workflow and rejects an unreported soft step. Its negative fixture removes
-the declarations from the keep-builds steps and proves all three are rejected.
-Caches can swallow errors as warnings, so outcome alone is insufficient:
-lookup before restore distinguishes an empty cache from an entry that failed
-to extract; exact-key lookup after save detects a save that produced no entry.
-A failed restore never fails a job: the kept builds only save time, so a
-leg or the negative whose lookup found an entry it then couldn't restore
-builds without it and reports `degraded/kept-restore` (#1161).
+the declarations from the soft steps in `flake-check.yml` and proves all of
+them are rejected.
 
-The build store's upload (`soft/builds-write`, after the gate, in
-flake-check.yml) degrades when the store can't be written: it doesn't
-answer, it fails, or it takes longer than the step's deadline. A store
-whose door refuses the job isn't degraded: who may write is the door's
-decision (Conary's signer rule), and a PR's run of its own copy of the
-workflow is refused on every push, which would otherwise read as a standing
-degradation. The step says so in its summary and succeeds, as it does for a
-job with no OIDC token to send.
+The build store's reachability probe (`soft/builds`, before Nix is installed,
+in `flake-check.yml`) degrades (`degraded/builds`) when the store named by
+`BURROW_BUILDS_URL` / `BURROW_BUILDS_PUBLIC_KEY` cannot be reached or does
+not answer as a Nix binary cache: the job skips adding it as a substituter
+and builds cold. Its upload (`soft/builds-write`, after the gate, in
+`flake-check.yml`) degrades (`degraded/builds-write`) when the store can't
+be written: it doesn't answer, it fails, or it takes longer than the step's
+deadline. A store whose door refuses the job isn't degraded: who may write
+is the door's decision (Conary's signer rule), and a PR's run of its own
+copy of the workflow is refused on every push, which would otherwise read as
+a standing degradation. The step says so in its summary and succeeds, as it
+does for a job with no OIDC token to send.
 
 Any machine importing burrow's watchdog module can set:
 
