@@ -55,6 +55,9 @@ pub struct Invocation {
     /// Optional explicit `$HOME` for the child process (defaults to the
     /// inherited `HOME` environment variable).
     pub home_dir: Option<PathBuf>,
+    /// Optional per-job scratch directory (`PROJ_SCRATCH`) used in host mode
+    /// to persist `$HOME` across turns of the same job.
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl Invocation {
@@ -84,6 +87,9 @@ impl Invocation {
             input_format: config.input_format,
             print_timeout_secs: config.print_timeout_secs,
             home_dir: None,
+            scratch_dir: std::env::var_os("PROJ_SCRATCH")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         }
     }
 }
@@ -434,6 +440,74 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
     }
 }
 
+enum HostHome {
+    Persistent(PathBuf),
+    Ephemeral(TempDir),
+}
+
+impl HostHome {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Persistent(path) => path,
+            Self::Ephemeral(dir) => dir.path(),
+        }
+    }
+}
+
+fn prepare_host_home(scratch_dir: Option<&Path>) -> Result<HostHome, String> {
+    if let Some(scratch) = scratch_dir
+        && scratch.is_dir()
+    {
+        let home = scratch.join(".antigravity-host-home");
+        match fs::symlink_metadata(&home) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing to follow symlink at isolated host HOME {}",
+                    home.display()
+                ));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!(
+                    "isolated host HOME {} is not a directory",
+                    home.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                DirBuilder::new().mode(0o700).create(&home).map_err(|e| {
+                    format!(
+                        "failed to create isolated host HOME {}: {e}",
+                        home.display()
+                    )
+                })?;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to inspect isolated host HOME {}: {e}",
+                    home.display()
+                ));
+            }
+        }
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "failed to secure isolated host HOME {}: {e}",
+                home.display()
+            )
+        })?;
+        return Ok(HostHome::Persistent(home));
+    }
+
+    let dir = tempfile::Builder::new()
+        .prefix("antigravity-host-home-")
+        .tempdir()
+        .and_then(|dir| {
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+            Ok(dir)
+        })
+        .map_err(|e| format!("failed to create isolated host HOME: {e}"))?;
+    Ok(HostHome::Ephemeral(dir))
+}
+
 /// Run one headless `antigravity` invocation in its own process group.
 ///
 /// When `stop()` returns `true` or the outer deadline elapses, the entire child
@@ -466,24 +540,19 @@ pub fn run_invocation(
     let orig_home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    // In host mode, always run in a private per-turn `$HOME` (regardless of
-    // credential mode) so interactive desktop or T3 userdata in the real
-    // `$HOME` is never read or overwritten.
+    // In host mode, always run in a private `$HOME` (regardless of credential
+    // mode) so interactive desktop or T3 userdata in the real `$HOME` is never
+    // read or overwritten. Under a proj job (`PROJ_SCRATCH`), keep it across
+    // turns of the same job so `antigravity` continuation sessions persist.
     let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
-        match tempfile::Builder::new()
-            .prefix("antigravity-host-home-")
-            .tempdir()
-            .and_then(|dir| {
-                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
-                Ok(dir)
-            }) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
+        match prepare_host_home(invocation.scratch_dir.as_deref()) {
+            Ok(home) => Some(home),
+            Err(message) => {
                 return TurnOutput {
                     error: Some(RunError::ProcessFailed {
                         exit_code: None,
                         signal: None,
-                        message: format!("failed to create isolated host HOME: {e}"),
+                        message,
                     }),
                     ..TurnOutput::default()
                 };
@@ -495,7 +564,7 @@ pub fn run_invocation(
     let effective_home = invocation
         .home_dir
         .clone()
-        .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
+        .or_else(|| isolated_host_home.as_ref().map(|h| h.path().to_path_buf()));
     let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
     let prepared = match prepare_credential(config, resolved_home.as_deref()) {
         Ok(p) => p,

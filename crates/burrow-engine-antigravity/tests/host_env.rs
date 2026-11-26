@@ -260,3 +260,140 @@ fn non_host_mode_does_not_forward_gh_config_dir() {
 
     assert_eq!(env_value(&dumped, "GH_CONFIG_DIR"), None);
 }
+
+#[test]
+fn host_mode_persists_session_home_across_turns_under_proj_scratch() {
+    let dir = TempDir::new().unwrap();
+    let real_home = dir.path().join("real-home");
+    let scratch = dir.path().join("proj-scratch");
+    let gh_dir = real_home.join(".config/gh");
+    let git_cfg = real_home.join(".config/git/config");
+    fs::create_dir_all(&gh_dir).unwrap();
+    fs::write(gh_dir.join("hosts.yml"), "github.com:\n").unwrap();
+    fs::create_dir_all(git_cfg.parent().unwrap()).unwrap();
+    fs::write(&git_cfg, "[user]\n\tname = Test\n").unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+
+    let env_dump = dir.path().join("turn2-env.txt");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-session-persist",
+        &format!(
+            r#"#!/bin/sh
+cat >/dev/null
+conv=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--conversation" ]; then
+    conv="$arg"
+    break
+  fi
+  prev="$arg"
+done
+state_dir="$HOME/.gemini/antigravity-cli"
+mkdir -p "$state_dir"
+if [ -z "$conv" ]; then
+  touch "$state_dir/sess-1"
+  printf '{{"type":"result","conversation_id":"sess-1","result":"turn 1 ok"}}\n'
+elif [ -f "$state_dir/sess-1" ] && [ "$conv" = "sess-1" ]; then
+  env > "{}"
+  printf '{{"type":"result","conversation_id":"sess-1","result":"turn 2 ok"}}\n'
+else
+  printf '{{"type":"result","conversation_id":"sess-2","result":"lost session"}}\n'
+fi
+"#,
+            env_dump.display(),
+        ),
+    );
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        credential_mode: CredentialMode::Env,
+        credential_env: None,
+        target_credential_env: None,
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let run_turn = |context: Context| {
+        let req = Request {
+            contract: CONTRACT.to_owned(),
+            execution: Some(Execution {
+                choice: None,
+                context,
+            }),
+            negotiated: Some(Negotiated {
+                by: Identity {
+                    engine: ENGINE.to_owned(),
+                    session: None,
+                },
+                offers: cfg.offers(),
+            }),
+            task: Task::Job {
+                repo: "owner/demo".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                prompt: "check persistence".to_owned(),
+                model: None,
+                effort: None,
+            },
+        };
+        let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
+            .arg(&cfg_path)
+            .env("HOME", &real_home)
+            .env("PROJ_SCRATCH", &scratch)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("GH_CONFIG_DIR")
+            .env_remove("GH_TOKEN_SOCKET")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&req).unwrap())
+            .unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+
+    let turn1 = run_turn(Context::Fresh);
+    assert!(
+        turn1.status.success(),
+        "turn 1 failed: stderr={}",
+        String::from_utf8_lossy(&turn1.stderr)
+    );
+
+    let turn2 = run_turn(Context::Continue {
+        session: "sess-1".to_owned(),
+    });
+    assert!(
+        turn2.status.success(),
+        "turn 2 failed (continuation lost session): stderr={}",
+        String::from_utf8_lossy(&turn2.stderr)
+    );
+
+    let dumped = fs::read_to_string(&env_dump).unwrap();
+    let seen_home = PathBuf::from(env_value(&dumped, "HOME").expect("HOME set"));
+    assert_ne!(seen_home, real_home);
+    assert!(
+        seen_home.starts_with(&scratch),
+        "expected host HOME {} under PROJ_SCRATCH {}",
+        seen_home.display(),
+        scratch.display()
+    );
+    assert_eq!(
+        env_value(&dumped, "GH_CONFIG_DIR"),
+        Some(gh_dir.to_str().unwrap())
+    );
+    assert_eq!(
+        env_value(&dumped, "GIT_CONFIG_GLOBAL"),
+        Some(git_cfg.to_str().unwrap())
+    );
+}

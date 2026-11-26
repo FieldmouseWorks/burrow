@@ -354,7 +354,7 @@ fn host_mode_isolates_home_for_env_and_file_credential_modes() {
         cfg.credential_mode = mode;
         cfg.credential_file = None;
         cfg.credential_env = None;
-        let inv = Invocation::from_config(
+        let mut inv = Invocation::from_config(
             &cfg,
             dir.path().to_path_buf(),
             "check home".to_owned(),
@@ -362,6 +362,7 @@ fn host_mode_isolates_home_for_env_and_file_credential_modes() {
             Some(Effort::Low),
             None,
         );
+        inv.scratch_dir = None;
         let turn = run_invocation(&cfg, &inv, &|| false);
         assert_eq!(turn.error, None, "mode={mode:?} turn={turn:?}");
         let seen_home = PathBuf::from(fs::read_to_string(&seen_home_file).unwrap());

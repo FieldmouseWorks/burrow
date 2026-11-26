@@ -184,6 +184,7 @@ fn build_args_covers_verified_headless_flags() {
         input_format: Some(InputFormat::Text),
         print_timeout_secs: Some(120),
         home_dir: None,
+        scratch_dir: None,
     };
     let args: Vec<String> = build_args(&inv)
         .into_iter()
@@ -792,7 +793,7 @@ fn host_mode_declares_no_sandbox_refuses_skip_permissions_and_isolates_home() {
     cfg.validate().unwrap();
     assert_eq!(cfg.offers().capabilities.sandbox, Sandbox::None);
 
-    let inv = Invocation::from_config(
+    let mut inv = Invocation::from_config(
         &cfg,
         dir.path().to_path_buf(),
         "host task".to_owned(),
@@ -800,6 +801,7 @@ fn host_mode_declares_no_sandbox_refuses_skip_permissions_and_isolates_home() {
         None,
         None,
     );
+    inv.scratch_dir = None;
     assert!(!inv.dangerously_skip_permissions);
     assert_eq!(inv.mode, Some(Mode::Auto));
 
