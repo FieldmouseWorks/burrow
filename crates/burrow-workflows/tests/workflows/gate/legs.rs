@@ -189,7 +189,7 @@ fn legs_of(g: &Gate, d: &Path, n: usize) -> BTreeMap<String, usize> {
     legs
 }
 
-/// Legs without eval-apart, or a leg that isn't one of 1 to 8, are refused
+/// Legs without eval-apart, or a leg that isn't one of 1 to 12, are refused
 /// before anything is evaluated.
 #[test]
 fn legs_it_cant_run_are_refused() {
@@ -198,7 +198,8 @@ fn legs_it_cant_run_are_refused() {
     for (apart, leg, legs, why) in [
         (false, "1", "2", "legs need eval-apart"),
         (true, "3", "2", "can't run leg 3 of 2"),
-        (true, "1", "9", "can't run leg 1 of 9"),
+        (true, "1", "13", "can't run leg 1 of 13"),
+        (true, "01", "12", "can't run leg 01 of 12"),
         (true, "0", "1", "can't run leg 0 of 1"),
         (true, "", "", "can't run leg  of"),
         (true, "1", "x", "can't run leg 1 of x"),
@@ -214,4 +215,18 @@ fn legs_it_cant_run_are_refused() {
         assert!(r.fails_with(why), "{apart} {leg} {legs}: {}", r.out);
         assert!(r.calls.is_empty(), "{apart} {leg} {legs}: {:?}", r.calls);
     }
+}
+
+/// Up to 12 legs (including two-digit leg numbers 10..=12) partition a flake's
+/// outputs cleanly across legs.
+#[test]
+fn twelve_legs_partition_outputs_cleanly() {
+    let g = Gate::new();
+    let every = g.flake(EVERY);
+    let assigned = legs_of(&g, &every, 12);
+    assert!(!assigned.is_empty());
+    assert!(
+        assigned.values().all(|k| (1..=12).contains(k)),
+        "{assigned:?}"
+    );
 }

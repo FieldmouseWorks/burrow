@@ -340,8 +340,9 @@ fn the_train_gate_is_the_whole_gate_from_mains_copy() {
     w.remove("negative");
     w.insert("pr-gate".into(), false.into());
     assert_eq!(train["with"], with);
-    // The four legs, and the agents check skipped only where it always was.
-    assert_eq!(train["with"]["legs"], 4);
+    // Eight legs (max supported by @main before 12-leg support lands), and the
+    // agents check skipped only where it always was.
+    assert_eq!(train["with"]["legs"], 8);
     assert_eq!(train["with"]["build-skip"], "agents");
 }
 
