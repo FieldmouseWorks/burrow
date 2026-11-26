@@ -223,6 +223,7 @@ pub fn work(dir: &Path) -> Result<(), String> {
         .append(true)
         .open(dir.join(LOG))
         .map_err(|e| format!("{}: {e}", dir.join(LOG).display()))?;
+    accepted(dir)?;
     let ran = match rec.kind {
         EvalKind::Outputs => {
             let ref_name = format!("refs/pr/{}", rec.number);
@@ -431,6 +432,14 @@ fn tail(s: &str) -> &str {
 
 fn note(mut log: &File, text: &str) {
     let _ = writeln!(log, "autoland: {text}");
+}
+
+fn accepted(dir: &Path) -> Result<(), String> {
+    match fs::remove_file(dir.join("policy-restoring")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Unit's `ExecStopPost`: write `DIR/end.json` and kick the repo's pass.

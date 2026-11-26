@@ -319,3 +319,39 @@ fn eval_run_wraps_in_heavy_when_configured() {
         ]
     );
 }
+
+#[test]
+fn resumed_eval_clears_policy_restoring_and_finishes_done() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let out_path = "/nix/store/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr-proof-r";
+    let nix = make_fake_nix(tmp.path(), out_path);
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let dir = tmp.path().join("resumed-eval");
+    fs::create_dir_all(&dir).unwrap();
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-resumed.service".into(),
+        timeout: 900,
+        nix,
+        git: which("git"),
+        heavy: None,
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+    fs::write(dir.join("policy-restoring"), "paused").unwrap();
+    work(&dir).unwrap();
+    assert!(!dir.join("policy-restoring").exists());
+    let said = end(&dir, &ended("success", "exited", "0")).unwrap();
+    assert_eq!(said["state"], "done", "{said}");
+    assert_eq!(said["paths"], json!([out_path]));
+}
