@@ -23,7 +23,11 @@ use burrow_github::{Api, Error, deferred};
 
 use crate::blocks::{House, Rewritten, rewrite, same_tree};
 use crate::config::Config;
-use crate::github::{self, Open, Pr, Repo};
+use crate::github::{self, Open, Opened, Pr, Repo};
+
+/// Bounded retries when a repo's default branch moves or its house branch
+/// disappears between reading the repo and opening a PR.
+const REPO_ATTEMPTS: usize = 3;
 
 /// How the owner hears: HOST-notify's `open KEY TITLE BODY` and
 /// `close KEY TITLE`.
@@ -253,77 +257,107 @@ impl Pass<'_> {
 
     fn repo(&mut self, repo: &Repo) -> Result<(), Error> {
         let name = repo.name.as_str();
-        // One snapshot of the default branch: the file is read at this
-        // commit and the branch starts from it, so the PR can't undo a
-        // change made meanwhile.
-        let sha = github::head(self.api, name, &repo.base)?;
-        // No AGENTS.md yet: the baseline job writes it, blocks included.
-        let Some((file_sha, agents)) = github::agents(self.api, name, &sha)? else {
-            return Ok(());
-        };
-        let text = match rewrite(&agents, &self.house) {
-            Rewritten::NoBlock => {
-                self.say(&format!(
-                    "{name}: no house block yet (its baseline job or the rollout adds it)"
-                ));
+        let mut next_sha: Option<String> = None;
+        let mut last_race: Option<Error> = None;
+        for _ in 0..REPO_ATTEMPTS {
+            // One snapshot of the default branch: the file is read at this
+            // commit and the branch starts from it, so the PR can't undo a
+            // change made meanwhile.
+            let sha = match next_sha.take() {
+                Some(sha) => sha,
+                None => github::head(self.api, name, &repo.base)?,
+            };
+            // No AGENTS.md yet: the baseline job writes it, blocks included.
+            let Some((file_sha, agents)) = github::agents(self.api, name, &sha)? else {
                 return Ok(());
+            };
+            let text = match rewrite(&agents, &self.house) {
+                Rewritten::NoBlock => {
+                    self.say(&format!(
+                        "{name}: no house block yet (its baseline job or the rollout adds it)"
+                    ));
+                    return Ok(());
+                }
+                Rewritten::Mangled(block) => {
+                    self.say(&format!(
+                        "{name}: the markers of its house:{block} block are mangled"
+                    ));
+                    self.mangled.push(name.into());
+                    return Ok(());
+                }
+                Rewritten::Text(text) => text,
+            };
+            // The repo that holds house/ itself: a merge there reaches its default
+            // branch before this system has it, and a PR now would take those
+            // blocks back out of its AGENTS.md, and a close would be for blocks this
+            // system is about to replace. The pass after the switch has them.
+            for block in &self.house.blocks {
+                let source = format!("house/{}.md", block.name);
+                if github::file(self.api, name, &source, &sha)?
+                    .is_some_and(|text| text != block.text)
+                {
+                    self.say(&format!(
+                        "{name}: its own {source} isn't this system's; the pass for that one does the work"
+                    ));
+                    return Ok(());
+                }
             }
-            Rewritten::Mangled(block) => {
+            let open = github::open_prs(self.api, name)?;
+            let rev = self.house.rev.clone();
+            if text == agents {
+                let why = format!(
+                    "AGENTS.md on {} already has the current house blocks ({rev}).",
+                    repo.base
+                );
+                return self.close_older(name, &open, &why);
+            }
+            // Already open for these blocks: only the cleanup may be left to do.
+            let branch = self.house.branch();
+            if let Some(current) = open.iter().find(|p| p.head == branch) {
+                return self.close_older(name, &open, &format!("Replaced by {}.", current.url));
+            }
+            if self.dry {
                 self.say(&format!(
-                    "{name}: the markers of its house:{block} block are mangled"
+                    "{name}: would open a PR updating its house blocks to {rev}"
                 ));
-                self.mangled.push(name.into());
-                return Ok(());
+                return self.close_older(name, &open, &format!("Replaced by the PR for {rev}."));
             }
-            Rewritten::Text(text) => text,
-        };
-        // The repo that holds house/ itself: a merge there reaches its default
-        // branch before this system has it, and a PR now would take those
-        // blocks back out of its AGENTS.md, and a close would be for blocks this
-        // system is about to replace. The pass after the switch has them.
-        for block in &self.house.blocks {
-            let source = format!("house/{}.md", block.name);
-            if github::file(self.api, name, &source, &sha)?.is_some_and(|text| text != block.text) {
-                self.say(&format!(
-                    "{name}: its own {source} isn't this system's; the pass for that one does the work"
-                ));
-                return Ok(());
+            // Re-check the default branch after open_prs(): if the current house
+            // PR merged between head() and open_prs(), main has already moved,
+            // so re-read from the new tip instead of opening a duplicate PR from
+            // a stale commit or racing the merged PR's branch deletion.
+            let current_sha = github::head(self.api, name, &repo.base)?;
+            if current_sha != sha {
+                last_race = Some(Error::said(format!(
+                    "{name}: {} moved ({sha} -> {current_sha}) before the PR could be opened",
+                    repo.base
+                )));
+                next_sha = Some(current_sha);
+                continue;
+            }
+            match github::open(
+                self.api,
+                &Open {
+                    repo: name,
+                    base: &repo.base,
+                    sha: &sha,
+                    branch: &branch,
+                    file_sha: &file_sha,
+                    text: &text,
+                    rev: &rev,
+                },
+            )? {
+                Opened::Url(url) => {
+                    self.say(&format!("{name}: opened {url}"));
+                    return self.close_older(name, &open, &format!("Replaced by {url}."));
+                }
+                Opened::BranchGone(err) => {
+                    last_race = Some(err);
+                    continue;
+                }
             }
         }
-        let open = github::open_prs(self.api, name)?;
-        let rev = self.house.rev.clone();
-        if text == agents {
-            let why = format!(
-                "AGENTS.md on {} already has the current house blocks ({rev}).",
-                repo.base
-            );
-            return self.close_older(name, &open, &why);
-        }
-        // Already open for these blocks: only the cleanup may be left to do.
-        let branch = self.house.branch();
-        if let Some(current) = open.iter().find(|p| p.head == branch) {
-            return self.close_older(name, &open, &format!("Replaced by {}.", current.url));
-        }
-        if self.dry {
-            self.say(&format!(
-                "{name}: would open a PR updating its house blocks to {rev}"
-            ));
-            return self.close_older(name, &open, &format!("Replaced by the PR for {rev}."));
-        }
-        let url = github::open(
-            self.api,
-            &Open {
-                repo: name,
-                base: &repo.base,
-                sha: &sha,
-                branch: &branch,
-                file_sha: &file_sha,
-                text: &text,
-                rev: &rev,
-            },
-        )?;
-        self.say(&format!("{name}: opened {url}"));
-        self.close_older(name, &open, &format!("Replaced by {url}."))
+        Err(last_race.expect("loop exited via continue"))
     }
 
     /// Closes the open PRs for older blocks. Any close that fails fails the

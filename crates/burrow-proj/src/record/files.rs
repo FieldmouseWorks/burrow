@@ -31,6 +31,8 @@ pub enum JobFile {
     EndNext,
     /// The engine it was first run on, from before the request record.
     Engine,
+    /// Per-job isolated `$HOME` directory for host-mode engine plugins.
+    EngineHome,
     /// Its GitHub stand-in's folder.
     Github,
     /// The waits GitHub's quota kept it from registering
@@ -88,6 +90,7 @@ impl JobFile {
             JobFile::AwaitNext => "await.next",
             JobFile::EndNext => "end.next",
             JobFile::Engine => "engine",
+            JobFile::EngineHome => "engine-home",
             JobFile::Github => "github",
             JobFile::GithubPending => "github-await",
             JobFile::Idle => "idle",
