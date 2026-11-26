@@ -66,7 +66,7 @@ let
 
     host, port = sys.argv[1], int(sys.argv[2])
     origin = f"Origin: {sys.argv[3]}\r\n" if len(sys.argv) > 3 else ""
-    s = socket.create_connection((host, port), timeout=10)
+    s = socket.create_connection((host, port))
     key = base64.b64encode(os.urandom(16)).decode()
     s.sendall((f"GET /websockify HTTP/1.1\r\nHost: {host}:{port}\r\n{origin}Upgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
@@ -145,8 +145,17 @@ pkgs.testers.runNixOSTest {
                     ["browser_evaluate", {"function": "() => document.cookie"}])
         assert "login=yes" in out and "session=yes" in out, out
 
-    cdp = "curl -fsS --max-time 5 http://127.0.0.1:9222/json/version"
-    viewer = "curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:6080/vnc.html"
+    cdp_url = "http://127.0.0.1:9222/json/version"
+    viewer_url = "http://127.0.0.1:6080/vnc.html"
+    # Positive checks carry no short wall-clock cap: under load a 1-vCPU VM can
+    # take more than 5s to answer DevTools or noVNC even once up (matching
+    # ready in modules/browser.nix and /json/list below), while a refused or
+    # broken port fails immediately. Blocked checks keep --max-time 5 so a DROP
+    # rule doesn't stall for the kernel's TCP SYN timeout.
+    cdp = f"curl -fsS {cdp_url}"
+    viewer = f"curl -fsS -o /dev/null {viewer_url}"
+    cdp_blocked = f"curl -fsS --max-time 5 {cdp_url}"
+    viewer_blocked = f"curl -fsS --max-time 5 -o /dev/null {viewer_url}"
 
     def browser_up(node):
         # The unit is started only once DevTools answers dev, so waiting on
@@ -164,13 +173,17 @@ pkgs.testers.runNixOSTest {
     for node in (machine, nft):
         browser_up(node)
         node.wait_for_unit("burrow-browser-viewer.service")
+        # wait_for_open_port connects as root, which the firewall rejects;
+        # check the listening socket directly so the viewer check below can't
+        # race a Type=simple start.
+        node.wait_until_succeeds("ss -Hlnt 'sport = :6080' | grep -q .")
         node.wait_for_unit("user@1001.service")
 
     with subtest("only burrow.user reaches the DevTools port and the viewer"):
         for node in (machine, nft):
             node.succeed("su dev -c '" + viewer + "'")
             for who in ("other", "root"):
-                for check in (cdp, viewer):
+                for check in (cdp_blocked, viewer_blocked):
                     node.fail(f"su {who} -s /bin/sh -c '{check}'")
             # The machine's own outside address goes through lo too.
             ip = node.succeed("ip -4 -o addr show eth1 | awk '{print $4}' | cut -d/ -f1").strip()
@@ -179,7 +192,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the viewer is open on its interface only, and only to its own pages"):
         for node in (machine, nft):
             name = node.name
-            client.wait_until_succeeds(f"curl -fsS --max-time 5 -o /dev/null http://{name}:6080/vnc.html", timeout=60)
+            client.wait_until_succeeds(f"curl -fsS --connect-timeout 5 -o /dev/null http://{name}:6080/vnc.html", timeout=120)
             greeting = client.succeed(f"python3 ${rfb} {name} 6080 http://{name}:6080").strip()
             assert greeting.startswith("RFB 003."), greeting
             # Another site's page in the owner's browser, or no page at all.
@@ -192,7 +205,7 @@ pkgs.testers.runNixOSTest {
             client.fail(f"curl -fsS --max-time 5 http://{name}:9222/json/version")
             # No other site gets to frame it and lay its own page over the owner's clicks.
             for page in ("vnc.html", "vnc_lite.html"):
-                head = client.succeed(f"curl -fsSI --max-time 5 http://{name}:6080/{page}").lower()
+                head = client.succeed(f"curl -fsSI http://{name}:6080/{page}").lower()
                 assert "content-security-policy: frame-ancestors 'none'" in head, head
 
     with subtest("a reload of the firewall or the rules keeps the ports shut"):
@@ -201,7 +214,7 @@ pkgs.testers.runNixOSTest {
         nft.succeed("systemctl reload nftables")
         for node in (machine, nft):
             node.succeed("su dev -c '" + cdp + "'")
-            node.fail("su other -s /bin/sh -c '" + cdp + "'")
+            node.fail("su other -s /bin/sh -c '" + cdp_blocked + "'")
             ip2 = node.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
             client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
         # The old table is gone, not left beside the new one.
@@ -212,7 +225,7 @@ pkgs.testers.runNixOSTest {
         accepts = ["INPUT -i eth2 -j ACCEPT", "OUTPUT -o lo -j ACCEPT"]
         for rule in accepts:
             machine.succeed(f"iptables -I {rule} && ip6tables -I {rule}")
-        machine.fail("su other -s /bin/sh -c '" + cdp + "'")
+        machine.fail("su other -s /bin/sh -c '" + cdp_blocked + "'")
         ip2 = machine.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
         client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
         for rule in accepts:
@@ -297,8 +310,8 @@ pkgs.testers.runNixOSTest {
         for node in (machine, nft):
             node.wait_until_fails("systemctl is-active -q burrow-browser.service")
             node.fail("systemctl is-active -q burrow-browser-viewer.service")
-            node.fail("su dev -c '" + cdp + "'")
-            node.fail("su dev -c '" + viewer + "'")
+            node.fail("su dev -c '" + cdp_blocked + "'")
+            node.fail("su dev -c '" + viewer_blocked + "'")
         # As when the module is turned off or rolled back: no table left behind.
         tables = machine.succeed("nft list tables")
         assert "burrow-browser" not in tables, tables
