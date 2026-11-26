@@ -242,17 +242,7 @@ impl Store {
         let dir = work.join("narinfo");
         fs::create_dir_all(&dir)?;
         fs::create_dir_all(cache)?;
-        let config = work.join("narinfo.curl");
-        let mut cfg = String::new();
-        for (i, p) in paths.iter().enumerate() {
-            let hash = hash_part(p);
-            cfg.push_str("url = ");
-            cfg.push_str(&curl_quote(&format!("{url}/{hash}.narinfo"))?);
-            cfg.push_str("\noutput = ");
-            cfg.push_str(&curl_quote(s(&dir.join(i.to_string())))?);
-            cfg.push('\n');
-        }
-        fs::write(&config, cfg)?;
+        let config = write_narinfo_curl_config(url, paths, work, &dir)?;
         // One deadline for the whole batch: curl's own `--max-time` is each
         // transfer's, so a stalled store would hold a leg once per output.
         let c = self.nix(
@@ -282,39 +272,13 @@ impl Store {
                 self.deadline
             )));
         }
-        let mut answered = vec![None; paths.len()];
-        for l in String::from_utf8_lossy(&o.stdout).lines() {
-            if let Some((Ok(i), Ok(code))) = l
-                .split_once(' ')
-                .map(|(i, c)| (i.parse::<usize>(), c.parse::<u16>()))
-                && let Some(a) = answered.get_mut(i)
-            {
-                *a = Some(code);
-            }
-        }
+        let answered = parse_curl_codes(&o.stdout, paths.len());
         for (i, (p, code)) in paths.iter().zip(answered).enumerate() {
             match code {
                 Some(404) => {}
                 Some(200) => {
-                    let src = dir.join(i.to_string());
-                    let text = fs::read_to_string(&src)?;
-                    // The runner is compiled with rustc alone: no crate's reader.
-                    let field = |k: &str| {
-                        text.lines()
-                            .find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix(": ")))
-                    };
-                    let size = field("FileSize")
-                        .or_else(|| field("NarSize"))
-                        .and_then(|n| n.parse().ok())
-                        .unwrap_or(0);
-                    match (field("StorePath"), field("URL")) {
-                        (Some(sp), Some(nar)) if sp == *p => {
-                            let hash = hash_part(p);
-                            fs::rename(&src, cache.join(format!("{hash}.narinfo")))?;
-                            has.insert((*p).to_owned(), (size, nar.to_owned()));
-                        }
-                        _ => return Err(err(format!("its narinfo for {p} doesn't name it"))),
-                    }
+                    let (size, nar) = stage_narinfo(p, &dir.join(i.to_string()), cache)?;
+                    has.insert((*p).to_owned(), (size, nar));
                 }
                 code => {
                     return Err(err(format!(
@@ -347,9 +311,80 @@ impl Store {
         Ok(has)
     }
 
+    /// Verify staged narinfos offline against `self.key`, removing untrusted
+    /// paths from `has` and returning how many were dropped.
+    fn verify_narinfos(
+        &self,
+        cache: &Path,
+        work: &Path,
+        has: &mut BTreeMap<String, (u64, String)>,
+    ) -> Result<usize> {
+        let mut untrusted = 0;
+        if has.is_empty() {
+            return Ok(0);
+        }
+        let local = format!("file://{}", cache.display());
+        let mut args = vec![
+            "store",
+            "verify",
+            "--store",
+            &local,
+            "--no-contents",
+            "--sigs-needed",
+            "1",
+            "--option",
+            "trusted-public-keys",
+            &self.key,
+        ];
+        args.extend(has.keys().map(String::as_str));
+        let o = output(self.asking(&work.join("xdg"), &args))?;
+        let said = String::from_utf8_lossy(&o.stderr);
+        for l in said.lines() {
+            if let Some(p) = l.split('\'').nth(1).filter(|_| l.contains("is untrusted")) {
+                untrusted += usize::from(has.remove(p).is_some());
+            }
+        }
+        if !o.status.success() && untrusted == 0 {
+            return Err(err(format!("nix store verify: {}", said.trim())));
+        }
+        Ok(untrusted)
+    }
+
+    /// Time the first [`SAMPLE`] bytes of `nar` from `url`.
+    fn sample_nar(&self, url: &str, nar: &str) -> Result<Option<(u64, f64)>> {
+        let o = output(self.nix(
+            "curl",
+            &[
+                "-sS",
+                "--fail",
+                "--proto",
+                "=https,http",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                self.deadline,
+                "-r",
+                &format!("0-{}", SAMPLE - 1),
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{size_download} %{time_total}",
+                "--",
+                &format!("{url}/{nar}"),
+            ],
+        ))?;
+        let said = String::from_utf8_lossy(&o.stdout);
+        let mut w = said.split_whitespace();
+        if o.status.success()
+            && let (Some(Ok(b)), Some(Ok(s))) = (w.next().map(str::parse), w.next().map(str::parse))
+        {
+            return Ok(Some((b, s)));
+        }
+        Ok(None)
+    }
+
     fn asked(&self, cold: &[String], work: &Path) -> Result<Report> {
         let url = self.url.trim_end_matches('/');
-        let key = &self.key;
         // Each cold derivation's outputs. A fixed output's path is one
         // `nix derivation show` doesn't print; this query does.
         let mut outputs: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -380,33 +415,7 @@ impl Store {
         // take: it doesn't count. With no key named, a store trusts none, so
         // only what needs no signature (a content-addressed path) counts.
         // Verify offline against the narinfos already fetched above.
-        let mut untrusted = 0;
-        if !has.is_empty() {
-            let local = format!("file://{}", cache.display());
-            let mut args = vec![
-                "store",
-                "verify",
-                "--store",
-                &local,
-                "--no-contents",
-                "--sigs-needed",
-                "1",
-                "--option",
-                "trusted-public-keys",
-                key,
-            ];
-            args.extend(has.keys().map(String::as_str));
-            let o = output(self.asking(&work.join("xdg"), &args))?;
-            let said = String::from_utf8_lossy(&o.stderr);
-            for l in said.lines() {
-                if let Some(p) = l.split('\'').nth(1).filter(|_| l.contains("is untrusted")) {
-                    untrusted += usize::from(has.remove(p).is_some());
-                }
-            }
-            if !o.status.success() && untrusted == 0 {
-                return Err(err(format!("nix store verify: {}", said.trim())));
-            }
-        }
+        let untrusted = self.verify_narinfos(&cache, work, &mut has)?;
         let mut report = Report {
             untrusted,
             ..Report::default()
@@ -424,40 +433,66 @@ impl Store {
         report.served.sort();
         report.unserved.sort();
         // The biggest NAR it would serve, its first SAMPLE bytes timed.
-        let biggest = nars.into_iter().max_by_key(|(n, _)| *n);
-        if let Some((_, nar)) = biggest {
-            let o = output(self.nix(
-                "curl",
-                &[
-                    "-sS",
-                    "--fail",
-                    "--proto",
-                    "=https,http",
-                    "--connect-timeout",
-                    "10",
-                    "--max-time",
-                    self.deadline,
-                    "-r",
-                    &format!("0-{}", SAMPLE - 1),
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{size_download} %{time_total}",
-                    "--",
-                    &format!("{url}/{nar}"),
-                ],
-            ))?;
-            let said = String::from_utf8_lossy(&o.stdout);
-            let mut w = said.split_whitespace();
-            if o.status.success()
-                && let (Some(Ok(b)), Some(Ok(s))) =
-                    (w.next().map(str::parse), w.next().map(str::parse))
-            {
-                report.sample = Some((b, s));
-            }
+        if let Some((_, nar)) = nars.into_iter().max_by_key(|(n, _)| *n) {
+            report.sample = self.sample_nar(url, nar)?;
         }
         report.restore = restore(&self.temp);
         Ok(report)
+    }
+}
+
+fn write_narinfo_curl_config(
+    url: &str,
+    paths: &[&str],
+    work: &Path,
+    dir: &Path,
+) -> Result<PathBuf> {
+    let config = work.join("narinfo.curl");
+    let mut cfg = String::new();
+    for (i, p) in paths.iter().enumerate() {
+        let hash = hash_part(p);
+        cfg.push_str("url = ");
+        cfg.push_str(&curl_quote(&format!("{url}/{hash}.narinfo"))?);
+        cfg.push_str("\noutput = ");
+        cfg.push_str(&curl_quote(s(&dir.join(i.to_string())))?);
+        cfg.push('\n');
+    }
+    fs::write(&config, cfg)?;
+    Ok(config)
+}
+
+fn parse_curl_codes(stdout: &[u8], count: usize) -> Vec<Option<u16>> {
+    let mut answered = vec![None; count];
+    for l in String::from_utf8_lossy(stdout).lines() {
+        if let Some((Ok(i), Ok(code))) = l
+            .split_once(' ')
+            .map(|(i, c)| (i.parse::<usize>(), c.parse::<u16>()))
+            && let Some(a) = answered.get_mut(i)
+        {
+            *a = Some(code);
+        }
+    }
+    answered
+}
+
+fn stage_narinfo(path: &str, src: &Path, cache: &Path) -> Result<(u64, String)> {
+    let text = fs::read_to_string(src)?;
+    // The runner is compiled with rustc alone: no crate's reader.
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix(": ")))
+    };
+    let size = field("FileSize")
+        .or_else(|| field("NarSize"))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    match (field("StorePath"), field("URL")) {
+        (Some(sp), Some(nar)) if sp == path => {
+            let hash = hash_part(path);
+            fs::rename(src, cache.join(format!("{hash}.narinfo")))?;
+            Ok((size, nar.to_owned()))
+        }
+        _ => Err(err(format!("its narinfo for {path} doesn't name it"))),
     }
 }
 

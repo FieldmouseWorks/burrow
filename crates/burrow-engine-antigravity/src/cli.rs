@@ -456,6 +456,83 @@ fn materialize_home_file(
     Ok(target)
 }
 
+fn prepare_file_credential(
+    config: &Config,
+    target_name: Option<&str>,
+    secret_value: Option<&str>,
+    secrets: Vec<String>,
+) -> Result<PreparedCredential, String> {
+    let Some(name) = target_name else {
+        return Ok(PreparedCredential {
+            env_var: None,
+            secrets,
+            _tempdir: None,
+            cleanup_home_file: None,
+        });
+    };
+    if let Some(path) = &config.credential_file {
+        return Ok(PreparedCredential {
+            env_var: Some((name.to_owned(), path.as_os_str().to_os_string())),
+            secrets,
+            _tempdir: None,
+            cleanup_home_file: None,
+        });
+    }
+    let Some(val) = secret_value else {
+        return Ok(PreparedCredential {
+            env_var: None,
+            secrets,
+            _tempdir: None,
+            cleanup_home_file: None,
+        });
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("antigravity-cred-")
+        .tempdir()
+        .map_err(|e| format!("failed to create isolated credential dir: {e}"))?;
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("failed to secure credential dir: {e}"))?;
+    let file_path = dir.path().join("credential");
+    fs::write(&file_path, val)
+        .map_err(|e| format!("failed to write isolated credential file: {e}"))?;
+    fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to secure credential file: {e}"))?;
+    Ok(PreparedCredential {
+        env_var: Some((name.to_owned(), file_path.into_os_string())),
+        secrets,
+        _tempdir: Some(dir),
+        cleanup_home_file: None,
+    })
+}
+
+fn prepare_home_file_credential(
+    config: &Config,
+    home: Option<&Path>,
+    cleanup_home_file: bool,
+    secret_value: Option<&str>,
+    secrets: Vec<String>,
+) -> Result<PreparedCredential, String> {
+    validate_credential_home_path(&config.credential_home_path)?;
+    let Some(val) = secret_value else {
+        return Ok(PreparedCredential {
+            env_var: None,
+            secrets,
+            _tempdir: None,
+            cleanup_home_file: None,
+        });
+    };
+    let home =
+        home.ok_or_else(|| "credential_mode \"home-file\" requires HOME to be set".to_owned())?;
+    materialize_home_file(home, &config.credential_home_path, val)?;
+    Ok(PreparedCredential {
+        env_var: None,
+        secrets,
+        _tempdir: None,
+        cleanup_home_file: cleanup_home_file
+            .then(|| (home.to_path_buf(), config.credential_home_path.clone())),
+    })
+}
+
 fn prepare_credential(
     config: &Config,
     home: Option<&Path>,
@@ -505,70 +582,15 @@ fn prepare_credential(
             })
         }
         CredentialMode::File => {
-            let Some(name) = target_name else {
-                return Ok(PreparedCredential {
-                    env_var: None,
-                    secrets,
-                    _tempdir: None,
-                    cleanup_home_file: None,
-                });
-            };
-            if let Some(path) = &config.credential_file {
-                return Ok(PreparedCredential {
-                    env_var: Some((name.to_owned(), path.as_os_str().to_os_string())),
-                    secrets,
-                    _tempdir: None,
-                    cleanup_home_file: None,
-                });
-            }
-            let Some(val) = &secret_value else {
-                return Ok(PreparedCredential {
-                    env_var: None,
-                    secrets,
-                    _tempdir: None,
-                    cleanup_home_file: None,
-                });
-            };
-            let dir = tempfile::Builder::new()
-                .prefix("antigravity-cred-")
-                .tempdir()
-                .map_err(|e| format!("failed to create isolated credential dir: {e}"))?;
-            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("failed to secure credential dir: {e}"))?;
-            let file_path = dir.path().join("credential");
-            fs::write(&file_path, val)
-                .map_err(|e| format!("failed to write isolated credential file: {e}"))?;
-            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("failed to secure credential file: {e}"))?;
-            Ok(PreparedCredential {
-                env_var: Some((name.to_owned(), file_path.into_os_string())),
-                secrets,
-                _tempdir: Some(dir),
-                cleanup_home_file: None,
-            })
+            prepare_file_credential(config, target_name, secret_value.as_deref(), secrets)
         }
-        CredentialMode::HomeFile => {
-            validate_credential_home_path(&config.credential_home_path)?;
-            let Some(val) = &secret_value else {
-                return Ok(PreparedCredential {
-                    env_var: None,
-                    secrets,
-                    _tempdir: None,
-                    cleanup_home_file: None,
-                });
-            };
-            let home = home.ok_or_else(|| {
-                "credential_mode \"home-file\" requires HOME to be set".to_owned()
-            })?;
-            materialize_home_file(home, &config.credential_home_path, val)?;
-            Ok(PreparedCredential {
-                env_var: None,
-                secrets,
-                _tempdir: None,
-                cleanup_home_file: cleanup_home_file
-                    .then(|| (home.to_path_buf(), config.credential_home_path.clone())),
-            })
-        }
+        CredentialMode::HomeFile => prepare_home_file_credential(
+            config,
+            home,
+            cleanup_home_file,
+            secret_value.as_deref(),
+            secrets,
+        ),
     }
 }
 
