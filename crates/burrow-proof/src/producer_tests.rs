@@ -840,7 +840,6 @@ fn a_build_fails_when_nix_says_a_builder_in_it_did() {
 
 #[test]
 fn build_derivation_eval_runs_in_heavy_slot() {
-    use std::os::unix::fs::PermissionsExt;
     let r = rig();
     r.ask(&request("prepare", &r.head, &r.tree, &["gate"]))
         .unwrap();
@@ -849,8 +848,7 @@ fn build_derivation_eval_runs_in_heavy_slot() {
     let seen = r.dir.path().join("heavy.log");
     let script = |name: &str, body: &str| {
         let p = bin.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::executable(&p, format!("#!/bin/sh\n{body}\n"));
         p
     };
     let heavy = script(
@@ -978,14 +976,13 @@ fn concurrent_build_prepares_for_one_repo_serialize_and_abandon_cleanly() {
 
 #[test]
 fn concurrent_fetches_for_same_repo_serialize_mirror_init() {
-    use std::os::unix::fs::PermissionsExt;
     let r = rig();
     // Wrap git to detect any two processes touching the repo's mirror at once.
     let bin = r.dir.path().join("git-wrap");
     std::fs::create_dir_all(&bin).unwrap();
     let guard = r.dir.path().join("mirror.busy");
     let git_wrap = bin.join("git");
-    std::fs::write(
+    burrow_test::executable(
         &git_wrap,
         format!(
             "#!/bin/sh\n\
@@ -998,9 +995,7 @@ fn concurrent_fetches_for_same_repo_serialize_mirror_init() {
              git \"$@\"\n",
             g = guard.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&git_wrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut cfg = r.cfg.clone();
     cfg.git = git_wrap;
     {
