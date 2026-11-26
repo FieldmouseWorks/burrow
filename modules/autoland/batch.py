@@ -42,6 +42,7 @@ class Batch:
         for key in ("finished", "owed"):
             self.state[key] = sorted({r.lower() for r in self.state[key]})
         self.state["retry"] = {k.lower(): v for k, v in self.state.get("retry", {}).items()}
+        self.state["revs"] = {k.lower(): v for k, v in self.state.get("revs", {}).items()}
         self.done = set()
         self._changed = {}
         self.left = False  # PRs or repos still unvisited, not only retries
@@ -54,6 +55,7 @@ class Batch:
         for key in ("finished", "owed"):
             self.state[key] = [k for k in self.state[key] if k in names]
         self.state["retry"] = {k: at for k, at in self.state["retry"].items() if k in names}
+        self.state["revs"] = {k: v for k, v in self.state["revs"].items() if k in names}
         if self.kick is not None:
             repos = [r for r in repos if r["repo"].lower() in self.kick]
         candidates = self.state["repos"].keys() | set(self.state["owed"])
@@ -117,8 +119,8 @@ class Batch:
         live = {str(pr["number"]) for pr in prs}
         st["stops"] = {k: v for k, v in st.get("stops", {}).items() if k in live}
         st["unseen"] = [k for k in st.get("unseen", []) if k in live]
-        st["revs"] = {k: v for k, v in st.get("revs", {}).items() if k in live}
-        revs = st["revs"]
+        revs = {k: v for k, v in self.state["revs"].get(repo.lower(), {}).items() if k in live}
+        self.state["revs"][repo.lower()] = revs
         cur = {str(pr["number"]): self.rev(pr, info) for pr in prs}
         self._changed[repo.lower()] = {pr["number"] for pr in prs if revs.get(str(pr["number"])) != cur[str(pr["number"])]}
         pending = [pr for pr in prs if done.get(str(pr["number"])) != cur[str(pr["number"])]]
@@ -182,7 +184,7 @@ class Batch:
         st.setdefault("visits", {})[key] = st["sequence"]
         rev = self.rev(pr, info)
         st["done"][key] = rev
-        st.setdefault("revs", {})[key] = rev
+        self.state["revs"].setdefault(repo.lower(), {})[key] = rev
         st["digest"] = mine
         st.setdefault("stops", {}).pop(key, None)
         if stopped:

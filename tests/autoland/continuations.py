@@ -570,4 +570,21 @@ with tempfile.TemporaryDirectory() as tmp:
         assert handled[0][0] == 1, handled
         S.run_pass(['sam/r'], continuing=True)
         assert [n for n, _, _ in handled] == [1, 2, 3], handled
+    # Last-seen revisions survive Batch.finish() so a newly changed PR still
+    # goes ahead of unchanged PRs after a previous pass completed normally.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs.append(pr(3))
+        S.run_pass(['sam/r'])
+        assert C.load('pass-progress.json', {})['repos'] == {}
+        handled.clear()
+        prs[2]['reviews'] = {'nodes': [{'state': 'COMMENTED'}]}
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        assert handled[0][0] == 3, handled
     print('changed PRs go ahead of unchanged ones in the same round: passed')
