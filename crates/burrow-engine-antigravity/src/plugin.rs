@@ -505,9 +505,11 @@ fn resolve_execution(
 /// Before running the CLI in `host_mode` for `Context::Continue`, verify that
 /// an isolated persistent host HOME exists and already holds prior state.
 /// Returns `Some(detail)` when no prior session could exist there (unset
-/// `PROJ_ENGINE_HOME`, non-existent directory, or empty directory); returns
-/// `None` for invalid paths (relative, matching `HOME`, non-directories, or
-/// symlinks) so `run_invocation` reports its own path validation error.
+/// `PROJ_ENGINE_HOME`, non-existent directory, or a directory whose successful
+/// enumeration shows it is empty); returns `None` for invalid or unreadable
+/// paths (relative, matching `HOME`, non-directories, symlinks, or `read_dir`
+/// errors) so `run_invocation` reports its own error rather than discarding a
+/// potentially usable session.
 fn host_continuation_home_missing(config: &Config, invocation: &Invocation) -> Option<String> {
     if !config.host_mode || invocation.home_dir.is_some() {
         return None;
@@ -540,11 +542,10 @@ fn host_continuation_home_missing(config: &Config, invocation: &Invocation) -> O
             {
                 return None;
             }
-            let has_state = fs::read_dir(dir)
-                .ok()
-                .and_then(|mut entries| entries.next())
-                .is_some();
-            (!has_state).then(|| {
+            let Ok(mut entries) = fs::read_dir(dir) else {
+                return None;
+            };
+            entries.next().is_none().then(|| {
                 format!(
                     "persistent host HOME {} has no prior session state",
                     dir.display()

@@ -292,3 +292,51 @@ fn host_mode_continue_defers_invalid_proj_engine_home_to_path_validation() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn host_mode_continue_does_not_treat_unreadable_proj_engine_home_as_session_lost() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let fixture = write_executable(
+        dir.path(),
+        "ag-continue",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"result\",\"conversation_id\":\"ag-old-1\",\"result\":\"continued\"}\\n'\n",
+    );
+    let unreadable_home = dir.path().join("unreadable-home");
+    fs::create_dir_all(&unreadable_home).unwrap();
+    fs::write(unreadable_home.join("marker"), "prior-state").unwrap();
+    fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // If running as root (e.g., privileged container), read_dir still succeeds.
+    if fs::read_dir(&unreadable_home).is_ok() {
+        fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        credential_mode: CredentialMode::Env,
+        credential_env: None,
+        target_credential_env: None,
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let output = run_continue(&cfg_path, &cfg, dir.path(), "ag-old-1", |cmd| {
+        cmd.env("PROJ_ENGINE_HOME", &unreadable_home);
+    });
+
+    fs::set_permissions(&unreadable_home, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        refusal_event(&output.stderr).is_none(),
+        "unreadable PROJ_ENGINE_HOME must not be misclassified as session_lost: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
