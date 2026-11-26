@@ -479,7 +479,10 @@ mod tests {
         set_mtime(&old.turn("1", "jsonl"), 2000);
         old.mark_ended();
         let (since, due) = times(&old);
-        assert!(since >= before && due == since + crate::RESUME_GRACE, "{since} {due}");
+        assert!(
+            since >= before && due == since + crate::RESUME_GRACE,
+            "{since} {due}"
+        );
         assert!(wait(&old).unwrap().phase.contains("ended (failed)"));
         set_mtime(&old.turn("1", "ended"), 5000);
         old.mark_ended();

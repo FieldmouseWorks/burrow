@@ -185,7 +185,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       before = int(machine.succeed("date +%s"))
       machine.succeed(f"systemctl --user -M dev@ kill --kill-whom=all --signal=KILL '{unit(k)}'")
       w = waits(lambda w: "nothing resumed it" in w.get(k, {}).get("phase", ""))[k]
-      assert w["since"] >= before and w["due"] == w["since"] + 120, w
+      assert w["since"] >= before and w["due"] == w["since"] + 900, w
       machine.succeed(f"test -e /data/dev/jobs/{k}/1.ended")
       # And the next turn, running, has no end yet. Turn 1 named no session,
       # so this one is handed it first, and still runs what it's asked: a
