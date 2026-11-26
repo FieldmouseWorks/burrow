@@ -214,12 +214,18 @@ fn waits() {
     });
     // Ended in a failure, or an error: due at once too, and says which.
     case(&["state timed out after 4h"], |w| {
-        w.since == 3000.0 && w.due == 3120.0 && w.phase.contains("ended (timed out after 4h)")
+        w.since == 3000.0
+            && w.due == (3000 + crate::RESUME_GRACE) as f64
+            && w.phase.contains("ended (timed out after 4h)")
     });
     case(&["state error", "end done"], |w| {
-        w.due == 3120.0 && w.phase.contains("ended (error)")
+        w.due == (3000 + crate::RESUME_GRACE) as f64 && w.phase.contains("ended (error)")
     });
-    case(&["state failed"], |w| w.due == 3120.0);
+    case(&["state failed"], |w| {
+        // Long enough for a proj-inbox full pass (~9.5m) plus listing gap
+        // before the watchdog treats a failed turn as stalled.
+        w.due >= 3000.0 + 600.0 && w.due == (3000 + crate::RESUME_GRACE) as f64
+    });
     // A question for a person, a finished job, and a turn that didn't have
     // to say (a sandbox's, or one from before turns said) aren't watched.
     none_more(&["state done", "end ask"]);

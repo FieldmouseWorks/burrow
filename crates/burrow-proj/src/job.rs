@@ -479,12 +479,12 @@ mod tests {
         set_mtime(&old.turn("1", "jsonl"), 2000);
         old.mark_ended();
         let (since, due) = times(&old);
-        assert!(since >= before && due == since + 120, "{since} {due}");
+        assert!(since >= before && due == since + crate::RESUME_GRACE, "{since} {due}");
         assert!(wait(&old).unwrap().phase.contains("ended (failed)"));
         set_mtime(&old.turn("1", "ended"), 5000);
         old.mark_ended();
-        assert_eq!(times(&old), (5000, 5120));
-        assert_eq!(times(&old), (5000, 5120));
+        assert_eq!(times(&old), (5000, 5000 + crate::RESUME_GRACE));
+        assert_eq!(times(&old), (5000, 5000 + crate::RESUME_GRACE));
 
         // Killed before any stream, and before it even had a slot.
         let nostream = new("nostream");
@@ -518,8 +518,8 @@ mod tests {
         // often it's looked at.
         let unseen = new("unseen");
         set_mtime(&unseen.turn("1", "jsonl"), 2000);
-        assert_eq!(times(&unseen), (2000, 2120));
-        assert_eq!(times(&unseen), (2000, 2120));
+        assert_eq!(times(&unseen), (2000, 2000 + crate::RESUME_GRACE));
+        assert_eq!(times(&unseen), (2000, 2000 + crate::RESUME_GRACE));
 
         // One that said how it ended ended then, whatever its log says: an error
         // or a timeout has its grace from there, and no stamp.
@@ -533,7 +533,7 @@ mod tests {
             fs::write(said.turn("1", "outcome"), format!("{how}\n")).unwrap();
             set_mtime(&said.turn("1", "outcome"), 3000);
             said.mark_ended();
-            assert_eq!(times(&said), (3000, 3120), "{how}");
+            assert_eq!(times(&said), (3000, 3000 + crate::RESUME_GRACE), "{how}");
             assert!(!said.turn("1", "ended").exists(), "{how}");
         }
 

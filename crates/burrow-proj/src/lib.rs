@@ -202,8 +202,9 @@ pub mod watch;
 /// own before it does.
 pub const GRACE: i64 = 600;
 /// How long a failed turn has to be resumed before it's a stall: proj-inbox
-/// resumes an issue's job seconds later when a reply waits.
-pub const RESUME_GRACE: i64 = 120;
+/// resumes an issue's job once its pass runs, which may wait behind an
+/// in-flight full pass (~10m) and `LISTING_GAP` (120s).
+pub const RESUME_GRACE: i64 = 900;
 
 /// How a command ends when it doesn't succeed: its exit status, and what it
 /// says on stderr, if anything.
