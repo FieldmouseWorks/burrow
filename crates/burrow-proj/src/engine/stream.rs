@@ -290,6 +290,18 @@ pub fn record_session(job: &Job, engine: &str, id: &str) {
     let _ = crate::state_reads::write(job.file(JobFile::SessionEngine), conv);
 }
 
+/// Forget the recorded session for `engine`'s conversation so the next run
+/// starts fresh with a handoff of prior turns. Legacy unlabelled `session` is
+/// cleared only when `engine` is the default conversation and no
+/// `session.engine` exists.
+pub fn clear_session(job: &Job, engine: &str) {
+    let conv = conversation_of(engine);
+    let _ = crate::state_reads::remove(job.session_file(conv));
+    if conv == DEFAULT_ENGINE && !job.file(JobFile::SessionEngine).exists() {
+        let _ = crate::state_reads::remove(job.file(JobFile::Session));
+    }
+}
+
 /// Incremental reader over a live turn JSONL file, tracking the first named
 /// session id and whether a terminal result record has appeared.
 struct Watcher {

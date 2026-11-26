@@ -1,6 +1,8 @@
 //! Conary `conary-plugin v5` (`describe` + `work` for `job`) handler.
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use conary_core::plugin::{
     Answer, CONTRACT_V1, CONTRACTS, Context, Executed, Identity, Kind, Next, Offers, Request,
@@ -115,6 +117,7 @@ pub fn handle_request(config: &Config, request: &Request, stop: &dyn Fn() -> boo
                         ("usage_limit", reset_at, EXIT_REFUSED_USAGE)
                     }
                     Refusal::Login { .. } => ("login_expired", None, EXIT_REFUSED_AUTH),
+                    Refusal::SessionLost { .. } => ("session_lost", None, EXIT_FAILURE),
                 };
                 PluginResult {
                     response: None,
@@ -329,6 +332,15 @@ fn answer_detailed(
                 resolved_effort,
                 conversation.clone(),
             );
+            if conversation.is_some()
+                && let Some(detail) = host_continuation_home_missing(config, &invocation)
+            {
+                return Err(Box::new(DetailedError::Refusal {
+                    session: None,
+                    refusal: Refusal::SessionLost { detail },
+                    usage: None,
+                }));
+            }
             let turn = run_invocation(config, &invocation, stop);
 
             if let Some(err) = turn.error {
@@ -348,11 +360,13 @@ fn answer_detailed(
 
             let session = match (&conversation, turn.session) {
                 (Some(expected), Some(actual)) if actual != *expected => {
-                    return Err(Box::new(DetailedError::Other {
-                        session: Some(actual.clone()),
-                        error: format!(
-                            "antigravity changed continuation session from {expected:?} to {actual:?}"
-                        ),
+                    return Err(Box::new(DetailedError::Refusal {
+                        session: None,
+                        refusal: Refusal::SessionLost {
+                            detail: format!(
+                                "antigravity changed continuation session from {expected:?} to {actual:?}"
+                            ),
+                        },
                         usage: turn.usage,
                     }));
                 }
@@ -486,4 +500,39 @@ fn resolve_execution(
     };
 
     Ok((model, effort))
+}
+
+/// Before running the CLI in `host_mode` for `Context::Continue`, verify that
+/// an isolated persistent host HOME exists and already holds prior state.
+/// Returns `Some(detail)` when no prior session could exist there (unset
+/// `PROJ_ENGINE_HOME`, non-existent directory, or empty directory); returns
+/// `None` for non-directories/symlinks so `run_invocation` reports its own
+/// path validation error.
+fn host_continuation_home_missing(config: &Config, invocation: &Invocation) -> Option<String> {
+    if !config.host_mode || invocation.home_dir.is_some() {
+        return None;
+    }
+    let Some(path) = std::env::var_os("PROJ_ENGINE_HOME").filter(|v| !v.is_empty()) else {
+        return Some("host mode has no persistent PROJ_ENGINE_HOME for continuation".to_owned());
+    };
+    let dir = Path::new(&path);
+    match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => Some(format!(
+            "persistent host HOME {} has no prior session state",
+            dir.display()
+        )),
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {
+            let has_state = fs::read_dir(dir)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .is_some();
+            (!has_state).then(|| {
+                format!(
+                    "persistent host HOME {} has no prior session state",
+                    dir.display()
+                )
+            })
+        }
+        _ => None,
+    }
 }
