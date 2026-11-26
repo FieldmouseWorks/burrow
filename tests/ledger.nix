@@ -135,6 +135,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /tmp/cn-calls")
         machine.succeed("systemctl start burrow-ledger.service")
         assert calls() == ["sync sam/a sam/b kim/c"], calls()
+        machine.succeed("journalctl --sync")
         machine.succeed("journalctl -u burrow-ledger.service | grep -F 'syncing 3 repos in one cn sync'")
 
     with subtest("as the machine's own App, cn asks for each repo's token, and never has the user's login"):
@@ -211,6 +212,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /tmp/cn-calls")
         machine.fail("systemctl start burrow-ledger.service")
         assert calls() == ["sync sam/a sam/b kim/c"], calls()
+        machine.succeed("journalctl --sync")
         machine.succeed("journalctl -u burrow-ledger.service | grep -F \"couldn't sync sam/b: sam/b went wrong\"")
         machine.fail("test -e /var/lib/burrow/ledger/wake.json")
 
@@ -218,6 +220,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /tmp/cn-outcomes /tmp/cn-calls && touch /tmp/gh-fail-sam")
         machine.fail("systemctl start burrow-ledger.service")
         assert calls() == ["sync kim/c"], calls()
+        machine.succeed("journalctl --sync")
         machine.succeed("journalctl -u burrow-ledger.service | grep -F \"couldn't list sam's repos\"")
   '';
 }
