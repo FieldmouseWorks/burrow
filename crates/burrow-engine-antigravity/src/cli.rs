@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::config::{
-    Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
+    Config, CredentialMode, Effort, HOME_ENV, InputFormat, Mode, OutputFormat,
+    validate_credential_home_path,
 };
 use crate::normalize::{RunError, TurnOutput, normalize_output};
 use crate::schema::Schema;
@@ -434,6 +435,37 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
     }
 }
 
+/// Ensure a caller-supplied persistent host `$HOME` exists as a private (`0700`) directory.
+fn ensure_host_home_dir(dir: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to follow symlink at host HOME {}",
+                dir.display()
+            ));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(format!("host HOME {} is not a directory", dir.display()));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| format!("failed to create host HOME {}: {e}", dir.display()))?;
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to inspect host HOME {}: {e}",
+                dir.display()
+            ));
+        }
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("failed to secure host HOME {}: {e}", dir.display()))
+}
+
 /// Run one headless `antigravity` invocation in its own process group.
 ///
 /// When `stop()` returns `true` or the outer deadline elapses, the entire child
@@ -466,35 +498,62 @@ pub fn run_invocation(
     let orig_home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    // In host mode, always run in a private per-turn `$HOME` (regardless of
-    // credential mode) so interactive desktop or T3 userdata in the real
-    // `$HOME` is never read or overwritten.
-    let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
-        match tempfile::Builder::new()
-            .prefix("antigravity-host-home-")
-            .tempdir()
-            .and_then(|dir| {
-                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
-                Ok(dir)
-            }) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
-                return TurnOutput {
-                    error: Some(RunError::ProcessFailed {
-                        exit_code: None,
-                        signal: None,
-                        message: format!("failed to create isolated host HOME: {e}"),
-                    }),
-                    ..TurnOutput::default()
-                };
+    // In host mode, run in a private `$HOME` so interactive desktop or T3
+    // userdata in the real `$HOME` is never read or overwritten. When
+    // `BURROW_ANTIGRAVITY_HOME` is set (for example by `proj` per job), reuse
+    // that directory across turns so continuation sessions persist; otherwise
+    // create an ephemeral per-turn tempdir.
+    let persistent_host_home = if config.host_mode && invocation.home_dir.is_none() {
+        match std::env::var_os(HOME_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+        {
+            Some(dir) => {
+                if let Err(message) = ensure_host_home_dir(&dir) {
+                    return TurnOutput {
+                        error: Some(RunError::ProcessFailed {
+                            exit_code: None,
+                            signal: None,
+                            message,
+                        }),
+                        ..TurnOutput::default()
+                    };
+                }
+                Some(dir)
             }
+            None => None,
         }
     } else {
         None
     };
+    let isolated_host_home =
+        if config.host_mode && invocation.home_dir.is_none() && persistent_host_home.is_none() {
+            match tempfile::Builder::new()
+                .prefix("antigravity-host-home-")
+                .tempdir()
+                .and_then(|dir| {
+                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                    Ok(dir)
+                }) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    return TurnOutput {
+                        error: Some(RunError::ProcessFailed {
+                            exit_code: None,
+                            signal: None,
+                            message: format!("failed to create isolated host HOME: {e}"),
+                        }),
+                        ..TurnOutput::default()
+                    };
+                }
+            }
+        } else {
+            None
+        };
     let effective_home = invocation
         .home_dir
         .clone()
+        .or_else(|| persistent_host_home.clone())
         .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
     let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
     let prepared = match prepare_credential(config, resolved_home.as_deref()) {
@@ -518,7 +577,7 @@ pub fn run_invocation(
 
     if let Some(home) = &effective_home {
         command.env("HOME", home);
-        if isolated_host_home.is_some()
+        if (isolated_host_home.is_some() || persistent_host_home.is_some())
             && let Some(real_home) = &orig_home
         {
             let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")

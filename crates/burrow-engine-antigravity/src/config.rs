@@ -23,6 +23,7 @@ pub const CONFIG_ENV: &str = "BURROW_ANTIGRAVITY_CONFIG";
 
 /// Optional environment overrides for ad-hoc or fixture invocations.
 pub const BIN_ENV: &str = "BURROW_ANTIGRAVITY_BIN";
+pub const HOME_ENV: &str = "BURROW_ANTIGRAVITY_HOME";
 pub const JSON_SCHEMA_ENV: &str = "BURROW_ANTIGRAVITY_JSON_SCHEMA";
 pub const JUDGE_SCHEMA_ENV: &str = "BURROW_JUDGE_JSON_SCHEMA";
 pub const JUDGE_DIR_ENV: &str = "BURROW_JUDGE_DIR";

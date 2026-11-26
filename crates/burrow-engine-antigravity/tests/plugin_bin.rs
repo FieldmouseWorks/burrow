@@ -8,7 +8,7 @@ use std::time::Duration;
 use burrow_engine_antigravity::STRIPPED_ENV;
 use burrow_engine_antigravity::config::{
     CONFIG_ENV, Config, CredentialMode, DEFAULT_CREDENTIAL_HOME_PATH, EFFORTS, ENGINE, Effort,
-    ModelSpec, OutputFormat,
+    HOME_ENV, ModelSpec, OutputFormat,
 };
 use conary_core::plugin::{
     Answer, CONTRACT, Choice, Context, Execution, Identity, Kind, Limits, Negotiated, Next, Plugin,
@@ -678,4 +678,109 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
         ),
         "{denied_out:?}"
     );
+}
+
+#[test]
+fn host_mode_persists_home_across_continuation_turns() {
+    let dir = TempDir::new().unwrap();
+    let job_home = dir.path().join("antigravity-home");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-host-session",
+        r#"#!/bin/sh
+cat >/dev/null
+conv=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--conversation" ]; then
+    conv="$arg"
+    break
+  fi
+  prev="$arg"
+done
+state_dir="$HOME/.gemini/antigravity-cli"
+mkdir -p "$state_dir"
+if [ -z "$conv" ]; then
+  : > "$state_dir/session-ag-host-1"
+  printf '{"type":"result","conversation_id":"ag-host-1","result":"turn1"}\n'
+elif [ -f "$state_dir/session-$conv" ]; then
+  printf '{"type":"result","conversation_id":"%s","result":"turn2"}\n' "$conv"
+else
+  printf '{"type":"result","conversation_id":"ag-host-new","result":"lost"}\n'
+fi
+"#,
+    );
+
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        default_effort: Some(Effort::High),
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("host-config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let wrapper = write_executable(
+        dir.path(),
+        "antigravity-host-plugin",
+        &format!(
+            "#!/bin/sh\nexport {CONFIG_ENV}=\"{}\"\nexport {HOME_ENV}=\"{}\"\nexec \"{}\"\n",
+            cfg_path.display(),
+            job_home.display(),
+            burrow_test::program!("burrow-engine-antigravity"),
+        ),
+    );
+    let limits = Limits {
+        deadline: Duration::from_secs(15),
+        response_bytes: 1_048_576,
+    };
+    let plugin = Plugin::describe(&wrapper, limits).unwrap();
+
+    let fresh = plugin
+        .call_with(
+            Task::Job {
+                repo: "owner/demo".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                prompt: "first turn".to_owned(),
+                model: Some("test-model".to_owned()),
+                effort: Some("high".to_owned()),
+            },
+            Some(Choice {
+                engine: ENGINE.to_owned(),
+                model: Some("test-model".to_owned()),
+                effort: Some("high".to_owned()),
+            }),
+            Context::Fresh,
+            None,
+        )
+        .unwrap();
+    assert_eq!(fresh.by.session.as_deref(), Some("ag-host-1"));
+
+    let cont = plugin
+        .call_with(
+            Task::Job {
+                repo: "owner/demo".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                prompt: "second turn".to_owned(),
+                model: Some("test-model".to_owned()),
+                effort: Some("high".to_owned()),
+            },
+            Some(Choice {
+                engine: ENGINE.to_owned(),
+                model: Some("test-model".to_owned()),
+                effort: Some("high".to_owned()),
+            }),
+            Context::Continue {
+                session: "ag-host-1".to_owned(),
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(cont.by.session.as_deref(), Some("ag-host-1"));
+    assert!(matches!(
+        cont.answer,
+        Answer::Job { ref summary, next: Next::Done } if summary == "turn2"
+    ));
 }

@@ -164,16 +164,22 @@ pub fn resolve(
                 socket.to_string_lossy().into_owned(),
             );
     }
+    let job_state = items
+        .iter_mut()
+        .find(|g| g.capability == Capability::JobState)
+        .unwrap();
+    job_state.env.insert(
+        "BURROW_ANTIGRAVITY_HOME".into(),
+        job.dir
+            .join("antigravity-home")
+            .to_string_lossy()
+            .into_owned(),
+    );
     if let Some(socket) = var(env, "PROJ_HOST_JOBS_SOCKET") {
-        items
-            .iter_mut()
-            .find(|g| g.capability == Capability::JobState)
-            .unwrap()
-            .env
-            .insert(
-                "PROJ_HOST_JOBS_SOCKET".into(),
-                socket.to_string_lossy().into_owned(),
-            );
+        job_state.env.insert(
+            "PROJ_HOST_JOBS_SOCKET".into(),
+            socket.to_string_lossy().into_owned(),
+        );
     }
     items
         .iter_mut()
@@ -279,6 +285,10 @@ mod tests {
         assert_eq!(clear.paths, vec![(clear_socket.clone(), false)]);
         let env_map = grants.environment();
         assert_eq!(env_map["NIX_REMOTE"], "daemon");
+        assert_eq!(
+            env_map["BURROW_ANTIGRAVITY_HOME"],
+            job.dir.join("antigravity-home").to_string_lossy().as_ref()
+        );
         assert_eq!(
             env_map["PROJ_PROBE_SOCKET"],
             dir.path()
