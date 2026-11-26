@@ -384,6 +384,22 @@ def run_pass(kick, continuing=False):
                     seen_to = True
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
+                    except C.Unavailable as e:
+                        log(f"{repo}#{pr['number']}: {e}")
+                        if T.seat(repo, pr["number"]) is not None:
+                            # It may not be settled any more, and still be in.
+                            T.stop(repo, f"#{pr['number']} wasn't seen to")
+                        if isinstance(e, P.Cut) or batch.expired() or (
+                            (left_s := P.pass_left()) is not None and left_s <= 0
+                        ):
+                            partial = True
+                            batch.left = True
+                            break
+                        seen_all = False
+                        operations_complete = False
+                        batch.retry(repo, max(C.NOW + 5 * MIN, C.LIMITED[0] + 1 if C.LIMITED else 0))
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: the unavailable PR is retried
+                        continue
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
@@ -411,7 +427,9 @@ def run_pass(kick, continuing=False):
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: the stopping PR is revalidated
                 if not batch.seen_to(repo):
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
-                if T.on(repo):
+                if not seen_all:
+                    pass
+                elif T.on(repo):
                     # After its PRs, so the ones settled this pass are in it.
                     try:
                         T.step(repo)
