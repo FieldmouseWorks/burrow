@@ -14,7 +14,7 @@ mod end;
 mod place;
 mod split;
 pub(super) use place::{CHANGED, Place};
-pub(super) use split::SplitFail;
+pub(super) use split::{RetainedPartial, SplitFail, invalid_split_marker, invalid_split_message};
 
 use std::{
     collections::BTreeSet,

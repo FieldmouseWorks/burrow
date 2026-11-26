@@ -288,6 +288,20 @@ fn worker_split_with_invalid_existing_issue_rejects_cleanly_without_miss() {
         before_tasks
     );
 
+    // Persist GitHub's accepted comment from pass 1; pass 2 must reconcile it
+    // from GitHub without relying on a local posted marker.
+    let accepted = json!([[{
+        "id": 500,
+        "user": burrow_github::fake::actor("sam"),
+        "body": b.posted(),
+        "created_at": "2026-11-25T22:00:00Z"
+    }]]);
+    fs::write(
+        b.path("repos_sam_box_issues_7_comments"),
+        accepted.to_string(),
+    )
+    .unwrap();
+
     // Second pass: later label succeeds without double-posting.
     fs::remove_file(b.path("fail")).unwrap();
     let mut p2 = b.pass();
@@ -301,4 +315,254 @@ fn worker_split_with_invalid_existing_issue_rejects_cleanly_without_miss() {
     assert!(job.turn("1", "split-invalid").exists());
     assert!(!job.path("planning-hold").exists());
     assert!(job.turn("1", "stopped").exists());
+}
+
+#[test]
+fn worker_split_invalid_comment_reconciles_existing_github_comment_without_duplicate() {
+    let (mut b, mut parent, _) = parent_fixture();
+    b.cfg.scratch = b.path("scratch");
+    b.job_ending("j1", "done", Some("split"), "Splitting work");
+    let job = crate::job::Job::new(&b.cfg, "j1");
+    let record = b.record("j1");
+    parent["labels"] = json!([{"name":"claude"}]);
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    fs::write(
+        b.path("repos_sam_box_issues_99"),
+        issue(99, "github-actions[bot]", &["flaky"]).to_string(),
+    )
+    .unwrap();
+    let input = b.pass().issue_text("sam/box", &parent, &[]);
+    Pass::hand(&record, &input).unwrap();
+
+    let tasks = vec![task("new child", None), task("bot flaky", Some(99))];
+    fs::write(
+        job.turn("1", "split"),
+        serde_json::to_string(&tasks).unwrap(),
+    )
+    .unwrap();
+
+    // Simulate a crash after turn 1's answer and GitHub's invalid-split
+    // comment were posted, before any local split-rejection state was updated.
+    files::mark(&record, files::File::Answered)
+        .put("1\n")
+        .unwrap();
+    let marker = invalid_split_marker("sam/box", "7", "j1", Some("1"));
+    let existing = json!([[{
+        "id": 501,
+        "user": burrow_github::fake::actor("sam"),
+        "body": format!("Invalid split: already posted\n\n{marker}\n\n---\n{}\n_proj-inbox on box_\n", b.cfg.inbox_mark),
+        "created_at": "2026-11-25T22:00:00Z"
+    }]]);
+    fs::write(
+        b.path("repos_sam_box_issues_7_comments"),
+        existing.to_string(),
+    )
+    .unwrap();
+
+    let mut p = b.pass();
+    p.jobs("sam/box", "box", std::slice::from_ref(&parent))
+        .unwrap();
+    assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+    assert!(
+        b.posted().is_empty(),
+        "must not re-post already-accepted invalid-split comment:\n{}",
+        b.posted()
+    );
+    assert!(b.log().contains("labels[]=later"));
+    assert!(!record.exists());
+    assert!(!job.turn("1", "split").exists());
+    assert!(job.turn("1", "split-invalid").exists());
+}
+
+#[test]
+fn planner_split_invalid_comment_reconciles_existing_github_comment_without_duplicate() {
+    let (b, mut parent, _) = parent_fixture();
+    parent["labels"] = json!([{"name":"tracker"}]);
+    parent["body"] = json!("Updated scope");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    fs::write(
+        b.path("repos_sam_box_issues_99"),
+        issue(99, "github-actions[bot]", &["flaky"]).to_string(),
+    )
+    .unwrap();
+
+    let tasks = vec![task("new child", None), task("bot flaky", Some(99))];
+    let answer = format!("split\n{}", serde_json::to_string(&tasks).unwrap());
+    b.job("planner", "done", &answer);
+    let record = b
+        .cfg
+        .inbox
+        .as_ref()
+        .unwrap()
+        .state
+        .join(".triage/sam_box-7");
+    fs::create_dir_all(&record).unwrap();
+    fs::write(record.join(files::File::Job), "planner").unwrap();
+    let input = b.pass().issue_text("sam/box", &parent, &[]);
+    Pass::hand(&record, &input).unwrap();
+
+    let marker = invalid_split_marker("sam/box", "7", "planner", None);
+    let existing = json!([[{
+        "id": 502,
+        "user": burrow_github::fake::actor("sam"),
+        "body": format!("**claude job**\n\nInvalid split: already posted\n\n{marker}\n\n---\n{}\n_proj-inbox on box_\n", b.cfg.inbox_mark),
+        "created_at": "2026-11-25T22:00:00Z"
+    }]]);
+    fs::write(
+        b.path("repos_sam_box_issues_7_comments"),
+        existing.to_string(),
+    )
+    .unwrap();
+
+    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    let mut p = b.pass();
+    p.verdicts("sam/box", t, std::slice::from_ref(&parent))
+        .unwrap();
+    assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+    assert!(
+        b.posted().is_empty(),
+        "must not re-post already-accepted planner invalid-split comment:\n{}",
+        b.posted()
+    );
+    assert!(b.log().contains("labels[]=later"));
+    assert!(!b.log().contains("labels[]=tracker"));
+    assert!(!record.exists());
+}
+
+#[test]
+fn invalid_split_recovery_reports_retained_partial_children_without_claiming_none_created() {
+    // Worker split recovering an incomplete tasks.json with one created child
+    // (#100) and one unconfirmed creation attempt before the invalid #99.
+    {
+        let (mut b, mut parent, _) = parent_fixture();
+        b.cfg.scratch = b.path("scratch");
+        b.job_ending("j1", "done", Some("split"), "Splitting work");
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let record = b.record("j1");
+        parent["labels"] = json!([{"name":"claude"}]);
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        fs::write(
+            b.path("repos_sam_box_issues_99"),
+            issue(99, "github-actions[bot]", &["flaky"]).to_string(),
+        )
+        .unwrap();
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        Pass::hand(&record, &input).unwrap();
+
+        let tasks = vec![
+            task("already created child", None),
+            task("ambiguous child", None),
+            task("bot flaky", Some(99)),
+        ];
+        fs::write(
+            job.turn("1", "split"),
+            serde_json::to_string(&tasks).unwrap(),
+        )
+        .unwrap();
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+        let path = b.pass().plan_dir("sam/box", "7").join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].number = Some(100);
+        list.children[1].attempted = true;
+        list.children[1].number = None;
+        assert!(b.pass().save_list("sam/box", "7", &list));
+
+        let mut p = b.pass();
+        p.jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+        let posted = b.posted();
+        assert!(posted.contains("Invalid split:"), "{posted}");
+        assert!(
+            !posted.contains("No children created"),
+            "must not claim no children were created when partial receipts were retained:\n{posted}"
+        );
+        assert!(
+            posted.contains("Retained partial child #100 and 1 unconfirmed child-creation attempt"),
+            "{posted}"
+        );
+        assert!(
+            posted.contains("no further children will be created; needs replanning."),
+            "{posted}"
+        );
+        let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(after.tasks.is_empty());
+        assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+        assert!(
+            after
+                .retained
+                .iter()
+                .any(|r| r.child.attempted && r.child.number.is_none())
+        );
+    }
+
+    // Planner split recovering an incomplete tasks.json with a created child (#100).
+    {
+        let (b, mut parent, _) = parent_fixture();
+        parent["labels"] = json!([{"name":"tracker"}]);
+        parent["body"] = json!("Updated scope");
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        fs::write(
+            b.path("repos_sam_box_issues_99"),
+            issue(99, "github-actions[bot]", &["flaky"]).to_string(),
+        )
+        .unwrap();
+
+        let tasks = vec![
+            task("already created child", None),
+            task("bot flaky", Some(99)),
+        ];
+        let input = b.pass().issue_text("sam/box", &parent, &[]);
+        assert!(b.pass().prepare_plan("sam/box", "7", &input, &tasks));
+        let path = b.pass().plan_dir("sam/box", "7").join("tasks.json");
+        let mut list: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        list.children[0].attempted = true;
+        list.children[0].number = Some(100);
+        assert!(b.pass().save_list("sam/box", "7", &list));
+
+        let answer = format!("split\n{}", serde_json::to_string(&tasks).unwrap());
+        b.job("planner", "done", &answer);
+        let record = b
+            .cfg
+            .inbox
+            .as_ref()
+            .unwrap()
+            .state
+            .join(".triage/sam_box-7");
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join(files::File::Job), "planner").unwrap();
+        Pass::hand(&record, &input).unwrap();
+        let plan = vec![
+            super::super::triage::Step::Priority("priority: medium".into()),
+            super::super::triage::Step::Split(tasks),
+            super::super::triage::Step::Label("tracker".into()),
+        ];
+        fs::write(
+            record.join(files::File::Plan),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        fs::write(record.join(files::File::Did), "1\n").unwrap();
+
+        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+        let mut p = b.pass();
+        p.verdicts("sam/box", t, std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(p.unreached.is_empty(), "{:?}", p.unreached);
+        let posted = b.posted();
+        assert!(posted.contains("Invalid split:"), "{posted}");
+        assert!(
+            !posted.contains("No children created"),
+            "planner recovery must not claim no children were created:\n{posted}"
+        );
+        assert!(posted.contains("Retained partial child #100"), "{posted}");
+        assert!(
+            posted.contains("no further children will be created; needs replanning."),
+            "{posted}"
+        );
+        let after: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(after.tasks.is_empty());
+        assert!(after.retained.iter().any(|r| r.child.number == Some(100)));
+    }
 }

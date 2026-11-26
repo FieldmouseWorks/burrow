@@ -557,8 +557,9 @@ impl Pass<'_> {
                 match crate::planning::parse(answer.split_once('\n').map_or("", |(_, rest)| rest)) {
                     Ok(tasks) => vec![Step::Split(tasks), Step::Label(TRACKER.into())],
                     Err(e) => vec![
-                        Step::Post(format!(
-                            "Invalid split: {e}. No children created; needs replanning."
+                        Step::Post(super::plans::invalid_split_message(
+                            &e,
+                            &super::plans::RetainedPartial::default(),
                         )),
                         Step::Label(LATER.into()),
                     ],
@@ -663,19 +664,25 @@ impl Pass<'_> {
                         Err(super::plans::SplitFail::Retry) => return false,
                         Err(super::plans::SplitFail::Invalid(reason)) => {
                             eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
-                            self.abort_incomplete_split(repo, n, tasks);
-                            steps.truncate(i);
-                            steps.push(Step::Post(format!(
-                                "Invalid split: {reason}. No children created; needs replanning."
-                            )));
-                            steps.push(Step::Label(LATER.into()));
+                            let partial = self.incomplete_split_partial(repo, n, tasks);
+                            let body = super::plans::invalid_split_message(&reason, &partial);
+                            let engine = job.engine_label(&job.turns().unwrap_or_default());
+                            let marker = super::plans::invalid_split_marker(repo, n, job.id, None);
+                            if !self.post_marked_once(
+                                repo,
+                                n,
+                                &marker,
+                                &format!("**{engine} job**\n\n{body}"),
+                            ) || !self.abort_incomplete_split(repo, n, tasks)
+                                || !self.add_label(repo, n, LATER)
+                            {
+                                return false;
+                            }
+                            steps.truncate(i + 1);
                             let Ok(encoded) = serde_json::to_vec(&steps) else {
                                 return false;
                             };
-                            if files::mark(d, File::Plan).write(encoded).is_err() {
-                                return false;
-                            }
-                            continue;
+                            files::mark(d, File::Plan).write(encoded).is_ok()
                         }
                     }
                 }

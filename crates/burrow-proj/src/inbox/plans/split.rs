@@ -1,4 +1,4 @@
-//! Pre-flight validation and recovery for `split` proposals.
+//! Pre-flight validation, idempotent rejection, and recovery for `split` proposals.
 use super::{List, Retained};
 use crate::inbox::Pass;
 use crate::planning::Task;
@@ -11,6 +11,60 @@ pub(in crate::inbox) enum SplitFail {
     Retry,
     /// The split itself is invalid and cannot succeed on retry.
     Invalid(String),
+}
+
+/// Partial child-creation receipts preserved from an incomplete split
+/// written by an earlier implementation before pre-flight validation existed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(in crate::inbox) struct RetainedPartial {
+    pub(in crate::inbox) created: Vec<u64>,
+    pub(in crate::inbox) unconfirmed: usize,
+}
+
+impl RetainedPartial {
+    pub(in crate::inbox) fn is_empty(&self) -> bool {
+        self.created.is_empty() && self.unconfirmed == 0
+    }
+}
+
+pub(in crate::inbox) fn invalid_split_marker(
+    repo: &str,
+    n: &str,
+    job_id: &str,
+    turn: Option<&str>,
+) -> String {
+    match turn {
+        Some(t) => format!("<!-- proj-invalid-split {repo}#{n} {job_id} turn-{t} -->"),
+        None => format!("<!-- proj-invalid-split {repo}#{n} {job_id} -->"),
+    }
+}
+
+pub(in crate::inbox) fn invalid_split_message(reason: &str, partial: &RetainedPartial) -> String {
+    if partial.is_empty() {
+        return format!("Invalid split: {reason}. No children created; needs replanning.");
+    }
+    let mut parts = Vec::new();
+    if !partial.created.is_empty() {
+        let nums: Vec<String> = partial.created.iter().map(|n| format!("#{n}")).collect();
+        let noun = if partial.created.len() == 1 {
+            "partial child"
+        } else {
+            "partial children"
+        };
+        parts.push(format!("{noun} {}", nums.join(", ")));
+    }
+    if partial.unconfirmed > 0 {
+        let noun = if partial.unconfirmed == 1 {
+            "unconfirmed child-creation attempt"
+        } else {
+            "unconfirmed child-creation attempts"
+        };
+        parts.push(format!("{} {noun}", partial.unconfirmed));
+    }
+    format!(
+        "Invalid split: {reason}. Retained {} from an earlier attempt; no further children will be created; needs replanning.",
+        parts.join(" and ")
+    )
 }
 
 impl Pass<'_> {
@@ -67,19 +121,81 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// Post a marked inbox comment idempotently: reconcile any existing comment
+    /// carrying the same marker and inbox signature on GitHub before posting.
+    pub(in crate::inbox) fn post_marked_once(
+        &self,
+        repo: &str,
+        n: &str,
+        marker: &str,
+        body: &str,
+    ) -> bool {
+        let Some(comments) = crate::github::every(
+            self.cfg,
+            &format!("repos/{repo}/issues/{n}/comments?per_page=100"),
+        ) else {
+            return false;
+        };
+        if comments.iter().any(|c| {
+            c["body"]
+                .as_str()
+                .is_some_and(|b| b.contains(marker) && b.contains(&self.cfg.inbox_mark))
+        }) {
+            return true;
+        }
+        self.post(repo, n, &format!("{body}\n\n{marker}"))
+    }
+
+    /// Inspect an incomplete active task list matching a rejected split for any
+    /// partial child-creation receipts that will be retained on abort.
+    pub(in crate::inbox) fn incomplete_split_partial(
+        &self,
+        repo: &str,
+        n: &str,
+        tasks: &[Task],
+    ) -> RetainedPartial {
+        let d = self.plan_dir(repo, n);
+        let Ok(bytes) = fs::read(d.join("tasks.json")) else {
+            return RetainedPartial::default();
+        };
+        let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
+            return RetainedPartial::default();
+        };
+        if list.tasks != tasks || !list.children.iter().any(|c| c.number.is_none()) {
+            return RetainedPartial::default();
+        }
+        let mut partial = RetainedPartial::default();
+        for child in &list.children {
+            if child.attempted || child.merged_pr.is_some() {
+                match child.number {
+                    Some(num) => partial.created.push(num),
+                    None => partial.unconfirmed += 1,
+                }
+            }
+        }
+        partial
+    }
+
     /// Clear an incomplete active task list that matches a rejected split
     /// (for example, written before pre-flight validation existed), while
     /// preserving every retained and attempted creation receipt.
-    pub(in crate::inbox) fn abort_incomplete_split(&self, repo: &str, n: &str, tasks: &[Task]) {
+    pub(in crate::inbox) fn abort_incomplete_split(
+        &self,
+        repo: &str,
+        n: &str,
+        tasks: &[Task],
+    ) -> bool {
         let d = self.plan_dir(repo, n);
-        let Ok(bytes) = fs::read(d.join("tasks.json")) else {
-            return;
+        let bytes = match fs::read(d.join("tasks.json")) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => return false,
         };
         let Ok(mut list) = serde_json::from_slice::<List>(&bytes) else {
-            return;
+            return false;
         };
         if list.tasks != tasks || !list.children.iter().any(|c| c.number.is_none()) {
-            return;
+            return true;
         }
         for (task, child) in std::mem::take(&mut list.tasks)
             .into_iter()
@@ -90,9 +206,11 @@ impl Pass<'_> {
             }
         }
         list.source = None;
-        if self.save_list(repo, n, &list) {
-            let _ = fs::remove_file(d.join("input"));
+        if !self.save_list(repo, n, &list) {
+            return false;
         }
+        let _ = fs::remove_file(d.join("input"));
+        true
     }
 
     pub(in crate::inbox) fn clear_worker_split(&self, repo: &str, n: &str) {

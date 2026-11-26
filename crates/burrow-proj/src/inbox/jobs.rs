@@ -212,15 +212,11 @@ impl Pass<'_> {
                         self.retry(repo);
                         continue;
                     }
-                    if read(&job.file(JobFile::PlanningHold)).as_deref()
-                        != Some("invalid-split-posted")
-                    {
-                        fs::write(
-                            job.file(JobFile::PlanningHold),
-                            "finishing the task split\n",
-                        )
-                        .map_err(|e| io_fail(&job.file(JobFile::PlanningHold), e))?;
-                    }
+                    fs::write(
+                        job.file(JobFile::PlanningHold),
+                        "finishing the task split\n",
+                    )
+                    .map_err(|e| io_fail(&job.file(JobFile::PlanningHold), e))?;
                 }
                 let Some(written) = self.written(repo, parent) else {
                     self.miss(repo);
@@ -272,30 +268,30 @@ impl Pass<'_> {
                 };
                 if let Some(reason) = invalid {
                     eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
-                    if let Ok(tasks) = &parsed {
-                        self.abort_incomplete_split(repo, n, tasks);
+                    let partial = parsed
+                        .as_ref()
+                        .map(|tasks| self.incomplete_split_partial(repo, n, tasks))
+                        .unwrap_or_default();
+                    let body = super::plans::invalid_split_message(&reason, &partial);
+                    let marker =
+                        super::plans::invalid_split_marker(repo, n, &id, Some(&split_turn));
+                    if !self.post_marked_once(repo, n, &marker, &body) {
+                        self.miss(repo);
+                        continue;
                     }
-                    self.clear_worker_split(repo, n);
-                    if read(&job.file(JobFile::PlanningHold)).as_deref()
-                        != Some("invalid-split-posted")
+                    if let Ok(tasks) = &parsed
+                        && !self.abort_incomplete_split(repo, n, tasks)
                     {
-                        if !self.post(
-                            repo,
-                            n,
-                            &format!(
-                                "Invalid split: {reason}. No children created; needs replanning."
-                            ),
-                        ) {
-                            self.miss(repo);
-                            continue;
-                        }
-                        fs::write(job.file(JobFile::PlanningHold), "invalid-split-posted\n")
-                            .map_err(|e| io_fail(&job.file(JobFile::PlanningHold), e))?;
+                        self.retry(repo);
+                        continue;
                     }
                     if !self.add_label(repo, n, super::triage::LATER) {
                         self.miss(repo);
                         continue;
                     }
+                    self.clear_worker_split(repo, n);
+                    super::enrollment::mark_parked(self.inbox, repo, n)
+                        .map_err(|e| Fail::new(1, e))?;
                     {
                         let _held = job
                             .lock()
@@ -311,8 +307,6 @@ impl Pass<'_> {
                         )
                         .map_err(|e| io_fail(&job.turn_file(&split_turn, TurnFile::Split), e))?;
                     }
-                    super::enrollment::mark_parked(self.inbox, repo, n)
-                        .map_err(|e| Fail::new(1, e))?;
                     self.retire_record(repo, n, &id, &d)?;
                     continue;
                 }
