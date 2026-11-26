@@ -264,14 +264,51 @@ st2_retry = line(2, 900 + P.EVAL_RETRY * 60)
 assert "working out what remi-proof builds" in st2_retry and "proofEval" in pr_state(2), (st2_retry, pr_state(2))
 
 # 4. Moved head supersedes a running eval unit (stopping it, or queueing in stopping).
+# While the old eval unit is still running in stopping, the same PR MUST NOT start a
+# second concurrent eval unit; once it stops, the new head's eval starts.
 jid2_new = pr_state(2)["proofEval"]["job"]
 STOPPED.clear()
 UNSTOPPABLE.add(jid2_new)
-run(clean(checks=proof, number=2, sha=heads[3]), 900 + P.EVAL_RETRY * 60 + 10)
+P.begin("sam/r", {1, 2})
+st2_unstop = run(clean(checks=proof, number=2, sha=heads[3]), 900 + P.EVAL_RETRY * 60 + 10)[0]
 assert jid2_new in pr_state(2).get("stopping", []), pr_state(2)
+assert "proofEval" not in pr_state(2), f"started concurrent eval while old one still running: {pr_state(2)}"
+assert "waiting to work out what remi-proof builds" in st2_unstop, st2_unstop
+# Even when PR 2 is no longer in OPEN (e.g. closed while its eval unit is still running),
+# another PR in the same repo MUST still wait for that live eval unit to finish.
+P.begin("sam/r", {4})
+st4_closed_busy = line(4, 900 + P.EVAL_RETRY * 60 + 15)
+assert "waiting to work out what remi-proof builds" in st4_closed_busy, st4_closed_busy
+assert "proofEval" not in pr_state(4), f"ignored live eval from PR outside OPEN: {pr_state(4)}"
 UNSTOPPABLE.clear()
-run(clean(checks=proof, number=2, sha=heads[3]), 900 + P.EVAL_RETRY * 60 + 20)
+P.begin("sam/r", {1, 2})
+st2_after_stop = run(clean(checks=proof, number=2, sha=heads[3]), 900 + P.EVAL_RETRY * 60 + 20)[0]
 assert jid2_new in STOPPED, STOPPED
+assert "working out what remi-proof builds" in st2_after_stop and "proofEval" in pr_state(2), (st2_after_stop, pr_state(2))
+
+# 4b. A live merged eval that refuses to stop on a head move also blocks starting a
+# new eval unit (preventing concurrent merged-ref updates on the same PR).
+fresh_pr_state()
+nix_knows()
+info["defaultBranchRef"]["target"] = {"oid": heads[3]}
+P.begin("sam/r", {7})
+line(7, 700)
+run_eval_unit(pr_state(7)["proofEval"]["job"])
+P.begin("sam/r", {7})
+line(7, 710)
+jid7_m_old = pr_state(7)["mergedEval"]["job"]
+STOPPED.clear()
+UNSTOPPABLE.add(jid7_m_old)
+P.begin("sam/r", {7})
+st7_moved = run(clean(checks=proof, number=7, sha=heads[4]), 720)[0]
+assert jid7_m_old in pr_state(7).get("stopping", []), pr_state(7)
+assert "proofEval" not in pr_state(7) and "mergedEval" not in pr_state(7), pr_state(7)
+assert "waiting to work out what remi-proof builds" in st7_moved, st7_moved
+UNSTOPPABLE.clear()
+P.begin("sam/r", {7})
+run(clean(checks=proof, number=7, sha=heads[4]), 730)
+assert jid7_m_old in STOPPED, STOPPED
+del info["defaultBranchRef"]["target"]
 
 # 5. Merged eval runs ONLY for the PR next in line, not while waiting behind
 # another PR's slot, and once harvested updates the branch when built in store.

@@ -86,7 +86,7 @@ OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
 LOOKED = {}  # the PRs of each repo this pass has settled, waiting or not
-EVAL_ACTIVE = {}  # the PRs of each repo with an eval unit running this pass
+EVAL_ACTIVE = {}  # live eval unit ids seen or started per repo this pass
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVALUATING = "evaluating"  # an eval unit is running for this PR
 EVAL_WAITING = "waiting"  # another PR in this repo already has an eval unit running
@@ -215,19 +215,33 @@ def eval_wake(repo, rec):
     C.wake(repo, due if due > C.NOW else C.NOW + 15 * C.MIN)  # ends: the eval unit ends or times out
 
 
-def eval_busy(repo, n):
-    """Whether another open PR in repo already has a live eval unit."""
-    if EVAL_ACTIVE.get(repo, set()) - {n}:
-        return True
-    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
+def eval_busy(repo, st=None):
+    """Whether repo already has any live eval unit (including on the same PR,
+    in stopping, or on a PR no longer open)."""
+    active = EVAL_ACTIVE.get(repo)
+    if active:
+        for jid in list(active):
+            if running(jid):
+                return True
+            active.discard(jid)
+    builds_root = os.path.join(STATE, "builds")
+    if os.path.isdir(builds_root):
+        for jid in os.listdir(builds_root):
+            b = load(f"builds/{jid}/build.json", None) or {}
+            if b.get("eval") and b.get("repo") == repo and running(jid):
+                EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+                return True
+    states = [st] if st is not None else []
+    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"\d+\.json"
     for f in os.listdir(STATE):
-        m = re.fullmatch(mine, f)
-        if m and (k := int(m[1])) != n and (repo not in OPEN or k in OPEN[repo]):
-            other = load(f, {})
-            for field in ("proofEval", "mergedEval"):
-                rec = other.get(field) or {}
-                if rec.get("job") and running(rec["job"]):
-                    return True
+        if re.fullmatch(mine, f):
+            states.append(load(f, {}))
+    for other in states:
+        for field in ("proofEval", "mergedEval"):
+            rec = other.get(field) or {}
+            if rec.get("job") and running(rec["job"]):
+                EVAL_ACTIVE.setdefault(repo, set()).add(rec["job"])
+                return True
     return False
 
 
@@ -269,12 +283,12 @@ def harvest_eval(repo, n, st, eval_field, out_field, key, merged=False):
         return None
     jid = rec["job"]
     if running(jid):
-        EVAL_ACTIVE.setdefault(repo, set()).add(n)
+        EVAL_ACTIVE.setdefault(repo, set()).add(jid)
         eval_wake(repo, rec)
         return EVALUATING
     if C.DRY:
         return None
-    EVAL_ACTIVE.get(repo, set()).discard(n)
+    EVAL_ACTIVE.get(repo, set()).discard(jid)
     end = load(f"builds/{jid}/end.json", None)
     del st[eval_field]
     if end and end.get("state") == "done" and not end.get("failed"):
@@ -311,7 +325,7 @@ def _outputs(repo, pr, checks, st, start=True):
     if C.DRY or not start:
         return None
     n, head = pr["number"], pr["headRefOid"]
-    if eval_busy(repo, n):
+    if eval_busy(repo, st):
         return EVAL_WAITING
     try:
         mirror = M.fetch(repo, pr=pr)
@@ -323,7 +337,7 @@ def _outputs(repo, pr, checks, st, start=True):
         st["proofOutputs"] = {"for": key, "paths": None, "drvs": None, "at": C.NOW}
         return None
     st["proofEval"] = rec = {"for": key, "job": jid, "at": C.NOW}
-    EVAL_ACTIVE.setdefault(repo, set()).add(n)
+    EVAL_ACTIVE.setdefault(repo, set()).add(jid)
     eval_wake(repo, rec)
     return EVALUATING
 
@@ -360,7 +374,7 @@ def merged(repo, pr, checks, st, tip, start=True):
         return got["paths"]
     if C.DRY or not start:
         return None
-    if eval_busy(repo, n):
+    if eval_busy(repo, st):
         return EVAL_WAITING
     try:
         mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
@@ -372,7 +386,7 @@ def merged(repo, pr, checks, st, tip, start=True):
         st["mergedOutputs"] = {"for": key, "paths": None, "failed": True, "at": C.NOW}
         return None
     st["mergedEval"] = rec = {"for": key, "job": jid, "at": C.NOW}
-    EVAL_ACTIVE.setdefault(repo, set()).add(n)
+    EVAL_ACTIVE.setdefault(repo, set()).add(jid)
     eval_wake(repo, rec)
     return EVALUATING
 
@@ -638,6 +652,7 @@ def start(jid, build_json, what, starter=None):
         p = subprocess.run([*starter, here], capture_output=True, text=True)
     if p.returncode:
         log(f"{build_json['repo']}#{build_json['number']}: couldn't start {what}: {p.stderr.strip()[-300:]}")
+        shutil.rmtree(here, ignore_errors=True)
         return None
     return jid
 
