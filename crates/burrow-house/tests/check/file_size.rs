@@ -269,9 +269,12 @@ fn renamed() {
     );
     let script = format!("#!/usr/bin/env python3\n{}", long());
     passes(
-        &case(vec![from(change("renamed", "src/tool.py", 0, 0), "bin/tool")])
-            .tree("4ead", "src/tool.py", &script)
-            .tree("3e7b", "bin/tool", &script),
+        &case(vec![from(
+            change("renamed", "src/tool.py", 0, 0),
+            "bin/tool",
+        )])
+        .tree("4ead", "src/tool.py", &script)
+        .tree("3e7b", "bin/tool", &script),
     );
 }
 
