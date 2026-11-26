@@ -235,3 +235,60 @@ fn host_mode_continue_uses_populated_proj_engine_home_as_child_home() {
         "populated PROJ_ENGINE_HOME state must be preserved"
     );
 }
+
+#[test]
+fn host_mode_continue_defers_invalid_proj_engine_home_to_path_validation() {
+    let dir = TempDir::new().unwrap();
+    let real_home = dir.path().join("real-home");
+    fs::create_dir_all(&real_home).unwrap();
+    let ran_marker = dir.path().join("cli-ran");
+    let fixture = write_executable(
+        dir.path(),
+        "ag-should-not-run",
+        &format!(
+            "#!/bin/sh\necho ran > \"{}\"\nprintf '{{\"type\":\"result\",\"conversation_id\":\"ag-old-1\",\"result\":\"ok\"}}\\n'\n",
+            ran_marker.display()
+        ),
+    );
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        credential_mode: CredentialMode::Env,
+        credential_env: None,
+        target_credential_env: None,
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    for (label, engine_home, expected_err) in [
+        (
+            "relative",
+            Path::new("relative/engine-home"),
+            "must be an absolute path",
+        ),
+        ("matches-home", real_home.as_path(), "must not match HOME"),
+    ] {
+        let output = run_continue(&cfg_path, &cfg, dir.path(), "ag-old-1", |cmd| {
+            cmd.env("HOME", &real_home)
+                .env("PROJ_ENGINE_HOME", engine_home);
+        });
+        assert!(!output.status.success(), "{label}: expected failure");
+        assert!(
+            !ran_marker.exists(),
+            "{label}: CLI must not run when PROJ_ENGINE_HOME is invalid"
+        );
+        assert!(
+            refusal_event(&output.stderr).is_none(),
+            "{label}: invalid PROJ_ENGINE_HOME must not be misclassified as session_lost: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_err),
+            "{label}: expected {expected_err:?} in stderr, got: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

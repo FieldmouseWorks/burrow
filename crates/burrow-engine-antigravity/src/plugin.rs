@@ -10,7 +10,7 @@ use conary_core::plugin::{
 };
 
 use crate::cli::{Invocation, run_invocation};
-use crate::config::{Config, ENGINE, Effort};
+use crate::config::{Config, ENGINE, Effort, HOST_HOME_ENV};
 use crate::normalize::{Refusal, RunError, Usage};
 
 /// Exit codes aligned with burrow's Conary plugin diagnostics contract.
@@ -506,22 +506,40 @@ fn resolve_execution(
 /// an isolated persistent host HOME exists and already holds prior state.
 /// Returns `Some(detail)` when no prior session could exist there (unset
 /// `PROJ_ENGINE_HOME`, non-existent directory, or empty directory); returns
-/// `None` for non-directories/symlinks so `run_invocation` reports its own
-/// path validation error.
+/// `None` for invalid paths (relative, matching `HOME`, non-directories, or
+/// symlinks) so `run_invocation` reports its own path validation error.
 fn host_continuation_home_missing(config: &Config, invocation: &Invocation) -> Option<String> {
     if !config.host_mode || invocation.home_dir.is_some() {
         return None;
     }
-    let Some(path) = std::env::var_os("PROJ_ENGINE_HOME").filter(|v| !v.is_empty()) else {
-        return Some("host mode has no persistent PROJ_ENGINE_HOME for continuation".to_owned());
+    let Some(path) = std::env::var_os(HOST_HOME_ENV).filter(|v| !v.is_empty()) else {
+        return Some(format!(
+            "host mode has no persistent {HOST_HOME_ENV} for continuation"
+        ));
     };
     let dir = Path::new(&path);
+    if !dir.is_absolute() {
+        return None;
+    }
+    let orig_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if orig_home.as_deref() == Some(dir) {
+        return None;
+    }
     match fs::symlink_metadata(dir) {
         Err(e) if e.kind() == ErrorKind::NotFound => Some(format!(
             "persistent host HOME {} has no prior session state",
             dir.display()
         )),
         Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {
+            if let Some(real_home) = orig_home.as_deref()
+                && let (Ok(canon_dir), Ok(canon_home)) =
+                    (fs::canonicalize(dir), fs::canonicalize(real_home))
+                && canon_dir == canon_home
+            {
+                return None;
+            }
             let has_state = fs::read_dir(dir)
                 .ok()
                 .and_then(|mut entries| entries.next())
