@@ -62,17 +62,27 @@ let
   # page at ORIGIN (or none): the screen's RFB greeting. Exits 1 if the
   # viewer refuses the WebSocket.
   rfb = pkgs.writeText "rfb-greeting.py" ''
-    import base64, os, socket, sys
+    import base64, os, socket, sys, time
 
     host, port = sys.argv[1], int(sys.argv[2])
     origin = f"Origin: {sys.argv[3]}\r\n" if len(sys.argv) > 3 else ""
-    s = socket.create_connection((host, port))
+    deadline = time.monotonic() + 120
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("timed out waiting for viewer response")
+        return left
+
+    s = socket.create_connection((host, port), timeout=remaining())
+    s.settimeout(remaining())
     key = base64.b64encode(os.urandom(16)).decode()
     s.sendall((f"GET /websockify HTTP/1.1\r\nHost: {host}:{port}\r\n{origin}Upgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                "Sec-WebSocket-Protocol: binary\r\n\r\n").encode())
     data = b""
     while b"\r\n\r\n" not in data:
+        s.settimeout(remaining())
         chunk = s.recv(4096)
         if not chunk:
             break
@@ -81,7 +91,11 @@ let
     if not head.startswith(b"HTTP/1.1 101"):
         sys.exit(f"refused: {head.splitlines()[:1]}")
     while len(rest) < 2 + 12:
-        rest += s.recv(4096)
+        s.settimeout(remaining())
+        chunk = s.recv(4096)
+        if not chunk:
+            sys.exit("closed before RFB greeting")
+        rest += chunk
     print(rest[2:14].decode().strip())
   '';
 
@@ -145,15 +159,16 @@ pkgs.testers.runNixOSTest {
                     ["browser_evaluate", {"function": "() => document.cookie"}])
         assert "login=yes" in out and "session=yes" in out, out
 
+    probe_timeout = 120
     cdp_url = "http://127.0.0.1:9222/json/version"
     viewer_url = "http://127.0.0.1:6080/vnc.html"
-    # Positive checks carry no short wall-clock cap: under load a 1-vCPU VM can
-    # take more than 5s to answer DevTools or noVNC even once up (matching
-    # ready in modules/browser.nix and /json/list below), while a refused or
-    # broken port fails immediately. Blocked checks keep --max-time 5 so a DROP
-    # rule doesn't stall for the kernel's TCP SYN timeout.
-    cdp = f"curl -fsS {cdp_url}"
-    viewer = f"curl -fsS -o /dev/null {viewer_url}"
+    # Positive checks keep a generous finite deadline (120s): under load a
+    # 1-vCPU VM can take more than 5s to answer DevTools or noVNC even once up,
+    # while a stalled response still terminates instead of blocking the test.
+    # Blocked checks keep --max-time 5 so a DROP rule doesn't stall for the
+    # kernel's TCP SYN timeout.
+    cdp = f"curl -fsS --max-time {probe_timeout} {cdp_url}"
+    viewer = f"curl -fsS --max-time {probe_timeout} -o /dev/null {viewer_url}"
     cdp_blocked = f"curl -fsS --max-time 5 {cdp_url}"
     viewer_blocked = f"curl -fsS --max-time 5 -o /dev/null {viewer_url}"
 
@@ -192,12 +207,14 @@ pkgs.testers.runNixOSTest {
     with subtest("the viewer is open on its interface only, and only to its own pages"):
         for node in (machine, nft):
             name = node.name
-            client.wait_until_succeeds(f"curl -fsS --connect-timeout 5 -o /dev/null http://{name}:6080/vnc.html", timeout=120)
+            client.wait_until_succeeds(f"curl -fsS --connect-timeout 5 --max-time 30 -o /dev/null http://{name}:6080/vnc.html", timeout=120)
             greeting = client.succeed(f"python3 ${rfb} {name} 6080 http://{name}:6080").strip()
             assert greeting.startswith("RFB 003."), greeting
             # Another site's page in the owner's browser, or no page at all.
-            client.fail(f"python3 ${rfb} {name} 6080 http://evil.example")
-            client.fail(f"python3 ${rfb} {name} 6080")
+            for bad in (f"python3 ${rfb} {name} 6080 http://evil.example",
+                        f"python3 ${rfb} {name} 6080"):
+                out = client.fail(f"{bad} 2>&1")
+                assert "HTTP/1.1 403" in out, out
             # Not on eth2, though the firewall trusts it.
             ip2 = node.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
             client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
@@ -205,7 +222,7 @@ pkgs.testers.runNixOSTest {
             client.fail(f"curl -fsS --max-time 5 http://{name}:9222/json/version")
             # No other site gets to frame it and lay its own page over the owner's clicks.
             for page in ("vnc.html", "vnc_lite.html"):
-                head = client.succeed(f"curl -fsSI http://{name}:6080/{page}").lower()
+                head = client.succeed(f"curl -fsSI --max-time {probe_timeout} http://{name}:6080/{page}").lower()
                 assert "content-security-policy: frame-ancestors 'none'" in head, head
 
     with subtest("a reload of the firewall or the rules keeps the ports shut"):
@@ -256,7 +273,7 @@ pkgs.testers.runNixOSTest {
     with subtest("Claude drives the browser the owner sees"):
         out = drive(machine, ["browser_navigate", {"url": "http://127.0.0.1:8088/"}])
         assert "burrow test page" in out, out
-        tabs = machine.succeed("su dev -c 'curl -fsS http://127.0.0.1:9222/json/list'")
+        tabs = machine.succeed(f"su dev -c 'curl -fsS --max-time {probe_timeout} http://127.0.0.1:9222/json/list'")
         assert "http://127.0.0.1:8088/" in tabs, tabs
         # Snapshots go to the runtime dir, not the folder Claude works in.
         machine.succeed("ls /run/user/1001/burrow-browser/ | grep -q .")
@@ -287,7 +304,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"cd /var/lib/burrow-browser/profile && runuser -u burrow-browser -- sh -c {shlex.quote(add)}")
         machine.succeed("systemctl start burrow-browser.service")
         browser_up(machine)
-        tabs = machine.succeed("su dev -c 'curl -fsS http://127.0.0.1:9222/json/list'")
+        tabs = machine.succeed(f"su dev -c 'curl -fsS --max-time {probe_timeout} http://127.0.0.1:9222/json/list'")
         assert "profile-picker" not in tabs, tabs
         login_kept(machine)
 
