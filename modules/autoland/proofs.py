@@ -47,11 +47,12 @@ program and system it boots, which builds beside the others' turns. That
 is a build of the steward's like the proof's, in a heavy slot like it,
 but with no verdict: it ends, and the PR takes its place in the line, as
 it would had nothing been built first. What it builds is each check
-derivation's own inputs (`nix-store --query --references`), every output
-of each, rooted in its folder for a day (KEEP_INPUTS) so they're there
-when the PR's turn comes; one whose inputs are all built already goes
-straight to the line. One for a head or checks its PR no longer has is
-stopped when the next starts.
+derivation's unbuilt non-VM inputs (descending through any derivation
+whose unbuilt closure builds a `kvm` or `nixos-test` derivation, such as
+a `linkFarm` of VM tests), every output of each, rooted in its folder for
+a day (KEEP_INPUTS) so they're there when the PR's turn comes; one with
+no unbuilt non-VM inputs goes straight to the line. One for a head or
+checks its PR no longer has is stopped when the next starts.
 
 A PR behind its base whose builds aren't in the store may have them there
 once it's brought up to date: most PRs change nothing a proof builds, so
@@ -70,6 +71,7 @@ its order, nor every PR in it: a batch takes those it hasn't looked at
 first, and leaves out those unchanged since, so a slot freed meanwhile
 isn't taken past one still waiting."""
 
+import json
 import os
 import re
 import shutil
@@ -102,6 +104,8 @@ LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 COMMENT_BYTES = 60000
 KEEP = 7  # days an ended build's folder, its outputs' roots in it, is kept
 KEEP_INPUTS = 1  # days an ended prebuild's folder, the roots of what it built, is kept
+VM_FEATURES = frozenset(("kvm", "nixos-test"))  # requiredSystemFeatures that mark a VM derivation
+SHOW_BATCH = 500  # derivations per `nix derivation show` call (stays well under ARG_MAX)
 
 
 def begin(repo, numbers, first=()):
@@ -155,9 +159,10 @@ class Cut(C.Unavailable):
     eval to wait out)."""
 
 
-def nix(*args, timeout=60):
-    """nix's stdout. Its deadline is the timeout, but never past the pass's
-    own (pass_left), so a pass's eval can't outlast the pass."""
+def nix(*args, timeout=60, stderr=False):
+    """nix's stdout (or stderr when stderr=True). Its deadline is the
+    timeout, but never past the pass's own (pass_left), so a pass's eval
+    can't outlast the pass."""
     left = pass_left()
     cut = left is not None and left < timeout
     if cut:
@@ -172,7 +177,7 @@ def nix(*args, timeout=60):
         raise
     if p.returncode != 0:
         raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
-    return p.stdout
+    return p.stderr if stderr else p.stdout
 
 
 def derivations(repo, mirror, ref, rev, checks):
@@ -468,10 +473,119 @@ def start_run(repo, pr, checks, st):
                  f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
 
 
+def _feature_words(value):
+    if isinstance(value, str):
+        return value.split()
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+def _is_vm_drv(entry):
+    env = entry.get("env")
+    if not isinstance(env, dict):
+        raise RuntimeError("nix derivation show: entry has no env")
+    features = set(_feature_words(env.get("requiredSystemFeatures")))
+    sa = entry.get("structuredAttrs")
+    if isinstance(sa, dict):
+        features.update(_feature_words(sa.get("requiredSystemFeatures")))
+    if raw := env.get("__json"):
+        try:
+            parsed = json.loads(raw) or {}
+        except ValueError as e:
+            raise RuntimeError(f"nix derivation show: bad __json: {e}") from None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("nix derivation show: __json is not an object")
+        features.update(_feature_words(parsed.get("requiredSystemFeatures")))
+    return bool(features & VM_FEATURES)
+
+
+def _drv_deps(entry, store_dir):
+    raw = entry.get("inputDrvs")
+    if raw is None:
+        raw = (entry.get("inputs") or {}).get("drvs")
+    if not isinstance(raw, dict):
+        raise RuntimeError("nix derivation show: entry has no inputDrvs")
+    return [k if "/" in k else os.path.join(store_dir, k) for k in raw]
+
+
+def _pending_drvs(drvs):
+    """Unbuilt .drv paths in drvs' closure, from a local dry-run (no substituter)."""
+    dry = nix("nix-store", "--realise", "--dry-run", "--option", "substitute", "false", *drvs, stderr=True)
+    pending, building_section = set(), False
+    for line in dry.splitlines():
+        s = line.strip()
+        if "will be built:" in s:
+            building_section = True
+        elif "will be fetched" in s or "don't know how to build" in s:
+            building_section = False
+        elif building_section and s.startswith("/") and s.endswith(".drv"):
+            pending.add(s)
+    return pending
+
+
 def inputs(drvs):
-    """The derivations drvs are built from, and every output of them:
-    ([drv, ...], [path, ...]). Raises when the store can't say."""
-    ins = sorted(p for p in nix("nix-store", "--query", "--references", *drvs).split() if p.endswith(".drv"))
+    """The unbuilt non-VM derivations drvs are built from, and every output
+    of them: ([drv, ...], [path, ...]). Descends through any derivation
+    whose unbuilt closure includes a kvm/nixos-test derivation (such as a
+    linkFarm of VM tests) so prebuild never runs VM tests outside proofSlots.
+    Raises when the store can't say."""
+    if not drvs:
+        return [], []
+    pending = _pending_drvs(drvs)
+    if not pending:
+        return [], []
+    store_dir = os.path.dirname(drvs[0])
+    pending_list = sorted(pending)
+    shown = {}
+    for i in range(0, len(pending_list), SHOW_BATCH):
+        raw = nix("nix", "--extra-experimental-features", "nix-command", "derivation", "show",
+                  *pending_list[i:i + SHOW_BATCH])
+        try:
+            body = json.loads(raw)
+        except ValueError as e:
+            raise RuntimeError(f"nix derivation show: {e}") from None
+        if not isinstance(body, dict):
+            raise RuntimeError("nix derivation show: expected JSON object")
+        entries = body["derivations"] if isinstance(body.get("derivations"), dict) else body
+        for k, v in entries.items():
+            shown[k if "/" in k else os.path.join(store_dir, k)] = v
+    vm_self, deps = {}, {}
+    for d in pending_list:
+        entry = shown.get(d)
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"nix derivation show: missing {d}")
+        vm_self[d] = _is_vm_drv(entry)
+        deps[d] = [c for c in _drv_deps(entry, store_dir) if c in pending]
+    has_vm = {}
+    for start in pending_list:
+        if start in has_vm:
+            continue
+        stack = [(start, False)]
+        while stack:
+            node, done = stack.pop()
+            if node in has_vm:
+                continue
+            if done:
+                has_vm[node] = vm_self[node] or any(has_vm.get(c, False) for c in deps[node])
+            else:
+                stack.append((node, True))
+                for c in deps[node]:
+                    if c not in has_vm:
+                        stack.append((c, False))
+    roots = set(drvs)
+    ins, seen, queue = set(), set(), [d for d in drvs if d in pending]
+    while queue:
+        node = queue.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        for c in deps[node]:
+            if c in roots or has_vm[c]:
+                queue.append(c)
+            else:
+                ins.add(c)
+    ins = sorted(ins)
     return ins, sorted(set(nix("nix-store", "--query", "--outputs", *ins).split())) if ins else []
 
 

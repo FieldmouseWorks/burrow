@@ -52,7 +52,7 @@ os.makedirs(f"{tmp}/nix")
 for tool in ("nix", "nix-store"):
     with open(f"{tmp}/nix/{tool}", "w") as f:
         f.write(f"""#!{sys.executable}
-import json, subprocess, sys, urllib.parse
+import json, os, subprocess, sys, urllib.parse
 a = sys.argv[1:]
 with open({NIX_LOG!r}, "a") as f:
     f.write(json.dumps([{tool!r}, *a]) + "\\n")
@@ -64,6 +64,49 @@ elif a[:2] == ["--query", "--references"]:
     print("\\n".join(r for d in a[2:] for r in know.get("refs", {{}}).get(d, [])))
 elif a[:2] == ["--query", "--outputs"]:
     print("\\n".join(o for d in a[2:] for o in know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])))
+elif a[:2] == ["--realise", "--dry-run"]:
+    roots = [x for x in a[2:] if x.endswith(".drv")]
+    pending, seen = [], set()
+    stack = list(roots)
+    while stack:
+        d = stack.pop()
+        if d in seen:
+            continue
+        seen.add(d)
+        outs = know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])
+        if any(o not in know["valid"] for o in outs):
+            pending.append(d)
+            stack.extend(know.get("refs", {{}}).get(d, []))
+    if pending:
+        print(f"these {{len(pending)}} derivations will be built:", file=sys.stderr)
+        for d in sorted(pending):
+            print(f"  {{d}}", file=sys.stderr)
+elif {tool!r} == "nix" and "derivation" in a and "show" in a:
+    if know.get("show_fail"):
+        print("error: derivation show failed", file=sys.stderr)
+        sys.exit(1)
+    drvs = a[a.index("show") + 1:]
+    classic = know.get("classic_show")
+    out = {{}}
+    for d in drvs:
+        feat = know.get("features", {{}}).get(d)
+        env = {{}}
+        entry = {{"env": env}}
+        if isinstance(feat, str):
+            env["requiredSystemFeatures"] = feat
+        elif isinstance(feat, dict):
+            if "structuredAttrs" in feat:
+                entry["structuredAttrs"] = {{"requiredSystemFeatures": feat["structuredAttrs"]}}
+            if "__json" in feat:
+                env["__json"] = json.dumps({{"requiredSystemFeatures": feat["__json"]}})
+        refs = know.get("refs", {{}}).get(d, [])
+        if classic:
+            entry["inputDrvs"] = {{r: ["out"] for r in refs}}
+            out[d] = entry
+        else:
+            entry["inputs"] = {{"drvs": {{os.path.basename(r): {{"outputs": ["out"]}} for r in refs}}}}
+            out[os.path.basename(d)] = entry
+    print(json.dumps(out if classic else {{"version": 4, "derivations": out}}))
 else:
     url, _, attr = a[-1].partition("#")
     u = urllib.parse.urlsplit(url)
@@ -82,7 +125,7 @@ X, Y, Z, W = (f"/nix/store/{c * 32}-proof-{c}" for c in "xyzw")
 VALID = [Z]
 
 
-def nix_knows(drvs=None, outs=None, refs=None):
+def nix_knows(drvs=None, outs=None, refs=None, features=None, show_fail=False, classic_show=False):
     """Each PR's derivation (by number, or by (number, attribute), or by a
     commit's tree as "tree:TREE"), a derivation's outputs where it has
     more than one, and the derivations one is built from (none unless
@@ -91,12 +134,14 @@ def nix_knows(drvs=None, outs=None, refs=None):
     json.dump({"drvs": {heads[k] if isinstance(k, int) else k if isinstance(k, str) else f"{heads[k[0]]}#{k[1]}.drvPath":
                         d + ".drv" for k, d in drvs.items()},
                "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID,
-               "refs": {d + ".drv": [r + ".drv" for r in rs] for d, rs in (refs or {}).items()}}, open(NIX, "w"))
+               "refs": {d + ".drv": [r + ".drv" for r in rs] for d, rs in (refs or {}).items()},
+               "features": {d + ".drv": f for d, f in (features or {}).items()},
+               "show_fail": show_fail, "classic_show": classic_show}, open(NIX, "w"))
     open(NIX_LOG, "w").close()
 
 
 def evals():
-    return [x for x in map(json.loads, open(NIX_LOG)) if x[0] == "nix"]
+    return [x for x in map(json.loads, open(NIX_LOG)) if x[0] == "nix" and "eval" in x]
 
 
 kept, kept_build = C.job, P.build
@@ -837,6 +882,47 @@ assert pr_state(1)["strikes"] == {"build": 1}, pr_state(1)
 assert "couldn't start" in line(1, 800) and JOBS == ["inputs"] and pr_state(1)["strikes"] == {"build": 2}, JOBS
 P.build_inputs = stub_inputs
 assert PRE in line(1, 900) and not pr_state(1)["strikes"], pr_state(1)
+# A linkFarm of VM tests (like checks/agents.nix) has VM derivations as its
+# direct references: prebuild descends past kvm/nixos-test derivations (and
+# any wrapper whose unbuilt closure contains one) to prebuild only their
+# non-VM driver inputs, never booting VMs outside proofSlots.
+VM1 = "/nix/store/" + "1" * 32 + "-vm-test-run-agents"
+VM2 = "/nix/store/" + "2" * 32 + "-vm-test-run-plugins"
+DRV1 = "/nix/store/" + "3" * 32 + "-nixos-test-driver-agents"
+DRV2 = "/nix/store/" + "4" * 32 + "-nixos-test-driver-plugins"
+OUTER = "/nix/store/" + "5" * 32 + "-all-proofs"
+FARM_REFS = {X: [VM1, VM2], VM1: [DRV1], VM2: [DRV2]}
+FARM_FEATS = {VM1: "kvm nixos-test", VM2: {"structuredAttrs": ["nixos-test"]}}
+fresh_pr_state()
+VALID[:] = []
+nix_knows(refs=FARM_REFS, features=FARM_FEATS)
+P.begin("sam/r", {1})
+status = line(1)
+assert PRE in status and JOBS == [f"inputs 1 {DRV1}.drv {DRV2}.drv"], (status, JOBS)
+# With the non-VM drivers already built, nothing is prebuilt (VM tests wait in line).
+fresh_pr_state()
+VALID[:] = [DRV1, DRV2]
+nix_knows(refs=FARM_REFS, features=FARM_FEATS)
+P.begin("sam/r", {1})
+status = line(1)
+assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+# Nested wrapper (outer -> linkFarm -> VM -> driver) and classic derivation-show
+# schema with env.__json: still descends past both wrappers and the VM.
+fresh_pr_state()
+VALID[:] = []
+nix_knows({1: OUTER}, refs={OUTER: [X], X: [VM1], VM1: [DRV1]},
+          features={VM1: {"__json": ["kvm"]}}, classic_show=True)
+P.begin("sam/r", {1})
+status = line(1)
+assert PRE in status and JOBS == [f"inputs 1 {DRV1}.drv"], (status, JOBS)
+# If derivation show fails, prebuild fails closed (skips prebuilding rather than
+# running an uninspected derivation that might boot VMs outside proofSlots).
+fresh_pr_state()
+VALID[:] = []
+nix_knows(refs=FARM_REFS, features=FARM_FEATS, show_fail=True)
+P.begin("sam/r", {1})
+status = line(1)
+assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
 P.build_inputs = kept_inputs
 
 del S.CFG["repos"]["sam/r"]
