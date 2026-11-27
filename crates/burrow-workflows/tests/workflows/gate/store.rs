@@ -255,18 +255,14 @@ impl Drop for RealStore {
 }
 
 fn make_writable(p: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
     let Ok(meta) = fs::symlink_metadata(p) else {
         return;
     };
-    if meta.file_type().is_symlink() {
+    if !meta.is_dir() {
         return;
     }
-    let mode = meta.permissions().mode();
-    let _ = fs::set_permissions(p, fs::Permissions::from_mode(mode | 0o700));
-    if meta.is_dir()
-        && let Ok(entries) = fs::read_dir(p)
-    {
+    burrow_test::permissions(p, 0o700);
+    if let Ok(entries) = fs::read_dir(p) {
         for entry in entries.flatten() {
             make_writable(&entry.path());
         }
