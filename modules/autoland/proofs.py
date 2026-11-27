@@ -47,11 +47,12 @@ program and system it boots, which builds beside the others' turns. That
 is a build of the steward's like the proof's, in a heavy slot like it,
 but with no verdict: it ends, and the PR takes its place in the line, as
 it would had nothing been built first. What it builds is each check
-derivation's own inputs (`nix-store --query --references`), every output
-of each, rooted in its folder for a day (KEEP_INPUTS) so they're there
-when the PR's turn comes; one whose inputs are all built already goes
-straight to the line. One for a head or checks its PR no longer has is
-stopped when the next starts.
+derivation's unbuilt non-VM inputs (descending through any derivation
+whose unbuilt closure builds a `kvm` or `nixos-test` derivation, such as
+a `linkFarm` of VM tests), every output of each, rooted in its folder for
+a day (KEEP_INPUTS) so they're there when the PR's turn comes; one with
+no unbuilt non-VM inputs goes straight to the line. One for a head or
+checks its PR no longer has is stopped when the next starts.
 
 A PR behind its base whose builds aren't in the store may have them there
 once it's brought up to date: most PRs change nothing a proof builds, so
@@ -80,6 +81,7 @@ import time
 
 import common as C
 import mirror as M
+import proof_inputs
 from common import CFG, STATE, load, log, save
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
@@ -145,10 +147,11 @@ def live(st):
     return moving
 
 
-def nix(*args, timeout=60):
-    """nix's stdout (for fast store queries; evals run in their own unit).
-    Inside a pass (REMOTE_DEADLINE set), runs through common.remote so a
-    stalled store can't carry a step past systemd's TimeoutStartSec."""
+def nix(*args, timeout=60, stderr=False):
+    """nix's stdout (or stderr when stderr=True), for fast store queries
+    (evals run in their own unit). Inside a pass (REMOTE_DEADLINE set),
+    runs through common.remote so a stalled store can't carry a step past
+    systemd's TimeoutStartSec."""
     cmd = [f"{CFG['nix']}/{args[0]}", *args[1:]]
     if C.REMOTE_DEADLINE is not None:
         p = C.remote(cmd, capture_output=True, text=True, timeout=timeout)
@@ -156,7 +159,7 @@ def nix(*args, timeout=60):
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
-    return p.stdout
+    return p.stderr if stderr else p.stdout
 
 
 def evaluable(repo, checks):
@@ -567,10 +570,12 @@ def start_run(repo, pr, checks, st):
 
 
 def inputs(drvs):
-    """The derivations drvs are built from, and every output of them:
-    ([drv, ...], [path, ...]). Raises when the store can't say."""
-    ins = sorted(p for p in nix("nix-store", "--query", "--references", *drvs).split() if p.endswith(".drv"))
-    return ins, sorted(set(nix("nix-store", "--query", "--outputs", *ins).split())) if ins else []
+    """The unbuilt non-VM derivations drvs are built from, and every output
+    of them: ([drv, ...], [path, ...]). Descends through any derivation
+    whose unbuilt closure includes a kvm/nixos-test derivation (such as a
+    linkFarm of VM tests) so prebuild never runs VM tests outside proofSlots.
+    Raises when the store can't say."""
+    return proof_inputs.inputs(drvs, nix)
 
 
 def prebuild(repo, pr, checks, st, stage):
