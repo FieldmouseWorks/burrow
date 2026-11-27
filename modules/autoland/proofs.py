@@ -829,6 +829,22 @@ def slot_free(repo, slots):
     return builds < slots
 
 
+def _verdict_settled(pr, st, jid):
+    if st.get("provedPosted") == jid:
+        return True
+    checks = (st.get("provedFor") or [None, ()])[1]
+    if not checks:
+        return False
+    nodes = (pr.get("commits") or {}).get("nodes") or []
+    rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
+    settled = {
+        c["context"].lower()
+        for c in (rollup.get("contexts") or {}).get("nodes", [])
+        if c.get("__typename") == "StatusContext" and c.get("state") != "PENDING" and c.get("context")
+    }
+    return all(c.lower() in settled for c in checks)
+
+
 def urgent(repo, pr, status_state, status_desc, free_slot):
     """Whether PR has a proof transition that should not wait behind the rest
     of a slow round: a verdict just posted waiting to land, a finished build or
@@ -842,6 +858,7 @@ def urgent(repo, pr, status_state, status_desc, free_slot):
         and (jid := st.get("provedJob"))
         and jid.startswith(C.BUILD)
         and not st.get("strikes", {}).get("status")
+        and not _verdict_settled(pr, st, jid)
         and C.build_state(jid) == "done"
     ):
         return True

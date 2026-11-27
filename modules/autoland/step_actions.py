@@ -405,7 +405,7 @@ class Actions:
             self.st["proofsLive"] = P.jobs(self.st)
             if self.running("proved") and not C.stop_job(jid):
                 self.st["stopping"] = list(dict.fromkeys(self.st.get("stopping", []) + [jid]))
-            for k in ("", "Job", "At", "Lost", "Again", "Broke", "For", "Unposted"):
+            for k in ("", "Job", "At", "Lost", "Again", "Broke", "For", "Unposted", "Posted"):
                 self.st.pop("proved" + k, None)
             self.ends.pop("proved", None)
         # A build or run of this head that's done: the verdicts it kept. What
@@ -430,6 +430,7 @@ class Actions:
                 done = "built" if builds else "ran"
                 if said_all and P.record(self.repo, self.pr, said):
                     self.st.pop("provedUnposted", None)
+                    self.st["provedPosted"] = jid
                     # Their statuses kick the pass that lands it, or hands it to a fix.
                     self.settle("pending", f"Settled; {names} {done} here, its verdict posted"[:140], stage=S.PROOF)
                     return

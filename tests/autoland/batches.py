@@ -173,11 +173,18 @@ with tempfile.TemporaryDirectory() as tmp:
             'proofPaths': {'proof-sam-r-5-head5-1': {'at': 1, 'paths': ['/nix/store/built-5']}},
         })
         r_prs.append(pr(5))
+        # A PR whose proof finished and already posted its verdict (e.g. behind
+        # its base) must not stay urgent ahead of unvisited PRs in the round.
+        C.save('pr-sam_r-6.json', {
+            'proved': 'head-6', 'provedJob': 'proof-sam-r-6-head6-1',
+            'provedPosted': 'proof-sam-r-6-head6-1',
+        })
+        r_prs.append(pr(6))
         C.save('pass-progress.json', {'repos': {'sam/r': {
-            'done': {'1': None, '2': None, '3': None, '4': None, '5': None},
-            'visits': {'1': 11, '2': 12, '3': 13, '4': 5, '5': 14},
+            'done': {'1': None, '2': None, '3': None, '4': None, '5': None, '6': None},
+            'visits': {'1': 11, '2': 12, '3': 13, '4': 5, '5': 14, '6': 15},
             'round': 10,
-            'sequence': 14,
+            'sequence': 15,
         }}})
         u_clock, u_handled = [0], []
 
@@ -196,7 +203,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S, 'branches', lambda *a, **k: None), (S, 'upkeep', lambda *a: None),
                 (C, 'follow_renames', lambda *a: None), (C, 'taken', lambda *a: None),
                 (C, 'coverage', lambda rs, done: {}), (C, 'poke', lambda *a: None),
-                (C, 'build_state', lambda jid: 'done' if jid == 'proof-sam-r-2-head2-1' else ('running' if jid == 'proof-sam-r-5-head5-1' else None)),
+                (C, 'build_state', lambda jid: 'done' if jid in ('proof-sam-r-2-head2-1', 'proof-sam-r-6-head6-1') else ('running' if jid == 'proof-sam-r-5-head5-1' else None)),
                 (S.P, 'unbuilt', lambda paths: set()),
             ):
                 stack.enter_context(patch.object(obj, name, value))
