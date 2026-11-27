@@ -240,6 +240,36 @@ def retire_deleted(known, failed, digest):
             digest[x["name"]] = [(C.RETIRING, x["name"], f"{x['for']} took on its name, and gets no job until this is done (journalctl -u autoland)")]
 
 
+def carry_digest(repo, previous, *, left=None, ran_default=False, ran_branches=False, ran_upkeep=False, ran_taken=False):
+    """Previously published digest entries whose owning step did not run
+    cleanly in this pass. A yielded slice or failed read must not drop
+    unvisited PR or deferred upkeep/branch notices and flap the stuck issue."""
+    if not previous:
+        return []
+    pr_prefix = f"[{repo}#"
+    default_line = f"[{repo}](https://github.com/{repo})"
+    branch_prefix = f"{repo}: "
+    left_prefixes = tuple(f"[{repo}#{pr['number']}](" for pr in (left or ()))
+    kept = []
+    for entry in previous:
+        why, line, _ = entry
+        if line.startswith(pr_prefix):
+            if left is None or line.startswith(left_prefixes):
+                kept.append(entry)
+        elif line == default_line:
+            if not ran_default:
+                kept.append(entry)
+        elif why == C.TAKEN:
+            if not ran_taken:
+                kept.append(entry)
+        elif line.startswith(branch_prefix):
+            if not ran_branches:
+                kept.append(entry)
+        elif not ran_upkeep:
+            kept.append(entry)
+    return kept
+
+
 def run_pass(kick, continuing=False):
     waits.begin()
     batch = Batch(kick, continuing)
@@ -265,6 +295,7 @@ def run_pass(kick, continuing=False):
     failed = load("baseline-failed.json", {})
     started = 0
     # What waits for the owner, by repo: a kicked pass replaces its repos'.
+    was_digest = load("digest-repos.json", {})
     digest = {}
     if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
@@ -282,16 +313,21 @@ def run_pass(kick, continuing=False):
         deferred.add(repo)
         operations_complete = True
         seen_all = True  # its PRs: False once its look fails short of them
+        previous = [tuple(x) for x in was_digest.get(repo, ())]
+        left = None
+        ran_default = False
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
                 # First: nothing of a deleted repo's may act on the one that
                 # took its name, so until that's done nothing else is.
-                R.restart(r, known, failed)
+                if R.restart(r, known, failed):
+                    previous = []
             except Exception as e:
                 log(f"{repo}: starting it over as new: {e}")
                 waits.failed(repo, op="restart")
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                digest[repo] = previous
                 batch.finish(repo)
                 continue
             waits.passed(repo, "restart")
@@ -326,6 +362,9 @@ def run_pass(kick, continuing=False):
                     waits.read(repo, [])
                     upkeep(repo, mine)
                     waits.passed(repo, "upkeep")
+                    digest[repo] = [*mine, *carry_digest(
+                        repo, previous, left=(), ran_default=True, ran_branches=True,
+                        ran_upkeep=waits.ran(repo, "upkeep"), ran_taken=True)]
                     batch.finish(repo)
                     deferred.discard(repo)
                     continue
@@ -346,7 +385,10 @@ def run_pass(kick, continuing=False):
                 waits.read(repo, prs)
                 pending = batch.pending(repo, prs, mine, info)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
+                default_line = f"[{repo}](https://github.com/{repo})"
+                mine[:] = [x for x in mine if x[1] != default_line]
                 held = R.watch_default(r, info, prs, mine) or {}
+                ran_default = True
                 pending = [pr for pr in prs if pr in pending or pr["number"] in held]
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
@@ -397,6 +439,7 @@ def run_pass(kick, continuing=False):
                 if partial or batch.expired():
                     complete = False
                     batch.left = True
+                    digest[repo] = [*mine, *carry_digest(repo, previous, left=left, ran_default=True)]
                     continue
                 op = "train"
                 # Complete: the branches of the PRs seen to in earlier
@@ -439,6 +482,10 @@ def run_pass(kick, continuing=False):
             waits.passed(repo, "upkeep")
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
+            digest[repo] = [*mine, *carry_digest(
+                repo, previous, left=left, ran_default=ran_default,
+                ran_branches=waits.ran(repo, "branches"),
+                ran_upkeep=waits.ran(repo, "upkeep"), ran_taken=True)]
             if operations_complete:
                 batch.finish(repo, seen_all)
                 deferred.discard(repo)
@@ -467,7 +514,7 @@ def run_pass(kick, continuing=False):
              if k.lower() not in visited and (k == "" or k.lower() in names or v > C.NOW)
              and (k != "" or kick is not None or continuing or v > C.NOW)}
     save("wake.json", {**wakes, **C.WAKE})
-    digest = {**{k: v for k, v in load("digest-repos.json", {}).items()
+    digest = {**{k: v for k, v in was_digest.items()
                  if k not in seen and (kick is not None or k in inventory)}, **digest}
     digest = {k: list(dict.fromkeys(tuple(x) for x in v)) for k, v in digest.items()}
     save("digest-repos.json", digest)

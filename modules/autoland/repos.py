@@ -91,11 +91,14 @@ def restart(r, known, failed):
     anything acts on it, when the settings the steward last set under its
     name were another repo's (C.replaced). Then `reset`."""
     repo = r["repo"]
+    restarted = False
     for k, st in C.kept_state(repo):
         if C.replaced(st, r):
             log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+            restarted = True
             if not DRY:
                 reset(r, k, known, failed)
+    return restarted
 
 
 def reset(r, k, known, failed):
