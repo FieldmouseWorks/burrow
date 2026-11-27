@@ -65,22 +65,27 @@ let
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
   };
-  # The settings burrow leaves to Conary's defaults, each with why. A config
-  # has every other key of Settings, as the pinned Conary's own schema
-  # (`burrow-flow-files schema`) lists them, not a list written here: a pin
-  # follow that adds a setting fails this check until burrow renders it or
-  # says here why its default is burrow's too. Conary's defaults name no
-  # machine (Conary#381), so the engines a judge is owed for and the bots'
-  # addresses are the steward's own.
+  # The settings burrow leaves to Conary's defaults, each with why and the
+  # default it relies on. A config has every other key of Settings, as the
+  # pinned Conary's own schema (`burrow-flow-files schema`) lists them, not
+  # a list written here, and the pin's default for each of these is the one
+  # held here: a pin follow that adds a setting, or changes the default of
+  # one left to it, fails this check until burrow renders it or says here
+  # why the new default is burrow's too. Conary's defaults name no machine
+  # (Conary#381), so the engines a judge is owed for and the bots' addresses
+  # are the steward's own.
   defaulted = {
-    default_priority = "the steward's one priority is its first label: an unlabelled PR is at Conary's medium";
-    deferred = "the steward defers no check until review is ready, and Conary's default defers none";
-    disputed_p2 = "undecided: the steward has no rule for a re-raised P2 or P3, and Conary's block holds it as any finding (burrow#1602)";
-    fix_growth = "the steward hands no PR over for what its fix rounds add, nor does Conary's default";
-    judge_key = "a seal key is named by its file, never written in the config";
-    major_key = "a seal key is named by its file, never written in the config";
-    judge_key_file = "only a machine with the judge's seal has one, and the example has none";
-    renovate_run = "undecided: the steward waits Renovate's own timeout (renovateRun), the flow Conary's default (burrow#1602)";
+    default_priority = { default = "medium"; why = "the steward's one priority is its first label: an unlabelled PR is at Conary's medium"; };
+    deferred = {
+      default = { attempts = 3; checks = { }; run_timeout = 21600; start_timeout = 900; };
+      why = "the steward defers no check until review is ready, and Conary's default defers none";
+    };
+    disputed_p2 = { default = "block"; why = "undecided, for FieldmouseWorks/burrow#1612: the steward has no rule for a re-raised P2 or P3"; };
+    fix_growth = { default = null; why = "the steward hands no PR over for what its fix rounds add, nor does Conary's default"; };
+    judge_key = { default = null; why = "a seal key is named by its file, never written in the config"; };
+    major_key = { default = null; why = "a seal key is named by its file, never written in the config"; };
+    judge_key_file = { default = null; why = "only a machine with the judge's seal has one, and the example has none"; };
+    renovate_run = { default = 7200; why = "undecided, for FieldmouseWorks/burrow#1612: the steward waits Renovate's own timeout (renovateRun)"; };
   };
   wiring = {
     # The reviewer's protocol, as `cn` is told it, on every writer of the
@@ -146,6 +151,9 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e --argjson d '${builtins.toJSON (lib.attrNames defaulted)}' \
     '(."$defs".Settings.properties | keys) as $s | ($d - $s) == [] and ($s | length) > ($d | length)' schema.json >/dev/null \
     || fail "a setting left to Conary's default isn't one of the pin's: $(jq -c '."$defs".Settings.properties | keys' schema.json)"
+  jq -e --argjson d '${builtins.toJSON (lib.mapAttrs (_: e: e.default) defaulted)}' \
+    '.properties.settings.default as $p | [$d | to_entries[] | .key as $k | select(($p | has($k) | not) or $p[$k] != .value)] == []' schema.json >/dev/null \
+    || fail "the pin's default changed for a setting left to it: $(jq -c --argjson d '${builtins.toJSON (lib.mapAttrs (_: e: e.default) defaulted)}' '.properties.settings.default as $p | [$d | to_entries[] | select($p[.key] != .value) | {key, held: .value, pin: $p[.key]}]' schema.json)"
   jq -c --argjson d '${builtins.toJSON (lib.attrNames defaulted)}' \
     '{settings: ((."$defs".Settings.properties | keys) - $d), stages: (."$defs".StageLabels.properties | keys)}' schema.json > pinned.json
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
