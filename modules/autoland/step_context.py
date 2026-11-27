@@ -39,7 +39,7 @@ STRIKES = {
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 # What a status run takes from the live passes' state of a PR (Context).
-LIVE_FACTS = ("strikes", "proofOutputs", "mergedOutputs", "proofEval", "mergedEval")
+LIVE_FACTS = ("strikes", "proofOutputs", "mergedOutputs", "proofEval", "mergedEval", "evalStruckAt")
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 CHECKS_START = 5 * 60  # how long GitHub gets to show a new head's first check
 # What the steward's own proofs are doing while they're at work.
