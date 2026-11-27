@@ -67,6 +67,8 @@ pub(crate) enum Unseen {
     /// Its job was stopped when its labels parked it: only an engine label
     /// put back on takes it up again.
     Parked,
+    /// An open closing PR already carries this issue.
+    Carried(String),
     /// GitHub has refused to list its repo since then.
     Unlisted(i64),
     /// Nothing is kept of it here, and GitHub wasn't asked or didn't say.
@@ -91,6 +93,7 @@ impl fmt::Display for Unseen {
             Unseen::Parked => {
                 f.write_str("its job was stopped when its labels parked it")
             }
+            Unseen::Carried(pr) => write!(f, "open closing PR {pr} already carries it"),
             Unseen::Unlisted(since) => write!(
                 f,
                 "GitHub has refused to list its repo since {}",
@@ -147,6 +150,8 @@ pub(crate) enum Wait {
     Paused,
     /// GitHub's quota, resetting then.
     Quota(i64),
+    /// An open closing PR that already carries this issue.
+    ClosingPr(String),
     /// The inbox's next pass that reaches GitHub.
     Pass,
 }
@@ -167,6 +172,7 @@ impl Wait {
             Wait::Stuck(what) => format!("its plan, which can't go on: {what}"),
             Wait::Paused => "its repo's pause".into(),
             Wait::Quota(_) => "GitHub's quota".into(),
+            Wait::ClosingPr(pr) => format!("open closing PR {pr}"),
             Wait::Pass => "the inbox's next pass".into(),
         }
     }
@@ -190,6 +196,7 @@ impl Wait {
             Wait::Stuck(_) => "someone putting its task list right: the inbox can't".into(),
             Wait::Paused => "the settings allowing its repo again".into(),
             Wait::Quota(reset) => format!("the quota resetting at {}", usage::when(*reset)),
+            Wait::ClosingPr(_) => "that PR merging or closing without closing the issue".into(),
             Wait::Pass => "an event on its repo, or the pass the inbox booked for it".into(),
         }
     }
@@ -459,6 +466,17 @@ impl Look<'_, '_> {
             }
         }
         let waiting = files::sorting_waits(state).join(format!("{}-{n}", k.to_lowercase()));
+        if let Some(pr) = files::carried(state, &k, n) {
+            return Record::new(
+                &name,
+                Stage::Unseen(Unseen::Carried(pr.clone())),
+                format!(
+                    "nothing while {pr} is open; if it closes without closing the issue, the inbox's next pass takes it up"
+                ),
+            )
+            .since(files::carried_since(state, &k, n))
+            .waiting(Wait::ClosingPr(pr));
+        }
         if waiting.exists() {
             let r = Record::new(
                 &name,
@@ -931,6 +949,7 @@ pub(super) fn observer<'a>(cfg: &'a Config, inbox: &'a crate::config::Inbox) -> 
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        closing_prs: BTreeMap::new(),
     }
 }
 

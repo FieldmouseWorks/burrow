@@ -162,6 +162,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.j
             scope: None,
             drain_at: None,
             skipped: Vec::new(),
+            closing_prs: BTreeMap::new(),
         }
     }
 

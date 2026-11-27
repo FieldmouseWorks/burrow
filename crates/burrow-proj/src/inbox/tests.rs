@@ -53,6 +53,7 @@ fn pass(cfg: &Config) -> Pass<'_> {
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        closing_prs: BTreeMap::new(),
     }
 }
 

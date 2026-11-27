@@ -55,6 +55,29 @@ pub(in crate::inbox) fn retired_root(state: &Path) -> PathBuf {
 pub(in crate::inbox) fn drain_waiting(state: &Path) -> PathBuf {
     state.join(".drain-waiting")
 }
+/// Issues skipped because an open closing PR already carries them.
+pub(in crate::inbox) fn carried_root(state: &Path) -> PathBuf {
+    state.join(".carried")
+}
+/// One carried issue's record file (`OWNER/REPO#N\tPR-URL`).
+pub(in crate::inbox) fn carried_path(state: &Path, key: &str, n: &str) -> PathBuf {
+    carried_root(state).join(format!("{}-{n}", key.to_lowercase()))
+}
+/// The open closing PR carrying `key#n`, if recorded.
+pub(in crate::inbox) fn carried(state: &Path, key: &str, n: &str) -> Option<String> {
+    carried_entry(&carried_path(state, key, n)).map(|(_, pr)| pr)
+}
+/// `(issue, pr_url)` from a `.carried/` record file.
+pub(in crate::inbox) fn carried_entry(path: &Path) -> Option<(String, String)> {
+    let text = read(path)?;
+    let (issue, pr) = text.split_once('\t')?;
+    let pr = pr.trim();
+    (!issue.is_empty() && !pr.is_empty()).then(|| (issue.to_owned(), pr.to_owned()))
+}
+/// When `key#n` was recorded as carried by an open closing PR.
+pub(in crate::inbox) fn carried_since(state: &Path, key: &str, n: &str) -> Option<i64> {
+    mtime(&carried_path(state, key, n))
+}
 /// A file in an issue's record folder: its worker record, its sorting
 /// record, or a retired one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -882,6 +882,19 @@ impl Pass<'_> {
             && self.engine(&issue).is_none()
             && !self.has_task_list(Some(repo), &child.to_string())
         {
+            match self.check_open_closing_pr(repo, &child.to_string()) {
+                super::closing_pr::OpenClosingPr::None => {}
+                super::closing_pr::OpenClosingPr::Open(pr) => {
+                    self.reconcile_notice(repo, n, None);
+                    return Hold::Yes(format!(
+                        "its next child #{child} is carried by open closing PR {pr}"
+                    ));
+                }
+                super::closing_pr::OpenClosingPr::Unknown => {
+                    self.miss(repo);
+                    return Hold::Unknown;
+                }
+            }
             if !self.add_label(repo, &child.to_string(), "ready")
                 || !self.remove_label(repo, &child.to_string(), "later")
             {

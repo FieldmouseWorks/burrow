@@ -107,6 +107,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         },
         drain_at: None,
         skipped: Vec::new(),
+        closing_prs: BTreeMap::new(),
     };
     // `drain`: the drain's own pass, from the saved ready lists alone.
     let result = if only == "drain" {
@@ -139,6 +140,9 @@ fn status(cfg: &Config, inbox: &Inbox) {
     for (issue, id) in record::observer(cfg, inbox).kept_jobs() {
         let st = Job::new(cfg, &id).state();
         println!("{issue:<40} {st:<8} {id}");
+    }
+    for (issue, pr) in closing_pr::carried_prs(cfg) {
+        println!("{issue:<40} {:<8} {pr}", "carried");
     }
 }
 
@@ -277,6 +281,8 @@ struct Pass<'a> {
     /// open issue to a later pass (scope.rs): it says nothing of whether
     /// that listing reaches GitHub again.
     skipped: Vec<String>,
+    /// Cached open closing-PR lookups for this pass, keyed by `(repo_lower, n)`.
+    closing_prs: BTreeMap<(String, u64), Option<Option<String>>>,
 }
 
 impl Pass<'_> {
@@ -623,6 +629,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         // anything: a dry quota can't keep a finished sorting job's slot.
         self.settle();
         self.prune_planner_waits()?;
+        self.prune_carried_prs()?;
         let repos: Vec<(String, String)> = self
             .project
             .iter()
@@ -660,6 +667,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             };
             if !self.cfg.paused(&repo) {
+                self.reconcile_carried_prs(&repo, all.as_deref())?;
                 self.new_issues(&repo, &open)?;
             }
             self.jobs(&repo, &p, &open)?;
@@ -679,6 +687,9 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                             self.miss(&repo);
                             continue;
                         };
+                        if !self.cfg.paused(&repo) {
+                            self.reconcile_carried_closed(&repo, &all)?;
+                        }
                         all
                     }
                 };
@@ -881,6 +892,8 @@ fn say(f: Fail) {
 
 mod answers;
 mod claims;
+mod closing_pr;
+pub(crate) use closing_pr::carried_lines;
 mod drain;
 pub(crate) mod enrollment;
 pub(crate) use drain::job_paused;
@@ -899,6 +912,8 @@ mod sorting_questions;
 mod triage;
 mod write;
 
+#[cfg(test)]
+mod closing_pr_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]

@@ -265,6 +265,9 @@ pub struct Holds {
     pub pipeline: Pipeline,
     /// The inbox's triage; none when it's off.
     pub triage: Option<Triage>,
+    /// Issues skipped because an open closing PR already carries them.
+    #[serde(default)]
+    pub carried: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -392,6 +395,9 @@ impl Snapshot {
             for w in &t.waiting {
                 out += &format!("sorting: {w}\n");
             }
+        }
+        for c in &self.holds.carried {
+            out += &format!("carried: {c}\n");
         }
         for (i, r) in self.queue.iter().take(5).enumerate() {
             out += &format!("ready {}: {}#{}\n", i + 1, r.repo, r.number);
@@ -704,6 +710,7 @@ fn holds(cfg: &Config) -> Holds {
                 sorting_at_once: t.at_once,
                 waiting: crate::inbox::record::sorting_waits(cfg),
             }),
+        carried: crate::inbox::carried_lines(cfg),
     }
 }
 

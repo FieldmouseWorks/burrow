@@ -221,6 +221,14 @@
       "description": "What's configured to hold work back, where it lives today (the config\nmodules/proj.nix writes).",
       "type": "object",
       "properties": {
+        "carried": {
+          "description": "Issues skipped because an open closing PR already carries them.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "paused": {
           "description": "Repos whose automated work is paused.",
           "type": "array",

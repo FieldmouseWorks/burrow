@@ -343,6 +343,19 @@ impl Pass<'_> {
             {
                 continue;
             }
+            match self.check_open_closing_pr(repo, &n) {
+                super::closing_pr::OpenClosingPr::None => {}
+                super::closing_pr::OpenClosingPr::Open(_) => {
+                    if files::drained(&d) && !files::has_job(&d) {
+                        let _ = fs::remove_dir_all(&d);
+                    }
+                    continue;
+                }
+                super::closing_pr::OpenClosingPr::Unknown => {
+                    self.miss(repo);
+                    continue;
+                }
+            }
             let id = match self.start(repo, issue, &comments) {
                 Ok(id) => id,
                 Err(f) => {
