@@ -54,10 +54,14 @@ fn sweep(jobs: &Path) -> ExitCode {
     for (name, why) in &done.held {
         eprintln!("burrow-scratch: {} stays: {why}", name.to_string_lossy());
     }
-    if !done.held.is_empty() {
+    // A stuck entry is the notice's, and the sweep succeeded. A held one is
+    // still under the watched name and no notice reads it: the unit fails,
+    // for the failed-unit watchdog, after a pause so the path unit (which
+    // starts it again while the name is there) never hits its trigger limit.
+    if done.failed() {
         sleep(PAUSE);
+        return ExitCode::FAILURE;
     }
-    // A stuck entry is the notice's, not a failed unit: the sweep did its job.
     ExitCode::SUCCESS
 }
 

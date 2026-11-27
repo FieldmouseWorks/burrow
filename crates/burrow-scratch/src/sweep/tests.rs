@@ -112,6 +112,8 @@ fn what_it_cant_remove_goes_stuck_and_the_rest_still_goes() {
     );
     // Out of the watched name, with what could go gone.
     assert_eq!(names(&jobs), [".stuck-ro-2.1"]);
+    // Stuck is out of the watched name and noticed: not a failed sweep.
+    assert!(!done.failed());
     assert_eq!(
         fs::read_dir(jobs.join(".stuck-ro-2.1/web"))
             .unwrap()
@@ -143,4 +145,19 @@ fn a_jobs_dir_that_is_a_link_is_refused() {
     assert!(sweep(&link).is_err());
     assert!(sweep(&root.path().join("jobs/../jobs")).is_err());
     assert_eq!(names(&jobs), [".gone-a-1"]);
+}
+
+// Only what it leaves under the watched name fails it: nothing else notices.
+#[test]
+fn a_sweep_fails_only_on_what_it_leaves_under_the_watched_name() {
+    let why = || "why".to_owned();
+    let mut done = Sweep {
+        removed: vec![".gone-a".into()],
+        stuck: vec![(".stuck-b".into(), why())],
+        still: vec![(".stuck-c".into(), why())],
+        held: vec![],
+    };
+    assert!(!done.failed());
+    done.held.push((".gone-d".into(), why()));
+    assert!(done.failed());
 }

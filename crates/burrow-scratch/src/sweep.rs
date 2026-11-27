@@ -43,6 +43,16 @@ pub struct Sweep {
     pub held: Vec<(OsString, String)>,
 }
 
+impl Sweep {
+    /// Whether the sweep failed: it left a watched name behind, which nothing
+    /// will ever notice (the notices read only stuck names), so its unit
+    /// fails and the machine's failed-unit watchdog takes it. A stuck entry
+    /// isn't a failure: it's out of the watched name, and noticed.
+    pub fn failed(&self) -> bool {
+        !self.held.is_empty()
+    }
+}
+
 /// Removes each direct child of `jobs` whose name starts with [`GONE`] or
 /// [`STUCK`]; renames a [`GONE`] one it can't remove to [`STUCK`]. Fails only
 /// when `jobs` itself can't be opened or read.
@@ -132,6 +142,8 @@ fn remove(parent: &OwnedFd, name: &OsStr, at: &Path, depth: usize) -> Result<(),
         Err(e) => return Err(said(e)),
     };
     let kind = rfs::fstat(&pinned).map_err(said)?;
+    // Its type is all it's for: a level holds one descriptor, the dir's below.
+    drop(pinned);
     if FileType::from_raw_mode(kind.st_mode) != FileType::Directory {
         return gone(rfs::unlinkat(parent, name, AtFlags::empty()));
     }
