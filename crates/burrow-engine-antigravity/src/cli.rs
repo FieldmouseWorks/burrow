@@ -596,130 +596,59 @@ fn prepare_credential(
     }
 }
 
-/// Run one headless `antigravity` invocation in its own process group.
-///
-/// When `stop()` returns `true` or the outer deadline elapses, the entire child
-/// process group is killed and reaped immediately via `burrow-process`.
-#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
-pub fn run_invocation(
-    config: &Config,
-    invocation: &Invocation,
-    stop: &dyn Fn() -> bool,
-) -> TurnOutput {
-    run_invocation_streaming(config, invocation, stop, None)
+fn process_failed(message: String) -> TurnOutput {
+    TurnOutput {
+        error: Some(RunError::ProcessFailed {
+            exit_code: None,
+            signal: None,
+            message,
+        }),
+        ..TurnOutput::default()
+    }
 }
 
-/// Like [`run_invocation`], scrubbing and normalizing each complete stdout line
-/// via `on_step` as it arrives and preserving any partial session/usage on
-/// timeout or cancellation.
-pub fn run_invocation_streaming(
+/// In host mode, always run in a private `$HOME` (regardless of credential
+/// mode) so interactive desktop or T3 userdata in the real `$HOME` is never
+/// read or overwritten. When `PROJ_ENGINE_HOME` is provided by `burrow-proj`,
+/// persist that per-job directory across turns so `--conversation` resumes
+/// find prior Antigravity session state; otherwise use a per-turn tempdir.
+fn prepare_isolated_host_home(
     config: &Config,
     invocation: &Invocation,
-    stop: &dyn Fn() -> bool,
-    mut on_step: Option<&mut dyn FnMut(StreamStep)>,
-) -> TurnOutput {
-    // A schema that can't be held to is refused before the child runs: never
-    // "any JSON will do".
-    let schema = match invocation
-        .json_schema
-        .as_deref()
-        .map(Schema::compile)
-        .transpose()
-    {
-        Ok(schema) => schema,
-        Err(why) => {
-            return TurnOutput {
-                error: Some(RunError::ProcessFailed {
-                    exit_code: None,
-                    signal: None,
-                    message: why,
-                }),
-                ..TurnOutput::default()
-            };
-        }
-    };
-    let orig_home = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
+    orig_home: Option<&Path>,
+) -> Result<Option<IsolatedHostHome>, String> {
+    if !config.host_mode || invocation.home_dir.is_some() {
+        return Ok(None);
+    }
+    let persistent = std::env::var_os(HOST_HOME_ENV)
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    // In host mode, always run in a private `$HOME` (regardless of credential
-    // mode) so interactive desktop or T3 userdata in the real `$HOME` is never
-    // read or overwritten. When `PROJ_ENGINE_HOME` is provided by `burrow-proj`,
-    // persist that per-job directory across turns so `--conversation` resumes
-    // find prior Antigravity session state; otherwise use a per-turn tempdir.
-    let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
-        let persistent = std::env::var_os(HOST_HOME_ENV)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from);
-        if let Some(dir) = persistent {
-            match prepare_persistent_host_home(&dir, orig_home.as_deref()) {
-                Ok(dir) => Some(IsolatedHostHome::Persistent(dir)),
-                Err(message) => {
-                    return TurnOutput {
-                        error: Some(RunError::ProcessFailed {
-                            exit_code: None,
-                            signal: None,
-                            message,
-                        }),
-                        ..TurnOutput::default()
-                    };
-                }
-            }
-        } else {
-            match tempfile::Builder::new()
-                .prefix("antigravity-host-home-")
-                .tempdir()
-                .and_then(|dir| {
-                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
-                    Ok(dir)
-                }) {
-                Ok(dir) => Some(IsolatedHostHome::Temp(dir)),
-                Err(e) => {
-                    return TurnOutput {
-                        error: Some(RunError::ProcessFailed {
-                            exit_code: None,
-                            signal: None,
-                            message: format!("failed to create isolated host HOME: {e}"),
-                        }),
-                        ..TurnOutput::default()
-                    };
-                }
-            }
-        }
+    if let Some(dir) = persistent {
+        prepare_persistent_host_home(&dir, orig_home).map(|d| Some(IsolatedHostHome::Persistent(d)))
     } else {
-        None
-    };
-    let effective_home = invocation
-        .home_dir
-        .clone()
-        .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
-    let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
-    let cleanup_home_file = isolated_host_home
-        .as_ref()
-        .is_some_and(IsolatedHostHome::is_persistent);
-    let prepared = match prepare_credential(config, resolved_home.as_deref(), cleanup_home_file) {
-        Ok(p) => p,
-        Err(why) => {
-            return TurnOutput {
-                error: Some(RunError::ProcessFailed {
-                    exit_code: None,
-                    signal: None,
-                    message: why,
-                }),
-                ..TurnOutput::default()
-            };
-        }
-    };
+        tempfile::Builder::new()
+            .prefix("antigravity-host-home-")
+            .tempdir()
+            .and_then(|dir| {
+                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                Ok(dir)
+            })
+            .map(|d| Some(IsolatedHostHome::Temp(d)))
+            .map_err(|e| format!("failed to create isolated host HOME: {e}"))
+    }
+}
 
-    let mut command = Command::new(&config.binary);
-    command
-        .args(build_args(invocation))
-        .current_dir(&invocation.workdir);
-
-    if let Some(home) = &effective_home {
+fn configure_command_env(
+    command: &mut Command,
+    config: &Config,
+    effective_home: Option<&Path>,
+    isolated_host_home: bool,
+    orig_home: Option<&Path>,
+    prepared: &PreparedCredential,
+) {
+    if let Some(home) = effective_home {
         command.env("HOME", home);
-        if isolated_host_home.is_some()
-            && let Some(real_home) = &orig_home
-        {
+        if isolated_host_home && let Some(real_home) = orig_home {
             let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .filter(|p| p.is_absolute())
@@ -787,27 +716,97 @@ pub fn run_invocation_streaming(
     if let Some((key, val)) = &prepared.env_var {
         command.env(key, val);
     }
+}
+
+/// In `stream-json` input mode, deliver the prompt as a single NDJSON
+/// `{"event":"user","message":{"content":...}}` line on stdin (which
+/// `stream_unless` closes immediately on write, and binds to `/dev/null`
+/// when empty). In single-shot `json`/`text` mode, `--print=<prompt>` carries
+/// the prompt and stdin stays `/dev/null`.
+fn build_stdin_payload(invocation: &Invocation) -> Option<Vec<u8>> {
+    if uses_stream_json_stdin(invocation) && !invocation.prompt.is_empty() {
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "event": "user",
+            "message": { "content": invocation.prompt },
+        }))
+        .expect("stream-json user prompt serialization cannot fail");
+        line.push(b'\n');
+        Some(line)
+    } else {
+        None
+    }
+}
+
+/// Run one headless `antigravity` invocation in its own process group.
+///
+/// When `stop()` returns `true` or the outer deadline elapses, the entire child
+/// process group is killed and reaped immediately via `burrow-process`.
+pub fn run_invocation(
+    config: &Config,
+    invocation: &Invocation,
+    stop: &dyn Fn() -> bool,
+) -> TurnOutput {
+    run_invocation_streaming(config, invocation, stop, None)
+}
+
+/// Like [`run_invocation`], scrubbing and normalizing each complete stdout line
+/// via `on_step` as it arrives and preserving any partial session/usage on
+/// timeout or cancellation.
+pub fn run_invocation_streaming(
+    config: &Config,
+    invocation: &Invocation,
+    stop: &dyn Fn() -> bool,
+    mut on_step: Option<&mut dyn FnMut(StreamStep)>,
+) -> TurnOutput {
+    // A schema that can't be held to is refused before the child runs: never
+    // "any JSON will do".
+    let schema = match invocation
+        .json_schema
+        .as_deref()
+        .map(Schema::compile)
+        .transpose()
+    {
+        Ok(schema) => schema,
+        Err(why) => return process_failed(why),
+    };
+    let orig_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    let isolated_host_home =
+        match prepare_isolated_host_home(config, invocation, orig_home.as_deref()) {
+            Ok(dir) => dir,
+            Err(message) => return process_failed(message),
+        };
+    let effective_home = invocation
+        .home_dir
+        .clone()
+        .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
+    let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
+    let cleanup_home_file = isolated_host_home
+        .as_ref()
+        .is_some_and(IsolatedHostHome::is_persistent);
+    let prepared = match prepare_credential(config, resolved_home.as_deref(), cleanup_home_file) {
+        Ok(p) => p,
+        Err(why) => return process_failed(why),
+    };
+
+    let mut command = Command::new(&config.binary);
+    command
+        .args(build_args(invocation))
+        .current_dir(&invocation.workdir);
+    configure_command_env(
+        &mut command,
+        config,
+        effective_home.as_deref(),
+        isolated_host_home.is_some(),
+        orig_home.as_deref(),
+        &prepared,
+    );
 
     let deadline = config
         .deadline_secs
         .map(|secs| Instant::now() + Duration::from_secs(secs));
-    // In `stream-json` input mode, deliver the prompt as a single NDJSON
-    // `{"event":"user","message":{"content":...}}` line on stdin (which
-    // `stream_unless` closes immediately on write, and binds to `/dev/null`
-    // when empty). In single-shot `json`/`text` mode, `--print=<prompt>` carries
-    // the prompt and stdin stays `/dev/null`.
-    let stdin_payload: Option<Vec<u8>> =
-        if uses_stream_json_stdin(invocation) && !invocation.prompt.is_empty() {
-            let mut line = serde_json::to_vec(&serde_json::json!({
-                "event": "user",
-                "message": { "content": invocation.prompt },
-            }))
-            .expect("stream-json user prompt serialization cannot fail");
-            line.push(b'\n');
-            Some(line)
-        } else {
-            None
-        };
+    let stdin_payload = build_stdin_payload(invocation);
     let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
     let mut forwarder = StreamForwarder::for_continuation(invocation.conversation.as_deref());
     let mut on_stdout_line = |line: &str| {
@@ -840,13 +839,6 @@ pub fn run_invocation_streaming(
         Err(err) if err.reason == "command exceeded its time limit" => {
             partial_turn_output(&err.stdout, RunError::TimedOut, &secrets)
         }
-        Err(err) => TurnOutput {
-            error: Some(RunError::ProcessFailed {
-                exit_code: None,
-                signal: None,
-                message: crate::normalize::scrub(&err.reason, &secrets),
-            }),
-            ..TurnOutput::default()
-        },
+        Err(err) => process_failed(crate::normalize::scrub(&err.reason, &secrets)),
     }
 }

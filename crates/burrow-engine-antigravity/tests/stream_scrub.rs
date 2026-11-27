@@ -84,6 +84,38 @@ fn assert_not_leaked(kind: &str, needle: &str, stderr: &str, stdout: &str) {
     );
 }
 
+fn tool_step_line(output: &str) -> String {
+    serde_json::json!({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "run_command",
+            "tool_info": {
+                "output": output,
+            },
+        },
+    })
+    .to_string()
+}
+
+fn write_config(dir: &Path, name: &str, cfg: &Config) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, serde_json::to_vec(cfg).unwrap()).unwrap();
+    path
+}
+
+fn stream_event_lines(stderr: &str) -> Vec<serde_json::Value> {
+    stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|ev| ev["event"] == "stream")
+        .map(|ev| {
+            serde_json::from_str::<serde_json::Value>(ev["line"].as_str().unwrap())
+                .expect("streamed line must stay valid JSON after scrubbing")
+        })
+        .collect()
+}
+
 #[test]
 fn streamed_tool_output_and_result_scrub_configured_credential_file() {
     let dir = TempDir::new().unwrap();
@@ -92,28 +124,9 @@ fn streamed_tool_output_and_result_scrub_configured_credential_file() {
     let raw_cred = r#"{"access_token":"ya29.stream-secret-access-1234","refresh_token":"1//stream-secret-refresh-5678","extra_field":"custom-unlisted-secret-9999"}"#;
     fs::write(&cred_file, format!("{raw_cred}\n")).unwrap();
 
-    let tool_raw_cred = serde_json::json!({
-        "event": "step_update",
-        "step_update": {
-            "step_type": "tool",
-            "tool_name": "run_command",
-            "tool_info": {
-                "output": format!("{raw_cred}\n"),
-            },
-        },
-    })
-    .to_string();
-    let tool_tokens = serde_json::json!({
-        "event": "step_update",
-        "step_update": {
-            "step_type": "tool",
-            "tool_name": "run_command",
-            "tool_info": {
-                "output": "a=ya29.stream-secret-access-1234 r=1//stream-secret-refresh-5678",
-            },
-        },
-    })
-    .to_string();
+    let tool_raw_cred = tool_step_line(&format!("{raw_cred}\n"));
+    let tool_tokens =
+        tool_step_line("a=ya29.stream-secret-access-1234 r=1//stream-secret-refresh-5678");
     let result_line = serde_json::json!({
         "event": "result",
         "result": {
@@ -148,8 +161,7 @@ printf '%s\n' '{result_line}'
         activity_secs: 60,
         ..Config::default()
     };
-    let cfg_path = dir.path().join("cfg.json");
-    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+    let cfg_path = write_config(dir.path(), "cfg.json", &cfg);
 
     let req = job_request(&cfg, dir.path());
     let output = run_plugin_streaming(&cfg_path, &req, &[("HOME", home.path().to_str().unwrap())]);
@@ -181,15 +193,7 @@ printf '%s\n' '{result_line}'
         &stdout,
     );
 
-    let stream_lines: Vec<serde_json::Value> = stderr
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|ev| ev["event"] == "stream")
-        .map(|ev| {
-            serde_json::from_str::<serde_json::Value>(ev["line"].as_str().unwrap())
-                .expect("streamed line must stay valid JSON after scrubbing")
-        })
-        .collect();
+    let stream_lines = stream_event_lines(&stderr);
     assert_eq!(stream_lines.len(), 4, "stream_lines: {stream_lines:?}");
     assert_eq!(
         stream_lines[1]["step_update"]["tool_info"]["output"],
