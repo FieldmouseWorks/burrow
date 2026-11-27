@@ -10,7 +10,7 @@ use std::process::Command;
 use std::thread;
 
 use burrow_proof::end::Ended;
-use burrow_proof::eval::{EvalKind, EvalRecord, end, run, start, work};
+use burrow_proof::eval::{EvalKind, EvalRecord, argv, end, run, start, work};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -354,4 +354,73 @@ fn resumed_eval_clears_policy_restoring_and_finishes_done() {
     let said = end(&dir, &ended("success", "exited", "0")).unwrap();
     assert_eq!(said["state"], "done", "{said}");
     assert_eq!(said["paths"], json!([out_path]));
+}
+
+#[test]
+fn eval_start_omits_runtime_max_sec_when_heavy_is_configured() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-heavy-queue.service".into(),
+        timeout: 900,
+        nix: PathBuf::from("/nix/bin"),
+        git: which("git"),
+        heavy: Some(PathBuf::from("/run/current-system/sw/bin/heavy")),
+        kick: None,
+        eval: true,
+    };
+    let args = argv("/bin/burrow-proof", "/tmp/eval-dir", &rec);
+    assert!(
+        !args
+            .iter()
+            .any(|a| a.starts_with("--property=RuntimeMaxSec=")),
+        "{args:?}"
+    );
+}
+
+#[test]
+fn eval_work_enforces_timeout_and_end_reports_timed_out() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let nix = tmp.path().join("nix");
+    fs::create_dir_all(&nix).unwrap();
+    write_exec(&nix.join("nix"), "#!/bin/sh\nsleep 10\n");
+    write_exec(&nix.join("nix-store"), "#!/bin/sh\nexit 0\n");
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let dir = tmp.path().join("eval-timeout");
+    fs::create_dir_all(&dir).unwrap();
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-timeout.service".into(),
+        timeout: 1,
+        nix,
+        git: which("git"),
+        heavy: Some(PathBuf::from("/run/current-system/sw/bin/heavy")),
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+    let err = work(&dir).unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+    let said = end(&dir, &ended("failed", "exited", "1")).unwrap();
+    assert_eq!(said["state"], "timed out", "{said}");
+    assert_eq!(said["failed"], true, "{said}");
 }

@@ -14,17 +14,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::end::{Ended, kick};
 use crate::{END, LOG, RAN, plain, save};
+
+const TIMED_OUT: &str = "timed-out";
 
 /// Which derivation evaluation a unit performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -156,20 +159,29 @@ fn word(p: &Path) -> Result<String, String> {
 }
 
 /// `systemd-run` arguments for an eval unit whose folder is `dir`.
+///
+/// When `heavy` is configured, `eval-run` may wait in `heavy`'s queue longer
+/// than `rec.timeout`, so `RuntimeMaxSec` is omitted on the unit and `eval-work`
+/// enforces `rec.timeout` once it enters the slot.
 pub fn argv(exe: &str, dir: &str, rec: &EvalRecord) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--user".into(),
         "--quiet".into(),
         "--collect".into(),
         format!("--unit={}", rec.unit),
-        format!("--property=RuntimeMaxSec={}s", rec.timeout),
+    ];
+    if rec.heavy.is_none() {
+        args.push(format!("--property=RuntimeMaxSec={}s", rec.timeout));
+    }
+    args.extend([
         format!("--property=ExecStopPost=:{exe} eval-end {dir}"),
         "--expand-environment=no".into(),
         "--".into(),
         exe.into(),
         "eval-run".into(),
         dir.into(),
-    ]
+    ]);
+    args
 }
 
 /// Start the eval unit for `dir` via `systemd_run`.
@@ -215,35 +227,56 @@ pub fn run(dir: &Path, exe: &Path) -> Result<(), String> {
     }
 }
 
-/// Do the actual git/nix evaluation and write `DIR/ran.json`.
+enum CmdError {
+    TimedOut,
+    Failed(String),
+}
+
+impl From<String> for CmdError {
+    fn from(s: String) -> Self {
+        Self::Failed(s)
+    }
+}
+
+/// Do the actual git/nix evaluation and write `DIR/ran.json`, bounding the work
+/// itself to `rec.timeout` seconds.
 pub fn work(dir: &Path) -> Result<(), String> {
     let rec = EvalRecord::read(dir)?;
+    let _ = fs::remove_file(dir.join(TIMED_OUT));
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join(LOG))
         .map_err(|e| format!("{}: {e}", dir.join(LOG).display()))?;
     accepted(dir)?;
+    let deadline = Instant::now() + Duration::from_secs(rec.timeout);
     let ran = match rec.kind {
         EvalKind::Outputs => {
             let ref_name = format!("refs/pr/{}", rec.number);
-            eval_derivations(&rec, &ref_name, &rec.head, &log)?
+            eval_derivations(&rec, &ref_name, &rec.head, deadline, &log)
         }
-        EvalKind::Merged => eval_merged(&rec, &log)?,
+        EvalKind::Merged => eval_merged(&rec, deadline, &log),
+    };
+    let ran = match ran {
+        Ok(ran) => ran,
+        Err(CmdError::TimedOut) => {
+            let _ = fs::write(dir.join(TIMED_OUT), b"timed out\n");
+            note(&log, &format!("eval timed out after {}s", rec.timeout));
+            return Err(format!("timed out after {}s", rec.timeout));
+        }
+        Err(CmdError::Failed(why)) => return Err(why),
     };
     save(&dir.join(RAN), &ran).map_err(|e| format!("{}: {e}", dir.join(RAN).display()))
 }
 
-fn eval_merged(rec: &EvalRecord, log: &File) -> Result<EvalRan, String> {
-    let tip = rec.tip.as_deref().ok_or("missing tip")?;
-    let base = rec.base.as_deref().ok_or("missing base")?;
-    let up = Command::new(&rec.git)
-        .arg("-C")
+fn eval_merged(rec: &EvalRecord, deadline: Instant, log: &File) -> Result<EvalRan, CmdError> {
+    let tip = rec.tip.as_deref().ok_or("missing tip".to_owned())?;
+    let base = rec.base.as_deref().ok_or("missing base".to_owned())?;
+    let mut cmd = Command::new(&rec.git);
+    cmd.arg("-C")
         .arg(&rec.mirror)
-        .args(["merge-base", "--is-ancestor", tip, &rec.head])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git merge-base: {e}"))?;
+        .args(["merge-base", "--is-ancestor", tip, &rec.head]);
+    let up = run_until(cmd, "git merge-base", deadline)?;
     match up.status.code() {
         Some(0) => {
             return Ok(EvalRan {
@@ -256,22 +289,21 @@ fn eval_merged(rec: &EvalRecord, log: &File) -> Result<EvalRan, String> {
         _ => {
             let err = String::from_utf8_lossy(&up.stderr);
             note(log, &format!("git merge-base failed: {}", err.trim()));
-            return Err(format!("git merge-base: {}", tail(err.trim())));
+            return Err(CmdError::Failed(format!(
+                "git merge-base: {}",
+                tail(err.trim())
+            )));
         }
     }
-    let tree = Command::new(&rec.git)
-        .arg("-C")
-        .arg(&rec.mirror)
-        .args([
-            "merge-tree",
-            "--write-tree",
-            "--no-messages",
-            tip,
-            &rec.head,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git merge-tree: {e}"))?;
+    let mut cmd = Command::new(&rec.git);
+    cmd.arg("-C").arg(&rec.mirror).args([
+        "merge-tree",
+        "--write-tree",
+        "--no-messages",
+        tip,
+        &rec.head,
+    ]);
+    let tree = run_until(cmd, "git merge-tree", deadline)?;
     match tree.status.code() {
         Some(1) => {
             return Ok(EvalRan {
@@ -284,13 +316,16 @@ fn eval_merged(rec: &EvalRecord, log: &File) -> Result<EvalRan, String> {
         _ => {
             let err = String::from_utf8_lossy(&tree.stderr);
             note(log, &format!("git merge-tree failed: {}", err.trim()));
-            return Err(format!("git merge-tree: {}", tail(err.trim())));
+            return Err(CmdError::Failed(format!(
+                "git merge-tree: {}",
+                tail(err.trim())
+            )));
         }
     }
     let tree_oid = String::from_utf8_lossy(&tree.stdout)
         .split_whitespace()
         .next()
-        .ok_or("git merge-tree produced no tree")?
+        .ok_or("git merge-tree produced no tree".to_owned())?
         .to_owned();
     let msg = format!("#{} brought up to date with {base}", rec.number);
     let rev = git_stdout(
@@ -312,23 +347,31 @@ fn eval_merged(rec: &EvalRecord, log: &File) -> Result<EvalRan, String> {
             "-m",
             &msg,
         ],
+        deadline,
         log,
     )?;
     let ref_name = format!("refs/merged/{}", rec.number);
-    git_stdout(&rec.git, &rec.mirror, &["update-ref", &ref_name, &rev], log)?;
-    eval_derivations(rec, &ref_name, &rev, log)
+    git_stdout(
+        &rec.git,
+        &rec.mirror,
+        &["update-ref", &ref_name, &rev],
+        deadline,
+        log,
+    )?;
+    eval_derivations(rec, &ref_name, &rev, deadline, log)
 }
 
 fn eval_derivations(
     rec: &EvalRecord,
     ref_name: &str,
     rev: &str,
+    deadline: Instant,
     log: &File,
-) -> Result<EvalRan, String> {
+) -> Result<EvalRan, CmdError> {
     let mirror = rec
         .mirror
         .to_str()
-        .ok_or("mirror path is not valid UTF-8")?;
+        .ok_or("mirror path is not valid UTF-8".to_owned())?;
     let url = format!("git+file://{}?ref={ref_name}&rev={rev}", quote_path(mirror));
     let mut drvs = BTreeMap::new();
     for (check, attr) in &rec.attrs {
@@ -350,6 +393,7 @@ fn eval_derivations(
                 "--no-update-lock-file",
                 &target,
             ],
+            deadline,
             log,
         )?;
         drvs.insert(check.clone(), drv);
@@ -357,7 +401,7 @@ fn eval_derivations(
     let mut query_args = vec!["--query", "--outputs"];
     let drv_list: Vec<&str> = drvs.values().map(String::as_str).collect();
     query_args.extend(drv_list);
-    let out = run_nix(&rec.nix, "nix-store", &query_args, log)?;
+    let out = run_nix(&rec.nix, "nix-store", &query_args, deadline, log)?;
     let paths: Vec<String> = out
         .split_whitespace()
         .map(str::to_owned)
@@ -379,34 +423,95 @@ fn eval_derivations(
     }
 }
 
-fn git_stdout(git: &Path, mirror: &Path, args: &[&str], log: &File) -> Result<String, String> {
-    let out = Command::new(git)
-        .arg("-C")
-        .arg(mirror)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+fn git_stdout(
+    git: &Path,
+    mirror: &Path,
+    args: &[&str],
+    deadline: Instant,
+    log: &File,
+) -> Result<String, CmdError> {
+    let mut cmd = Command::new(git);
+    cmd.arg("-C").arg(mirror).args(args);
+    let out = run_until(cmd, "git", deadline)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         note(log, &format!("git {:?} failed: {}", args, err.trim()));
-        return Err(format!("git: {}", tail(err.trim())));
+        return Err(CmdError::Failed(format!("git: {}", tail(err.trim()))));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-fn run_nix(nix_dir: &Path, tool: &str, args: &[&str], log: &File) -> Result<String, String> {
-    let out = Command::new(nix_dir.join(tool))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("{tool}: {e}"))?;
+fn run_nix(
+    nix_dir: &Path,
+    tool: &str,
+    args: &[&str],
+    deadline: Instant,
+    log: &File,
+) -> Result<String, CmdError> {
+    let mut cmd = Command::new(nix_dir.join(tool));
+    cmd.args(args);
+    let out = run_until(cmd, tool, deadline)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         note(log, &format!("{tool} failed: {}", err.trim()));
-        return Err(format!("{tool}: {}", tail(err.trim())));
+        return Err(CmdError::Failed(format!("{tool}: {}", tail(err.trim()))));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+fn run_until(mut cmd: Command, label: &str, deadline: Instant) -> Result<Output, CmdError> {
+    if Instant::now() >= deadline {
+        return Err(CmdError::TimedOut);
+    }
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CmdError::Failed(format!("{label}: {e}")))?;
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = out_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = err_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = out_reader.join().unwrap_or_default();
+                let stderr = err_reader.join().unwrap_or_default();
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CmdError::TimedOut);
+                }
+                thread::sleep(Duration::from_millis(25).min(deadline - now));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CmdError::Failed(format!("{label}: {e}")));
+            }
+        }
+    }
 }
 
 fn quote_path(path: &str) -> String {
@@ -479,7 +584,7 @@ pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
             "failed": ran.failed,
             "at": at,
         }),
-        _ if how.result == "timeout" => json!({
+        _ if how.result == "timeout" || dir.join(TIMED_OUT).exists() => json!({
             "state": "timed out",
             "exit": null,
             "drvs": null,
