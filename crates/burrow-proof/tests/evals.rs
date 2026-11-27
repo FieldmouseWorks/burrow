@@ -357,7 +357,7 @@ fn resumed_eval_clears_policy_restoring_and_finishes_done() {
 }
 
 #[test]
-fn eval_start_omits_runtime_max_sec_when_heavy_is_configured() {
+fn eval_start_gives_heavy_queue_generous_runtime_max_sec() {
     let tmp = TempDir::new().unwrap();
     let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
     let mut attrs = BTreeMap::new();
@@ -381,9 +381,7 @@ fn eval_start_omits_runtime_max_sec_when_heavy_is_configured() {
     };
     let args = argv("/bin/burrow-proof", "/tmp/eval-dir", &rec);
     assert!(
-        !args
-            .iter()
-            .any(|a| a.starts_with("--property=RuntimeMaxSec=")),
+        args.iter().any(|a| a == "--property=RuntimeMaxSec=8100s"),
         "{args:?}"
     );
 }

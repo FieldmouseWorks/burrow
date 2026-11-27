@@ -28,6 +28,10 @@ use crate::end::{Ended, kick};
 use crate::{END, LOG, RAN, plain, save};
 
 const TIMED_OUT: &str = "timed-out";
+/// Extra wall-clock budget for waiting in `heavy`'s queue before `eval-work`
+/// starts, so a busy machine doesn't kill queued evals at `rec.timeout` while
+/// still bounding a permanently wedged queue.
+const QUEUE_CAP: u64 = 7200;
 
 /// Which derivation evaluation a unit performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -160,28 +164,28 @@ fn word(p: &Path) -> Result<String, String> {
 
 /// `systemd-run` arguments for an eval unit whose folder is `dir`.
 ///
-/// When `heavy` is configured, `eval-run` may wait in `heavy`'s queue longer
-/// than `rec.timeout`, so `RuntimeMaxSec` is omitted on the unit and `eval-work`
-/// enforces `rec.timeout` once it enters the slot.
+/// When `heavy` is configured, `eval-run` may wait in `heavy`'s queue before
+/// `eval-work` starts, so `RuntimeMaxSec` includes [`QUEUE_CAP`] as a generous
+/// outer bound while `eval-work` enforces `rec.timeout` once in the slot.
 pub fn argv(exe: &str, dir: &str, rec: &EvalRecord) -> Vec<String> {
-    let mut args = vec![
+    let runtime_max = if rec.heavy.is_some() {
+        rec.timeout.saturating_add(QUEUE_CAP)
+    } else {
+        rec.timeout
+    };
+    vec![
         "--user".into(),
         "--quiet".into(),
         "--collect".into(),
         format!("--unit={}", rec.unit),
-    ];
-    if rec.heavy.is_none() {
-        args.push(format!("--property=RuntimeMaxSec={}s", rec.timeout));
-    }
-    args.extend([
+        format!("--property=RuntimeMaxSec={runtime_max}s"),
         format!("--property=ExecStopPost=:{exe} eval-end {dir}"),
         "--expand-environment=no".into(),
         "--".into(),
         exe.into(),
         "eval-run".into(),
         dir.into(),
-    ]);
-    args
+    ]
 }
 
 /// Start the eval unit for `dir` via `systemd_run`.
