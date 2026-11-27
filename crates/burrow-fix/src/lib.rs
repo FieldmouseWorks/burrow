@@ -11,7 +11,8 @@
 //! grades it.
 //!
 //! - [`broker`]: one request's fix, one live fix a PR, stopped with its
-//!   connection, and a restart that stops what it was waiting on.
+//!   connection, and a restart that leaves its jobs at work and answers
+//!   the flow's request made again from them.
 //! - burrow-producer's `jobs`: the proj job a fix runs as, through proj's
 //!   own commands, shared with the judge's runner.
 //! - [`answers`]: what the job says it did, held to the problems it was

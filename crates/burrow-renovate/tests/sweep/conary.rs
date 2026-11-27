@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use conary_github::api::{
-    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status, User,
-    WorkflowRun,
+    Annotation, ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review,
+    Status, User, WorkflowRun,
 };
 use conary_github::branches::{Branches, Merged};
 use conary_github::flow::{self, Major, Revision, SealKey, Settings, Snapshot};
@@ -28,6 +28,16 @@ impl Machine {
         let path = self.path("landing.json");
         fs::write(&path, json!({ "repos": repos }).to_string()).unwrap();
         self.landing = Some(path);
+    }
+
+    /// `repo`'s flow configuration in the flow directory, as the machine
+    /// renders it (`OWNER/NAME.json`, lowercased).
+    fn flow(&mut self, repo: &str, config: Value) {
+        let dir = self.path("flow");
+        let path = dir.join(format!("{}.json", repo.to_lowercase()));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, config.to_string()).unwrap();
+        self.flow = Some(dir);
     }
 }
 
@@ -175,7 +185,7 @@ impl conary_github::Source for Hub {
     fn merge_base(&self, _: &str, _: &str, _: &str) -> Result<String, ApiError> {
         Err(ApiError::new("not scripted"))
     }
-    fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {
+    fn annotations(&self, _: &str, _: u64) -> Result<Vec<Annotation>, ApiError> {
         Err(ApiError::new("not scripted"))
     }
 }
@@ -244,8 +254,6 @@ fn a_major_conaryd_lands_lands_on_the_sweeps_ok() {
     let body = "This PR contains the following updates: foo1 to v2.\r\n\r\n---\r\n";
     let mut m = Machine::as_app();
     m.landing(conaryd());
-    // The steward's list says so too, as it does once it reads the record.
-    m.steward(&[(REPO, lands("conaryd"))], 0, json!({}));
     m.prs(&[described(1, body)]);
     let p = m.pass();
     let (ok, held) = handed(p.task(), 1);
@@ -402,6 +410,166 @@ fn an_unreadable_record_hands_nothing_over() {
         "{:#?}",
         p.jobs
     );
+}
+
+/// A conaryd-held repo is covered from the landing record alone, without
+/// repos.json (or when repos.json doesn't list it or is stale); a
+/// steward-held repo (or one being handed back) still reads repos.json.
+#[test]
+fn a_conaryd_held_repo_is_covered_from_the_landing_record_alone() {
+    let body = "This PR contains the following updates: foo3 to v2.";
+    for (record, steward) in [
+        // No repos.json at all (no steward, or after D deletes it).
+        (conaryd(), None),
+        // Handover to conaryd under way, no repos.json.
+        (
+            json!({"sam/r": {"owner": "steward", "to": "conaryd", "generation": 2}}),
+            None,
+        ),
+        // Fresh repos.json that omits this repo.
+        (conaryd(), Some((vec![("sam/other", lands("steward"))], 0))),
+        // Stale repos.json that omits this repo.
+        (
+            conaryd(),
+            Some((vec![("sam/other", lands("steward"))], 7 * 3600)),
+        ),
+    ] {
+        let mut m = Machine::as_app();
+        m.landing(record.clone());
+        if let Some((repos, age)) = steward {
+            m.steward(&repos, age, json!({}));
+        }
+        m.prs(&[described(3, body)]);
+        let (ok, _) = handed(m.pass().task(), 3);
+        m.comments(3, &[marked(BOT, &ok)]);
+        let p = m.pass();
+        assert!(p.jobs.is_empty(), "{record}: {:#?}", p.jobs);
+        assert_eq!(
+            p.majors(),
+            ("close", "No major updates waiting."),
+            "{record}"
+        );
+    }
+    // Where the steward holds it (or is taking it back) and repos.json
+    // omits it, nothing lands it and the owner hears of an ok major.
+    for record in [
+        json!({}),
+        json!({"sam/r": {"owner": "steward", "generation": 1}}),
+        json!({"sam/r": {"owner": "conaryd", "to": "steward", "generation": 2}}),
+    ] {
+        let mut m = Machine::as_app();
+        m.landing(record.clone());
+        m.steward(&[("sam/other", lands("steward"))], 0, json!({}));
+        m.prs(&[described(3, body)]);
+        let v = m.verdict(3, "ok", "main", BOT);
+        m.comments(3, &[v]);
+        let p = m.pass();
+        assert!(p.jobs.is_empty(), "{record}: {:#?}", p.jobs);
+        assert_eq!(p.majors().0, "open", "{record}");
+    }
+}
+
+/// A conaryd-held repo takes its proofs from its flow configuration, not
+/// repos.json: pending proofs aren't CI to wait for, their completion
+/// doesn't re-hand the PR, red proofs are red CI, and the job is told how
+/// each recipe runs. A steward-held repo still reads repos.json.
+#[test]
+fn a_conaryd_held_repo_takes_its_proofs_from_its_flow_config() {
+    let flow_proofs = json!({
+        "settings": {
+            "proofs": {
+                "agents": {"Build": "checks.x86_64-linux.agents"},
+                "gate": {"Run": ["/bin/bash", "-c", "make gate"]},
+                "hil": {"Job": "Run `just hil` on the bench box."},
+            }
+        }
+    });
+    let pending_proof = json!({
+        "__typename": "CheckRun",
+        "name": "agents",
+        "status": "IN_PROGRESS",
+        "conclusion": "",
+    });
+    let mut m = Machine::as_app();
+    m.landing(conaryd());
+    m.flow(REPO, flow_proofs.clone());
+    // repos.json has a different proof: ignored for a conaryd-held repo.
+    m.steward(
+        &[(REPO, lands("conaryd"))],
+        0,
+        json!({"old-proof": "ssh old"}),
+    );
+    m.prs(&[with(described(16, "body"), pending_proof.clone())]);
+    let p = m.pass();
+    let task = p.task();
+    assert!(
+        task.contains("agents isn't CI: it runs on a machine, like this: `nix build .#checks.x86_64-linux.agents -L` on the commit. conaryd builds it itself for each new head and posts the `agents` check: never post that check yourself. Rerun it that way on what you push."),
+        "{task}"
+    );
+    assert!(
+        task.contains("gate isn't CI: it runs on a machine, like this: `/bin/bash -c 'make gate'` in a worktree at the commit, with PROOF_REPO, PROOF_HEAD and PROOF_CHECK set. conaryd runs it itself for each new head and posts the `gate` check: never post that check yourself. Rerun it that way on what you push."),
+        "{task}"
+    );
+    assert!(
+        task.contains("hil isn't CI: it runs on a machine, like this: Run `just hil` on the bench box. Rerun it that way on what you push."),
+        "{task}"
+    );
+    assert!(!task.contains("old-proof"), "{task}");
+    // Its completion doesn't hand the PR over again.
+    let mut done_proof = pending_proof.clone();
+    done_proof["status"] = "COMPLETED".into();
+    done_proof["conclusion"] = "SUCCESS".into();
+    done_proof["completedAt"] = "2099-01-02T00:00:00Z".into();
+    m.prs(&[with(described(16, "body"), done_proof)]);
+    assert!(m.pass().jobs.is_empty());
+    // A red proof hands the PR over to fix.
+    let mut failed_proof = pending_proof;
+    failed_proof["status"] = "COMPLETED".into();
+    failed_proof["conclusion"] = "FAILURE".into();
+    m.prs(&[with(described(16, "body"), failed_proof)]);
+    assert!(
+        m.pass()
+            .task()
+            .contains("a major version bump, and its CI fails")
+    );
+
+    // For a steward-held repo, repos.json's proofs are still the ones used.
+    let mut m = Machine::as_app();
+    m.landing(json!({"sam/r": {"owner": "steward", "generation": 1}}));
+    m.flow(REPO, flow_proofs);
+    m.steward(
+        &[(REPO, lands("steward"))],
+        0,
+        json!({"old-proof": "ssh old"}),
+    );
+    m.prs(&[red(6)]);
+    let task = m.pass().task().to_owned();
+    assert!(task.contains("old-proof isn't CI"), "{task}");
+    assert!(!task.contains("agents isn't CI"), "{task}");
+}
+
+/// When a flow directory is configured, a missing or malformed flow config
+/// for a conaryd-held repo fails closed: no job is started and no cleared
+/// major is listed as uncovered.
+#[test]
+fn a_missing_or_malformed_flow_config_fails_closed() {
+    let mut m = Machine::as_app();
+    m.landing(conaryd());
+    let dir = m.path("flow");
+    fs::create_dir_all(&dir).unwrap();
+    m.flow = Some(dir.clone());
+    m.prs(&[described(1, "body")]);
+    let p = m.sweep(&[]);
+    assert_eq!(p.code, Some(1));
+    assert!(p.jobs.is_empty(), "{:#?}", p.jobs);
+    assert_eq!(p.majors().0, "close");
+
+    fs::create_dir_all(dir.join("sam")).unwrap();
+    fs::write(dir.join("sam/r.json"), "not json").unwrap();
+    let p = m.sweep(&[]);
+    assert_eq!(p.code, Some(1));
+    assert!(p.jobs.is_empty(), "{:#?}", p.jobs);
+    assert_eq!(p.majors().0, "close");
 }
 
 /// `--key` makes the key the flow takes, as a seal would, before any major

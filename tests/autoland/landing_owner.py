@@ -133,11 +133,17 @@ assert C.held("sam/r", {"number": 5, "headRefOid": A})
 C.CFG["settings"] = landing("steward", "conaryd", generation=3)
 fresh_pr_state()
 STOPPED.clear()
-C.save("pr-sam_r-5.json", {"fixed": "x", "fixedJob": "job-a", "provedJob": "proof-x", "proofsLive": ["job-b"]})
+C.save("pr-sam_r-5.json", {"fixed": "x", "fixedJob": "job-a", "provedJob": "proof-x", "proofsLive": ["job-b"],
+                           "proofEval": {"for": [A, {}], "job": "proof-eval-1", "at": 0},
+                           "mergedEval": {"for": [A, A, {}], "job": "proof-eval-2", "at": 0}})
 C.save("pr-sam_r-6.json", {"judgedJob": "job-c"})
 C.save("pr-sam_rr-7.json", {"fixedJob": "job-other"})  # another repo's
+os.makedirs(f"{tmp}/state/builds/proof-eval-orphan")
+os.makedirs(f"{tmp}/state/builds/proof-eval-other")
+C.save("builds/proof-eval-orphan/build.json", {"repo": "sam/r", "number": 9, "head": A, "eval": True})
+C.save("builds/proof-eval-other/build.json", {"repo": "sam/rr", "number": 9, "head": A, "eval": True})
 assert not L.lands("sam/r")
-assert sorted(STOPPED) == ["job-a", "job-b", "job-c", "proof-x"], STOPPED
+assert sorted(STOPPED) == ["job-a", "job-b", "job-c", "proof-eval-1", "proof-eval-2", "proof-eval-orphan", "proof-x"], STOPPED
 assert marker() == {"sam/r": 3}, marker()
 # One proj won't stop keeps the repo the steward's: no release, and a look
 # again a few minutes on.

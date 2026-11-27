@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use burrow_process::fence::enter;
 use burrow_proof::end::{Ended, end};
+use burrow_proof::eval;
 use burrow_proof::fence::Cgroups;
 use burrow_proof::plugin::Config;
 use burrow_proof::run::run;
@@ -15,9 +16,13 @@ use burrow_proof::start::start;
 use burrow_proof::work::{BROKE, work};
 
 const USAGE: &str = "usage:
-  burrow-proof start DIR   start the run DIR/build.json says, in its unit
-  burrow-proof run DIR     the unit's own process: each check's command
-  burrow-proof end DIR     the unit's ExecStopPost: its worktrees removed, DIR/end.json
+  burrow-proof start DIR        start the run DIR/build.json says, in its unit
+  burrow-proof run DIR          the unit's own process: each check's command
+  burrow-proof end DIR          the unit's ExecStopPost: its worktrees removed, DIR/end.json
+  burrow-proof eval-start DIR   start the proof derivation eval DIR/build.json says, in its unit
+  burrow-proof eval-run DIR     the eval unit's process (enters heavy when set)
+  burrow-proof eval-work DIR    the eval work itself: nix eval + outputs into DIR/ran.json
+  burrow-proof eval-end DIR     the eval unit's ExecStopPost: DIR/end.json and repo kick
   burrow-proof work CONFIG ID   a proof producer's run ID, in its worker's unit: its exit is how it came out
   burrow-proof enter FENCE -- PROGRAM [ARG...]   PROGRAM, inside the cgroup FENCE";
 
@@ -34,6 +39,14 @@ fn main() -> ExitCode {
             .and_then(Cgroups::own)
             .and_then(|mut fences| run(Path::new(dir), &mut fences)),
         [word, dir] if word == "end" => end(Path::new(dir), &Ended::from_env()).map(drop),
+        [word, dir] if word == "eval-start" => {
+            exe().and_then(|exe| eval::start(Path::new(dir), &exe, Path::new("systemd-run")))
+        }
+        [word, dir] if word == "eval-run" => exe().and_then(|exe| eval::run(Path::new(dir), &exe)),
+        [word, dir] if word == "eval-work" => eval::work(Path::new(dir)),
+        [word, dir] if word == "eval-end" => {
+            eval::end(Path::new(dir), &Ended::from_env()).map(drop)
+        }
         [word, config, id] if word == "work" => {
             let code = Config::read(Path::new(config)).and_then(|cfg| {
                 let mut fences = Cgroups::own(exe()?)?;

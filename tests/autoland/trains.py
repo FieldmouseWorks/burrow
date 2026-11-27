@@ -3,7 +3,7 @@ the train instead of being merged, and comes out once it isn't settled any
 more; its status says where in the train it is, or why the train holds it
 out; the train's own status is CI only as the App's failure; a pass ends
 with a step of the train unless it has nothing to do; cn gets the App's
-tokens from the steward. That the repo's rules require the train's status,
+tokens from burrow-upkeep's `token --bare`. That the repo's rules require the train's status,
 and that the branch watch leaves the train's branches to cn, are
 burrow-upkeep's (settle.rs, branches.rs)."""
 
@@ -58,10 +58,10 @@ status, _ = run(clean(), 700)
 assert not merges(), WROTE
 assert cn_runs() == [SHOW, JOIN], cn_runs()
 assert "state=success" in status and "In the train, next in line." in status, status
-# cn writes the ledger's own log, with the App's tokens from this steward.
+# cn writes the ledger's own log, with the App's tokens from burrow-upkeep.
 env = cn_log()[1]["env"]
 assert env["CONARY_LEDGER"] == f"{tmp}/ledger" and env["CONARY_ANCHOR_REPO"] == "sam/homelab", env
-assert env["CONARY_TOKEN_COMMAND"].endswith("/steward.py token") and " -E -s " in env["CONARY_TOKEN_COMMAND"], env
+assert env["CONARY_TOKEN_COMMAND"] == f"{tmp}/upkeep-none upkeep.json token --bare", env
 # What it waits on is the train's, with the train's deadline.
 noted = waits.NOTED["sam/r"]["sam/r#5"]
 assert noted["phase"].startswith("In the train, next in line.") and noted["minutes"] == 240, noted
@@ -415,26 +415,9 @@ assert kicked(show=landed) == [], cn_runs()
 S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish, S.R.watch_default = kept_fns
 print("train step: ok")
 
-# cn's token command is the steward's `token`, which prints the App's token
-# for the repo's owner and nothing else, and exits 75 when GitHub can't be
-# asked, as cn does.
-out = io.StringIO()
-with contextlib.redirect_stdout(out):
-    S.token("Sam/r")
-assert out.getvalue() == "ghs_app_sam\n", out.getvalue()
-kept_token = C.token
-for e, code in ((C.Unavailable("HTTP 502"), 75), (RuntimeError("the App isn't installed on sam"), 1)):
-    C.token = lambda owner, e=e: (_ for _ in ()).throw(e)
-    out = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(out):
-            S.token("sam/r")
-        raise AssertionError("printed a token it didn't have")
-    except SystemExit as x:
-        assert x.code == code and out.getvalue() == "", (x.code, out.getvalue())
-C.token = kept_token
-# Run by cn as cn runs it (the repo added last), it's the steward's own
-# command, taking no lock: here with no App key, so no token and no output.
+# cn's token command is burrow-upkeep's `token --bare` (its tests/token.rs
+# has what it prints). Run by cn as cn runs it (the repo added last), it's
+# the real one: here with no App key, so no token and no output.
 nokey = f"{tmp}/no-key"
 os.makedirs(nokey)
 cred, os.environ["CREDENTIALS_DIRECTORY"] = os.environ["CREDENTIALS_DIRECTORY"], nokey
