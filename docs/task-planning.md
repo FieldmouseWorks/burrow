@@ -22,7 +22,11 @@ array of 2–16 tasks, each with `title`, `body` and `check`; an optional
 and an optional `carries`, `OWNER/REPO#N`, names the open PR a child is
 split to carry to landing.
 Titles and task bodies have fixed bounds, and a whole plan is validated
-before any child is created. Exact generated or verbatim reused children
+before any child is created or task list updated; a split whose reused
+`issue` is the parent, missing on GitHub, a pull request, or ineligible
+(unauthorized author or outside text) is rejected with an `Invalid split`
+comment and `later` label rather than retried as a GitHub outage. Exact
+generated or verbatim reused children
 retain that size approval, rather than running another planner. Changed
 input is checked again. The planner must preserve authorization
 boundaries, unresolved work and existing PRs in self-contained children.

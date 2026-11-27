@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 burrow-github = { path = "../burrow-github" }
+burrow-house = { path = "../burrow-house" }
 burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
 # Conary's seal: the MAC a major's verdict carries, which the steward and

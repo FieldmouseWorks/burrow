@@ -23,5 +23,6 @@ jobs:
           rust-first-allow: |
             modules/autoland/** # steward stays Python until its Rust port lands
           file-size-allow: |
+            .github/workflows/flake-check.yml # one reusable workflow that callers pin by path
             modules/autoland/common.py # steward Python helper until ported to Rust
             modules/autoland.nix # single NixOS module for autoland

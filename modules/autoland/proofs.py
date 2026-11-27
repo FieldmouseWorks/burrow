@@ -77,7 +77,6 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.parse
 
 import common as C
 import mirror as M
@@ -87,21 +86,22 @@ OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
 LOOKED = {}  # the PRs of each repo this pass has settled, waiting or not
+EVAL_ACTIVE = {}  # live eval unit ids seen or started per repo this pass
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
+EVALUATING = "evaluating"  # an eval unit is running for this PR
+EVAL_WAITING = "waiting"  # another PR in this repo already has an eval unit running
 # seconds, its inputs fetched included. An eval of burrow's own checks took
 # 185-250s and ran past 300s on a busy machine (FieldmouseWorks/burrow#1451
 # and #1468, 2026-11-23): the deadline has to outlast a loaded box's eval.
 EVAL_TIMEOUT = 900
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
-# seconds a pass must have left for merged()'s eval, which takes as long as outputs'
-MERGED_MIN = 6 * 60
 LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 # The most a failed build's comment may take, in UTF-8 bytes: under GitHub's
 # 65,536 characters, and under the 128 KiB Linux takes for the one argument
 # gh is given it in.
 COMMENT_BYTES = 60000
 KEEP = 7  # days an ended build's folder, its outputs' roots in it, is kept
-KEEP_INPUTS = 1  # days an ended prebuild's folder, the roots of what it built, is kept
+KEEP_INPUTS = 1  # days an ended prebuild's or eval's folder is kept
 
 
 def begin(repo, numbers, first=()):
@@ -111,6 +111,7 @@ def begin(repo, numbers, first=()):
     FIRST[repo] = set(first)
     WAITING[repo] = set()
     LOOKED[repo] = set()
+    EVAL_ACTIVE[repo] = set()
 
 
 def place(repo, n):
@@ -144,49 +145,18 @@ def live(st):
     return moving
 
 
-def pass_left():
-    """Seconds the pass has left before its own deadline, None outside one."""
-    return None if C.REMOTE_DEADLINE is None else C.REMOTE_DEADLINE - time.monotonic()
-
-
-class Cut(C.Unavailable):
-    """nix ran out of the pass's time before it answered: the eval wasn't
-    at fault, so nothing is recorded against the PR (no strike, no failed
-    eval to wait out)."""
-
-
 def nix(*args, timeout=60):
-    """nix's stdout. Its deadline is the timeout, but never past the pass's
-    own (pass_left), so a pass's eval can't outlast the pass."""
-    left = pass_left()
-    cut = left is not None and left < timeout
-    if cut:
-        timeout = left
-    if timeout <= 0:
-        raise Cut("the pass's deadline is reached")
-    try:
-        p = subprocess.run([f"{CFG['nix']}/{args[0]}", *args[1:]], capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if cut:
-            raise Cut(f"{args[0]} cut short by the pass's deadline") from None
-        raise
+    """nix's stdout (for fast store queries; evals run in their own unit).
+    Inside a pass (REMOTE_DEADLINE set), runs through common.remote so a
+    stalled store can't carry a step past systemd's TimeoutStartSec."""
+    cmd = [f"{CFG['nix']}/{args[0]}", *args[1:]]
+    if C.REMOTE_DEADLINE is not None:
+        p = C.remote(cmd, capture_output=True, text=True, timeout=timeout)
+    else:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
     return p.stdout
-
-
-def derivations(repo, mirror, ref, rev, checks):
-    """Each of checks' derivations, by check, and all their outputs: its
-    flake attribute (the repo's proofBuilds) at that exact commit of the
-    steward's mirror, as a proof's checkout of it has it (its rev
-    included), with import-from-derivation off. Raises when it can't be
-    worked out."""
-    attrs = C.repo_cfg(repo)["proofBuilds"]
-    url = f"git+file://{urllib.parse.quote(mirror)}?ref={ref}&rev={rev}"
-    drvs = {c: nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
-                   "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
-                   "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)}
-    return drvs, sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split()))
 
 
 def evaluable(repo, checks):
@@ -215,6 +185,18 @@ def kept(repo, pr, checks, st):
     return None
 
 
+def merged_kept(repo, pr, checks, st, tip):
+    """mergedOutputs' record for PR's head on tip while it still holds."""
+    if not tip or not evaluable(repo, checks):
+        return None
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    key = [pr["headRefOid"], tip, {c: attrs[c] for c in sorted(checks)}]
+    got = st.get("mergedOutputs")
+    if got and got["for"] == key and (not got.get("failed") or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
+        return got
+    return None
+
+
 def untold(repo, pr, checks, st):
     """Whether outputs' None says nothing about the eval: a status run's, on
     a head and checks the live passes haven't worked out yet (or whose
@@ -223,89 +205,204 @@ def untold(repo, pr, checks, st):
     return C.DRY and evaluable(repo, checks) and kept(repo, pr, checks, st) is None
 
 
-def outputs(repo, pr, checks, st):
-    """The store paths PR's proof of checks builds on its head (derivations).
-    Worked out once a head, and None when it can't be: a check with no
-    attribute, an eval that fails or takes too long (tried again EVAL_RETRY
-    minutes on). A status run works nothing out: it has what the live passes
-    worked out (step_context.LIVE_FACTS), else None, and untold says which."""
+def drop_eval(st, field, key=None):
+    """Stops and forgets a running eval unit unless it matches key."""
+    rec = st.get(field)
+    if not rec or (key is not None and rec.get("for") == key):
+        return
+    if not C.DRY and rec.get("job") and running(rec["job"]) and not C.stop_job(rec["job"]):
+        st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [rec["job"]]))
+    del st[field]
+
+
+def eval_wake(repo, rec):
+    """Books a pass wake for when an eval unit is due to have ended."""
+    due = rec["at"] + EVAL_TIMEOUT + 300
+    C.wake(repo, due if due > C.NOW else C.NOW + 15 * C.MIN)  # ends: the eval unit ends or times out
+
+
+def eval_busy(repo, st=None):
+    """Whether repo already has any live eval unit (including on the same PR,
+    in stopping, or on a PR no longer open)."""
+    active = EVAL_ACTIVE.get(repo)
+    if active:
+        for jid in list(active):
+            if running(jid):
+                return True
+            active.discard(jid)
+    builds_root = os.path.join(STATE, "builds")
+    if os.path.isdir(builds_root):
+        for jid in os.listdir(builds_root):
+            b = load(f"builds/{jid}/build.json", None) or {}
+            if b.get("eval") and b.get("repo") == repo and running(jid):
+                EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+                return True
+    states = [st] if st is not None else []
+    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"\d+\.json"
+    for f in os.listdir(STATE):
+        if re.fullmatch(mine, f):
+            states.append(load(f, {}))
+    for other in states:
+        for field in ("proofEval", "mergedEval"):
+            rec = other.get(field) or {}
+            if rec.get("job") and running(rec["job"]):
+                EVAL_ACTIVE.setdefault(repo, set()).add(rec["job"])
+                return True
+    return False
+
+
+def start_eval(repo, pr, checks, kind, mirror, base=None, tip=None):
+    """Starts a proof derivation eval unit (`burrow-proof eval-start DIR`)."""
+    n, head = pr["number"], pr["headRefOid"]
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    jid = unit_id(repo, n, head)
+    if C.DRY:
+        return jid
+    record = {
+        "repo": repo,
+        "number": n,
+        "head": head,
+        "kind": kind,
+        "mirror": mirror,
+        "attrs": {c: attrs[c] for c in sorted(checks)},
+        "base": base,
+        "tip": tip,
+        "unit": C.build_unit(jid),
+        "timeout": EVAL_TIMEOUT,
+        "nix": CFG["nix"],
+        "git": CFG["git"],
+        "heavy": CFG.get("heavy"),
+        "kick": f"{CFG['kick']}/{repo}",
+        "eval": True,
+    }
+    return start(jid, record, f"the {kind} eval of {', '.join(checks)}", [CFG["proofRun"], "eval-start"])
+
+
+def harvest_eval(repo, n, st, eval_field, out_field, key, merged=False):
+    """Checks an active eval unit: keeps waiting if running, or harvests
+    end.json (or records a lost/failed unit) into out_field."""
+    rec = st.get(eval_field)
+    if not rec:
+        return None
+    if rec.get("for") != key:
+        drop_eval(st, eval_field, key)
+        return None
+    jid = rec["job"]
+    if running(jid):
+        EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+        eval_wake(repo, rec)
+        return EVALUATING
+    if C.DRY:
+        return None
+    EVAL_ACTIVE.get(repo, set()).discard(jid)
+    end = load(f"builds/{jid}/end.json", None)
+    del st[eval_field]
+    if end and end.get("state") == "done" and not end.get("failed"):
+        paths = end.get("paths") or None
+        if merged:
+            st[out_field] = {"for": key, "paths": paths, "failed": False, "at": end.get("at", C.NOW)}
+        else:
+            st[out_field] = {"for": key, "paths": paths, "drvs": end.get("drvs") if paths else None, "at": end.get("at", C.NOW)}
+    else:
+        why = end.get("state") if end else "without end.json"
+        log(f"{repo}#{n}: proof eval {jid} ended {why}")
+        if merged:
+            st[out_field] = {"for": key, "paths": None, "failed": True, "at": C.NOW}
+        else:
+            st[out_field] = {"for": key, "paths": None, "drvs": None, "at": C.NOW}
+    return None
+
+
+def _outputs(repo, pr, checks, st, start=True):
+    """Internal outputs() implementation with optional start=False for built()."""
+    if not evaluable(repo, checks):
+        drop_eval(st, "proofEval")
+        return None
+    key = output_key(repo, pr, checks)
+    got = kept(repo, pr, checks, st)
+    if got is not None:
+        drop_eval(st, "proofEval", key)
+        return got["paths"]
+    if harvest_eval(repo, pr["number"], st, "proofEval", "proofOutputs", key, merged=False) == EVALUATING:
+        return EVALUATING
     got = kept(repo, pr, checks, st)
     if got is not None:
         return got["paths"]
-    if C.DRY or not evaluable(repo, checks):
+    if C.DRY or not start:
         return None
     n, head = pr["number"], pr["headRefOid"]
-    key = output_key(repo, pr, checks)
-    drvs = paths = None
+    if eval_busy(repo, st):
+        return EVAL_WAITING
     try:
         mirror = M.fetch(repo, pr=pr)
-        drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
-        paths = paths or None
-    except Cut:
-        raise  # the pass ran out of time: nothing recorded
+        jid = start_eval(repo, pr, checks, "outputs", mirror)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-        log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
-    st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None, "at": C.NOW}
-    return paths
-
-
-def merged(repo, pr, checks, st, tip):
-    """The store paths PR's proof of checks would build once it's brought
-    up to date with its base, whose tip GitHub says is tip: its head merged
-    into tip, as GitHub's update-branch merges it (a clean merge only).
-    Worked out once a head on a tip, and None when it's up to date already,
-    the merge conflicts, or what it builds can't be worked out (tried again
-    EVAL_RETRY minutes on). A status run works nothing out: it has what the
-    live passes worked out (step_context.LIVE_FACTS), else None."""
-    attrs = C.repo_cfg(repo)["proofBuilds"]
-    if not tip or not evaluable(repo, checks):
+        log(f"{repo}#{n}: can't start proof eval at {head[:12]}: {e}")
+        jid = None
+    if jid is None:
+        st["proofOutputs"] = {"for": key, "paths": None, "drvs": None, "at": C.NOW}
         return None
+    st["proofEval"] = rec = {"for": key, "job": jid, "at": C.NOW}
+    EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+    eval_wake(repo, rec)
+    return EVALUATING
+
+
+def outputs(repo, pr, checks, st):
+    """The store paths PR's proof of checks builds on its head. Worked out in
+    its own unit (start_eval), never inline in the pass: returns paths when
+    known, EVALUATING/EVAL_WAITING while an eval unit is running or queued,
+    or None when unevaluable, failed, or untold in C.DRY."""
+    return _outputs(repo, pr, checks, st, start=True)
+
+
+_default_outputs = outputs
+
+
+def merged(repo, pr, checks, st, tip, start=True):
+    """The store paths PR's proof of checks would build once brought up to
+    date with its base tip. Worked out in its own unit (never inline in the
+    pass) and started only when `start` is true (the PR next in line)."""
+    if not tip or not evaluable(repo, checks):
+        drop_eval(st, "mergedEval")
+        return None
+    attrs = C.repo_cfg(repo)["proofBuilds"]
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     key = [head, tip, {c: attrs[c] for c in sorted(checks)}]
-    got = st.get("mergedOutputs")
-    if got and got["for"] == key and (not got.get("failed") or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
+    got = merged_kept(repo, pr, checks, st, tip)
+    if got is not None:
+        drop_eval(st, "mergedEval", key)
         return got["paths"]
-    if C.DRY:
+    if harvest_eval(repo, n, st, "mergedEval", "mergedOutputs", key, merged=True) == EVALUATING:
+        return EVALUATING
+    got = merged_kept(repo, pr, checks, st, tip)
+    if got is not None:
+        return got["paths"]
+    if C.DRY or not start:
         return None
-    left = pass_left()
-    if left is not None and left < MERGED_MIN:
-        return None  # optional: the pass has no time for its eval, the next one tries
-    paths, failed = None, True
+    if eval_busy(repo, st):
+        return EVAL_WAITING
     try:
         mirror = M.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
-        up = subprocess.run(["git", "-C", mirror, "merge-base", "--is-ancestor", tip, head], capture_output=True, text=True)
-        # 0: the head has the tip already; 1: it doesn't; else git can't say
-        # (a tip that moved on again before the fetch, say).
-        if up.returncode not in (0, 1):
-            raise RuntimeError(f"git merge-base: {up.stderr.strip()[-300:]}")
-        tree = None
-        if up.returncode == 1:
-            tree = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
-                                  capture_output=True, text=True)
-            # 1 is a merge that conflicts: nothing to bring it up to date to.
-            if tree.returncode not in (0, 1):
-                raise RuntimeError(f"git merge-tree: {tree.stderr.strip()[-300:]}")
-        if tree and tree.returncode == 0:
-            who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
-            rev = M.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
-                        "-m", f"#{n} brought up to date with {base}").decode().strip()
-            M.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
-            paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
-        failed = False
-    except Cut:
-        raise  # the pass ran out of time: nothing recorded
+        jid = start_eval(repo, pr, checks, "merged", mirror, base=base, tip=tip)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-        log(f"{repo}#{n}: can't tell what its proof builds brought up to date with {base}: {e}")
-    st["mergedOutputs"] = {"for": key, "paths": paths, "failed": failed, "at": C.NOW}
-    return paths
+        log(f"{repo}#{n}: can't start merged proof eval with {base}: {e}")
+        jid = None
+    if jid is None:
+        st["mergedOutputs"] = {"for": key, "paths": None, "failed": True, "at": C.NOW}
+        return None
+    st["mergedEval"] = rec = {"for": key, "job": jid, "at": C.NOW}
+    EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+    eval_wake(repo, rec)
+    return EVALUATING
 
 
 def built(repo, pr, checks, st):
     """Each of checks' derivations on PR's head, by check, when every output
     of them all is valid in this machine's store: each passed here. None
     when one isn't, or what they build can't be worked out."""
-    outs = outputs(repo, pr, checks, st)
-    if not outs or unbuilt(outs):
+    outs = _outputs(repo, pr, checks, st, start=False) if outputs is _default_outputs else outputs(repo, pr, checks, st)
+    if not isinstance(outs, list) or not outs or unbuilt(outs):
         return None
     return st["proofOutputs"].get("drvs")
 
@@ -349,8 +446,8 @@ def unbuilt(paths):
         return set()
     try:
         return set(nix("nix-store", "--check-validity", "--print-invalid", *sorted(paths)).split())
-    except Cut:
-        raise  # the pass ran out of time: nothing recorded
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"can't tell which store paths are built: {e}")
         return set(paths)
@@ -398,15 +495,16 @@ def ahead(repo, n, st, slots, outs=None):
 def superseded(repo, pr, st):
     """The PR's head moved on to pr's: of its proof jobs still at work, all
     on a head it no longer has, the ones to stop. That's every one but a job
-    building something the new head's proof wants (its check, unchanged),
-    which that proof would only wait for (ahead): it's left to finish. One
-    whose builds nobody worked out is stopped, and so is every one when the
-    new head's can't be worked out."""
+    building something the new head's proof wants (already known in
+    proofOutputs), which that proof would only wait for (ahead): it's left
+    to finish. Never runs nix eval inline; if the new head's outputs aren't
+    known yet, every old build is stopped."""
     js = live(st)
     recs = st.get("proofPaths", {})
     wanted = set()
     if any((recs.get(j) or {}).get("paths") for j in js) and (last := st.get("proofOutputs")):
-        wanted = unbuilt(outputs(repo, pr, sorted(last["for"][1]), st))
+        if got := kept(repo, pr, sorted(last["for"][1]), st):
+            wanted = unbuilt(got["paths"])
     keep = [j for j in js if wanted.intersection((recs.get(j) or {}).get("paths") or ())]
     for j in keep:
         log(f"{repo}#{pr['number']}: proof job {j}, on its last head, builds what this head's proof wants: left to finish")
@@ -433,8 +531,8 @@ def build(repo, pr, checks, st):
         # Each check's outputs, while its derivation is surely in the store
         # (just worked out): the build's verdicts are read from them alone.
         outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
-    except Cut:
-        raise  # the pass ran out of time: nothing recorded
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what the build of {', '.join(checks)} makes: {e}")
         return None
@@ -492,8 +590,8 @@ def prebuild(repo, pr, checks, st, stage):
         return building(repo, rec) if rec.get("job") and running(rec["job"]) else None
     try:
         ins, outs = inputs(drvs)
-    except Cut:
-        raise  # the pass ran out of time: nothing recorded
+    except C.Unavailable:
+        raise
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what {', '.join(checks)} is built from: {e}")
         st["proofInputs"] = {"for": key, "job": None}
@@ -566,6 +664,7 @@ def start(jid, build_json, what, starter=None):
         p = subprocess.run([*starter, here], capture_output=True, text=True)
     if p.returncode:
         log(f"{build_json['repo']}#{build_json['number']}: couldn't start {what}: {p.stderr.strip()[-300:]}")
+        shutil.rmtree(here, ignore_errors=True)
         return None
     return jid
 
@@ -588,7 +687,8 @@ def prune():
         if any(os.path.exists(os.path.join(root, jid, f"policy-{state}")) for state in ("paused", "restoring")):
             continue
         end = load(f"builds/{jid}/end.json", None)
-        keep = KEEP_INPUTS if (load(f"builds/{jid}/build.json", None) or {}).get("inputs") else KEEP
+        b = load(f"builds/{jid}/build.json", None) or {}
+        keep = KEEP_INPUTS if b.get("inputs") or b.get("eval") else KEEP
         try:
             at = end["at"] if end else (None if C.build_state(jid) in ("running", None)
                                         else os.path.getmtime(os.path.join(root, jid, "build.json")))

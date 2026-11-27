@@ -918,6 +918,7 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-settings",
  "burrow-test",
@@ -1044,6 +1045,7 @@ dependencies = [
  "base64 0.23.1",
  "burrow-brief",
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-test",
  "flaky",

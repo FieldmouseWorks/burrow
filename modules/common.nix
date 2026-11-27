@@ -197,6 +197,21 @@ inputs:
         config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
         }));
+
+        # Single owner of the machine's git packing bounds (inherited by host,
+        # services, and microVM sandboxes alike). Unbounded pack-objects uses
+        # every core and unbounded delta window memory, which can OOM-kill a
+        # shared host. Repos outside proj keep git's own automatic maintenance
+        # under these bounds; concurrent proj jobs disable auto-maintenance via
+        # their GitMetadata grant and run serialized geometric repacks when
+        # finished job worktrees are pruned (crates/burrow-proj/src/scratch.rs).
+        config.programs.git.config = {
+          pack = {
+            threads = lib.mkDefault 2;
+            windowMemory = lib.mkDefault "256m";
+            packSizeLimit = lib.mkDefault "512m";
+          };
+        };
       })
   ];
 }

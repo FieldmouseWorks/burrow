@@ -19,6 +19,9 @@ case "$*" in
   'api -i -X GET repos/sam/r/contents/my%20dir/big.rs?ref=4ead')
     answer '200 OK'
     printf '{"type": "file", "encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
+  'api -i -X GET repos/sam/r/contents/my%20dir/big.rs?ref=3e7b')
+    answer '200 OK'
+    printf '{"type": "file", "encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big-before.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
   'api -i -X GET repos/sam/r/contents/vendor/lib?ref='*) answer '200 OK'; echo '{"type": "submodule", "sha": "5ab"}' ;;
   'api -i -X GET repos/sam/r/contents/bin/run?ref='*) answer '200 OK'; echo '{"type": "symlink", "target": "../tools/run"}' ;;
   'api -i -X POST repos/sam/r/statuses/4ead --input -') answer '201 Created'; echo '{}' ;;
@@ -50,6 +53,7 @@ fn setup(d: &Path, fork: bool) {
     let compare = json!({"merge_base_commit": {"sha": "3e7b"}, "files": files});
     fs::write(d.join("compare.json"), compare.to_string()).unwrap();
     fs::write(d.join("big.rs"), "x\n".repeat(1001)).unwrap();
+    fs::write(d.join("big-before.rs"), "x\n".repeat(986)).unwrap();
 }
 
 fn house(d: &Path, args: &[&str], model_names: &str) -> Output {
