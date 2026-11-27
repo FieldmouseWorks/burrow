@@ -16,7 +16,9 @@ use crate::config::{
     Config, CredentialMode, Effort, HOST_HOME_ENV, InputFormat, Mode, OutputFormat,
     validate_credential_home_path,
 };
-use crate::normalize::{RunError, TurnOutput, normalize_output};
+use crate::normalize::{
+    RunError, StreamForwarder, StreamStep, TurnOutput, normalize_output, partial_turn_output,
+};
 use crate::schema::Schema;
 
 /// Cross-engine credentials that must NEVER leak into the `antigravity` child,
@@ -604,6 +606,18 @@ pub fn run_invocation(
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
 ) -> TurnOutput {
+    run_invocation_streaming(config, invocation, stop, None)
+}
+
+/// Like [`run_invocation`], scrubbing and normalizing each complete stdout line
+/// via `on_step` as it arrives and preserving any partial session/usage on
+/// timeout or cancellation.
+pub fn run_invocation_streaming(
+    config: &Config,
+    invocation: &Invocation,
+    stop: &dyn Fn() -> bool,
+    mut on_step: Option<&mut dyn FnMut(StreamStep)>,
+) -> TurnOutput {
     // A schema that can't be held to is refused before the child runs: never
     // "any JSON will do".
     let schema = match invocation
@@ -774,10 +788,12 @@ pub fn run_invocation(
         command.env(key, val);
     }
 
-    let deadline = Instant::now() + Duration::from_secs(config.deadline_secs);
+    let deadline = config
+        .deadline_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs));
     // In `stream-json` input mode, deliver the prompt as a single NDJSON
     // `{"event":"user","message":{"content":...}}` line on stdin (which
-    // `output_unless` closes immediately on write, and binds to `/dev/null`
+    // `stream_unless` closes immediately on write, and binds to `/dev/null`
     // when empty). In single-shot `json`/`text` mode, `--print=<prompt>` carries
     // the prompt and stdin stays `/dev/null`.
     let stdin_payload: Option<Vec<u8>> =
@@ -792,15 +808,21 @@ pub fn run_invocation(
         } else {
             None
         };
-    let result = burrow_process::output_unless(
+    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
+    let mut forwarder = StreamForwarder::for_continuation(invocation.conversation.as_deref());
+    let mut on_stdout_line = |line: &str| {
+        if let Some(cb) = on_step.as_deref_mut() {
+            cb(forwarder.process_line_scrubbed(line, &secrets));
+        }
+    };
+    let result = burrow_process::stream_unless(
         &mut command,
         stdin_payload.as_deref(),
         deadline,
         config.max_output_bytes,
         stop,
+        &mut on_stdout_line,
     );
-
-    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
 
     match result {
         Ok(output) => normalize_output(
@@ -812,19 +834,17 @@ pub fn run_invocation(
             schema.as_ref(),
             &secrets,
         ),
-        Err(why) if why == "command was stopped" => TurnOutput {
-            error: Some(RunError::Cancelled),
-            ..TurnOutput::default()
-        },
-        Err(why) if why == "command exceeded its time limit" => TurnOutput {
-            error: Some(RunError::TimedOut),
-            ..TurnOutput::default()
-        },
-        Err(why) => TurnOutput {
+        Err(err) if err.reason == "command was stopped" => {
+            partial_turn_output(&err.stdout, RunError::Cancelled, &secrets)
+        }
+        Err(err) if err.reason == "command exceeded its time limit" => {
+            partial_turn_output(&err.stdout, RunError::TimedOut, &secrets)
+        }
+        Err(err) => TurnOutput {
             error: Some(RunError::ProcessFailed {
                 exit_code: None,
                 signal: None,
-                message: crate::normalize::scrub(&why, &secrets),
+                message: crate::normalize::scrub(&err.reason, &secrets),
             }),
             ..TurnOutput::default()
         },

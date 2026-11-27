@@ -45,7 +45,7 @@ fn base_config(binary: PathBuf) -> Config {
         models: sample_models(),
         default_model: Some("test-model".to_owned()),
         default_effort: Some(Effort::Medium),
-        deadline_secs: 30,
+        deadline_secs: Some(30),
         meters: vec!["quota".to_owned()],
         ..Config::default()
     }
@@ -163,6 +163,20 @@ fn config_validation_rejects_invalid_models_and_efforts() {
     cfg.default_model = Some("dup-model".to_owned());
     cfg.default_effort = Some(Effort::Max);
     assert!(cfg.validate().unwrap_err().contains("default_effort"));
+}
+
+#[test]
+fn deadline_secs_allows_none_and_rejects_zero() {
+    let mut cfg: Config = serde_json::from_str(r#"{"deadline_secs": null}"#).unwrap();
+    assert_eq!(cfg.deadline_secs, None);
+    cfg.validate().unwrap();
+
+    let omitted: Config = serde_json::from_str("{}").unwrap();
+    assert_eq!(omitted.deadline_secs, None);
+    omitted.validate().unwrap();
+
+    cfg.deadline_secs = Some(0);
+    assert!(cfg.validate().unwrap_err().contains("deadline_secs"));
 }
 
 #[test]
