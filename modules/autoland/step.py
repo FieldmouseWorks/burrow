@@ -51,7 +51,8 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         # PR's own step goes ahead in a repo the steward doesn't land.
         if C.held(repo, pr):
             raise C.JobPaused(f"{repo}: repository work paused")
-        return p.run()
+        p.run()
+        return p.revisit
     except C.JobPaused as e:
         if C.handed(repo, pr):
             why = str(e).split(": ", 1)[-1]
@@ -119,10 +120,10 @@ class Pass(Context, Jobs, Actions):
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
 
         # What its fix jobs left, posted once it's so (or they're stopped).
-        if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
+        if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.reread):
             self.settle("pending", said, stage=S.FIX)
             save(self.key, self.st)
-            return said == "A Claude job's answers went up: reading the PR again"
+            return
         if set_aside := aside(self.tag, self.pr, self.labels, self.held, self.below):
             self.st["aside"] = C.NOW  # its day to land in begins once it's no longer (day_began)
             self.settle("pending", *set_aside[:2], stage=set_aside[2], wait=set_aside[3])

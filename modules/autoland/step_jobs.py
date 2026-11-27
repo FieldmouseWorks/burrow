@@ -134,7 +134,7 @@ class Jobs:
         strike (claims)."""
         if at is _HEAD:
             at = self.head
-        if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
+        if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.reread):
             log(f"{self.tag}: no new {kind} job yet: an earlier one on the branch may still push, or its answers just went up")
             self.after(C.NOW, 1)  # ends: the next try to stop it
             return None

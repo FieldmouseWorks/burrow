@@ -44,7 +44,7 @@ def handed(st, kind, jid, pr):
     st.pop(kind + "Tracker", None)
 
 
-def stand_down(repo, pr, st, tag, strike, cleared, after):
+def stand_down(repo, pr, st, tag, strike, cleared, reread):
     """Before a new fix job is handed the PR: claims retires the jobs it
     keeps between turns on it (it names them to stop, and keeps them until
     proj says each is over). True once none may still push to the branch;
@@ -54,16 +54,16 @@ def stand_down(repo, pr, st, tag, strike, cleared, after):
     it read of the PR is stale, so replacement work is decided on a later
     pass that reads it again. Which jobs those are is claims.rs's to say:
     this only runs what it names."""
-    status, out = see(repo, pr, st, tag, strike, cleared, after, retire=True)
+    status, out = see(repo, pr, st, tag, strike, cleared, reread, retire=True)
     return status is None and (out is None or out["clear"])
 
 
-def look(repo, pr, st, tag, strike, cleared, after):
+def look(repo, pr, st, tag, strike, cleared, reread):
     """The PR's fix jobs, seen to by `claims` (see)."""
-    return see(repo, pr, st, tag, strike, cleared, after)[0]
+    return see(repo, pr, st, tag, strike, cleared, reread)[0]
 
 
-def see(repo, pr, st, tag, strike, cleared, after, retire=False):
+def see(repo, pr, st, tag, strike, cleared, reread, retire=False):
     """The PR's fix jobs, seen to by `claims`. The PR's status when the
     pass is to stop here, or None (and what claims said, for `see`): answers
     went up (what it read of the PR is stale; a pass is booked for now), or
@@ -112,7 +112,7 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
                 # it: the head gets no other job of the kind meanwhile
                 # (step_actions.hand_off), and a new head is none of it.
                 st[a["kind"] + "Tracker"] = a["tracker"]
-            after(C.NOW, 0)  # ends: the pass that reads what went up
+            reread()
             status = status or "A Claude job's answers went up: reading the PR again"
         elif outcome == "moved":
             log(f"{tag}: Claude job {jid} stood down, nothing posted: {why}")
