@@ -153,6 +153,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("[ $(grep -cx full /var/lib/probe/passes) = 2 ]", timeout=60)
 
     with subtest("polkit lets it start its handlers' units and nothing else"):
+        assert "polkit.service" in machine.succeed("systemctl show -p Wants --value burrow-events.service").split()
+        assert "polkit.service" in machine.succeed("systemctl show -p After --value burrow-events.service").split()
         machine.fail("su -s /bin/sh burrow-events -c 'systemctl start other.service'")
         machine.succeed("su -s /bin/sh burrow-events -c 'systemctl start probe@sam-x.service'")
         machine.succeed("grep -x sam/x /var/lib/probe/passes")
