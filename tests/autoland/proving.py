@@ -632,6 +632,51 @@ finally:
     S.CFG["nix"] = kept_cfg_nix
 print("proof evals bounded by the pass: ok")
 
+# Optional merged() eval cut short by the pass's deadline returns None rather
+# than aborting the step, and records no failed mergedOutputs.
+real_derivs, real_fetch, real_git = P.derivations, P.M.fetch, P.M.git
+P.M.fetch = lambda *a, **k: f"{tmp}/mirror"
+P.derivations = lambda *a, **k: (_ for _ in ()).throw(P.Cut("nix cut short by the pass's deadline"))
+real_run = P.subprocess.run
+P.subprocess.run = lambda cmd, **k: subprocess.CompletedProcess(
+    cmd, 0 if "merge-base" not in cmd else 1, "tree0\n" if "merge-tree" in cmd else "", ""
+)
+P.M.git = lambda *a, **k: b"deadbeef\n"
+try:
+    with C.pass_deadline(600):
+        st_m = {}
+        assert P.merged("sam/r", {"number": 5, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], st_m, "b" * 40) is None
+        assert "mergedOutputs" not in st_m, st_m
+finally:
+    P.derivations, P.M.fetch, P.M.git, P.subprocess.run = real_derivs, real_fetch, real_git, real_run
+
+# A Cut or Unavailable raised after outputs() computed proofOutputs still
+# persists proofOutputs so the next pass doesn't repeat the eval.
+fresh_pr_state()
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}, "proofSlots": 1}
+tools()
+eval_calls = []
+def counting_outputs(repo, pr, checks, st):
+    if (got := P.kept(repo, pr, checks, st)) is not None:
+        return got["paths"]
+    eval_calls.append(pr["headRefOid"])
+    drvs = {"vm": X + ".drv"}
+    st["proofOutputs"] = {"for": P.output_key(repo, pr, checks), "paths": [X], "drvs": drvs, "at": C.NOW}
+    return [X]
+P.outputs = counting_outputs
+real_prebuild = P.prebuild
+P.prebuild = lambda *a, **k: (_ for _ in ()).throw(P.Cut("nix cut short by the pass's deadline"))
+try:
+    try:
+        run(clean(checks=VM), 700)
+        raise AssertionError("expected Cut")
+    except P.Cut:
+        pass
+    assert len(eval_calls) == 1 and pr_state().get("proofOutputs", {}).get("paths") == [X], (eval_calls, pr_state())
+finally:
+    P.prebuild = real_prebuild
+print("proofOutputs saved across Cut: ok")
+
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
 del S.CFG["repos"]["sam/r"]
 os.environ["PATH"], S.CFG["nix"], os.environ["AUTOLAND_CONFIG"] = kept_path, kept_nix, kept_config

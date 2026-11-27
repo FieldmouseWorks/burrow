@@ -7,15 +7,17 @@ change is made once and reaches every repo.
 | Layer | Home | What's in it |
 |---|---|---|
 | The machine | `burrow.claude` | Permissions, the guard, the one-way doors, and which model does what. Every Claude on the box gets it; nothing in a repo repeats it. |
-| Every repo | The blocks in `house/`, copied into AGENTS.md | The house rules and the commit style ([`house/rules.md`](../house/rules.md)), and how a PR lands ([`house/prs.md`](../house/prs.md)). They live in the repo because Codex, cloud sessions and outside contributors never see the machine. |
+| Every repo | The blocks in `house/`, copied into AGENTS.md | The house rules and the commit style ([`house/rules.md`](../house/rules.md)), how a PR lands ([`house/prs.md`](../house/prs.md)), and the shared review rules ([`house/review.md`](../house/review.md)). They live in the repo because Codex, cloud sessions and outside contributors never see the machine. |
 | Every code repo | [`lib/project.nix`](../lib/project.nix), through its `flake.nix` | The toolchains, and the gate: format, lint and tests in `nix flake check`. CI only calls it. |
 | Each project | the repo itself | Its domain rules, its own review risks, how to build and test it, its verification tools, ADRs, status docs and deploys. |
 
 ## The house blocks
 
 Each file in `house/` is the source of one block:
-[`house/rules.md`](../house/rules.md), the house rules, and
-[`house/prs.md`](../house/prs.md), the Pull requests section. Every repo's
+[`house/rules.md`](../house/rules.md), the house rules,
+[`house/prs.md`](../house/prs.md), the Pull requests section, and
+[`house/review.md`](../house/review.md), the shared review rules inside
+`## Code Review Rules`. Every repo's
 AGENTS.md carries a copy of each, **verbatim, markers included**, from
 `<!-- house:NAME v1 begin ... -->` to `<!-- house:NAME end -->`. The house
 sync (`burrow.house`) finds each block by its markers and rewrites it when its
@@ -24,8 +26,9 @@ file here changes, so:
 - Copy it byte for byte. Don't reword, reflow or trim it, and keep both marker
   lines exactly as they are.
 - Put the rules block straight after the AGENTS.md's title and opening
-  paragraph, before the repo's own sections, and the Pull requests block just
-  before the repo's Code Review Rules.
+  paragraph, before the repo's own sections, the Pull requests block just
+  before `## Code Review Rules`, and the review block at the top of
+  `## Code Review Rules`, with the repo's own P1 risks directly below it.
 - Anything the repo needs on top goes outside the markers: in its own
   sections, or straight after the block it adds to (a path whose PRs wait for
   the owner goes after the Pull requests block). A repo-specific rule that's
@@ -38,8 +41,11 @@ file here changes, so:
 - To change a block, change its file in `house/` here. Edits inside the
   markers in a repo are overwritten.
 - A new block is a new file in `house/`, named for the block, with its marker
-  lines first and last. A repo without a block yet is left alone, so each
-  repo's copy goes in by hand once; the house sync keeps it from then on.
+  lines first and last. A repo without a block yet is left alone (except
+  `review`, which the house sync places inside an existing `## Code Review
+  Rules` section carrying the four common P1 lines once a repo already carries
+  a house block), so each other block's copy goes in by hand once; the house
+  sync keeps it from then on.
 
 ## The gate is the flake
 
@@ -120,20 +126,25 @@ Every repo with code gets a `flake.nix` from the template
   whenever its title or body is edited. It holds the PR to the house rules a
   machine can read ([which, and how](../crates/burrow-house/src/lib.rs)): its
   title is `area: plain sentence`, and a PR that adds Python or grows Python
-  and shell past a fix, adds a timer, grows a code file past 1,000 lines,
+  and shell past a fix, adds a timer, pushes a non-test code file across the
+  1,000-line backstop (over it at the head, at or under it or absent at the
+  merge base; test files and Rust inline `#[cfg(test)]` blocks don't count),
   grows an AGENTS.md's own part past 100 lines or names a model has the line
-  in its body that says why, with a reason. A PR whose head is under
-  `renovate/` fails unless Renovate opened it, since Renovate takes every
-  branch there as its own, and so does one whose title or body writes the
-  review connector's mention, even in backticks, which the connector reads
-  as a task instead of reviewing the PR. Each
-  rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
-  by the next run's, so fixing the title or body clears it; a fork's PR,
-  whose token can't post them, gets them as the job's result. A repo can set
-  the action's `growth` and `lines`, and one whose subject is models turns
-  off `model-names`. A private repo runs it on its self-hosted runner, as it
-  does the gate: the action builds the check with the runner's cargo and
-  runs it with gh.
+  in its body that says why, with a reason. Growing a non-test code file
+  already over the backstop at the merge base fails unless the path has a
+  standing waiver in `file-size-allow`: a `Why not split:` body line does not
+  pass it. A PR whose head is under `renovate/` fails
+  unless Renovate opened it, since Renovate takes every branch there as its
+  own, and so does one whose title or body writes the review connector's
+  mention, even in backticks, which the connector reads as a task instead of
+  reviewing the PR. Each rule is a commit status for the PR of its own,
+  `house/RULE (#N)`, replaced by the next run's, so fixing the title or body
+  clears it; a fork's PR, whose token can't post them, gets them as the job's
+  result. A repo can set the action's `growth`, `lines`, `rust-first-allow`
+  and `file-size-allow` (standing per-path waivers, one path or glob per line,
+  with `#` comments), and one whose subject is models turns off `model-names`.
+  A private repo runs it on its self-hosted runner, as it does the gate: the
+  action builds the check with the runner's cargo and runs it with gh.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
   when burrow's do. Change a Rust version in `rust-toolchain.toml` only.
 - The template also brings `.editorconfig`. Rust crates forbid `unsafe` in

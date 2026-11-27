@@ -174,6 +174,7 @@ if printf '%s' "$req" | grep -q '"kind":"describe"'; then
   exit 0
 fi
 printf '%s\n' "$req" >> {capture}
+printf '%s\n' "${{PROJ_ENGINE_HOME:-}}" >> {capture}.home
 echo '{{"event":"session","session_id":"sess-custom-1"}}' >&2
 echo '{{"event":"activity"}}' >&2
 echo '{{"event":"usage","session":"sess-custom-1","usage":{{"input_tokens":120,"output_tokens":45,"total_cost_usd":0.12}}}}' >&2
@@ -256,6 +257,13 @@ fi
     assert_eq!(lines[0]["execution"]["context"]["kind"], "fresh");
     assert_eq!(lines[1]["execution"]["context"]["kind"], "continue");
     assert_eq!(lines[1]["execution"]["context"]["session"], "sess-custom-1");
+    let expected_home = job.file(JobFile::EngineHome).to_string_lossy().into_owned();
+    let homes: Vec<String> = fs::read_to_string(format!("{}.home", capture.display()))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(homes, vec![expected_home.clone(), expected_home]);
 }
 
 /// A plugin whose `describe` identity or execution provenance contradicts the

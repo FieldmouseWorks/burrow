@@ -387,8 +387,8 @@ in
 
     deadlineSeconds = mkOption {
       type = types.ints.positive;
-      default = 1800;
-      description = "Outer hard wall-clock deadline in seconds enforced on the child process group.";
+      default = 14400;
+      description = "Outer hard wall-clock deadline in seconds enforced on the child process group (matches `burrow.proj.timeout`'s 4h default).";
     };
 
     meters = mkOption {

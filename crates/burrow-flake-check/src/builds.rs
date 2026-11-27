@@ -5,16 +5,17 @@
 //! derivations it's about to build cold it has, and says so beside them:
 //! how many, which, their bytes, how long fetching them would take, and how
 //! long the kept builds' restore took. Nothing substitutes from it: curl
-//! reads the outputs' narinfos by hash, nix checks their signatures
-//! (`nix store verify --no-contents`, with a cache of its own), and one
-//! NAR's first bytes are timed for the fetch. Informational, as the cold build's own line is: it never fails a
-//! leg, and every question has a deadline.
+//! reads the outputs' narinfos concurrently by hash, nix checks those
+//! fetched narinfos' signatures offline (`nix store verify --no-contents`),
+//! and one NAR's first bytes are timed for the fetch. Informational, as the
+//! cold build's own line is: it never fails a leg, and every question has a
+//! deadline.
 //!
 //! A run that may write the store also gets [`NIX_CONFIG`]: what a flake's
 //! own `nixConfig` could otherwise change in a run whose builds the store
 //! takes, it can't.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a run that writes the store adds to every nix it runs, last, so it
 /// wins: a flake's `nixConfig` is never taken (so it can't add a
@@ -30,6 +31,8 @@ pub fn writes() -> bool {
 
 /// How long one question to the store may take.
 const DEADLINE: &str = "60";
+/// How many narinfo requests curl keeps in flight at once.
+const PARALLEL: &str = "32";
 /// The most of one NAR fetched to time the store.
 const SAMPLE: u64 = 64 << 20;
 
@@ -219,15 +222,18 @@ impl Store {
     }
 
     /// The store's narinfos for `paths`, by their hashes: each path it
-    /// has, with its download's bytes and its NAR's URL. Read with curl,
-    /// never nix: given a path its store hasn't, nix tries to build it, and
-    /// an HTTP store (nix 2.35) then fails the whole question. A 404 is a
-    /// path it hasn't; any other answer is an error.
+    /// has, with its download's bytes and its NAR's URL, staged in `cache`
+    /// as a local binary cache so signature verification never fetches them
+    /// again. Read concurrently with curl (bounded by [`PARALLEL`]), never
+    /// nix: given a path its store hasn't, nix tries to build it, and an
+    /// HTTP store (nix 2.35) then fails the whole question. A 404 is a path
+    /// it hasn't; any other answer is an error.
     fn narinfos(
         &self,
         url: &str,
         paths: &[&str],
         work: &Path,
+        cache: &Path,
     ) -> Result<BTreeMap<String, (u64, String)>> {
         let mut has = BTreeMap::new();
         if paths.is_empty() {
@@ -235,29 +241,39 @@ impl Store {
         }
         let dir = work.join("narinfo");
         fs::create_dir_all(&dir)?;
+        fs::create_dir_all(cache)?;
+        let config = work.join("narinfo.curl");
+        let mut cfg = String::new();
+        for (i, p) in paths.iter().enumerate() {
+            let hash = hash_part(p);
+            cfg.push_str("url = ");
+            cfg.push_str(&curl_quote(&format!("{url}/{hash}.narinfo"))?);
+            cfg.push_str("\noutput = ");
+            cfg.push_str(&curl_quote(s(&dir.join(i.to_string())))?);
+            cfg.push('\n');
+        }
+        fs::write(&config, cfg)?;
         // One deadline for the whole batch: curl's own `--max-time` is each
         // transfer's, so a stalled store would hold a leg once per output.
-        let mut c = self.nix(
+        let c = self.nix(
             "timeout",
             &[
                 self.deadline,
                 "curl",
                 "-sS",
+                "--parallel",
+                "--parallel-max",
+                PARALLEL,
                 "--proto",
                 "=https,http",
                 "--connect-timeout",
                 "10",
                 "-w",
                 "%{urlnum} %{response_code}\\n",
+                "-K",
+                s(&config),
             ],
         );
-        for (i, p) in paths.iter().enumerate() {
-            let base = p.rsplit('/').next().unwrap_or(p);
-            let hash = base.split_once('-').map_or(base, |(h, _)| h);
-            c.arg("-o")
-                .arg(dir.join(i.to_string()))
-                .arg(format!("{url}/{hash}.narinfo"));
-        }
         let o = output(c)?;
         if o.status.code() == Some(124) {
             return Err(err(format!(
@@ -280,7 +296,8 @@ impl Store {
             match code {
                 Some(404) => {}
                 Some(200) => {
-                    let text = fs::read_to_string(dir.join(i.to_string()))?;
+                    let src = dir.join(i.to_string());
+                    let text = fs::read_to_string(&src)?;
                     // The runner is compiled with rustc alone: no crate's reader.
                     let field = |k: &str| {
                         text.lines()
@@ -292,6 +309,8 @@ impl Store {
                         .unwrap_or(0);
                     match (field("StorePath"), field("URL")) {
                         (Some(sp), Some(nar)) if sp == *p => {
+                            let hash = hash_part(p);
+                            fs::rename(&src, cache.join(format!("{hash}.narinfo")))?;
                             has.insert((*p).to_owned(), (size, nar.to_owned()));
                         }
                         _ => return Err(err(format!("its narinfo for {p} doesn't name it"))),
@@ -305,6 +324,25 @@ impl Store {
                     )));
                 }
             }
+        }
+        if !o.status.success() {
+            return Err(err(format!(
+                "curl failed reading narinfos ({}): {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )));
+        }
+        if !has.is_empty() {
+            let store_dir = has
+                .keys()
+                .next()
+                .and_then(|p| p.rsplit_once('/').map(|(d, _)| d))
+                .filter(|d| !d.is_empty())
+                .unwrap_or("/nix/store");
+            fs::write(
+                cache.join("nix-cache-info"),
+                format!("StoreDir: {store_dir}\n"),
+            )?;
         }
         Ok(has)
     }
@@ -333,18 +371,23 @@ impl Store {
             .flatten()
             .map(String::as_str)
             .filter(|p| !p.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
-        let mut has = self.narinfos(url, &paths, work)?;
+        let cache = work.join("cache");
+        let mut has = self.narinfos(url, &paths, work, &cache)?;
         // What its key doesn't sign, a store that trusts only that key wouldn't
         // take: it doesn't count. With no key named, a store trusts none, so
         // only what needs no signature (a content-addressed path) counts.
+        // Verify offline against the narinfos already fetched above.
         let mut untrusted = 0;
         if !has.is_empty() {
+            let local = format!("file://{}", cache.display());
             let mut args = vec![
                 "store",
                 "verify",
                 "--store",
-                url,
+                &local,
                 "--no-contents",
                 "--sigs-needed",
                 "1",
@@ -353,7 +396,7 @@ impl Store {
                 key,
             ];
             args.extend(has.keys().map(String::as_str));
-            let o = output(self.asking(work, &args))?;
+            let o = output(self.asking(&work.join("xdg"), &args))?;
             let said = String::from_utf8_lossy(&o.stderr);
             for l in said.lines() {
                 if let Some(p) = l.split('\'').nth(1).filter(|_| l.contains("is untrusted")) {
@@ -416,6 +459,31 @@ impl Store {
         report.restore = restore(&self.temp);
         Ok(report)
     }
+}
+
+/// A store path's hash part: the prefix before `-` of its basename.
+fn hash_part(path: &str) -> &str {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.split_once('-').map_or(base, |(h, _)| h)
+}
+
+/// A value quoted for a curl `-K` config file, refusing control characters
+/// that could split a line or inject another directive.
+fn curl_quote(value: &str) -> Result<String> {
+    if value.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(err("control character in curl config value"));
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    Ok(out)
 }
 
 /// The kept builds' restore, as the workflow's clock steps had it: its

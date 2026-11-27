@@ -8,7 +8,8 @@
 //! in, belongs to the generated reference). Another owned fact is one more
 //! source chained there. A tree that owns the house blocks (burrow's
 //! house/) is held to them too ([`house`]): its AGENTS.md carries each as
-//! house/ has it.
+//! house/ has it, and when it also owns the settings reference, its AGENTS.md
+//! documents the `proj settings show` read door ([`settings::check_read_door`]).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,8 @@ pub enum Fix {
     Link,
     /// Carries a copy of it: copy it from the owner, verbatim.
     Copy,
+    /// Names the wrong read door or leaves it out: keep the owner's door.
+    Door,
 }
 
 impl std::fmt::Display for Finding {
@@ -85,6 +88,11 @@ impl std::fmt::Display for Finding {
             Fix::Copy => write!(
                 f,
                 "{}:{}: carries {}; copy it from {} verbatim",
+                self.file, self.line, self.what, self.owner
+            ),
+            Fix::Door => write!(
+                f,
+                "{}:{}: {}; keep `proj settings show` as {} documents",
                 self.file, self.line, self.what, self.owner
             ),
         }
@@ -123,6 +131,7 @@ pub fn check(root: &Path, facts: &[Fact]) -> Result<Vec<Finding>, String> {
         found.extend(check_text(&file, &text, facts));
     }
     found.extend(house::check(root)?);
+    found.extend(settings::check_read_door(root)?);
     Ok(found)
 }
 
@@ -152,7 +161,7 @@ fn markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 /// split after `.`, `;`, `?` or `!` and a space; a list item, a table
 /// row, a heading and each line of a code block stand alone.
 /// A colon keeps an option and its value in the same statement.
-fn sentences(text: &str) -> Vec<(usize, String)> {
+pub(crate) fn sentences(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut open = Paragraph::default();
     let mut fenced = false;

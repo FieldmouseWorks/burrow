@@ -20,6 +20,7 @@ fn a_fix_job_weighs_findings_on_their_merits() {
         "Weigh every finding on its merits, the same from the first round on, past the review-round limit too, whatever severity the reviewer gave it. ",
         "with a regression test for each of those cases that fails without the fix, not only the line the thread is on. ",
         "Answer the rest with your reasons and change nothing for them: ",
+        "a non-P1 Code Review Rules finding (a design or split note isn't required mid-PR; answer with your reason rather than calling it unasked-for)",
         "A finding labelled P1 that names no rule on that P1 list, no reason in the PR's description that doesn't hold (settled as below) and no concrete failure scenario counts as P2 here: its label alone doesn't make it one to fix. ",
     ] {
         assert!(FINDINGS.contains(said), "{said}");

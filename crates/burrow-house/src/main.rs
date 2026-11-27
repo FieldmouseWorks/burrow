@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use burrow_github::Gh;
 use burrow_house::check::{self, Event};
 use burrow_house::github::Real;
+use burrow_house::rules::AllowList;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -39,6 +40,15 @@ fn number<T: std::str::FromStr>(name: &str) -> Result<T, String> {
         .map_err(|_| format!("{name}: {value:?} isn't a number"))
 }
 
+fn allow(name: &str) -> Result<AllowList, String> {
+    let raw = match env::var(name) {
+        Ok(v) => v,
+        Err(env::VarError::NotPresent) => String::new(),
+        Err(e) => return Err(format!("{name}: {e}")),
+    };
+    AllowList::parse(&raw).map_err(|e| format!("{name}: {e}"))
+}
+
 /// The event, from the action's environment and the runner's.
 fn event() -> Result<Event, String> {
     let repo = var("GITHUB_REPOSITORY")?;
@@ -57,6 +67,8 @@ fn event() -> Result<Event, String> {
             "false" => false,
             other => return Err(format!("MODEL_NAMES: {other:?} isn't true or false")),
         },
+        rust_first_allow: allow("RUST_FIRST_ALLOW")?,
+        file_size_allow: allow("FILE_SIZE_ALLOW")?,
         repo,
         run_url,
     })

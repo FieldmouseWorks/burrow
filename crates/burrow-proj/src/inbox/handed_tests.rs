@@ -620,3 +620,101 @@ fn long_repository_issue_and_job_names_retire_without_combining_components() {
     b.pass().retired(&repo.to_uppercase()).unwrap();
     assert_eq!(fs::read_dir(retired).unwrap().count(), 0);
 }
+
+#[test]
+fn failed_turn_without_session_restarts_up_to_limit() {
+    let mut b = Box::new();
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.projects = b.path("src");
+    fs::create_dir_all(b.path("src/box")).unwrap();
+    let mut on = issue(7, "sam", &["claude"]);
+    on["state"] = json!("open");
+    fs::write(b.path("comments"), json!([[]]).to_string()).unwrap();
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.job("j1", "failed", "");
+    let d = b.record("j1");
+    fs::write(d.join(files::File::Answered), "0\n").unwrap();
+    fs::write(d.join(files::File::Seen), "0\n").unwrap();
+    let input = b.pass().issue_text("sam/box", &on, &[]);
+    fs::write(d.join(files::File::Input), input).unwrap();
+
+    // First failure without a session: retires j1 and starts a fresh job (streak 1).
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let second = files::job(&d).unwrap();
+    assert_ne!(
+        second,
+        "j1",
+        "failed turn without session should restart: log={}",
+        b.log()
+    );
+    assert!(b.cfg.jobs.join("j1/1.stopped").exists());
+    assert_eq!(files::answered(&d).as_deref(), Some("0"));
+    assert_eq!(files::revived(&d).as_deref(), Some("1 1"));
+
+    // Second failure without a session: starts one more time (streak 2).
+    fs::write(b.cfg.jobs.join(&second).join("1.outcome"), "failed\n").unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let third = files::job(&d).unwrap();
+    assert_ne!(third, second, "second failure should still restart");
+    assert!(b.cfg.jobs.join(&second).join("1.stopped").exists());
+    assert_eq!(files::revived(&d).as_deref(), Some("1 2"));
+
+    // Third failure without a session: streak is 2, so it stops restarting and posts.
+    fs::write(b.cfg.jobs.join(&third).join("1.outcome"), "failed\n").unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert_eq!(files::job(&d).as_deref(), Some(third.as_str()));
+    let posted = b.posted();
+    assert!(
+        posted.contains("ended without an answer (failed)"),
+        "{posted}"
+    );
+}
+
+#[test]
+fn failed_answered_turn_without_session_still_restarts() {
+    let mut b = Box::new();
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.projects = b.path("src");
+    fs::create_dir_all(b.path("src/box")).unwrap();
+    let mut on = issue(7, "sam", &["claude"]);
+    on["state"] = json!("open");
+    fs::write(b.path("comments"), json!([[]]).to_string()).unwrap();
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.job("j1", "failed", "");
+    let d = b.record("j1");
+    // Already answered (e.g. posted by an older proj-inbox before sessionless
+    // restarts existed), with no session and no revive streak recorded yet.
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
+    fs::write(d.join(files::File::Seen), "0\n").unwrap();
+    let input = b.pass().issue_text("sam/box", &on, &[]);
+    fs::write(d.join(files::File::Input), input).unwrap();
+
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let second = files::job(&d).unwrap();
+    assert_ne!(
+        second,
+        "j1",
+        "already-answered sessionless failed turn should restart: log={}",
+        b.log()
+    );
+    assert!(b.cfg.jobs.join("j1/1.stopped").exists());
+    assert_eq!(files::answered(&d).as_deref(), Some("0"));
+    assert_eq!(files::revived(&d).as_deref(), Some("1 1"));
+
+    // Once the streak limit (2) is reached and answered, a later pass must not restart again.
+    fs::write(b.cfg.jobs.join(&second).join("1.outcome"), "failed\n").unwrap();
+    fs::write(d.join(files::File::Revived), "1 2\n").unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert_eq!(files::job(&d).as_deref(), Some(second.as_str()));
+}

@@ -242,7 +242,7 @@ fn a_negative_restores_every_legs_kept_builds() {
         .iter()
         .filter(|s| uses(s, "actions/cache/restore@") && s["with"]["lookup-only"] != true)
         .collect();
-    assert_eq!(restores.len(), 8, "one a leg, up to eight");
+    assert_eq!(restores.len(), 12, "one a leg, up to twelve");
     let first = at(&|s| uses(s, "actions/cache/restore@"));
     let made = &all[at(&|s| s.get("run").is_some_and(|r| r == script(gate_made)))];
     let install = &all[at(&|s| uses(s, "cachix/install-nix-action@"))];
@@ -278,7 +278,7 @@ fn a_negative_restores_every_legs_kept_builds() {
             ("steps.merge.outputs.tip", "".into()),
         ])
     };
-    for legs in 1..=8u64 {
+    for legs in 1..=12u64 {
         for (k, r) in restores.iter().enumerate() {
             let leg = k as u64 + 1;
             let c = base(legs);
@@ -311,7 +311,7 @@ fn a_negative_restores_every_legs_kept_builds() {
         ("inputs.keep-builds", false.into()),
         ("inputs.install-nix", false.into()),
     ] {
-        let mut c = base(8);
+        let mut c = base(12);
         c.insert(key.to_owned(), off.clone());
         for r in &restores {
             assert!(!value(text(&r["if"]), &c).truthy(), "{key} {off:?}");
@@ -355,7 +355,7 @@ fn a_negative_restores_every_legs_kept_builds() {
         ] {
             // Every other leg skipped: neither looked up nor restored.
             let mut c = ctx(&[("always()", true.into())]);
-            for n in 1..=8 {
+            for n in 1..=12 {
                 for step in [format!("kept-{n}"), format!("kept-{n}-restore")] {
                     c.insert(format!("steps.{step}.outputs.cache-hit"), "".into());
                 }

@@ -293,7 +293,7 @@ def merged(repo, pr, checks, st, tip):
             paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
         failed = False
     except Cut:
-        raise  # the pass ran out of time: nothing recorded
+        return None  # optional: the pass ran out of time for its eval, the next one tries
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds brought up to date with {base}: {e}")
     st["mergedOutputs"] = {"for": key, "paths": paths, "failed": failed, "at": C.NOW}
