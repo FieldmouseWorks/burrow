@@ -807,3 +807,39 @@ def started(st, outs=None):
     if outs is not None:
         # The clock, not the pass's: jobs one pass starts come in order.
         st.setdefault("proofPaths", {})[st["provedJob"]] = {"paths": outs, "at": time.time()}
+
+
+def slot_free(repo, slots):
+    """Whether repo's proofSlots currently have room for another proof job."""
+    if not slots:
+        return False
+    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
+    busy = 0
+    for f in os.listdir(STATE):
+        m = re.fullmatch(mine, f)
+        if m and (repo not in OPEN or int(m[1]) in OPEN[repo]):
+            other = load(f, {})
+            if any(running(j) for j in jobs(other)):
+                busy += 1
+                if busy >= slots:
+                    return False
+    return True
+
+
+def urgent(repo, pr, status_state, status_desc, free_slot):
+    """Whether PR has a proof transition that should not wait behind the rest
+    of a slow round: a verdict just posted waiting to land, a finished build or
+    run waiting to post its verdict and free its slot, or a proofTurn PR when
+    a slot is free."""
+    if status_state == "pending" and status_desc.endswith("its verdict posted"):
+        return True
+    st = load(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", {})
+    if (
+        st.get("proved") == pr.get("headRefOid")
+        and (jid := st.get("provedJob"))
+        and jid.startswith(C.BUILD)
+        and not st.get("strikes", {}).get("status")
+        and C.build_state(jid) == "done"
+    ):
+        return True
+    return bool(free_slot and st.get("proofTurn"))

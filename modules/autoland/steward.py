@@ -80,7 +80,7 @@ import step
 import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, save
-from prs import open_prs
+from prs import open_prs, our_status
 
 
 # ---------------------------------------------------------------- main
@@ -358,13 +358,19 @@ def run_pass(kick, continuing=False):
                 heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
+                # Next, PRs with an urgent proof transition (finished build/run,
+                # verdict posted, or waiting on a now-free proof slot) so slow
+                # rounds do not starve them.
                 # Then every PR's look this round before any one's second
                 # (batch.due), first-labelled ahead within a round, then
                 # unvisited PRs before revisiting changed ones.
+                slots = C.repo_cfg(repo).get("proofSlots")
 
-                def order(pr):
+                def order(pr, free_slot):
                     n = pr["number"]
-                    return n not in held, not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
+                    st_state, st_desc = our_status(pr) if pr.get("commits") else (None, "")
+                    urg = P.urgent(repo, pr, st_state, st_desc, free_slot)
+                    return n not in held, not urg, not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
 
                 # Read and ready: each PR's own step fails on its own.
                 waits.passed(repo, op)
@@ -378,7 +384,8 @@ def run_pass(kick, continuing=False):
                     # Chosen one look at a time: a round can end partway
                     # through the slice, and the next starts its order over.
                     batch.turn(repo, pending)
-                    pr = left.pop(min(range(len(left)), key=lambda i: order(left[i])))
+                    free_slot = P.slot_free(repo, slots) if slots else False
+                    pr = left.pop(min(range(len(left)), key=lambda i: order(left[i], free_slot)))
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
