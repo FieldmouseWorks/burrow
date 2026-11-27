@@ -91,11 +91,14 @@ def restart(r, known, failed):
     anything acts on it, when the settings the steward last set under its
     name were another repo's (C.replaced). Then `reset`."""
     repo = r["repo"]
+    restarted = False
     for k, st in C.kept_state(repo):
         if C.replaced(st, r):
             log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+            restarted = True
             if not DRY:
                 reset(r, k, known, failed)
+    return restarted
 
 
 def reset(r, k, known, failed):
@@ -201,6 +204,16 @@ def first_fixes(r, prs):
     return fixes
 
 
+def default_digest_line(repo, default, sha):
+    """The digest item label watch_default writes for a red default branch."""
+    return f"{repo} {default} at {sha[:7]}"
+
+
+def is_default_digest(repo, entry):
+    """Whether a digest tuple belongs to watch_default for repo."""
+    return entry[1].startswith(f"{repo} ")
+
+
 def watch_default(r, info, prs, digest):
     """A red default branch: CI failed on what's merged, and every PR is
     built on it. With no merge queue (docs/repo-baseline.md), this is how
@@ -266,7 +279,7 @@ def watch_default(r, info, prs, digest):
             st.pop("red")
             save(key, st)
         return {pr["number"]: gone for pr in fixes}
-    line = f"{repo} {default} at {sha[:7]}"
+    line = default_digest_line(repo, default, sha)
     # A new red one landing caused: its undo is asked for with no job,
     # unless a fix is open already (anyone's of the steward's own, from a
     # RED_BRANCH branch), which is the red's fix in hand, as for a job.
