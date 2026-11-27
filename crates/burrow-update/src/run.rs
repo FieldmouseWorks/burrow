@@ -480,10 +480,13 @@ impl Run<'_> {
             &format!("{} no longer rides its PR.", cfg.update),
         );
         match self.built() {
-            Some(new) => self.new = new,
-            None if self.bumping => self.input_by_input()?,
+            running::Build::Ok(new) => self.new = new,
+            running::Build::DaemonLost => {
+                return Err(self.end(Outcome::Failed, "nix-daemon disconnected"));
+            }
+            running::Build::Failed if self.bumping => self.input_by_input()?,
             // Main alone: nothing to fall back to.
-            None => return Err(self.main_broke()),
+            running::Build::Failed => return Err(self.main_broke()),
         }
         if self.failed.is_empty() {
             settled(cfg, "build-inputs", "Cleared by a later run.");
@@ -506,11 +509,11 @@ impl Run<'_> {
     }
 
     /// HEAD's system, unless its tree failed to build in the last day.
-    fn built(&self) -> Option<String> {
+    fn built(&self) -> running::Build {
         if self.memo.failed_before("build") {
-            return None;
+            return running::Build::Failed;
         }
-        running::build(self.cfg)
+        running::build_checked(self.cfg)
     }
 
     /// Everything at once didn't build: each input on its own, on main,
@@ -518,9 +521,10 @@ impl Run<'_> {
     fn input_by_input(&mut self) -> Step {
         let cfg = self.cfg;
         let logs = cfg.state.join("logs");
-        if !self.memo.failed_before("build") {
+        let all_tree = self.memo.tree("HEAD");
+        let all_failed_before = self.memo.failed_before("build");
+        if !all_failed_before {
             copy(&logs.join("build.log"), &logs.join("build-all.log"));
-            self.memo.failed("build")?;
         }
         self.git(&["reset", "-q", "--hard", &self.main])?;
         self.unfetched.clear();
@@ -533,12 +537,26 @@ impl Run<'_> {
                 self.committed(false)?;
                 continue;
             }
+            if all_tree.is_some() && self.memo.tree("HEAD") == all_tree {
+                if !all_failed_before {
+                    copy(
+                        &logs.join("build-all.log"),
+                        &logs.join(format!("build-{i}.log")),
+                    );
+                }
+                self.git(&["reset", "-q", "--hard", "HEAD~1"])?;
+                self.failed.push(i.to_string());
+                continue;
+            }
             match self.built() {
-                Some(new) => {
+                running::Build::Ok(new) => {
                     self.new = new;
                     println!("{i}: builds");
                 }
-                None => {
+                running::Build::DaemonLost => {
+                    return Err(self.end(Outcome::Failed, "nix-daemon disconnected"));
+                }
+                running::Build::Failed => {
                     if !self.memo.failed_before("build") {
                         copy(
                             &logs.join("build.log"),
@@ -551,15 +569,19 @@ impl Run<'_> {
                 }
             }
         }
+        if !all_failed_before && let Some(tree) = &all_tree {
+            self.memo.failed_tree("build", tree)?;
+        }
         // What's left is whatever of the bump built; none of it is main
         // itself, with nothing new on it.
         self.changed = self.git(&["rev-parse", "HEAD"])? != self.main;
-        match running::build(cfg) {
-            Some(new) => {
+        match running::build_checked(cfg) {
+            running::Build::Ok(new) => {
                 self.new = new;
                 Ok(())
             }
-            None => Err(self.main_broke()),
+            running::Build::DaemonLost => Err(self.end(Outcome::Failed, "nix-daemon disconnected")),
+            running::Build::Failed => Err(self.main_broke()),
         }
     }
 

@@ -679,3 +679,145 @@ fn real_antigravity_stream_json_envelopes_normalize_result_schema_errors_and_lea
         "{denied_out:?}"
     );
 }
+
+#[test]
+fn host_mode_persists_isolated_home_across_turns_in_proj_engine_home() {
+    let dir = TempDir::new().unwrap();
+    let engine_home = dir.path().join("job-dir").join("engine-home");
+    fs::create_dir_all(engine_home.parent().unwrap()).unwrap();
+    let fake_real_home = dir.path().join("real-home");
+    fs::create_dir_all(fake_real_home.join(".cargo")).unwrap();
+    fs::write(fake_real_home.join(".gitconfig"), "[user]\nname = Test\n").unwrap();
+
+    // Fake `antigravity` CLI:
+    // - On fresh turn (no `--conversation`): creates `$HOME/.gemini/antigravity-cli/session-sess-1`
+    //   and returns `conversation_id: "sess-1"`.
+    // - On continue turn (`--conversation sess-1`): checks that the session file
+    //   exists in `$HOME`; if missing, starts a new `sess-2` (reproducing the
+    //   per-turn TempDir bug where `plugin.rs` rejects the changed session).
+    let fixture = write_executable(
+        dir.path(),
+        "ag-session-persist",
+        r#"#!/bin/sh
+cat >/dev/null
+conv=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--conversation" ]; then
+    conv="$arg"
+  fi
+  prev="$arg"
+done
+state_dir="$HOME/.gemini/antigravity-cli"
+mkdir -p "$state_dir"
+if [ -z "$conv" ]; then
+  printf 'turn1\n' > "$state_dir/session-sess-1"
+  printf '{"type":"result","conversation_id":"sess-1","result":"turn 1 ok"}\n'
+elif [ -f "$state_dir/session-$conv" ]; then
+  printf '{"type":"result","conversation_id":"%s","result":"turn 2 ok;git=%s;cargo=%s"}\n' \
+    "$conv" "${GIT_CONFIG_GLOBAL:-}" "${CARGO_HOME:-}"
+else
+  printf '{"type":"result","conversation_id":"sess-2","result":"lost session"}\n'
+fi
+"#,
+    );
+
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        host_mode: true,
+        credential_mode: CredentialMode::HomeFile,
+        credential_env: Some("BURROW_AG_TEST_IN".to_owned()),
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let run_turn = |context: Context| -> std::process::Output {
+        let req = Request {
+            contract: CONTRACT.to_owned(),
+            task: Task::Job {
+                repo: "owner/demo".to_owned(),
+                prompt: "continue check".to_owned(),
+                workdir: dir.path().to_string_lossy().into_owned(),
+                model: Some("test-model".to_owned()),
+                effort: Some("low".to_owned()),
+            },
+            negotiated: Some(Negotiated {
+                by: Identity {
+                    engine: ENGINE.to_owned(),
+                    session: None,
+                },
+                offers: cfg.offers(),
+            }),
+            execution: Some(Execution {
+                choice: Some(Choice {
+                    engine: ENGINE.to_owned(),
+                    model: Some("test-model".to_owned()),
+                    effort: Some("low".to_owned()),
+                }),
+                context,
+            }),
+        };
+        let mut child = Command::new(burrow_test::program!("burrow-engine-antigravity"))
+            .env(CONFIG_ENV, &cfg_path)
+            .env("HOME", &fake_real_home)
+            .env("PROJ_ENGINE_HOME", &engine_home)
+            .env("BURROW_AG_TEST_IN", "secret-token")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("CARGO_HOME")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&req).unwrap())
+            .unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+
+    let out1 = run_turn(Context::Fresh);
+    assert!(
+        out1.status.success(),
+        "turn 1 failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let resp1: conary_core::plugin::Response = serde_json::from_slice(&out1.stdout).unwrap();
+    assert_eq!(resp1.by.session.as_deref(), Some("sess-1"));
+    assert!(
+        !fake_real_home.join(".gemini").exists(),
+        "real HOME must remain untouched"
+    );
+
+    let out2 = run_turn(Context::Continue {
+        session: "sess-1".to_owned(),
+    });
+    assert!(
+        out2.status.success(),
+        "turn 2 failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let resp2: conary_core::plugin::Response = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(resp2.by.session.as_deref(), Some("sess-1"));
+    let expected_git = fake_real_home.join(".gitconfig");
+    let expected_cargo = fake_real_home.join(".cargo");
+    match resp2.answer {
+        Answer::Job { summary, .. } => {
+            assert_eq!(
+                summary,
+                format!(
+                    "turn 2 ok;git={};cargo={}",
+                    expected_git.display(),
+                    expected_cargo.display()
+                )
+            );
+        }
+        other => panic!("unexpected answer: {other:?}"),
+    }
+}

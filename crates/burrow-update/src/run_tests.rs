@@ -940,3 +940,72 @@ fn a_fallback_input_that_cant_be_committed_is_never_deployed() {
     assert!(!switched(&m));
     assert_eq!(m.recorded("deployed-main"), None);
 }
+
+#[test]
+fn a_daemon_disconnect_does_not_hold_back_an_input_or_poison_failed_trees() {
+    let m = machine();
+    m.upstream("burrow", &sha('e'));
+    fs::write(m.home("build-disconnects"), "").unwrap();
+    assert_eq!(go(&m), 1);
+    assert_eq!(
+        said(&m),
+        ("failed".into(), "nix-daemon disconnected".into())
+    );
+    assert!(!m.cfg.state.join("failed-trees").exists());
+    assert!(!m.cfg.state.join("jobs/build-inputs").exists());
+    // Next run, with nix-daemon back up, deploys burrow without holding it back.
+    assert_eq!(go(&m), 0);
+    assert_eq!(
+        said(&m),
+        (
+            "ok".into(),
+            "live and confirmed: burrow bbbbbbb -> eeeeeee".into()
+        )
+    );
+}
+
+#[test]
+fn a_combined_failure_with_one_bad_input_is_memoized_for_later_runs() {
+    let m = machine();
+    // Inputs are tried in sorted order: burrow (tested first) fails to build,
+    // nixpkgs builds cleanly but fails the VM test so main cannot advance.
+    m.upstream("nixpkgs", &sha('c'));
+    m.upstream("burrow", &sha('e'));
+    fs::write(m.home("build-breaks"), sha('e')).unwrap();
+    fs::write(m.home("check-breaks"), sha('c')).unwrap();
+    let before_first = m.kept("built").lines().count();
+    assert_eq!(go(&m), VERDICT);
+
+    let logs = m.cfg.state.join("logs");
+    assert!(logs.join("build-all.log").exists());
+    assert!(logs.join("build-burrow.log").exists());
+    assert!(!logs.join("build-nixpkgs.log").exists());
+
+    let first_run: Vec<String> = m
+        .kept("built")
+        .lines()
+        .skip(before_first)
+        .map(String::from)
+        .collect();
+    let all_tree = &first_run[0];
+    let burrow_tree = &first_run[1];
+    assert_ne!(all_tree, burrow_tree);
+
+    // Next run must not rebuild the combined tree or the memoized failing input.
+    let before_second = m.kept("built").lines().count();
+    assert_eq!(go(&m), VERDICT);
+    let second_run: Vec<String> = m
+        .kept("built")
+        .lines()
+        .skip(before_second)
+        .map(String::from)
+        .collect();
+    assert!(
+        !second_run.contains(all_tree),
+        "rebuilt combined tree {all_tree}: {second_run:?}"
+    );
+    assert!(
+        !second_run.contains(burrow_tree),
+        "rebuilt failing input tree {burrow_tree}: {second_run:?}"
+    );
+}
