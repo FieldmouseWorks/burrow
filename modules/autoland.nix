@@ -117,7 +117,7 @@ let
     # The owner's door, and its record (reviewers.py), or null.
     askAsOwner = cfg.askAsOwner.door;
     bash = "${pkgs.bash}/bin/bash";
-    git = "${pkgs.git}/bin/git";
+    git = lib.getExe config.programs.git.package;
     runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
     labels = { inherit (cfg.labels) hold owner first batch waiting; };
