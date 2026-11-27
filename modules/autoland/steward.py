@@ -430,6 +430,8 @@ def run_pass(kick, continuing=False):
                         log(f"{repo}#{pr['number']}: {e}")
                         now = time.monotonic()
                         if batch.expired() or now >= batch.hard_until or (C.REMOTE_DEADLINE is not None and now >= C.REMOTE_DEADLINE):
+                            if why := T.STOPPED.get(repo):
+                                batch.stop(repo, pr, why)
                             left.append(pr)
                             partial = True
                             batch.left = True
@@ -440,6 +442,7 @@ def run_pass(kick, continuing=False):
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass retries the PR
                         if T.seat(repo, pr["number"]) is not None:
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
+                        batch.stop(repo, pr, T.STOPPED.get(repo))
                         continue
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
