@@ -533,13 +533,48 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
 
     let s = Scratch::default();
     let log = s.join("flake.log");
-    write(&log, "building '/nix/store/abc-foo.drv'...\n");
-    let ok = s.bash(
-        script(fallback),
-        s.path(),
-        &[("BUILDS", URL), ("LOG", log.to_str().unwrap())],
-    );
-    assert_eq!(ok.code, 0, "clean log failed: {}", ok.said());
+    for (case, line) in [
+        (
+            "clean-build",
+            "building '/nix/store/abc-foo.drv'...\n".to_owned(),
+        ),
+        (
+            "unrelated-falling-back",
+            "warning: error: unable to download 'https://cache.nixos.org/abc.narinfo': HTTP error 503\n\
+             warning: disabling binary cache 'https://cache.nixos.org' for 60 seconds\n\
+             warning: falling back to building '/nix/store/abc-foo'\n"
+                .to_owned(),
+        ),
+        (
+            "unrelated-substitution-failed",
+            "warning: substitution of '/nix/store/abc-foo' failed\n\
+             warning: falling back to building '/nix/store/abc-foo'\n"
+                .to_owned(),
+        ),
+        (
+            "healthy-store-with-other-cache-untrusted-and-fallback",
+            format!(
+                "copying path '/nix/store/aaa-good' from '{URL}'\n\
+                 warning: ignoring substitute for '/nix/store/bbb-other' from 'https://cache.nixos.org', as it's not signed\n\
+                 warning: falling back to building '/nix/store/bbb-other'\n"
+            ),
+        ),
+        (
+            "lookalike-host-prefix",
+            format!(
+                "error: unable to download '{URL}.other/abc.narinfo': HTTP error 503\n\
+                 disabling binary cache '{URL}.other' for 60 seconds\n"
+            ),
+        ),
+    ] {
+        write(&log, &line);
+        let ok = s.bash(
+            script(fallback),
+            s.path(),
+            &[("BUILDS", URL), ("LOG", log.to_str().unwrap())],
+        );
+        assert_eq!(ok.code, 0, "{case} failed builds-fallback: {}", ok.said());
+    }
 
     for (case, line) in [
         (
@@ -547,8 +582,24 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
             format!("disabling binary cache '{URL}' for 60 seconds\n"),
         ),
         (
+            "disabled-cache-trailing-slash",
+            format!("disabling binary cache '{URL}/' for 60 seconds\n"),
+        ),
+        (
+            "substituter-disabled",
+            format!("substituter '{URL}' is disabled\n"),
+        ),
+        (
+            "not-a-binary-cache",
+            format!("warning: '{URL}' does not appear to be a binary cache\n"),
+        ),
+        (
             "unable-to-download",
             format!("error: unable to download '{URL}/abc.narinfo': HTTP error 503\n"),
+        ),
+        (
+            "incomplete-nar",
+            format!("error: NAR for '/nix/store/abc-foo' fetched from '{URL}' is incomplete\n"),
         ),
         (
             "untrusted-substitute",
@@ -557,8 +608,10 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
             ),
         ),
         (
-            "falling-back",
-            "warning: falling back to building '/nix/store/abc-foo'\n".to_owned(),
+            "untrusted-substituter",
+            format!(
+                "warning: ignoring untrusted substituter '{URL}', you are not a trusted user.\n"
+            ),
         ),
     ] {
         write(&log, &line);
@@ -569,6 +622,24 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
         );
         assert_ne!(failed.code, 0, "{case} passed builds-fallback");
     }
+
+    // Trailing slash on BURROW_BUILDS_URL still matches Nix's normalized URL.
+    write(
+        &log,
+        &format!("disabling binary cache '{URL}' for 60 seconds\n"),
+    );
+    let trailing = s.bash(
+        script(fallback),
+        s.path(),
+        &[
+            ("BUILDS", &format!("{URL}/")),
+            ("LOG", log.to_str().unwrap()),
+        ],
+    );
+    assert_ne!(
+        trailing.code, 0,
+        "trailing-slash BUILDS passed builds-fallback"
+    );
 
     // Runs in check, docs, and negative only when soft/builds succeeded and
     // the build step ran; degraded/builds-fallback runs on failure.
