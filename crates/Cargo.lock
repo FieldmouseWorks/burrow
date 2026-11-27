@@ -878,6 +878,7 @@ dependencies = [
  "burrow-notify",
  "burrow-probe",
  "burrow-process",
+ "burrow-scratch",
  "burrow-settings",
  "burrow-test",
  "burrow-usage-reset",
@@ -968,6 +969,15 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-scratch"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "sha2",
  "tempfile",
 ]
 
