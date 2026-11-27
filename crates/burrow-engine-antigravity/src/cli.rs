@@ -786,7 +786,7 @@ pub fn run_invocation_streaming(
             None
         };
     let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
-    let mut forwarder = StreamForwarder::new();
+    let mut forwarder = StreamForwarder::for_continuation(invocation.conversation.as_deref());
     let mut on_stdout_line = |line: &str| {
         if let Some(cb) = on_step.as_deref_mut() {
             cb(forwarder.process_line_scrubbed(line, &secrets));

@@ -557,8 +557,9 @@ impl Pass<'_> {
                 match crate::planning::parse(answer.split_once('\n').map_or("", |(_, rest)| rest)) {
                     Ok(tasks) => vec![Step::Split(tasks), Step::Label(TRACKER.into())],
                     Err(e) => vec![
-                        Step::Post(format!(
-                            "Invalid split: {e}. No children created; needs replanning."
+                        Step::Post(super::plans::invalid_split_message(
+                            &e,
+                            &super::plans::RetainedPartial::default(),
                         )),
                         Step::Label(LATER.into()),
                     ],
@@ -632,8 +633,10 @@ impl Pass<'_> {
     /// it carries on from the next and says nothing twice.
     fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step], job: &Job) -> bool {
         let did: usize = files::did(d).and_then(|n| n.parse().ok()).unwrap_or(0);
-        for (i, step) in steps.iter().enumerate().skip(did) {
-            let took = match step {
+        let mut steps = steps.to_vec();
+        let mut i = did;
+        while i < steps.len() {
+            let took = match &steps[i] {
                 Step::Priority(l) => {
                     let Some(issue) =
                         crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
@@ -653,7 +656,35 @@ impl Pass<'_> {
                     let Ok(input) = files::input(d) else {
                         return false;
                     };
-                    self.prepare_plan(repo, n, &input, tasks) && self.split_children(repo, n, tasks)
+                    match self.validate_split_issues(repo, n, tasks) {
+                        Ok(()) => {
+                            self.prepare_plan(repo, n, &input, tasks)
+                                && self.split_children(repo, n, tasks)
+                        }
+                        Err(super::plans::SplitFail::Retry) => return false,
+                        Err(super::plans::SplitFail::Invalid(reason)) => {
+                            eprintln!("proj-inbox: {repo}#{n}: invalid split: {reason}");
+                            let partial = self.incomplete_split_partial(repo, n, &input, tasks);
+                            let body = super::plans::invalid_split_message(&reason, &partial);
+                            let engine = job.engine_label(&job.turns().unwrap_or_default());
+                            let marker = super::plans::invalid_split_marker(repo, n, job.id, None);
+                            if !self.post_marked_once(
+                                repo,
+                                n,
+                                &marker,
+                                &format!("**{engine} job**\n\n{body}"),
+                            ) || !self.abort_incomplete_split(repo, n, &input, tasks)
+                                || !self.add_label(repo, n, LATER)
+                            {
+                                return false;
+                            }
+                            steps.truncate(i + 1);
+                            let Ok(encoded) = serde_json::to_vec(&steps) else {
+                                return false;
+                            };
+                            files::mark(d, File::Plan).write(encoded).is_ok()
+                        }
+                    }
                 }
             };
             if !took
@@ -663,6 +694,7 @@ impl Pass<'_> {
             {
                 return false;
             }
+            i += 1;
         }
         if self.inbox.planning
             && steps
@@ -681,7 +713,7 @@ impl Pass<'_> {
 }
 
 /// One thing a verdict does on its issue.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum Step {
     Priority(String),
     Label(String),

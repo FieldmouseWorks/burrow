@@ -1,6 +1,8 @@
 //! Conary `conary-plugin v5` (`describe` + `work` for `job`) handler.
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use conary_core::plugin::{
     Answer, CONTRACT_V1, CONTRACTS, Context, Executed, Identity, Kind, Next, Offers, Request,
@@ -8,7 +10,7 @@ use conary_core::plugin::{
 };
 
 use crate::cli::{Invocation, run_invocation_streaming};
-use crate::config::{Config, ENGINE, Effort};
+use crate::config::{Config, ENGINE, Effort, HOST_HOME_ENV};
 use crate::normalize::{Refusal, RunError, StreamStep, Usage};
 
 /// Exit codes aligned with burrow's Conary plugin diagnostics contract.
@@ -126,6 +128,7 @@ pub fn handle_request_streaming(
                         ("usage_limit", reset_at, EXIT_REFUSED_USAGE)
                     }
                     Refusal::Login { .. } => ("login_expired", None, EXIT_REFUSED_AUTH),
+                    Refusal::SessionLost { .. } => ("session_lost", None, EXIT_FAILURE),
                 };
                 PluginResult {
                     response: None,
@@ -341,6 +344,15 @@ fn answer_detailed(
                 resolved_effort,
                 conversation.clone(),
             );
+            if conversation.is_some()
+                && let Some(detail) = host_continuation_home_missing(config, &invocation)
+            {
+                return Err(Box::new(DetailedError::Refusal {
+                    session: None,
+                    refusal: Refusal::SessionLost { detail },
+                    usage: None,
+                }));
+            }
             let turn = run_invocation_streaming(config, &invocation, stop, on_step);
 
             if let Some(err) = turn.error {
@@ -360,11 +372,13 @@ fn answer_detailed(
 
             let session = match (&conversation, turn.session) {
                 (Some(expected), Some(actual)) if actual != *expected => {
-                    return Err(Box::new(DetailedError::Other {
-                        session: Some(actual.clone()),
-                        error: format!(
-                            "antigravity changed continuation session from {expected:?} to {actual:?}"
-                        ),
+                    return Err(Box::new(DetailedError::Refusal {
+                        session: None,
+                        refusal: Refusal::SessionLost {
+                            detail: format!(
+                                "antigravity changed continuation session from {expected:?} to {actual:?}"
+                            ),
+                        },
                         usage: turn.usage,
                     }));
                 }
@@ -498,4 +512,58 @@ fn resolve_execution(
     };
 
     Ok((model, effort))
+}
+
+/// Before running the CLI in `host_mode` for `Context::Continue`, verify that
+/// an isolated persistent host HOME exists and already holds prior state.
+/// Returns `Some(detail)` when no prior session could exist there (unset
+/// `PROJ_ENGINE_HOME`, non-existent directory, or a directory whose successful
+/// enumeration shows it is empty); returns `None` for invalid or unreadable
+/// paths (relative, matching `HOME`, non-directories, symlinks, or `read_dir`
+/// errors) so `run_invocation` reports its own error rather than discarding a
+/// potentially usable session.
+fn host_continuation_home_missing(config: &Config, invocation: &Invocation) -> Option<String> {
+    if !config.host_mode || invocation.home_dir.is_some() {
+        return None;
+    }
+    let Some(path) = std::env::var_os(HOST_HOME_ENV).filter(|v| !v.is_empty()) else {
+        return Some(format!(
+            "host mode has no persistent {HOST_HOME_ENV} for continuation"
+        ));
+    };
+    let dir = Path::new(&path);
+    if !dir.is_absolute() {
+        return None;
+    }
+    let orig_home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if orig_home.as_deref() == Some(dir) {
+        return None;
+    }
+    match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => Some(format!(
+            "persistent host HOME {} has no prior session state",
+            dir.display()
+        )),
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {
+            if let Some(real_home) = orig_home.as_deref()
+                && let (Ok(canon_dir), Ok(canon_home)) =
+                    (fs::canonicalize(dir), fs::canonicalize(real_home))
+                && canon_dir == canon_home
+            {
+                return None;
+            }
+            let Ok(mut entries) = fs::read_dir(dir) else {
+                return None;
+            };
+            entries.next().is_none().then(|| {
+                format!(
+                    "persistent host HOME {} has no prior session state",
+                    dir.display()
+                )
+            })
+        }
+        _ => None,
+    }
 }

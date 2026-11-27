@@ -27,5 +27,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("app", "handle", "owner_asks", "briefs", "misdescribed", "rounds", "merits", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "rerun", "unstarted", "stacked", "legs", "lost", "unpushed", "tracked", "superseded", "deps", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting", "paused", "handoff", "landing_owner"):
+for part in ("app", "handle", "owner_asks", "briefs", "misdescribed", "rounds", "merits", "conflicts", "methods", "landed", "slots", "builds", "evals", "proving", "runs", "docs", "cancelled", "rerun", "unstarted", "stacked", "legs", "lost", "unpushed", "tracked", "superseded", "deps", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting", "paused", "handoff", "landing_owner"):
     importlib.import_module(part)

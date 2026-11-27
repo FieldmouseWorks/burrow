@@ -34,6 +34,7 @@
 
 pub mod comment;
 pub mod end;
+pub mod eval;
 pub mod fence;
 pub mod plugin;
 pub mod producer;

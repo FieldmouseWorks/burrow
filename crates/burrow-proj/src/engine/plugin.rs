@@ -61,6 +61,9 @@ pub enum RefusalKind {
     /// The engine can't run where the turn is: on the host when it declares
     /// `Sandbox::Needs`, or in a sandbox made for another engine.
     Misplaced,
+    /// The engine's saved conversation could not be resumed (missing host
+    /// state or replaced by a new session) and needs a fresh handoff.
+    SessionLost,
 }
 
 impl RefusalKind {
@@ -75,7 +78,8 @@ impl RefusalKind {
             Self::ApiKeyRejected
             | Self::BudgetExhausted
             | Self::CreditExhausted
-            | Self::Misplaced => false,
+            | Self::Misplaced
+            | Self::SessionLost => false,
         }
     }
 }
@@ -671,7 +675,12 @@ impl Running {
             }
         }
 
-        if let Some(sid) = stderr.session.as_deref() {
+        if let Some(sid) = stderr.session.as_deref()
+            && stderr
+                .refusal
+                .as_ref()
+                .is_none_or(|r| r.kind != RefusalKind::SessionLost)
+        {
             stream::record_session(job, &self.choice.engine, sid);
         }
 
@@ -690,6 +699,7 @@ impl Running {
                             RefusalKind::BudgetExhausted => "budget_exhausted",
                             RefusalKind::CreditExhausted => "credit_exhausted",
                             RefusalKind::Misplaced => "misplaced",
+                            RefusalKind::SessionLost => "session_lost",
                         },
                         "reason": refusal.reason,
                         "resets_at": refusal.resets_at,

@@ -29,6 +29,8 @@ pub struct StreamStep {
 /// Stateful per-invocation normalizer for streamed stdout lines.
 #[derive(Clone, Debug, Default)]
 pub struct StreamForwarder {
+    expected_session: Option<String>,
+    session_mismatch: bool,
     session: Option<String>,
     streamed_chunks: Vec<String>,
     usage: Usage,
@@ -39,6 +41,17 @@ pub struct StreamForwarder {
 impl StreamForwarder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a forwarder for a continuation turn that expects `expected_session`.
+    /// If the CLI reports a different session ID, replacement `session` events
+    /// and normalized success results are suppressed so the runner does not
+    /// overwrite its saved session before the `session_lost` refusal arrives.
+    pub fn for_continuation(expected_session: Option<&str>) -> Self {
+        Self {
+            expected_session: expected_session.map(str::to_owned),
+            ..Self::default()
+        }
     }
 
     /// Process one raw NDJSON line from the Antigravity CLI without secret
@@ -66,12 +79,19 @@ impl StreamForwarder {
         };
 
         let (event_name, payload) = unwrap_event(&record);
-        let new_session = if self.session.is_none() {
+        let new_session = if self.session.is_none() && !self.session_mismatch {
             let sid = extract_session(&record).or_else(|| extract_session(payload));
-            if let Some(ref s) = sid {
-                self.session = Some(s.clone());
+            match (&self.expected_session, sid) {
+                (Some(expected), Some(actual)) if actual != *expected => {
+                    self.session_mismatch = true;
+                    None
+                }
+                (_, Some(s)) => {
+                    self.session = Some(s.clone());
+                    Some(s)
+                }
+                (_, None) => None,
             }
-            sid
         } else {
             None
         };
@@ -129,6 +149,8 @@ impl StreamForwarder {
                 .clone()
                 .unwrap_or_else(|| "antigravity reported an error without details".to_owned());
             Some(self.build_result_record(true, text, payload, &record, secrets))
+        } else if self.session_mismatch {
+            None
         } else {
             let structured =
                 extract_structured_output(payload).or_else(|| extract_structured_output(&record));
