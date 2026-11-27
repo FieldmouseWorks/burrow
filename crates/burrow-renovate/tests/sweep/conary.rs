@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use conary_github::api::{
-    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status, User,
-    WorkflowRun,
+    Annotation, ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review,
+    Status, User, WorkflowRun,
 };
 use conary_github::branches::{Branches, Merged};
 use conary_github::flow::{self, Major, Revision, SealKey, Settings, Snapshot};
@@ -185,7 +185,7 @@ impl conary_github::Source for Hub {
     fn merge_base(&self, _: &str, _: &str, _: &str) -> Result<String, ApiError> {
         Err(ApiError::new("not scripted"))
     }
-    fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {
+    fn annotations(&self, _: &str, _: u64) -> Result<Vec<Annotation>, ApiError> {
         Err(ApiError::new("not scripted"))
     }
 }
