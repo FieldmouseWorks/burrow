@@ -66,11 +66,12 @@ class Gone(RuntimeError):
 # GitHub not answering just now. GraphQL says its own server errors in the
 # body, not as an HTTP status: "Something went wrong while executing your
 # query" is a 5xx by another name.
-UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|unexpected end of JSON input|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|unexpected end of JSON input|network is unreachable|no such host|TLS handshake|something went wrong while executing your query|resource limits for this query exceeded", re.I)
 # Of those, GitHub giving up on the query itself: its gateway's error, an
-# answer cut off part way, or its own word that the query failed. Asking for
-# less can get an answer where asking again for the same can't (prs.open_prs).
-HEAVY = re.compile(r"HTTP 50[24]|unexpected end of JSON input|something went wrong while executing your query", re.I)
+# answer cut off part way, or its own word that the query failed or hit its
+# resource limit. Asking for less can get an answer where asking again for the
+# same can't (prs.open_prs).
+HEAVY = re.compile(r"HTTP 50[24]|unexpected end of JSON input|something went wrong while executing your query|resource limits for this query exceeded", re.I)
 
 
 # When the rate limit that turned one of this pass's calls away resets, once

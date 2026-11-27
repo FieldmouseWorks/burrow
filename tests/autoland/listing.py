@@ -51,7 +51,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # Each way GitHub gives up on a heavy page: every PR is still listed,
     # once and in order, and the smaller size is kept for the pages after.
     for why in ('HTTP 504', 'gh: HTTP 502: Bad Gateway', 'unexpected end of JSON input',
-                'Something went wrong while executing your query'):
+                'Something went wrong while executing your query',
+                'Resource limits for this query exceeded.'):
         info, prs, asked = listed(7, why)
         assert prs == OPEN, (why, prs)
         assert info == {'squashMergeAllowed': True}, info
@@ -88,14 +89,16 @@ with tempfile.TemporaryDirectory() as tmp:
             raise AssertionError('a page of one that fails must raise')
     assert asked == [30, 15, 7, 3, 1], asked
 
-    # An answer cut off part way is GitHub not answering, for every call:
-    # the pass defers and tries again; it isn't counted as a failed pass.
-    cut = subprocess.CompletedProcess([], 1, stdout='', stderr='unexpected end of JSON input')
-    with patch.object(C, 'paused', return_value=False), patch.object(C, 'gh_env', return_value={}), \
-            patch.object(C.subprocess, 'run', return_value=cut):
-        try:
-            C.gh('api', 'graphql')
-        except C.Unavailable:
-            pass
-        else:
-            raise AssertionError('a cut-off answer must raise Unavailable')
+    # An answer cut off part way or exceeding GraphQL's resource limit is
+    # GitHub not answering, for every call: the pass defers and tries again;
+    # it isn't counted as a failed pass.
+    for stderr in ('unexpected end of JSON input', 'gh: Resource limits for this query exceeded.'):
+        cut = subprocess.CompletedProcess([], 1, stdout='', stderr=stderr)
+        with patch.object(C, 'paused', return_value=False), patch.object(C, 'gh_env', return_value={}), \
+                patch.object(C.subprocess, 'run', return_value=cut):
+            try:
+                C.gh('api', 'graphql')
+            except C.Unavailable:
+                pass
+            else:
+                raise AssertionError(f'{stderr!r} must raise Unavailable')
