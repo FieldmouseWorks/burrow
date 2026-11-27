@@ -1,13 +1,18 @@
-//! What the autoland steward last wrote about the repos it has (its
-//! repos.json): who lands each one's PRs, written when, and the proofs it
-//! runs on a machine rather than in CI, each with how. Read as the script's
-//! jq read it: its repos matched without their case, and their proofs in
-//! the order the file has them.
+//! Who lands each repo's PRs and the proofs that run on a machine rather
+//! than in CI, each with how.
+//!
+//! For a repo burrow-landing's record gives conaryd (or is handing over to
+//! it), coverage comes directly from the record (`Landing::By("conaryd")`)
+//! and its proofs from its flow configuration (`from_flow`). For a repo
+//! the steward holds, both come from the steward's repos.json (`Steward`),
+//! read as the script's jq read it: its repos matched without their case,
+//! and their proofs in the order the file has them.
 
 use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use conary_github::flow::{self, Recipe};
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::Value;
@@ -203,6 +208,71 @@ impl Steward {
     }
 }
 
+/// Coverage and proofs for a repo the landing record gives conaryd: it's
+/// landed by conaryd, and its proofs come from its flow configuration
+/// (`OWNER/NAME.json`, lowercased) under `flow`, when a flow directory is
+/// configured.
+pub(crate) fn from_flow(flow: Option<&Path>, repo: &str) -> Result<Repo, String> {
+    let Some(dir) = flow else {
+        return Ok(Repo {
+            landing: Landing::By("conaryd".into()),
+            ..Repo::default()
+        });
+    };
+    let path = dir.join(format!("{}.json", repo.to_lowercase()));
+    let text = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let cfg: flow::Config =
+        serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut proof_names = Vec::with_capacity(cfg.settings.proofs.len());
+    let mut proofs = String::new();
+    for (name, recipe) in &cfg.settings.proofs {
+        let how =
+            describe_recipe(name, recipe).map_err(|why| format!("{}: {why}", path.display()))?;
+        proof_names.push(Value::String(name.clone()));
+        proofs.push_str(&format!(
+            " {name} isn't CI: it runs on a machine, like this: {how} Rerun it that way on what you push."
+        ));
+    }
+    Ok(Repo {
+        landing: Landing::By("conaryd".into()),
+        proof_names,
+        proofs,
+    })
+}
+
+/// How a job reruns a flow proof recipe on what it pushes.
+fn describe_recipe(name: &str, recipe: &Recipe) -> Result<String, String> {
+    match recipe {
+        Recipe::Job(how) => Ok(how.clone()),
+        Recipe::Build(attr) => Ok(format!(
+            "`nix build .#{attr} -L` on the commit. conaryd builds it itself for each new head and posts the `{name}` check: never post that check yourself."
+        )),
+        Recipe::Run(argv) => {
+            if argv.is_empty() {
+                return Err(format!("proof {name} has no command"));
+            }
+            let cmd: Vec<String> = argv.iter().map(|w| shell_quote(w)).collect();
+            Ok(format!(
+                "`{}` in a worktree at the commit, with PROOF_REPO, PROOF_HEAD and PROOF_CHECK set. conaryd runs it itself for each new head and posts the `{name}` check: never post that check yourself.",
+                cmd.join(" ")
+            ))
+        }
+    }
+}
+
+/// A POSIX shell word, quoted only when it needs it (as Python's `shlex.quote`).
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+    {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\"'\"'"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +361,57 @@ mod tests {
             r#"{"at": 1000, "repos": {"sam/r": {"lands": "steward"}, "SAM/R": {"lands": null}}}"#,
         );
         assert_eq!(s.repo("sam/r", 1000).landing, Landing::Unknown);
+    }
+
+    #[test]
+    fn a_conaryd_repo_reads_its_proofs_from_its_flow_config() {
+        // Without a flow directory, it's still covered by conaryd with no proofs.
+        let bare = from_flow(None, "Sam/R").unwrap();
+        assert_eq!(bare.landing, by("conaryd"));
+        assert!(bare.proof_names.is_empty() && bare.proofs.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sam")).unwrap();
+        fs::write(
+            dir.path().join("sam/r.json"),
+            serde_json::json!({
+                "settings": {
+                    "proofs": {
+                        "z-job": {"Job": "Run `just hil` on the bench box."},
+                        "a-build": {"Build": "checks.x86_64-linux.agents"},
+                        "m-run": {"Run": ["/bin/bash", "-c", "echo 'hi' && make gate"]},
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let r = from_flow(Some(dir.path()), "Sam/R").unwrap();
+        assert_eq!(r.landing, by("conaryd"));
+        assert_eq!(
+            r.proof_names,
+            [
+                Value::from("a-build"),
+                Value::from("m-run"),
+                Value::from("z-job"),
+            ]
+        );
+        assert_eq!(
+            r.proofs,
+            " a-build isn't CI: it runs on a machine, like this: `nix build .#checks.x86_64-linux.agents -L` on the commit. conaryd builds it itself for each new head and posts the `a-build` check: never post that check yourself. Rerun it that way on what you push. \
+             m-run isn't CI: it runs on a machine, like this: `/bin/bash -c 'echo '\"'\"'hi'\"'\"' && make gate'` in a worktree at the commit, with PROOF_REPO, PROOF_HEAD and PROOF_CHECK set. conaryd runs it itself for each new head and posts the `m-run` check: never post that check yourself. Rerun it that way on what you push. \
+             z-job isn't CI: it runs on a machine, like this: Run `just hil` on the bench box. Rerun it that way on what you push."
+        );
+
+        // Missing, malformed, or an empty Run command fails closed.
+        assert!(from_flow(Some(dir.path()), "sam/missing").is_err());
+        fs::write(dir.path().join("sam/bad.json"), "not json").unwrap();
+        assert!(from_flow(Some(dir.path()), "sam/bad").is_err());
+        fs::write(
+            dir.path().join("sam/empty.json"),
+            serde_json::json!({"settings": {"proofs": {"gate": {"Run": []}}}}).to_string(),
+        )
+        .unwrap();
+        assert!(from_flow(Some(dir.path()), "sam/empty").is_err());
     }
 }

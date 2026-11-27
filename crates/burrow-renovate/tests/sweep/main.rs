@@ -178,6 +178,8 @@ struct Machine {
     steward: Option<PathBuf>,
     /// burrow-landing's record, once there's one.
     landing: Option<PathBuf>,
+    /// The flow's configurations directory, once there's one.
+    flow: Option<PathBuf>,
 }
 
 /// One sweep: what it exited with and said, the jobs it started and the
@@ -267,6 +269,7 @@ impl Machine {
             renovate: None,
             steward: None,
             landing: None,
+            flow: None,
         };
         m.project("r", "https://github.com/sam/r.git");
         fs::create_dir(m.path("state")).unwrap();
@@ -370,9 +373,13 @@ impl Machine {
             "tools": {"gh": b.join("gh"), "git": b.join("git"), "proj": b.join("proj"),
                       "notify": b.join("notify"), "lockWait": b.join("lock-wait")},
         });
-        // burrow-landing's record, only where a test gives one.
+        // burrow-landing's record and the flow's configurations, only where
+        // a test gives them.
         if let Some(landing) = &self.landing {
             config["landing"] = json!(landing);
+        }
+        if let Some(flow) = &self.flow {
+            config["flow"] = json!(flow);
         }
         let path = self.path("config.json");
         fs::write(&path, config.to_string()).unwrap();

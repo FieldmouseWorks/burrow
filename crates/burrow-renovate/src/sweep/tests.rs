@@ -5,6 +5,7 @@ fn its_config_is_every_setting_and_only_those() {
     let config = serde_json::json!({
         "name": "renovate-sweep", "state": "/s/renovate-sweep", "projects": "/p", "owner": "Sam",
         "settled": "review-settled", "steward": "/s/autoland/repos.json",
+        "landing": "/s/landing/owners.json", "flow": "/s/flow-configs",
         "app": {"name": "workers", "bot": "sam-workers"}, "renovate": "sam-renovate[bot]", "renovateRun": 7200, "held": ["hold", "needs-owner"],
         "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
                   "lockWait": "/b/lock-wait"},
@@ -13,12 +14,25 @@ fn its_config_is_every_setting_and_only_those() {
     assert_eq!(cfg.app.unwrap().bot, "sam-workers");
     assert_eq!(cfg.renovate.as_deref(), Some("sam-renovate[bot]"));
     assert_eq!(cfg.renovate_run, 7200);
+    assert_eq!(
+        cfg.landing.as_deref(),
+        Some(Path::new("/s/landing/owners.json"))
+    );
+    assert_eq!(cfg.flow.as_deref(), Some(Path::new("/s/flow-configs")));
     let mut user = config.clone();
     user["app"] = Value::Null;
     user["steward"] = Value::Null;
+    user["landing"] = Value::Null;
+    user["flow"] = Value::Null;
     user["renovate"] = Value::Null;
     let cfg: Config = serde_json::from_value(user).unwrap();
-    assert!(cfg.app.is_none() && cfg.steward.is_none() && cfg.renovate.is_none());
+    assert!(
+        cfg.app.is_none()
+            && cfg.steward.is_none()
+            && cfg.landing.is_none()
+            && cfg.flow.is_none()
+            && cfg.renovate.is_none()
+    );
     let mut more = config.clone();
     more["stray"] = 1.into();
     assert!(serde_json::from_value::<Config>(more).is_err());
