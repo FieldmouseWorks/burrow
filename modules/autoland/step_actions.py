@@ -471,7 +471,7 @@ class Actions:
                 self.st["evalStruckAt"] = failed_at
                 self.strike("eval")
             else:
-                C.wake(self.repo, failed_at + P.EVAL_RETRY * C.MIN + 1)
+                C.wake(self.repo, failed_at + P.EVAL_RETRY * C.MIN + 1)  # ends: the failed eval's EVAL_RETRY cooldown expires
             self.settle("pending", f"Settled, but what {names} builds can't be worked out here yet"[:140], stage=S.PROOF)
             return
         if builds:
