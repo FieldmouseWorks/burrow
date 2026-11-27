@@ -186,6 +186,7 @@ pkgs.testers.runNixOSTest {
         github("issues", [issue(3, "sam", "memory")])
         machine.fail("systemctl start burrow-probe.service")
         machine.fail("test -e /var/lib/gh/posted-3")
+        machine.succeed("journalctl --sync")
         machine.succeed("journalctl -u burrow-probe.service | grep \"isn't private\"")
 
     with subtest("burrow-events starts a pass"):
