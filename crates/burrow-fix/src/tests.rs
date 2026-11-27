@@ -541,18 +541,6 @@ fn an_overdue_job_or_one_that_ends_otherwise_is_stopped_and_answers_nothing() {
 }
 
 #[test]
-fn a_restart_stops_the_jobs_whose_requests_it_lost() {
-    let r = rig();
-    let k = key(REPO, 7);
-    std::fs::write(r.cfg.state.join("live").join(k.replace('/', "+")), &k).unwrap();
-    r.runner.0.lock().unwrap().held.push((k, "job-9".into()));
-    assert_eq!(r.broker.reconcile(), Ok(1));
-    assert_eq!(r.runner.0.lock().unwrap().stopped, ["job-9"]);
-    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
-    let _ = &r.dir;
-}
-
-#[test]
 fn a_prs_key_is_its_own() {
     assert_eq!(key("Sam/My_Box", 7), "fix/sam/my:box/7");
     assert_ne!(key("sam/my_box", 7), key("sam/my-box", 7));
@@ -674,17 +662,284 @@ fn a_start_that_read_as_failed_leaves_no_job_at_work() {
     t.join().unwrap();
 }
 
+/// The runner of a broker whose process is gone: once cut, a call never
+/// returns, as a killed broker asks proj nothing more, and stops nothing on
+/// its way out.
+struct Inert {
+    runner: Fake,
+    cut: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Inert {
+    fn alive(&self) {
+        while self.cut.load(std::sync::atomic::Ordering::SeqCst) {
+            thread::park_timeout(Duration::from_secs(1));
+        }
+    }
+}
+
+impl Jobs for Inert {
+    fn start(&self, repo: &str, key: &str, task: &str) -> Result<String, String> {
+        self.alive();
+        self.runner.start(repo, key, task)
+    }
+    fn find(&self, key: &str) -> Result<Option<String>, String> {
+        self.alive();
+        self.runner.find(key)
+    }
+    fn why(&self, id: &str) -> Result<Record, String> {
+        self.alive();
+        self.runner.why(id)
+    }
+    fn stop(&self, id: &str) -> Result<(), String> {
+        self.alive();
+        self.runner.stop(id)
+    }
+    fn answers(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.alive();
+        self.runner.answers(id)
+    }
+}
+
+impl Rig {
+    /// A broker on this rig's state, runner and GitHub, as a restart
+    /// builds it, on `jobs`.
+    fn broker_on(&self, jobs: Box<dyn Jobs>) -> Broker {
+        let pr = Pr {
+            heads: self.heads.clone(),
+            compare: self.compare.clone(),
+        };
+        let github: GitHub = Box::new(move || Box::new(pr.clone()));
+        let mut broker = Broker::new(self.cfg.clone(), jobs, github).unwrap();
+        broker.look = Duration::from_millis(20);
+        broker
+    }
+}
+
+/// A rig whose broker restarted while job-1, a fix of `HEAD` asked as
+/// `fix(HEAD)` asks it, was at work: the old broker's process is gone, and
+/// the flow's plugin saw its connection close.
+fn restarted() -> Rig {
+    use std::io::Write as _;
+    let mut r = rig();
+    r.script(&[record("running")], answered(None), &[HEAD]);
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    r.broker = Arc::new(r.broker_on(Box::new(Inert {
+        runner: r.runner.clone(),
+        cut: cut.clone(),
+    })));
+    let _old = r.serve(1);
+    let mut stream = std::os::unix::net::UnixStream::connect(&r.cfg.socket).unwrap();
+    stream
+        .write_all(format!("{}\n", fix(HEAD)).as_bytes())
+        .unwrap();
+    while r.runner.0.lock().unwrap().started.is_empty() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    cut.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(stream);
+    r.broker = Arc::new(r.broker_on(Box::new(r.runner.clone())));
+    r.broker.reconcile().unwrap();
+    r
+}
+
 #[test]
-fn a_restart_serves_on_when_a_lost_job_wont_stop_and_holds_its_pr() {
+fn a_restart_leaves_its_fix_job_at_work_and_answers_the_remade_request_from_it() {
+    let r = restarted();
+    assert!(
+        r.runner.0.lock().unwrap().stopped.is_empty(),
+        "the restart stopped the fix job"
+    );
+    // The flow asks again for the same PR, kind and head: the job it
+    // started before the restart answers it, with what it pushed meanwhile.
+    r.script(
+        &[record("running"), record("done")],
+        answered(Some(PUSHED)),
+        &[PUSHED],
+    );
+    let t = r.serve(1);
+    let got = r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+    assert_eq!(got["result"], json!({"status": "pushed", "head": PUSHED}));
+    assert_eq!(got["answers"][0]["problem"], 0);
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.started.len(), 1, "a second fix job started");
+    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_restart_holds_a_lost_requests_pr_while_its_job_is_at_work() {
     let r = rig();
     let k = format!("{}/1", key(REPO, 7));
+    // As an older broker kept it: the job's key alone, so no request can
+    // say it asks the same.
     std::fs::write(r.cfg.state.join("live").join(k.replace('/', "+")), &k).unwrap();
+    r.runner.0.lock().unwrap().held.push((k, "job-9".into()));
+    assert_eq!(r.broker.reconcile(), Ok(1));
+    assert!(r.runner.0.lock().unwrap().stopped.is_empty());
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 1);
+    // A request is refused while that job is at work, and once it has
+    // ended, the PR's next fix runs, with nothing stopped.
+    r.script(
+        &[record("running"), record("done"), record("done")],
+        answered(None),
+        &[HEAD],
+    );
+    let t = r.serve(2);
+    let err = r.ask(&fix(HEAD)).unwrap_err();
+    assert!(err.contains("at work already"), "{err}");
+    r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.started.len(), 1);
+    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+    let _ = &r.dir;
+}
+
+#[test]
+fn a_request_for_another_head_stops_the_adopted_job_and_starts_its_own() {
+    let r = restarted();
+    // The PR moved on to OTHER while the broker was down: the job handed
+    // HEAD is at work on a head the flow has given up on.
+    r.script(
+        &[record("running"), record("running")],
+        answered(None),
+        &[OTHER],
+    );
+    r.serve_all();
+    let asked = {
+        let (cfg, request) = (r.cfg.clone(), fix(OTHER));
+        thread::spawn(move || {
+            let mut out = Vec::new();
+            plugin(&cfg)?.answer(&mut request.to_string().as_bytes(), &mut out)
+        })
+    };
+    while r.runner.0.lock().unwrap().started.len() < 2 && !asked.is_finished() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    {
+        let runner = r.runner.0.lock().unwrap();
+        assert_eq!(runner.stopped, ["job-1"], "the superseded job runs on");
+        assert_eq!(runner.started.len(), 2, "{:?}", runner.started);
+        let (_, k, task) = &runner.started[1];
+        assert!(task.contains(OTHER), "{task}");
+        // What's kept on disk is the new job's, not the superseded one's.
+        let kept: Vec<String> = std::fs::read_dir(r.cfg.state.join("live"))
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].lines().next(), Some(k.as_str()));
+        assert_eq!(kept[0].lines().nth(1), Some(OTHER));
+    }
+    r.script(&[record("done")], answered(None), &[OTHER]);
+    asked.join().unwrap().unwrap();
+    assert_eq!(r.runner.0.lock().unwrap().started.len(), 2);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_superseded_job_that_wont_stop_keeps_its_pr_held() {
+    let r = restarted();
+    r.script(&[record("running")], answered(None), &[OTHER]);
+    r.runner.0.lock().unwrap().stop_fails = true;
+    let t = r.serve(2);
+    let err = r.ask(&fix(OTHER)).unwrap_err();
+    assert!(err.contains("won't stop"), "{err}");
+    assert_eq!(r.runner.0.lock().unwrap().started.len(), 1);
+    // Kept, as any job that wouldn't stop: a restart still finds it so.
+    let kept = std::fs::read_dir(r.cfg.state.join("live"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(kept.len() == 1 && kept[0].ends_with("kept\n"), "{kept:?}");
+    // Once it stops, the PR's next fix runs.
+    r.runner.0.lock().unwrap().stop_fails = false;
+    r.script(&[record("done")], answered(None), &[OTHER]);
+    r.ask(&fix(OTHER)).unwrap();
+    t.join().unwrap();
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(
+        (runner.started.len(), &runner.stopped[..]),
+        (2, &["job-1".to_owned()][..])
+    );
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_remade_request_with_other_problems_joins_nothing() {
+    let r = restarted();
+    let mut other = fix(HEAD);
+    other["problems"].as_array_mut().unwrap().remove(1);
+    // Its first look finds the job at work; a job started for it instead
+    // ends at its second.
+    let mut asked = record("ask");
+    asked.ends = vec!["ask".into()];
+    r.script(&[record("running"), asked], answered(None), &[HEAD]);
+    let t = r.serve(1);
+    let err = r.ask(&other).unwrap_err();
+    t.join().unwrap();
+    assert!(err.contains("at work already"), "{err}");
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.started.len(), 1);
+    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
+}
+
+#[test]
+fn an_adopted_job_that_ended_holding_anything_open_is_stopped_before_a_fresh_fix() {
+    let r = restarted();
+    let mut asked = record("ask");
+    asked.ends = vec!["ask".into()];
+    // Asked of the same head, with other problems.
+    let mut other = fix(HEAD);
+    other["problems"].as_array_mut().unwrap().remove(1);
+    r.script(
+        &[asked, record("done")],
+        json!({"pushed": null, "unable": null, "answers": [
+        {"problem": 0, "fixed": false, "reply": "a"},
+        {"problem": 1, "fixed": false, "reply": "b"}]}),
+        &[HEAD],
+    );
+    let t = r.serve(1);
+    r.ask(&other).unwrap();
+    t.join().unwrap();
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.stopped, ["job-1"]);
+    assert_eq!(runner.started.len(), 2);
+}
+
+#[test]
+fn a_job_that_ended_while_the_broker_was_down_answers_the_remade_request() {
+    let r = restarted();
+    r.script(&[record("done")], answered(Some(PUSHED)), &[PUSHED]);
+    let t = r.serve(1);
+    let got = r.ask(&fix(HEAD)).unwrap();
+    t.join().unwrap();
+    assert_eq!(got["result"], json!({"status": "pushed", "head": PUSHED}));
+    let runner = r.runner.0.lock().unwrap();
+    assert_eq!(runner.started.len(), 1);
+    assert!(runner.stopped.is_empty(), "{:?}", runner.stopped);
+    assert_eq!(fs_count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_restart_still_stops_a_kept_job_before_the_prs_next_fix() {
+    let r = rig();
+    let k = format!("{}/1", key(REPO, 7));
+    // A job whose request ended and that wouldn't stop.
+    std::fs::write(
+        r.cfg.state.join("live").join(k.replace('/', "+")),
+        format!("{k}\n\n\nkept\n"),
+    )
+    .unwrap();
     {
         let mut runner = r.runner.0.lock().unwrap();
         runner.held.push((k, "job-9".into()));
         runner.stop_fails = true;
     }
-    assert_eq!(r.broker.reconcile(), Ok(0));
+    assert_eq!(r.broker.reconcile(), Ok(1));
     assert_eq!(fs_count(&r.cfg.state.join("live")), 1);
     r.script(&[record("done")], answered(None), &[HEAD]);
     let t = r.serve(2);

@@ -16,12 +16,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from unittest.mock import patch
 
 import proofs as P
 import waits
-from harness import C, CI_GREEN, FAIL, JOBS, REAL, STATES, STOPPED, S, UNSTOPPABLE, M, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+from harness import C, CI_GREEN, FAIL, JOBS, PROOF_RUN, REAL, STATES, STOPPED, S, UNSTOPPABLE, M, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -144,12 +145,59 @@ def evals():
     return [x for x in map(json.loads, open(NIX_LOG)) if x[0] == "nix" and "eval" in x]
 
 
-kept, kept_build = C.job, P.build
+kept, kept_build, kept_start_eval = C.job, P.build, P.start_eval
 ids = itertools.count(1)
 C.job = lambda repo, task, clone=False, since=None, role=None: JOBS.append(task) or f"job-{next(ids)}"
 # A check with an attribute is built by the steward, not a Claude job: each
 # build started is in JOBS too, as "build N CHECK...".
 P.build = lambda repo, pr, checks, st: JOBS.append(f"build {pr['number']} {' '.join(checks)}") or f"{C.BUILD}{next(ids)}"
+
+
+def run_eval_now(repo, pr, checks, kind, mirror, base=None, tip=None):
+    """Drives the real burrow-proof eval-work + eval-end immediately so
+    builds.py can test slots, prebuilds, store verdicts and merged updates
+    without duplicating evals.py's multi-pass async unit tests."""
+    n, head = pr["number"], pr["headRefOid"]
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    jid = P.unit_id(repo, n, head)
+    if C.DRY:
+        return jid
+    here = f"{C.STATE}/builds/{jid}"
+    os.makedirs(here)
+    C.save(
+        f"builds/{jid}/build.json",
+        {
+            "repo": repo,
+            "number": n,
+            "head": head,
+            "kind": kind,
+            "mirror": mirror,
+            "attrs": {c: attrs[c] for c in sorted(checks)},
+            "base": base,
+            "tip": tip,
+            "unit": C.build_unit(jid),
+            "timeout": P.EVAL_TIMEOUT,
+            "nix": S.CFG["nix"],
+            "git": S.CFG["git"],
+            "heavy": S.CFG.get("heavy"),
+            "kick": None,
+            "eval": True,
+        },
+    )
+    p = subprocess.run([PROOF_RUN, "eval-work", here], capture_output=True, text=True)
+    env = {
+        **os.environ,
+        "SERVICE_RESULT": "success" if p.returncode == 0 else "exit-code",
+        "EXIT_CODE": "exited",
+        "EXIT_STATUS": str(p.returncode),
+    }
+    e = subprocess.run([PROOF_RUN, "eval-end", here], env=env, capture_output=True, text=True)
+    assert e.returncode == 0, e.stderr
+    STATES[jid] = json.load(open(f"{here}/end.json"))["state"]
+    return jid
+
+
+P.start_eval = run_eval_now
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."},
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
@@ -195,8 +243,16 @@ def taken(drv):
     return f"Taken from the store, not run again: {drv}.drv passed here before"
 
 
+def run_pr(pr, t=700):
+    status = run(pr, t)[0]
+    while not C.DRY and "working out what" in status:
+        P.EVAL_ACTIVE.clear()
+        status = run(pr, t)[0]
+    return status
+
+
 def line(n, t=700, checks=None):
-    return run(clean(checks=checks or proof, number=n, sha=heads[n]), t)[0]
+    return run_pr(clean(checks=checks or proof, number=n, sha=heads[n]), t)
 
 
 def ahead(k, verb="build"):
@@ -385,12 +441,12 @@ assert evals()[-1][-1].endswith("#checks.x86_64-linux.other.drvPath"), evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 
 # A PR pushed again while its proof builds: the job is left to finish when
-# the new head's proof wants what it's building (its check unchanged), and
+# the new head's proofOutputs is already known to want what it's building, and
 # that proof starts beside it at once, Nix building it once; it's stopped
-# when the new head builds something else, which then takes its slot. Each
-# head is worked out once.
+# when the new head builds something else or isn't evaluated yet (superseded
+# never runs nix eval inline).
 sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[5]}:refs/pull/1/head", cwd=work)
-for wants, stops in ((X, False), (W, True)):
+for wants, known, stops in ((X, True, False), (W, True, True), (X, False, True)):
     fresh_pr_state()
     STOPPED.clear()
     VALID[:] = [Z]
@@ -399,12 +455,20 @@ for wants, stops in ((X, False), (W, True)):
     line(1)
     job = pr_state(1)["provedJob"]
     assert ahead(1) in line(2) and JOBS == [], JOBS
+    if known:
+        st1 = pr_state(1)
+        st1["proofOutputs"] = {
+            "for": [heads[5], {"remi-proof": "checks.x86_64-linux.proof"}],
+            "paths": [wants],
+            "drvs": {"remi-proof": wants + ".drv"},
+            "at": 750,
+        }
+        C.save("pr-sam_r-1.json", st1)
     P.begin("sam/r", {1, 2})
-    status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
-    assert STOPPED == ([job] if stops else []) and RUNNING in status and len(JOBS) == 1, (wants, STOPPED, status, JOBS)
-    assert (SKIPPED in status) != stops, (wants, status)
+    status = run_pr(clean(checks=proof, number=1, sha=heads[5]), 800)
+    assert STOPPED == ([job] if stops else []) and RUNNING in status and len(JOBS) == 1, (wants, known, STOPPED, status, JOBS)
+    assert (SKIPPED in status) != stops, (wants, known, status)
     assert ahead(1) in line(2, 800) and JOBS == [], JOBS
-    assert len(evals()) == 3, evals()
 sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
 STOPPED.clear()
 
@@ -683,7 +747,7 @@ assert RUNNING in status and updates(8) == [] and JOBS == ["build 8 remi-proof"]
 fresh_pr_state()
 nix_knows({7: Y, f"tree:{up}": Z})
 P.begin("sam/r", {7})
-status = run(clean(checks=proof, number=7, sha=heads[7], branch="renovate/thing"), 700)[0]
+status = run_pr(clean(checks=proof, number=7, sha=heads[7], branch="renovate/thing"), 700)
 assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
 # GitHub doesn't take the update: a strike, and asked again next pass.
 fresh_pr_state()
@@ -695,7 +759,7 @@ status = line(7, 800)
 assert UPDATED in status and len(updates(7)) == 1 and not pr_state(7)["strikes"], (status, WROTE)
 # Against a base that isn't the default branch, whose tip no pass read: built.
 fresh_pr_state()
-status = run(clean(checks=proof, number=7, sha=heads[7], base="side"), 700)[0]
+status = run_pr(clean(checks=proof, number=7, sha=heads[7], base="side"), 700)
 assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
 # main moved on, its new tip merged in building something else: built.
 fresh_pr_state()
@@ -824,7 +888,7 @@ P.begin("sam/r", {1})
 line(1)
 old = inputs_job(1)
 sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[5]}:refs/pull/1/head", cwd=work)
-status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
+status = run_pr(clean(checks=proof, number=1, sha=heads[5]), 800)
 assert PRE in status and STOPPED == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, STOPPED, JOBS)
 sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
 STOPPED.clear()
@@ -840,8 +904,11 @@ UNSTOPPABLE.add(old)
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
 status = line(1, 800)
 assert PRE in status and pr_state(1)["stopping"] == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, pr_state(1), JOBS)
+# Pass 1 of line(1, 800) queued old in stopping while starting the new attribute's eval;
+# Pass 2 (harvesting the eval) tried stopping old once (1 strike), and line(1, 900) tries again (2).
+assert pr_state(1)["strikes"] == {"stop": 1}, pr_state(1)
 line(1, 900)
-assert pr_state(1)["stopping"] == [old] and pr_state(1)["strikes"] == {"stop": 1}, pr_state(1)
+assert pr_state(1)["stopping"] == [old] and pr_state(1)["strikes"] == {"stop": 2}, pr_state(1)
 UNSTOPPABLE.clear()
 line(1, 1000)
 assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
@@ -926,7 +993,7 @@ assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
 P.build_inputs = kept_inputs
 
 del S.CFG["repos"]["sam/r"]
-C.job, P.build = kept, kept_build
+C.job, P.build, P.start_eval = kept, kept_build, kept_start_eval
 C.gh, C.write = kept_gh, kept_write
 C.CFG["upkeep"] = kept_upkeep
 P.OPEN.clear()

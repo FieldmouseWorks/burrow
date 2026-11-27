@@ -192,6 +192,22 @@ pub fn resolve(
         .unwrap()
         .env
         .insert("NIX_REMOTE".into(), "daemon".into());
+    // Concurrent proj jobs share their repo's .git common dir across
+    // worktrees, so disable detached auto-gc/maintenance inside jobs and let
+    // scratch::clear() run serialized, bounded geometric repacks at job end.
+    let mut git_params = env("GIT_CONFIG_PARAMETERS")
+        .and_then(|v| v.into_string().ok())
+        .unwrap_or_default();
+    if !git_params.is_empty() {
+        git_params.push(' ');
+    }
+    git_params.push_str("'gc.auto=0' 'maintenance.auto=false'");
+    items
+        .iter_mut()
+        .find(|g| g.capability == Capability::GitMetadata)
+        .unwrap()
+        .env
+        .insert("GIT_CONFIG_PARAMETERS".into(), git_params);
     // Login PATH, App credentials and lifecycle variables reach commands
     // unchanged; the command builder appends git hooks after resolution.
     items
@@ -310,5 +326,75 @@ mod tests {
             job.dir.join("engine-home").to_string_lossy().as_ref()
         );
         assert!(grants.inherits_environment());
+    }
+
+    #[test]
+    fn git_metadata_grant_disables_concurrent_auto_maintenance_and_preserves_existing_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        cfg.tools.git = "git".into();
+        let project = dir.path().join("project");
+        let job = Job::new(&cfg, "test-git");
+        std::fs::create_dir_all(&job.dir).unwrap();
+        std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
+        let home = dir.path().join("home");
+        let machine = machine::tests::machine_in(dir.path());
+
+        let env_plain = |name: &str| match name {
+            "HOME" => Some(home.clone().into_os_string()),
+            _ => None,
+        };
+        let grants = resolve(
+            &cfg,
+            &job,
+            &dir.path().join("scratch"),
+            &env_plain,
+            &machine,
+        )
+        .unwrap();
+        let git_grant = grants
+            .items
+            .iter()
+            .find(|g| g.capability == Capability::GitMetadata)
+            .unwrap();
+        let params = git_grant
+            .env
+            .get("GIT_CONFIG_PARAMETERS")
+            .expect("GitMetadata grant should set GIT_CONFIG_PARAMETERS");
+        for (key, want) in [("gc.auto", "0"), ("maintenance.auto", "false")] {
+            let out = Command::new("git")
+                .args(["config", "--get", key])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_PARAMETERS", params)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{key}: {out:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), want);
+        }
+
+        let env_existing = |name: &str| match name {
+            "HOME" => Some(home.clone().into_os_string()),
+            "GIT_CONFIG_PARAMETERS" => Some("'user.name=alice'".into()),
+            _ => None,
+        };
+        let grants = resolve(
+            &cfg,
+            &job,
+            &dir.path().join("scratch"),
+            &env_existing,
+            &machine,
+        )
+        .unwrap();
+        let merged = &grants.environment()["GIT_CONFIG_PARAMETERS"];
+        let out = Command::new("git")
+            .args(["config", "--get", "user.name"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_PARAMETERS", merged)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "alice");
     }
 }
