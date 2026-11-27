@@ -112,6 +112,7 @@ def begin(repo, numbers, first=()):
     WAITING[repo] = set()
     LOOKED[repo] = set()
     EVAL_ACTIVE[repo] = set()
+    kick_eval_waiting(repo)
 
 
 def place(repo, n):
@@ -221,32 +222,63 @@ def eval_wake(repo, rec):
     C.wake(repo, due if due > C.NOW else C.NOW + 15 * C.MIN)  # ends: the eval unit ends or times out
 
 
+def note_eval_waiting(repo, rec):
+    """Records repo as waiting on another repo's eval unit and books a fallback wake."""
+    if not C.DRY:
+        waiting = load("eval-waiting.json", [])
+        if repo not in waiting:
+            save("eval-waiting.json", waiting + [repo])
+    if rec and rec.get("at") is not None:
+        eval_wake(repo, rec)
+    else:
+        C.wake(repo, C.NOW + EVAL_TIMEOUT + 300)  # ends: the active eval unit ends or times out
+
+
+def kick_eval_waiting(repo):
+    """Wakes repos waiting on the global eval slot once no eval unit is live."""
+    if C.DRY:
+        return
+    waiting = load("eval-waiting.json", [])
+    if not waiting or eval_busy(repo):
+        return
+    save("eval-waiting.json", [])
+    for w in waiting:
+        if w != repo:
+            C.kick(w)
+
+
 def eval_busy(repo, st=None):
-    """Whether repo already has any live eval unit (including on the same PR,
-    in stopping, or on a PR no longer open)."""
-    active = EVAL_ACTIVE.get(repo)
-    if active:
+    """Whether any repo already has a live eval unit (bounding eval concurrency
+    globally across repos without queuing behind heavy builds)."""
+    for owner, active in list(EVAL_ACTIVE.items()):
         for jid in list(active):
             if running(jid):
+                if owner != repo:
+                    note_eval_waiting(repo, None)
                 return True
             active.discard(jid)
     builds_root = os.path.join(STATE, "builds")
     if os.path.isdir(builds_root):
         for jid in os.listdir(builds_root):
             b = load(f"builds/{jid}/build.json", None) or {}
-            if b.get("eval") and b.get("repo") == repo and running(jid):
-                EVAL_ACTIVE.setdefault(repo, set()).add(jid)
+            if b.get("eval") and running(jid):
+                owner = b.get("repo") or ""
+                EVAL_ACTIVE.setdefault(owner, set()).add(jid)
+                if owner != repo:
+                    note_eval_waiting(repo, None)
                 return True
-    states = [st] if st is not None else []
-    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"\d+\.json"
+    states = [(repo, st)] if st is not None else []
     for f in os.listdir(STATE):
-        if re.fullmatch(mine, f):
-            states.append(load(f, {}))
-    for other in states:
+        if re.fullmatch(r"pr-.+-\d+\.json", f):
+            owner = f.removeprefix("pr-").rsplit("-", 1)[0].replace("_", "/", 1)
+            states.append((owner, load(f, {})))
+    for owner, other in states:
         for field in ("proofEval", "mergedEval"):
             rec = other.get(field) or {}
             if rec.get("job") and running(rec["job"]):
-                EVAL_ACTIVE.setdefault(repo, set()).add(rec["job"])
+                EVAL_ACTIVE.setdefault(owner, set()).add(rec["job"])
+                if owner != repo:
+                    note_eval_waiting(repo, rec)
                 return True
     return False
 
@@ -271,7 +303,9 @@ def start_eval(repo, pr, checks, kind, mirror, base=None, tip=None):
         "timeout": EVAL_TIMEOUT,
         "nix": CFG["nix"],
         "git": CFG["git"],
-        "heavy": CFG.get("heavy"),
+        # Eval units only run git and nix eval (already serialized per repo by
+        # eval_busy); queuing them behind multi-hour heavy builds burns EVAL_TIMEOUT.
+        "heavy": None,
         "kick": f"{CFG['kick']}/{repo}",
         "eval": True,
     }
@@ -297,6 +331,7 @@ def harvest_eval(repo, n, st, eval_field, out_field, key, merged=False):
     EVAL_ACTIVE.get(repo, set()).discard(jid)
     end = load(f"builds/{jid}/end.json", None)
     del st[eval_field]
+    kick_eval_waiting(repo)
     if end and end.get("state") == "done" and not end.get("failed"):
         paths = end.get("paths") or None
         if merged:

@@ -190,12 +190,17 @@ open(SRUN_LOG, "w").close()
 P.begin("sam/r", {1, 2})
 WAKES, kept_wake = [], C.wake
 C.wake = lambda repo, at: WAKES.append(at) or kept_wake(repo, at)
-st1 = line(1, 700)
+kept_heavy, S.CFG["heavy"] = S.CFG.get("heavy"), "/bin/heavy"
+try:
+    st1 = line(1, 700)
+finally:
+    S.CFG["heavy"] = kept_heavy
 C.wake = kept_wake
 assert nix_evals() == [], f"pass ran nix eval in-process: {nix_evals()}"
 assert "working out what remi-proof builds" in st1, st1
 assert pr_state(1).get("strikes", {}) == {}, pr_state(1)
 jid1 = pr_state(1)["proofEval"]["job"]
+assert json.load(open(f"{tmp}/state/builds/{jid1}/build.json")).get("heavy") is None, "eval unit must not queue in heavy"
 assert pr_state(1)["proofEval"]["at"] + P.EVAL_TIMEOUT + 300 in WAKES, WAKES
 assert "eval-run" in open(SRUN_LOG).read() and "eval-end" in open(SRUN_LOG).read(), open(SRUN_LOG).read()
 
@@ -366,6 +371,33 @@ def capture_timeout(cmd, *args, **kwargs):
 with C.pass_deadline(5), patch.object(C.subprocess, "run", side_effect=capture_timeout):
     P.unbuilt([X])
 assert seen_timeouts and seen_timeouts[0] <= 5, seen_timeouts
+
+# 7. Global eval concurrency bound: while one repo has a live eval unit, another
+# repo waits with EVAL_WAITING without starting a second unit, and is kicked
+# once the active eval finishes.
+fresh_pr_state()
+nix_knows()
+S.CFG["repos"]["sam/other"] = {
+    "proofJobs": {"remi-proof": "Run proof."},
+    "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"},
+    "proofSlots": 1,
+}
+try:
+    P.begin("sam/r", {1})
+    line(1, 700)
+    jid_r = pr_state(1)["proofEval"]["job"]
+    KICKS.clear()
+    P.begin("sam/other", {1})
+    st_other = {}
+    res_wait = P.outputs("sam/other", clean(checks=proof, number=1, sha=heads[2]), {"remi-proof"}, st_other)
+    assert res_wait == P.EVAL_WAITING, f"expected global eval wait, got {res_wait!r}"
+    assert "proofEval" not in st_other, st_other
+    run_eval_unit(jid_r)
+    KICKS.clear()
+    P.begin("sam/r", set())
+    assert any(k.endswith("/sam/other") for k in KICKS), f"waiting repo not kicked after eval ended: {KICKS}"
+finally:
+    del S.CFG["repos"]["sam/other"]
 
 # Restore harness globals.
 del S.CFG["repos"]["sam/r"]
