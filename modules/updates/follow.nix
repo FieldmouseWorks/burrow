@@ -16,6 +16,9 @@ let
   # A pass GitHub's rate limit held off books itself here for when it lifts
   # (burrow-events' wake file for the handler).
   wake = "${stateDir}/wake.json";
+  pipelineRepos = lib.optionals (autoland.enable or false) (
+    lib.unique ((autoland.pipelineRepos or [ ]) ++ (autoland.leadRepos or [ ]))
+  );
 
   followConfig = pkgs.writeText "cargo-follow.json" (builtins.toJSON {
     inherit (cfg) manifests;
@@ -24,6 +27,10 @@ let
     # A PR the train carries keeps its head: a new one would throw away the
     # candidate it rides in, gate and all.
     frozen = lib.optional (autoland.enable or false) autoland.labels.waiting.train.name;
+    # Follow PRs in pipeline repos carry fixes the rest of the queue waits on,
+    # so they go first in the proof/landing line.
+    first = if autoland.enable or false then autoland.labels.first else null;
+    inherit pipelineRepos;
   });
   # gh and git as the machine's own App, when it has one; cargo writes the
   # lock file.

@@ -176,6 +176,7 @@ struct Target<'a> {
     branch: &'a str,
     base: &'a str,
     path: &'a str,
+    first: Option<&'a str>,
 }
 
 impl Pass<'_> {
@@ -192,6 +193,7 @@ impl Pass<'_> {
             branch: &branch,
             base: &base,
             path: &m.path,
+            first: self.cfg.first_for(&repo, &m.repo),
         };
         let mut failed = Vec::new();
         for f in manifest::follows(&text)? {
@@ -271,6 +273,7 @@ impl Pass<'_> {
                 pr.number,
                 short(&at)
             ));
+            self.ensure_first(repo, pr.number, &pr.labels, t.first)?;
             return Ok(());
         }
         // Commits on it that aren't a pass's (the steward's fix job making
@@ -284,6 +287,7 @@ impl Pass<'_> {
                 "{repo}: #{} has a commit a pass didn't make ({theirs:?}), so it's left as it is",
                 pr.number
             ));
+            self.ensure_first(repo, pr.number, &pr.labels, t.first)?;
             return Ok(());
         }
         if self.ask.dry {
@@ -319,6 +323,7 @@ impl Pass<'_> {
                     pr_open.number,
                     short(&head)
                 ));
+                self.ensure_first(repo, pr_open.number, &pr_open.labels, t.first)?;
             }
             None => {
                 let mut pr = pr;
@@ -331,9 +336,54 @@ impl Pass<'_> {
                     "{repo}: {url} moves {upstream} to {}",
                     short(&head)
                 ));
+                if t.first.is_some() {
+                    let number = made["number"].as_u64().ok_or_else(|| {
+                        Error::said(format!("{path}: GitHub's answer has no number"))
+                    })?;
+                    self.ensure_first(repo, number, &[], t.first)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Put `label` on `repo`#`number`, unless it's already among `have`.
+    /// Best effort: a label GitHub won't take never fails the pass, except
+    /// a rate limit which rebooks it so the next pass tries again.
+    fn ensure_first(
+        &mut self,
+        repo: &str,
+        number: u64,
+        have: &[String],
+        label: Option<&str>,
+    ) -> Result<(), Error> {
+        let Some(label) = label else {
+            return Ok(());
+        };
+        if have.iter().any(|l| l.eq_ignore_ascii_case(label)) {
+            return Ok(());
+        }
+        if self.ask.dry {
+            self.say(format!("{repo}: would label #{number} {label:?}"));
+            return Ok(());
+        }
+        let path = format!("repos/{repo}/issues/{number}/labels");
+        match call(
+            self.api,
+            "POST",
+            &path,
+            Some(&json!({ "labels": [label] })),
+            None,
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if e.retry_at.is_some() => Err(e),
+            Err(e) => {
+                self.say(format!(
+                    "{repo}: #{number} didn't get its {label:?} label: {e}"
+                ));
+                Ok(())
+            }
+        }
     }
 
     /// The rev the manifest at `at` pins the URL at.
