@@ -9,7 +9,7 @@
 # sweep; a unit of its own after each sweep gives each one notice (HOST-notify),
 # closed once it's gone, so raising it never widens what the sweep can write.
 inputs:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 let
   inherit (config.burrow) stateDir;
   jobs = "${config.burrow.scratchDir}/jobs";
@@ -23,7 +23,7 @@ let
     then throw "crates/burrow-scratch/src/lib.rs no longer spells GONE as this module reads it"
     else builtins.head spelled;
   records = "${stateDir}/proj-scratch-stuck";
-  notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
+  notify = lib.optionals (config.burrow.tools ? notify) [ (lib.getExe config.burrow.tools.notify) ];
 in
 {
   config = lib.mkIf config.burrow.proj.enable {
@@ -43,13 +43,13 @@ in
       before = [ "proj-scratch-stuck.service" ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${sweeper} sweep ${jobs}";
+        ExecStart = utils.escapeSystemdExecArgs [ sweeper "sweep" jobs ];
         # Root, with only what unlinking another user's files in another
         # user's dirs takes, writing nowhere but SCRATCH/jobs.
         CapabilityBoundingSet = [ "CAP_DAC_OVERRIDE" "CAP_FOWNER" ];
         NoNewPrivileges = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [ jobs ];
+        ReadWritePaths = [ (utils.escapeSystemdExecArgs [ jobs ]) ];
         ProtectHome = "read-only";
         PrivateTmp = true;
         PrivateDevices = true;
@@ -85,7 +85,9 @@ in
       description = "The owner's notice for each finished job's scratch the sweep couldn't remove";
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${sweeper} notice ${jobs} ${records} proj-scratch-sweep.service ${notify}";
+        ExecStart = utils.escapeSystemdExecArgs (
+          [ sweeper "notice" jobs records "proj-scratch-sweep.service" ] ++ notify
+        );
       };
     };
 
