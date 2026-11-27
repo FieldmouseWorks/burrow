@@ -60,6 +60,14 @@ pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
                         .status()
                         .is_ok_and(|s| s.success())
                 })
+            } else if b.get("eval").and_then(Value::as_bool) == Some(true) {
+                cfg.proof_run.as_ref().is_some_and(|p| {
+                    Command::new(p)
+                        .arg("eval-start")
+                        .arg(&dir)
+                        .status()
+                        .is_ok_and(|s| s.success())
+                })
             } else {
                 let Some((program, args)) = cfg.proof_build_driver.split_first() else {
                     return Err("proof build driver is not configured".into());
@@ -154,5 +162,37 @@ mod tests {
             fs::read_to_string(proof.join("build.json")).unwrap(),
             inputs
         );
+    }
+
+    #[test]
+    fn a_restored_eval_unit_restarts_through_eval_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            burrow_test::executable(&p, format!("#!/bin/sh\n{body}\n"));
+            p
+        };
+        let (_rig, mut cfg) = crate::usage::tests::rig();
+        cfg.tools.systemctl = tool("systemctl", "echo inactive");
+        cfg.proof_run = Some(tool(
+            "burrow-proof",
+            &format!("echo \"$@\" > {}/proof-args", dir.path().display()),
+        ));
+        let state = dir.path().join("builds");
+        let proof = state.join("proof-o-r-1");
+        fs::create_dir_all(&proof).unwrap();
+        let record = r#"{"repo":"o/r","number":1,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"outputs","eval":true}"#;
+        fs::write(proof.join("build.json"), record).unwrap();
+        fs::write(proof.join("policy-paused"), "paused").unwrap();
+        cfg.proofs_state = Some(state);
+        cfg.settings = Some(burrow_settings::Config {
+            overlay: dir.path().join("overlay.json"),
+            allowed: vec!["o/r".into()],
+            pipeline_repos: vec![],
+            ..Default::default()
+        });
+        reconcile(&cfg).unwrap();
+        let args = fs::read_to_string(dir.path().join("proof-args")).unwrap();
+        assert_eq!(args.trim(), format!("eval-start {}", proof.display()));
     }
 }

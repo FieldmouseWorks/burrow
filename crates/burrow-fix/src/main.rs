@@ -36,9 +36,9 @@ fn main() -> ExitCode {
                     .map_err(|e| e.to_string())?;
                 broker.stuck = stuck_proj(&cfg).map(|p| Box::new(p) as _);
                 let broker = Arc::new(broker);
-                let stopped = broker.reconcile()?;
-                if stopped > 0 {
-                    eprintln!("stopped {stopped} fix jobs whose requests a restart lost");
+                let held = broker.reconcile()?;
+                if held > 0 {
+                    eprintln!("holds {held} fix jobs from before the restart, at work or ended");
                 }
                 server
                     .serve(move |request, work: &burrow_producer::serve::Work| {

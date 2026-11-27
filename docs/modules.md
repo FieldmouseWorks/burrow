@@ -419,7 +419,9 @@ see [README.md](../README.md).
   `plugins.fix.enable` (off) runs Conary's fix plugin and its broker
   (`crates/burrow-fix`): the flow's fixes run as proj jobs on the fixing role
   (`plugins.fix.role`), one live fix a PR, stopped when the flow's request
-  is; it needs `burrow.ledger.controllerUser`. `plugins.job.enable` (off)
+  is. A restart of the broker leaves its jobs at work and re-adopts them,
+  and the flow's request made again is answered from its job; it needs
+  `burrow.ledger.controllerUser`. `plugins.job.enable` (off)
   has the same broker serve the flow's `job` kind through a plugin of its
   own: a PR the flow can't settle, handed to the stuck role
   (`plugins.job.role`) as one proj job a PR, with the handoff and answer

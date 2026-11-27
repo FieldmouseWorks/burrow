@@ -532,6 +532,12 @@ fn classify(
             if name == p.cfg.settle.context {
                 continue;
             }
+            if let (Some(pr), Some(other)) =
+                (ask.pr["number"].as_u64(), burrow_house::status_pr(&name))
+                && other != pr
+            {
+                continue;
+            }
             if name == p.cfg.settle.train_context {
                 if c["state"] != "FAILURE" || !mine(p, &c["creator"]) {
                     continue;
@@ -573,11 +579,19 @@ fn classify(
             *at = (*at).max(*how);
         }
     }
+    let pr_number = ask.pr["number"].as_u64();
     let named: BTreeSet<_> = contexts
         .iter()
         .filter_map(|c| {
             text(&c["name"]).or_else(|| {
-                text(&c["context"]).map(|n| spelled.get(&n.to_lowercase()).copied().unwrap_or(n))
+                text(&c["context"])
+                    .filter(|n| {
+                        !matches!(
+                            (pr_number, burrow_house::status_pr(n)),
+                            (Some(pr), Some(other)) if other != pr
+                        )
+                    })
+                    .map(|n| spelled.get(&n.to_lowercase()).copied().unwrap_or(n))
             })
         })
         .collect();

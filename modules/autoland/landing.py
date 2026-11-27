@@ -46,12 +46,29 @@ def prs_states(repo):
 def jobs(st):
     """Every job and proof build a PR's state names: each kind's (KINDJob),
     the proofs it started, what it's stopping, the fix jobs that may still
-    push to its branch, and the build of what its proof is built from."""
+    push to its branch, and its proof prebuild and eval units."""
     named = [v for k, v in st.items() if k.endswith("Job") and isinstance(v, str)]
     named += st.get("proofsLive", []) + st.get("stopping", []) + list((st.get("answering") or {}).keys())
-    if (pre := st.get("proofInputs") or {}).get("job"):
-        named.append(pre["job"])
+    for field in ("proofInputs", "proofEval", "mergedEval"):
+        if (rec := st.get(field) or {}).get("job"):
+            named.append(rec["job"])
     return list(dict.fromkeys(named))
+
+
+def repo_builds(repo):
+    """Every build/eval unit folder under stateDir/builds belonging to repo."""
+    root = os.path.join(CFG["stateDir"], "builds")
+    try:
+        names = os.listdir(root)
+    except FileNotFoundError:
+        return []
+    want = repo.lower()
+    found = []
+    for jid in names:
+        b = C.load(f"builds/{jid}/build.json", {}, live=True)
+        if (b.get("repo") or "").lower() == want:
+            found.append(jid)
+    return found
 
 
 def alive(jid):
@@ -65,17 +82,17 @@ def vacate(repo, generation):
     """Stop the steward's work in a repo it's letting go of. True once none
     is left, with its release marker written for this handover."""
     left = []
-    # Its PRs' jobs, and the repo's own: the fix of its red default branch.
+    # Its PRs' jobs, the repo's own red-default fix, and any build/eval units on disk.
     states = list(prs_states(repo).values())
     states.append({"redJob": (C.load(f"repo-{repo.replace('/', '_')}.json", {}, live=True).get("red") or {}).get("job")})
-    for st in states:
-        for jid in jobs(st):
-            if not alive(jid):
-                continue
-            if C.stop_job(jid):
-                log(f"{repo}: stopped {jid}: conaryd is taking the repo's landing over")
-            else:
-                left.append(jid)
+    jids = [jid for st in states for jid in jobs(st)] + repo_builds(repo)
+    for jid in dict.fromkeys(jids):
+        if not alive(jid):
+            continue
+        if C.stop_job(jid):
+            log(f"{repo}: stopped {jid}: conaryd is taking the repo's landing over")
+        else:
+            left.append(jid)
     if left:
         log(f"{repo}: letting conaryd have it once {', '.join(left)} stop")
         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass stops them, or the record moves on

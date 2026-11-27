@@ -545,3 +545,96 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
+
+    # Yielding mid-repo or failing an earlier operation must preserve
+    # previously published notices for unvisited PRs and deferred repo-wide
+    # steps (branches, upkeep, taken) instead of flapping them off the stuck
+    # issue and back on every slice; visited/closed PRs and finished traversals
+    # still clear resolved entries.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(1), pr(2)]
+        flaky = ('A Claude job for it didn\'t finish', 'sam/r#99', '`test`: job j1 failed')
+        branch = ('Branch left behind', 'sam/r: `old`', 'denied')
+        taken = (C.TAKEN, 'sam/r', 'move it aside')
+        pr1_old = ('Open over a day', '[sam/r#1](https://github.com/sam/r/pull/1) 1', 'waiting')
+        pr2_old = ('Open over a day', '[sam/r#2](https://github.com/sam/r/pull/2) 2', 'waiting')
+        pr3_closed = ('Open over a day', '[sam/r#3](https://github.com/sam/r/pull/3) 3', 'closed')
+        red_default = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
+        C.save('digest-repos.json', {'sam/r': [list(x) for x in (flaky, branch, taken, pr1_old, pr2_old, pr3_closed, red_default)]})
+        published = []
+        original = S.step.handle
+
+        def long(repo, p, *args):
+            original(repo, p, *args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.R, 'publish', published.append), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        # PR #1 was visited and resolved, PR #3 is closed, watch_default ran
+        # and saw green; PR #2 (unvisited) and deferred branches/upkeep/taken
+        # must survive the yield without leaking into pass-progress.json.
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {flaky, branch, taken, pr2_old}, saved
+        assert set(published[-1]) == {flaky, branch, taken, pr2_old}, published[-1]
+        assert C.load('pass-progress.json', {})['repos']['sam/r']['digest'] == []
+        # A subsequent open_prs failure that runs upkeep and taken must keep
+        # unvisited PR #2 and deferred branch notices, update upkeep/taken,
+        # and not drop them while PRs could not be read.
+        C.WAKE.clear()
+        with patch.object(S.R, 'publish', published.append), \
+                patch.object(S, 'open_prs', side_effect=RuntimeError('gh: Resource limits for this query exceeded.')), \
+                patch.object(S, 'upkeep', lambda repo, mine: mine.append(flaky)):
+            S.run_pass(None)
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {flaky, branch, pr2_old}, saved
+        # Once the continuation finishes PR #2 and runs branches/upkeep/taken
+        # cleanly, resolved entries clear.
+        C.WAKE.clear()
+        with patch.object(S.R, 'publish', published.append):
+            S.run_pass(['sam/r'], continuing=True)
+        assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
+        assert published[-1] == [], published[-1]
+
+    # A red-branch notice recorded in an earlier slice clears as soon as a
+    # later slice's watch_default sees the default branch recover, and a
+    # failing upkeep preserves its prior upkeep notices until upkeep passes.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(1), pr(2)]
+        flaky = ('A Claude job for it didn\'t finish', 'sam/r#99', '`test`: job j1 failed')
+        red = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
+        C.save('digest-repos.json', {'sam/r': [list(flaky)]})
+        is_red = [True]
+        original = S.step.handle
+
+        def watch_red(r, info, prs, mine):
+            if is_red[0]:
+                mine.append(red)
+            return {}
+
+        def long(repo, p, *args):
+            original(repo, p, *args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.R, 'watch_default', watch_red), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {red, flaky}, saved
+        # Failing open_prs before watch_default runs preserves the red notice.
+        C.WAKE.clear()
+        with patch.object(S, 'open_prs', side_effect=RuntimeError('gh: Resource limits for this query exceeded.')), \
+                patch.object(S, 'upkeep', lambda repo, mine: mine.append(flaky)):
+            S.run_pass(['sam/r'])
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {red, flaky}, saved
+        is_red[0] = False
+        C.WAKE.clear()
+        with patch.object(S.R, 'watch_default', watch_red), \
+                patch.object(S, 'upkeep', lambda repo, mine: S.failing(repo, 'upkeep down', 'upkeep')):
+            S.run_pass(['sam/r'], continuing=True)
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert saved == [flaky], saved
+        C.WAKE.clear()
+        with patch.object(S.R, 'watch_default', watch_red):
+            S.run_pass(['sam/r'])
+        assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
+    print('yielded passes and failed reads preserve deferred digest notices: passed')

@@ -73,6 +73,33 @@ impl Rule {
     }
 }
 
+/// The commit status context `burrow-house` posts for `rule` on PR `pr`:
+/// `house/NAME (#N)`.
+pub fn status_context(rule: Rule, pr: u64) -> String {
+    format!("house/{} (#{})", rule.name(), pr)
+}
+
+/// The PR number of a `burrow-house` commit status (`house/NAME (#N)`), or
+/// `None` if `context` is not one. Commit statuses live on the commit SHA, so
+/// when a second PR shares a commit with an earlier PR, consumers use this to
+/// ignore the other PR's house statuses.
+pub fn status_pr(context: &str) -> Option<u64> {
+    let rest = context.strip_prefix("house/")?;
+    let (rule, num) = rest.rsplit_once(" (#")?;
+    let num = num.strip_suffix(')')?;
+    if rule.is_empty()
+        || !rule
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || num.is_empty()
+        || num.starts_with('0')
+        || !num.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    num.parse::<u64>().ok()
+}
+
 fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("a rule's pattern compiles")
 }
@@ -570,5 +597,29 @@ mod tests {
             says("Why not split: one table", "Why not Rust"),
             Said::Nothing
         );
+    }
+
+    #[test]
+    fn status_context_and_pr_round_trip() {
+        for rule in Rule::ALL {
+            let ctx = status_context(rule, 1625);
+            assert_eq!(status_pr(&ctx), Some(1625), "{ctx}");
+        }
+        assert_eq!(status_pr("house/future-rule2 (#9)"), Some(9));
+        for bad in [
+            "house/branch",
+            "house/branch (#0)",
+            "house/branch (#05)",
+            "house/branch (#abc)",
+            "house/branch (#99999999999999999999999999)",
+            "house/ (#1625)",
+            "house/Branch (#1625)",
+            "house/a/b (#1625)",
+            "house/a (#1) (#2)",
+            "other/branch (#1625)",
+            "",
+        ] {
+            assert_eq!(status_pr(bad), None, "{bad}");
+        }
     }
 }

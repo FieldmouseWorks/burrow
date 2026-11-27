@@ -310,7 +310,7 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
         .filter(|r| *r != Rule::ModelNames || event.model_names)
         .collect();
     let status = |rule: Rule, passed: bool, description: String| Status {
-        context: format!("house/{} (#{})", rule.name(), event.number),
+        context: rules::status_context(rule, event.number),
         state: if passed { "success" } else { "failure" },
         description,
         target_url: event.run_url.clone(),

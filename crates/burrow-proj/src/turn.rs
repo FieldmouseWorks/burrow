@@ -452,6 +452,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .and_then(|i| nanos(&i))
         .unwrap_or(0);
     let mut killed = 0;
+    let mut session_reset = false;
     // A refused run's turn gives up its slot and waits in line again, where
     // none is handed out while a hold holds its run, and runs once more in
     // its own conversation, its clock stood still meanwhile: the prompt it
@@ -619,6 +620,29 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         // Structured refusal reported by the engine plugin on stderr.
         match run.refusal {
+            Some(refusal) if refusal.kind == RefusalKind::SessionLost => {
+                if !session_reset
+                    && engine::resume_for(&job, &choice.engine).is_some()
+                    && (!ran || agent.as_deref().is_none_or(|a| stopped("agent", a)))
+                {
+                    session_reset = true;
+                    engine::clear_session(&job, &choice.engine);
+                    crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
+                    let _ = crate::state_reads::remove(job.file(JobFile::AwaitNext));
+                    let handoff_path = job.turn_file(&n, TurnFile::Handoff);
+                    first = engine::first_prompt(&job, &n, &choice.engine).map_err(|e| {
+                        Fail::new(1, format!("proj: {}: {e}", handoff_path.display()))
+                    })?;
+                    prompt = first.clone();
+                    eprintln!(
+                        "proj: {} lost its session ({}); restarting turn with a handoff",
+                        choice.engine, refusal.reason
+                    );
+                    continue;
+                }
+                record_turn_usage(&job, &n, &choice, started);
+                return Err(turn_refused(&job, &n, &refusal.reason, &outcome));
+            }
             Some(refusal) if !refusal.kind.holds_the_engine() => {
                 if let Some((next, same_conv)) = moved(&choice)? {
                     choice = next;
