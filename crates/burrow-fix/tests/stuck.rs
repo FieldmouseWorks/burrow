@@ -13,6 +13,7 @@ use burrow_producer::serve::{Controller, Server, Work};
 use conary_core::plugin::{Answer, Choice, Context, Limits, Next, Plugin, Request, Task};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -32,24 +33,42 @@ struct Runner {
     answers: Option<Value>,
 }
 
+/// One broker's runner. Once its broker is `gone` (its process killed), a
+/// call never returns: it asks proj nothing more, and stops nothing.
 #[derive(Clone)]
 struct Jobber {
     runner: Arc<Mutex<Runner>>,
     role: String,
+    gone: Arc<AtomicBool>,
+}
+
+impl Jobber {
+    fn alive(&self) {
+        while self.gone.load(Ordering::SeqCst) {
+            thread::park_timeout(Duration::from_secs(1));
+        }
+    }
 }
 
 impl Jobs for Jobber {
     fn start(&self, repo: &str, key: &str, task: &str) -> Result<String, String> {
+        self.alive();
         let mut r = self.runner.lock().unwrap();
         let id = format!("job-{}", r.started.len() + 1);
         r.started
             .push((repo.into(), key.into(), task.into(), self.role.clone()));
         Ok(id)
     }
-    fn find(&self, _: &str) -> Result<Option<String>, String> {
-        Ok(None)
+    fn find(&self, key: &str) -> Result<Option<String>, String> {
+        self.alive();
+        let r = self.runner.lock().unwrap();
+        Ok(r.started
+            .iter()
+            .position(|(_, k, _, _)| k == key)
+            .map(|i| format!("job-{}", i + 1)))
     }
     fn why(&self, _: &str) -> Result<Record, String> {
+        self.alive();
         self.runner
             .lock()
             .unwrap()
@@ -58,10 +77,12 @@ impl Jobs for Jobber {
             .ok_or_else(|| "no record".into())
     }
     fn stop(&self, id: &str) -> Result<(), String> {
+        self.alive();
         self.runner.lock().unwrap().stopped.push(id.into());
         Ok(())
     }
     fn answers(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+        self.alive();
         let r = self.runner.lock().unwrap();
         Ok(r.answers.as_ref().map(|a| a.to_string().into_bytes()))
     }
@@ -187,22 +208,26 @@ fn rig() -> Rig {
 }
 
 impl Rig {
-    /// The broker, serving every connection on its own thread for the rest
-    /// of the test.
-    fn serve(&self) {
+    /// The broker, as it starts, serving every connection on its own
+    /// thread for the rest of the test; set what it returns to kill it.
+    fn serve(&self) -> Arc<AtomicBool> {
         let shared = Shared(self.github.clone());
         let github: GitHub = Box::new(move || Box::new(shared.clone()));
+        let gone = Arc::new(AtomicBool::new(false));
         let jobber = |role: &str| Jobber {
             runner: self.runner.clone(),
             role: role.into(),
+            gone: gone.clone(),
         };
         let mut broker = Broker::new(self.cfg.clone(), Box::new(jobber("fix")), github).unwrap();
         broker.stuck = Some(Box::new(jobber("stuck")));
         broker.look = Duration::from_millis(20);
+        broker.reconcile().unwrap();
         let broker = Arc::new(broker);
         let me = Controller(rustix::process::getuid().as_raw());
         let server = Server::bind(&self.cfg.socket, me).unwrap();
         thread::spawn(move || server.serve(move |r: Request, w: &Work| broker.handle(r, w)));
+        gone
     }
 
     /// The runner the flow holds, as it negotiated with the plugin.
@@ -727,4 +752,85 @@ fn wait_for(done: impl Fn() -> bool) {
 
 fn count(dir: &Path) -> usize {
     std::fs::read_dir(dir).unwrap().count()
+}
+
+#[test]
+fn a_restart_leaves_the_stuck_job_at_work_and_answers_the_remade_request_from_it() {
+    let r = rig();
+    let gone = r.serve();
+    r.github(&[HEAD, PUSHED]);
+    r.script("running", json!({}));
+    let why = Stuck::ALL[0].word();
+    {
+        let (plugin, log) = (r.plugin.clone(), r.log.clone());
+        // The flow's call the restart cuts off: its plugin sees its
+        // connection close, and its answer is never read.
+        thread::spawn(move || {
+            let limits = Limits {
+                deadline: Duration::from_secs(30),
+                response_bytes: 1 << 20,
+            };
+            let runner = Plugin::describe(&plugin, limits).unwrap();
+            let _ = call(&runner, &log, handoff(why, None));
+        });
+    }
+    wait_for(|| !r.started().is_empty());
+    gone.store(true, Ordering::SeqCst);
+    r.serve();
+    assert!(r.runner.lock().unwrap().stopped.is_empty());
+    // The flow asks again: the job from before the restart answers it,
+    // held to the head it was handed.
+    r.script(
+        "done",
+        json!({"pushed": PUSHED, "unable": null, "followup": 40, "summary": "fixed the blocker"}),
+    );
+    let got = call(&r.runner(), &r.log, handoff(why, None)).unwrap();
+    let Answer::Job { summary, .. } = &got.answer else {
+        panic!("{:?}", got.answer)
+    };
+    assert!(
+        summary.starts_with(&format!("pushed {PUSHED}\n")),
+        "{summary}"
+    );
+    assert_eq!(r.started().len(), 1, "a second stuck-role job started");
+    assert!(r.runner.lock().unwrap().stopped.is_empty());
+    assert_eq!(count(&r.cfg.state.join("live")), 0);
+}
+
+#[test]
+fn a_readopted_stuck_job_keeps_the_followup_it_was_handed() {
+    let r = rig();
+    let gone = r.serve();
+    r.github(&[HEAD, PUSHED]);
+    r.script("running", json!({}));
+    let why = Stuck::ALL[0].word();
+    {
+        let (plugin, log) = (r.plugin.clone(), r.log.clone());
+        thread::spawn(move || {
+            let limits = Limits {
+                deadline: Duration::from_secs(30),
+                response_bytes: 1 << 20,
+            };
+            let runner = Plugin::describe(&plugin, limits).unwrap();
+            let _ = call(&runner, &log, handoff(why, None));
+        });
+    }
+    wait_for(|| !r.started().is_empty());
+    gone.store(true, Ordering::SeqCst);
+    // While the broker is down, an older matching follow-up (37) is reopened ahead of 40.
+    r.github_listing(&[HEAD, PUSHED], json!([issue(37), issue(40)]));
+    r.serve();
+    r.script(
+        "done",
+        json!({"pushed": PUSHED, "unable": null, "followup": 40, "summary": "fixed the blocker"}),
+    );
+    let got = call(&r.runner(), &r.log, handoff(why, None)).unwrap();
+    let Answer::Job { summary, .. } = &got.answer else {
+        panic!("{:?}", got.answer)
+    };
+    assert!(
+        summary.contains("follow-up: https://github.com/sam/box/issues/40\n"),
+        "{summary}"
+    );
+    assert_eq!(r.started().len(), 1, "a second stuck-role job started");
 }

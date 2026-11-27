@@ -142,13 +142,16 @@ pkgs.testers.runNixOSTest {
         m.wait_for_unit("multi-user.target")
         m.succeed("echo none >/var/lib/burrow/conary/anchor")
         m.succeed(f"echo {key} >/var/lib/burrow/conary/key.pub")
-        m.wait_for_unit("conaryd.service")
+        # conaryd is path-activated and Type=simple: wait until it is active
+        # and has bound its socket before checking it.
+        m.wait_until_succeeds("systemctl is-active -q conaryd.service", timeout=60)
+        m.wait_until_succeeds("test -S /run/conary/conaryd.sock", timeout=60)
 
     def status(m, url):
         return m.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert ${tls}/cert.pem -X POST -H 'Content-Type: application/json' -d '{{}}' {url}")
 
     with subtest("on, an unsigned request is refused over loopback"):
-        on.wait_for_unit("conary-gate-reuse.service")
+        on.wait_until_succeeds("systemctl is-active -q conary-gate-reuse.service", timeout=60)
         on.wait_for_open_port(8091, "127.0.0.1")
         assert status(on, "http://127.0.0.1:8091/") in ("400", "401")
 

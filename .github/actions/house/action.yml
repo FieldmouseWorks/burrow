@@ -19,7 +19,7 @@ inputs:
       why it isn't Rust: enough for a fix, not for a feature.
     default: "50"
   lines:
-    description: How long a code file may grow before it's split.
+    description: Non-test code line backstop for file-size.
     default: "1000"
   model-names:
     description: >-

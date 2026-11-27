@@ -13,11 +13,13 @@
 //!     `rust-first-allow`. A new shell script counts its lines, so glue passes.
 //!   - timers: work starts from events, so a PR that adds a timer (a systemd
 //!     timer, `startAt`, a cron schedule) says why on a `Why a timer:` line.
-//!   - file-size: a PR that grows a non-test code file past its limit, or
-//!     grows one already past it, splits it or says why not on a
-//!     `Why not split:` line unless the path has a standing waiver in
-//!     `file-size-allow`. Test files and Rust inline `#[cfg(test)]` blocks
-//!     don't count.
+//!   - file-size: a non-test code file's line limit is a backstop, not the
+//!     measure (test files and Rust inline `#[cfg(test)]` blocks don't count).
+//!     A PR that pushes a file across the limit (over it at the head, at or
+//!     under it or absent before) splits it, adds a standing waiver in
+//!     `file-size-allow`, or says why not on a `Why not split:` line. Growing
+//!     a file already over the limit fails without a standing waiver in
+//!     `file-size-allow`, and a body line does not pass it.
 //!   - model-names: tracked files never name a model, so a PR that adds a
 //!     line naming one says why on a `Why a model name:` line. A repo whose
 //!     subject is models (wend records which one wrote each fix) turns it
@@ -49,3 +51,5 @@ pub mod diff;
 pub mod github;
 pub mod rules;
 mod rust_cfg_test;
+
+pub use rules::{status_context, status_pr};

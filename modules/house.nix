@@ -113,8 +113,9 @@ in
     burrow.claude.machineMd = lib.mkOrder 1060 ''
       ## The house blocks
 
-      The house blocks in every repo's AGENTS.md (the house rules, and the
-      Pull requests section) are copies of the files in burrow's house/, and
+      The house blocks in every repo's AGENTS.md (the house rules, the Pull
+      requests section, and the shared review rules) are copies of the files in
+      burrow's house/, and
       `house-sync` (on new blocks, and each repo's pushes to its default
       branch) opens a PR wherever a copy differs. To change one, change it in
       burrow, never between a repo's markers.
