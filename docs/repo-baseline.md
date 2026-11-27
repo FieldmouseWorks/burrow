@@ -338,8 +338,9 @@ owner's (the steward's stalls are the stall watchdog's).
   AGENTS.md nearest each changed file, as the base branch has it (`###`
   subheadings group its checks), so review rules under any other heading
   move under that one.
-- **The house blocks** in AGENTS.md: [`house/rules.md`](../house/rules.md)
-  and [`house/prs.md`](../house/prs.md) (the Pull requests section), each
+- **The house blocks** in AGENTS.md: [`house/rules.md`](../house/rules.md),
+  [`house/prs.md`](../house/prs.md) (the Pull requests section), and
+  [`house/review.md`](../house/review.md) (inside `## Code Review Rules`), each
   copied in verbatim with its marker lines, as
   [the house style](house-style.md#the-house-blocks) says, so the house sync
   can find and update them later.
@@ -361,19 +362,29 @@ owner's (the steward's stalls are the stall watchdog's).
 
 ### AGENTS.md: the Code Review Rules section
 
-It calls Codex "the review bot", as the Pull requests block does, so it passes
-the name guards some repos run over their guidance (and the house rule against
-naming models).
+It copies [`house/review.md`](../house/review.md) verbatim inside
+`## Code Review Rules`, followed by the repo's own P1 risks. It calls Codex
+"the review bot", as the Pull requests block does, so it passes the name
+guards some repos run over their guidance (and the house rule against naming
+models).
 
 ```markdown
 ## Code Review Rules
 
-For reviewers, the review bot included. Flag as P1:
+<!-- house:review v1 begin. Copied from FieldmouseWorks/burrow house/review.md, verbatim. Change it there, not here: burrow's house sync rewrites everything between these markers. -->
+For reviewers, the review bot included.
+
+Not P1: flag a PR that gives a file a second job, at any length. The author
+splits it or answers with a reason; a fix job is not required to split a
+file mid-PR.
+
+Flag as P1:
 
 - a change that makes a check pass without fixing the thing it checks
 - tests or checks weakened, skipped or deleted to get green
 - secrets, tokens or personal data in the diff or the logs it adds
 - behavior changed beyond what the PR says it does
+<!-- house:review end -->
 - <the repo's own risks: what a reviewer of this codebase must never let through>
 ```
 

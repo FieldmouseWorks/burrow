@@ -390,6 +390,29 @@ fn normalize_records(
     let mut result =
         final_result.or_else(|| (!streamed_chunks.is_empty()).then(|| streamed_chunks.join("")));
 
+    if structured_output.is_none()
+        && result.as_deref().is_none_or(|s| s.trim().is_empty())
+        && !denied_actions.is_empty()
+    {
+        let detail = scrub(
+            &combined_or(
+                stderr_str,
+                &format!("denied actions: {}", denied_actions.join(", ")),
+            ),
+            secrets,
+        );
+        return TurnOutput {
+            session,
+            result: None,
+            structured_output: None,
+            error: Some(RunError::InvalidOutput(format!(
+                "antigravity exited 0 without producing a result (denied actions: {}; {detail})",
+                denied_actions.join(", ")
+            ))),
+            usage: usage_opt,
+        };
+    }
+
     if let Some(schema) = schema {
         match finalize_structured(schema, structured_output.take(), result.as_deref()) {
             Ok((value, rendered)) => {
@@ -414,26 +437,13 @@ fn normalize_records(
     }
 
     if result.as_deref().is_none_or(|s| s.trim().is_empty()) {
-        let msg = if !denied_actions.is_empty() {
-            let detail = scrub(
-                &combined_or(
-                    stderr_str,
-                    &format!("denied actions: {}", denied_actions.join(", ")),
-                ),
-                secrets,
-            );
-            format!(
-                "antigravity exited 0 without producing a result (denied actions: {}; {detail})",
-                denied_actions.join(", ")
-            )
-        } else {
-            "antigravity exited 0 without producing a result".to_owned()
-        };
         return TurnOutput {
             session,
             result: None,
             structured_output,
-            error: Some(RunError::InvalidOutput(msg)),
+            error: Some(RunError::InvalidOutput(
+                "antigravity exited 0 without producing a result".to_owned(),
+            )),
             usage: usage_opt,
         };
     }

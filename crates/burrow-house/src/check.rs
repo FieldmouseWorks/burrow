@@ -141,11 +141,48 @@ fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
             format!("adds a timer in {} file(s)", diff.timers.len()),
             "Work starts from an event (a push, a webhook, a unit finishing), not a clock. Start it from one, or add a line to the PR body starting 'Why a timer:' with the reason (a watchdog's heartbeat, a catch-up for a delivery that never came)".to_owned(),
         ),
-        Rule::FileSize => (
-            !diff.big.is_empty(),
-            format!("grows {} code file(s) past {} lines", diff.big.len(), event.lines),
-            format!("The house rules split a non-test code file before it passes {} lines (test files and inline #[cfg(test)] blocks don't count). Split it in this PR, add a standing waiver in .github/workflows/house.yml, or add a line to the PR body starting 'Why not split:' with the reason", event.lines),
-        ),
+        Rule::FileSize => {
+            if !diff.already_over.is_empty() {
+                let over = diff.already_over.len();
+                let mut why = format!(
+                    "grows {over} code file(s) already past {} lines without a standing waiver",
+                    event.lines
+                );
+                let mut extra = String::new();
+                if !diff.crossed.is_empty() {
+                    let crossed = diff.crossed.len();
+                    why = format!(
+                        "grows {over} file(s) already past {} lines (unwaived) and pushes {crossed} past it",
+                        event.lines
+                    );
+                    extra = format!(
+                        " It also pushes {crossed} file(s) past {} lines (split by job or explain with 'Why not split:').",
+                        event.lines
+                    );
+                }
+                return Verdict {
+                    rule,
+                    passed: false,
+                    why,
+                    error: Some(format!(
+                        "::error title=File size::This PR grows {over} non-test code file(s) already past {} lines without a standing waiver.{extra} A 'Why not split:' line in the PR body only covers a file crossing the {}-line backstop; growing one already over it passes only by splitting it or adding a standing waiver in .github/workflows/house.yml (file-size-allow).",
+                        event.lines, event.lines
+                    )),
+                };
+            }
+            (
+                !diff.crossed.is_empty(),
+                format!(
+                    "pushes {} code file(s) past {} lines",
+                    diff.crossed.len(),
+                    event.lines
+                ),
+                format!(
+                    "The {}-line limit is a backstop, not the measure (test files and inline #[cfg(test)] blocks don't count). Split by job in this PR, add a standing waiver in .github/workflows/house.yml (file-size-allow), or add a line to the PR body starting 'Why not split:' with the reason",
+                    event.lines
+                ),
+            )
+        }
         Rule::GuideSize => (
             !diff.guides.is_empty(),
             format!(
@@ -213,10 +250,22 @@ fn found(out: &mut dyn Write, diff: &Diff, event: &Event) -> Result<(), String> 
             diff.growth, event.growth
         ),
     )?;
-    for (file, length) in &diff.big {
+    for (file, length) in &diff.crossed {
         say(
             out,
-            &format!("grown past {} lines: {file:?}, {length} lines", event.lines),
+            &format!(
+                "pushed past {} lines: {file:?}, {length} lines",
+                event.lines
+            ),
+        )?;
+    }
+    for (file, length) in &diff.already_over {
+        say(
+            out,
+            &format!(
+                "already past {} lines and grown (no standing waiver): {file:?}, {length} lines",
+                event.lines
+            ),
         )?;
     }
     for (file, own) in &diff.guides {

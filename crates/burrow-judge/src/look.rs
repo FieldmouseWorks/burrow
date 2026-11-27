@@ -292,10 +292,11 @@ impl Looks {
         id: &str,
         dir: &Path,
         repo: &str,
+        pr: u64,
         head: &str,
         base: &str,
         spec: &Spec,
-        hosts: &[String],
+        engine_cfg: &crate::EngineConfig,
         work: &Work,
     ) -> Result<Looked, String> {
         let engine_units = self.units.get(&spec.engine).ok_or_else(|| {
@@ -305,7 +306,7 @@ impl Looks {
             )
         })?;
         let ran = lay(&self.cfg, id, repo, head, base, spec).and_then(|()| {
-            let gate = Gate::open(&dir.join(GATE), hosts, self.dial.clone())
+            let gate = Gate::open(&dir.join(GATE), &engine_cfg.hosts, self.dial.clone())
                 .map_err(|e| format!("its gate: {e}"))?;
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
             let ended = engine_units.run(id, work, until);
@@ -319,8 +320,20 @@ impl Looks {
         let _ = fs::remove_dir_all(dir);
         match ran? {
             Ended::Exited(0) => {}
-            Ended::Exited(n) => return Err(format!("the judge's look failed ({n})")),
-            Ended::Broke(why) => return Err(format!("the judge's look broke: {why}")),
+            Ended::Exited(n) => {
+                eprintln!(
+                    "burrow-judge: look {}@{id}.service for {repo}#{pr} exited with status {n}",
+                    engine_cfg.unit
+                );
+                return Err(format!("the judge's look failed ({n})"));
+            }
+            Ended::Broke(why) => {
+                eprintln!(
+                    "burrow-judge: look {}@{id}.service for {repo}#{pr} broke: {why}",
+                    engine_cfg.unit
+                );
+                return Err(format!("the judge's look broke: {why}"));
+            }
         }
         stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
         Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)
@@ -475,10 +488,11 @@ impl Judges for Looks {
             &id,
             &dir,
             repo,
+            *pr,
             head,
             &pull.base.sha,
             &spec,
-            &engine_cfg.hosts,
+            &engine_cfg,
             work,
         )?;
         Self::build_response(&request.contract, &spec, built, looked)

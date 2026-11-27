@@ -80,6 +80,17 @@ let
       lib.getExe agCfg.package
     else
       null;
+  defaultAgJudgeSettingsFile = pkgs.writeText "burrow-antigravity-judge-settings.json" (
+    builtins.toJSON {
+      toolPermission = "always-proceed";
+      permissions = {
+        deny = [
+          "command(systemctl)"
+          "command(sudo systemctl)"
+        ];
+      };
+    }
+  );
   agJudgeConfig = pkgs.writeText "burrow-engine-antigravity-judge.json" (
     builtins.toJSON {
       binary = agBinary;
@@ -89,10 +100,20 @@ let
       credential_mode = agCfg.credentialMode or "home-file";
       credential_home_path =
         agCfg.credentialHomePath or ".gemini/antigravity-cli/antigravity-oauth-token";
-      settings_file = agCfg.settingsFile or null;
-      mode = "plan";
+      settings_file =
+        if (agCfg.settingsFile or null) != null then
+          agCfg.settingsFile
+        else
+          defaultAgJudgeSettingsFile;
+      # Headless judge runs disable slash commands (`--mode plan` is ignored
+      # with a warning when slash commands are disabled and falls back to
+      # `request-review`, which aborts the turn on the first tool call).
+      # The look systemd unit itself provides OS-level isolation (`DynamicUser`,
+      # `PrivateNetwork`, read-only checkout, no Nix daemon), so Antigravity's
+      # nested `--sandbox` (which cannot resolve NixOS `bash` on PATH) is off.
+      mode = null;
       dangerously_skip_permissions = false;
-      sandbox = true;
+      sandbox = false;
       disable_slash_commands = true;
       output_format = "stream-json";
       deadline_secs = cfg.timeoutMinutes * 60;
@@ -105,6 +126,7 @@ let
       {
         nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
         meta.mainProgram = "burrow-engine-antigravity-judge";
+        passthru.config = agJudgeConfig;
       }
       ''
         makeBinaryWrapper ${lib.getExe' agPluginBin "burrow-engine-antigravity"} \
@@ -324,6 +346,14 @@ in
       defaultText = lib.literalExpression "the plugin's executable";
       description = "The executable the flow configuration's `plugins` names for judgments.";
     };
+
+    antigravityPlugin = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      internal = true;
+      default = agJudgePlugin;
+      description = "The wrapped Antigravity plugin package wired for judge looks.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -459,6 +489,7 @@ in
         unitConfig.CollectMode = "inactive-or-failed";
         # A switch leaves a look be: its producer stops it.
         restartIfChanged = false;
+        path = lib.optionals (name == "antigravity") [ pkgs.bash ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
@@ -479,8 +510,10 @@ in
           ]
           ++ [ "${config.burrow.projectsDir}:ro" ];
           BindPaths = [ "${state}/looks/%i" ];
-          # No network of its own: its one way out is its folder's gate.
+          # No network of its own: its one way out is its folder's gate, and
+          # no Nix daemon whose fetches would be a way out.
           PrivateNetwork = true;
+          InaccessiblePaths = [ "-/nix/var/nix/daemon-socket" ];
           LoadCredential = [ "judge-login-${name}:${eng.credentialFile}" ];
           ExecStart = "${lib.getExe package} look ${configFile} %i";
           TimeoutStartSec = cfg.timeoutMinutes * 60;

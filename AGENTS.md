@@ -45,6 +45,8 @@ they're more specific.
   ends it.
 - One fact, one home. Each rule or fact lives in one place; link to it
   instead of restating it.
+- One job per file: a file has one job you can state in a sentence without
+  "and". Split by job, never by length to get under a number.
 - Before you edit, say what done looks like and how it will be checked.
 - Keep your context small: every step re-sends all you've read, and a
   long wait makes it pay again. Read a file you're about to edit in full
@@ -77,9 +79,11 @@ reason of four words or more. Editing the body or title runs it again.
   code first.
 - Work starts from an event (a push, a webhook, a unit finishing), not a
   clock. A PR that adds a timer or a cron schedule says `Why a timer:`.
-- Split a non-test code file before it passes 1,000 lines (test files and
-  inline `#[cfg(test)]` blocks don't count), or say `Why not split:` unless
-  the path has a standing waiver in `.github/workflows/house.yml`.
+- 1,000 non-test code lines is a backstop, not the measure (test files and
+  inline `#[cfg(test)]` blocks don't count): a PR that pushes a file across
+  it says `Why not split:`; growing a file already over it needs a standing
+  waiver in `.github/workflows/house.yml` (`file-size-allow`), not a body
+  line.
 - AGENTS.md is a map: what the repo is, its own rules, and where things live
   (a feature map, the doc that owns each subject). Detail goes in the doc
   that owns it, linked from here. A PR that grows the repo's own part (the
@@ -149,12 +153,20 @@ a branch of that name.
 
 ## Code Review Rules
 
-For every reviewer, the steward's included. Flag as P1:
+<!-- house:review v1 begin. Copied from FieldmouseWorks/burrow house/review.md, verbatim. Change it there, not here: burrow's house sync rewrites everything between these markers. -->
+For reviewers, the review bot included.
+
+Not P1: flag a PR that gives a file a second job, at any length. The author
+splits it or answers with a reason; a fix job is not required to split a
+file mid-PR.
+
+Flag as P1:
 
 - a change that makes a check pass without fixing the thing it checks
 - tests or checks weakened, skipped or deleted to get green
 - secrets, tokens or personal data in the diff or the logs it adds
 - behavior changed beyond what the PR says it does
+<!-- house:review end -->
 - a one-way door that stops asking: an R2 `ask` rule in `modules/engines/anthropic.nix`
   dropped or narrowed, or the guard (`crates/burrow-guard`) letting a
   delete through without its snapshot or a default-branch force-push without

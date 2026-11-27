@@ -222,6 +222,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("systemctl show -p ActiveState --value probe.service | grep -x activating", timeout=60)
         machine.succeed("${halfSent} >/dev/null 2>&1 &")
         machine.wait_until_succeeds("test -e /tmp/half-sent", timeout=30)
+        machine.succeed("journalctl --sync")
         failed = machine.succeed("journalctl -u burrow-events.service | grep -c 'failed; again' || true")
         machine.succeed("systemctl stop --no-block burrow-events.service")
         time.sleep(1)
@@ -239,6 +240,7 @@ pkgs.testers.runNixOSTest {
         # as a broken switch.
         machine.succeed("systemctl stop burrow-events.service")
         machine.succeed("systemctl start burrow-events-catch-up.service")
+        machine.succeed("journalctl --sync")
         machine.succeed("journalctl -u burrow-events-catch-up.service | grep \"couldn't kick probe\"")
         machine.succeed("systemctl start burrow-events.service")
   '';

@@ -16,8 +16,9 @@ pub enum Rule {
     RustFirst,
     /// Work starts from events: a PR that adds a timer says why.
     Timers,
-    /// A PR that grows a non-test code file past the limit, or one already
-    /// past it, splits it or says why not.
+    /// A non-test code file's line limit is a backstop: pushing one across
+    /// it needs `Why not split:` (or a standing waiver); growing one already
+    /// over it needs a standing waiver, never a body line.
     FileSize,
     /// An AGENTS.md is a map: a PR that grows one's own part past GUIDE
     /// lines says why.
