@@ -220,7 +220,8 @@ into project jobs.
   context. A reply sent while a turn runs waits for it to finish.
 - **Done:** a turn that ends `proj done` closes the issue once its answer is
   posted, unless a reply is waiting or the issue changed since the job was
-  handed it (its title or text edited, a comment edited or deleted): then the
+  handed it (its title or text edited, a comment edited or deleted; a machine
+  author's own body edits to its own issue don't count): then the
   job is handed the issue as it stands instead. The stuck issue is excepted:
   the steward closes that. Reopen it to pick the work back up, as a fresh job from the
   issue as it stands. Closing it yourself, or taking the label off, ends the

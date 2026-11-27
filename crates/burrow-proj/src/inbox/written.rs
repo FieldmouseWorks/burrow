@@ -3,10 +3,24 @@ use super::Pass;
 use serde_json::{Value, json};
 
 const QUERY: &str = "query($owner:String!,$name:String!,$n:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$n){author{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} title body userContentEdits(first:100){totalCount nodes{editor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} deletedBy{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}} timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){totalCount nodes{... on RenamedTitleEvent{actor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}}} comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} totalCount nodes{databaseId author{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} body createdAt userContentEdits(first:100){totalCount nodes{editor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} deletedBy{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}}}}}}}";
+/// Body-edit counts for an issue opened by one of `inbox.authors`'s machine
+/// accounts, recorded only while `written.rs` verified the issue's complete
+/// edit history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MachineBodyEdits {
+    /// Retained body edits (`userContentEdits.totalCount`, verified `< 100`
+    /// and equal to `nodes.len()`).
+    pub total: u64,
+    /// Retained body edits whose editor is not the opener account.
+    pub by_others: u64,
+    /// Retained body edits with a `deletedBy` actor.
+    pub deleted: u64,
+}
 /// Verified text plus the original snapshot, retained only for refresh comparisons.
 pub(super) struct Written {
     pub issue: Value,
     pub comments: Vec<Value>,
+    pub machine_body_edits: Option<MachineBodyEdits>,
     original: [Value; 2],
 }
 impl Written {
@@ -91,10 +105,10 @@ impl Pass<'_> {
         // The machinery's extra authority covers only issues it opened itself.
         let by_machine = !self.allowed(issue["author"]["databaseId"].as_u64())
             && self.issue_writer(&issue["author"]);
-        if (self.issue_writer(&issue["author"]) || self.generated_child(repo, rest))
+        let trusted = (self.issue_writer(&issue["author"]) || self.generated_child(repo, rest))
             && self.writers(&issue["userContentEdits"], "editor", by_machine)
-            && self.writers(&issue["timelineItems"], "actor", by_machine)
-        {
+            && self.writers(&issue["timelineItems"], "actor", by_machine);
+        if trusted {
             safe["title"] = issue["title"].clone();
             safe["body"] = issue["body"].clone();
         } else {
@@ -103,10 +117,36 @@ impl Pass<'_> {
                 "The issue's title or body has an untrusted or unknown writer. Ask an authorized author for a new issue."
             );
         }
+        let machine_body_edits = if trusted && issue["author"]["__typename"] == "Bot" {
+            let opener = issue["author"]["databaseId"].as_u64();
+            self.allowed(opener)
+                .then(|| {
+                    issue["userContentEdits"]["nodes"].as_array().map(|edits| {
+                        let by_others = edits
+                            .iter()
+                            .filter(|e| {
+                                e["editor"]["__typename"] != "Bot"
+                                    || e["editor"]["databaseId"].as_u64() != opener
+                            })
+                            .count() as u64;
+                        let deleted =
+                            edits.iter().filter(|e| !e["deletedBy"].is_null()).count() as u64;
+                        MachineBodyEdits {
+                            total: edits.len() as u64,
+                            by_others,
+                            deleted,
+                        }
+                    })
+                })
+                .flatten()
+        } else {
+            None
+        };
         let comments = nodes.iter().filter(|c| self.authored(c)).map(|c| json!({"id":c["databaseId"], "user":{"id":c["author"]["databaseId"],"type":c["author"]["__typename"],"login": if c["author"]["__typename"] == "Bot" { json!(format!("{}[bot]", c["author"]["login"].as_str().unwrap_or_default().trim_end_matches("[bot]"))) } else { c["author"]["login"].clone() }}, "body":c["body"], "created_at":c["createdAt"]})).collect();
         Some(Written {
             issue: safe,
             comments,
+            machine_body_edits,
             original: [issue["title"].clone(), issue["body"].clone()],
         })
     }
