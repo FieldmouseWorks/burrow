@@ -778,6 +778,53 @@ fn pipeline_repo_labels_existing_open_pr_without_pushing() {
     );
     assert_eq!(changed(&gh), vec!["POST repos/sam/home/issues/7/labels"]);
 
+    // Open PR with a commit a pass didn't make when nothing counts: left open
+    // and labelled with `first`.
+    let mut gh = github(Some((&[], HEAD)));
+    theirs(&mut gh);
+    let (ran, out) = pass_with(
+        &pipeline_cfg(),
+        &mut gh,
+        &mut FakeLocal::default(),
+        None,
+        false,
+    );
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), vec!["POST repos/sam/home/issues/7/labels"]);
+
+    // Open PR without another commit when nothing counts: closed without labelling.
+    let mut gh = github(Some((&[], HEAD)));
+    let (ran, out) = pass_with(
+        &pipeline_cfg(),
+        &mut gh,
+        &mut FakeLocal::default(),
+        None,
+        false,
+    );
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(
+        changed(&gh),
+        vec![
+            "POST repos/sam/home/issues/7/comments",
+            "PATCH repos/sam/home/pulls/7",
+            "DELETE repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
+        ]
+    );
+
     // Dry-run never mutates GitHub, and reports what it would label.
     let mut gh = github(Some((&[], HEAD)));
     let mut local = FakeLocal {

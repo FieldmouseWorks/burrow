@@ -245,6 +245,7 @@ impl Pass<'_> {
                         "{repo}: #{} has a commit a pass didn't make ({theirs:?}), so it's left open",
                         pr.number
                     ));
+                    self.ensure_first(repo, pr.number, &pr.labels, t.first)?;
                 } else if self.ask.dry {
                     self.say(format!("{repo}: would close #{}", pr.number));
                 } else {
