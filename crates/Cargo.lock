@@ -918,6 +918,7 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-settings",
  "burrow-test",
@@ -1044,6 +1045,7 @@ dependencies = [
  "base64 0.23.1",
  "burrow-brief",
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-test",
  "flaky",
@@ -1200,14 +1202,14 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=b0dba6561f9bc3e529d2ffb39cb0b4d34e1bb0b5#b0dba6561f9bc3e529d2ffb39cb0b4d34e1bb0b5"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
 dependencies = [
  "blake3",
+ "conary-plugin",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "regex",
  "rustix",
- "schemars 1.2.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -1217,10 +1219,11 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=b0dba6561f9bc3e529d2ffb39cb0b4d34e1bb0b5#b0dba6561f9bc3e529d2ffb39cb0b4d34e1bb0b5"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
+ "conary-plugin",
  "ed25519-dalek",
  "jiff 1.0.2",
  "regex",
@@ -1234,6 +1237,16 @@ dependencies = [
  "tempfile",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "conary-plugin"
+version = "5.0.0"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
+dependencies = [
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -402,8 +402,20 @@ impl Judges for Looks {
         let _ = fs::remove_dir_all(&dir);
         match ran? {
             Ended::Exited(0) => {}
-            Ended::Exited(n) => return Err(format!("the judge's look failed ({n})")),
-            Ended::Broke(why) => return Err(format!("the judge's look broke: {why}")),
+            Ended::Exited(n) => {
+                eprintln!(
+                    "burrow-judge: look {}@{id}.service for {repo}#{pr} exited with status {n}",
+                    engine_cfg.unit
+                );
+                return Err(format!("the judge's look failed ({n})"));
+            }
+            Ended::Broke(why) => {
+                eprintln!(
+                    "burrow-judge: look {}@{id}.service for {repo}#{pr} broke: {why}",
+                    engine_cfg.unit
+                );
+                return Err(format!("the judge's look broke: {why}"));
+            }
         }
         stopped.map_err(|e| format!("the judge's look wouldn't stop: {e}"))?;
         let looked = Looked::read(&said.map_err(|e| format!("its answer: {e}"))?)?;

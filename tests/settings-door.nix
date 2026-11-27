@@ -98,5 +98,9 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("burrow-settings /etc/settings-tracked allows sam/code")
     for unit in ["burrow-events", "proj-inbox", "proj-watch", "autoland", "burrow-update", "burrow-ledger"]:
         machine.fail(f"systemctl is-active {unit}.service")
+    # Repeated rapid starts must not hit systemd's default 5-in-10s start limit.
+    assert machine.succeed("systemctl show -P StartLimitIntervalUSec burrow-settings-door.service").strip() == "0"
+    machine.succeed("rm -f /var/lib/settings-fixture/pause")
+    machine.succeed("for i in 1 2 3 4 5 6; do systemctl start burrow-settings-door.service; done")
   '';
 }

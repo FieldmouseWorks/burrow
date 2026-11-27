@@ -388,6 +388,7 @@ pub(super) fn host(
             crate::host_jobs::socket(cfg, job, n),
         )
         .env("PROJ_JOB", job.id)
+        .env("PROJ_ENGINE_HOME", job.file(JobFile::EngineHome))
         .env("PROJ_GITHUB_DIR", job.file(JobFile::Github))
         .env(
             "PROJ_GITHUB_KICK",

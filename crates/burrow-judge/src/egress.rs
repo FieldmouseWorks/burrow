@@ -22,9 +22,12 @@ const FORBIDDEN: &[u8] =
 const CONNECTED: &[u8] = b"HTTP/1.1 200 Connection established\r\n\r\n";
 /// The most of a request's head the gate reads before it gives up on it.
 const HEAD: usize = 65536;
-/// How long the way to an API waits on it: to connect, and for each read and
-/// write after.
+/// How long the way to an API waits to connect or flush a write.
 const PATIENCE: Duration = Duration::from_secs(60);
+/// How long an open API tunnel waits between upstream bytes before dropping a
+/// wedged peer: long enough that high-effort reasoning turns and pooled HTTP/2
+/// connections stay up across silent thinking and tool calls.
+const READ_PATIENCE: Duration = Duration::from_secs(600);
 
 /// How the gate reaches an API's host, on 443.
 pub type Dial = Arc<dyn Fn(&str) -> io::Result<TcpStream> + Send + Sync>;
@@ -35,7 +38,7 @@ pub fn dial(host: &str) -> io::Result<TcpStream> {
     for addr in (host, 443).to_socket_addrs()? {
         match TcpStream::connect_timeout(&addr, PATIENCE) {
             Ok(s) => {
-                s.set_read_timeout(Some(PATIENCE))?;
+                s.set_read_timeout(Some(READ_PATIENCE))?;
                 s.set_write_timeout(Some(PATIENCE))?;
                 return Ok(s);
             }
