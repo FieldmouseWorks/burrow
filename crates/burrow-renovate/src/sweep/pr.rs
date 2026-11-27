@@ -96,6 +96,7 @@ impl Pr<'_> {
     /// with whether it's one of the steward's proofs (`proofs`, their
     /// names).
     pub fn checks(&self, settled: &str, proofs: &[Value]) -> Vec<Check> {
+        let pr_number = self.0.get("number").and_then(Value::as_u64);
         items(self.0.get("statusCheckRollup"))
             .into_iter()
             .filter_map(|c| {
@@ -104,6 +105,13 @@ impl Pr<'_> {
                     return None;
                 }
                 let status = c.get("__typename").and_then(Value::as_str) == Some("StatusContext");
+                if status
+                    && let (Some(pr), Some(other)) =
+                        (pr_number, name.as_str().and_then(burrow_house::status_pr))
+                    && other != pr
+                {
+                    return None;
+                }
                 let field = |k: &str| c.get(k).and_then(Value::as_str);
                 let state = if status {
                     match field("state") {
@@ -276,6 +284,42 @@ mod tests {
         assert_eq!(checks[0].at, json!("t1"));
         assert_eq!(checks[5].at, json!("t2"));
         assert_eq!(checks[1].at, Value::Null);
+    }
+
+    #[test]
+    fn checks_ignore_another_prs_house_status_on_the_same_commit() {
+        let p = json!({
+            "number": 1627,
+            "statusCheckRollup": [
+                {"__typename": "StatusContext", "context": "house/branch (#1625)", "state": "FAILURE"},
+                {"__typename": "StatusContext", "context": "house/branch (#1627)", "state": "SUCCESS"},
+                {"__typename": "StatusContext", "context": "house/title (#1627)", "state": "FAILURE"},
+                {"__typename": "StatusContext", "context": "other/branch (#1625)", "state": "FAILURE"},
+            ]
+        });
+        let got: Vec<(String, State)> = Pr(&p)
+            .checks("review-settled", &[])
+            .into_iter()
+            .map(|c| (shown(Some(&c.name)), c.state))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("house/branch (#1627)".into(), State::Green),
+                ("house/title (#1627)".into(), State::Red),
+                ("other/branch (#1625)".into(), State::Red),
+            ]
+        );
+
+        let no_num = json!({"statusCheckRollup": [
+            {"__typename": "StatusContext", "context": "house/branch (#1625)", "state": "FAILURE"},
+        ]});
+        let got: Vec<(String, State)> = Pr(&no_num)
+            .checks("review-settled", &[])
+            .into_iter()
+            .map(|c| (shown(Some(&c.name)), c.state))
+            .collect();
+        assert_eq!(got, [("house/branch (#1625)".into(), State::Red)]);
     }
 
     #[test]
