@@ -290,10 +290,11 @@ let
   lockWait = pkgs.writeShellScriptBin "lock-wait" ''
     exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
   '';
-  # Who lands each repo (autoland/landing.nix), read at each run of
-  # renovate-run and renovate-sweep. None without autoland, where nothing
-  # hands landing over.
+  # Who lands each repo and its flow configs (autoland/{landing,shadow}.nix);
+  # none without autoland.
   landingRecord = if autoland.enable or false then lib.attrByPath [ "burrow" "landing" "record" ] null config else null;
+  flowConfigs = if autoland.enable or false then autoland.flowConfigs or null else null;
+  flowRender = lib.optionals (autoland.enable or false) (autoland.flow.render or [ ]);
   # renovate-run (crates/burrow-renovate), with its config built in.
   renovateWake = "${cfg.renovate.dir}/wake.json";
   renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
@@ -332,11 +333,10 @@ let
     projects = config.burrow.projectsDir;
     owner = config.burrow.owner;
     settled = vars.SETTLED;
-    # The steward's list of its repos (who lands each, its proofs); none
-    # without it.
+    # For repos the steward holds; conaryd's come from landing and flow.
     steward = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else null;
-    # A major's verdicts are sealed as conaryd reads them where it lands.
     landing = landingRecord;
+    flow = flowConfigs;
     # The App the jobs it starts act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };
@@ -934,8 +934,10 @@ in
         };
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
         description = "Hand stuck Renovate PRs to a Claude job${lib.optionalString (name == "renovate-sweep@") " (%I)"}";
-        # The full one sees what the full Renovate pass left.
-        after = lib.optional (name == "renovate-sweep") "renovate.service";
+        # The full one sees what the full Renovate pass left; both read the
+        # flow's live configs for repos conaryd lands.
+        after = lib.optional (name == "renovate-sweep") "renovate.service" ++ flowRender;
+        wants = flowRender;
         serviceConfig = {
           Type = "oneshot";
           User = user;

@@ -76,6 +76,7 @@ let
   given = "${on.burrow.stateDir}/landing/conaryd-given";
   flow = units.conary-flow;
   driver = units.burrow-landing;
+  sweep = lib.head (lib.splitString " " units.renovate-sweep.serviceConfig.ExecStart);
   template = on.burrow.landing.eventsTemplate;
   handlers = c: c.burrow.events.handlers;
   wrong = lib.filter (x: x != null) [
@@ -133,6 +134,7 @@ let
     (if failing (asked true) != [ ] then "a machine whose flow, run by a controller of its own, asks through the owner's door fails: ${toString (failing (asked true))}" else null)
     (if !(lib.elem "conary-flow" controlledDoor.askers) || !(lib.elem askedFlow.burrow.user controlledDoor.askers) then "the owner's door's broker doesn't let both the steward and the flow's controller ask: ${toString controlledDoor.askers}" else null)
     (if askedFlow.burrow.autoland.askAsOwner.door.askers != [ askedFlow.burrow.user ] then "with no controller, the owner's door's broker lets someone other than burrow.user ask" else null)
+    (if !(lib.all (u: lib.elem "autoland-flow-configs.service" units.${u}.after && lib.elem "autoland-flow-configs.service" units.${u}.wants) [ "renovate-sweep" "renovate-sweep@" ]) then "renovate-sweep doesn't wait for the flow configs it reads" else null)
   ];
   askedConfig = "${askedFlow.burrow.autoland.flow.base}/sam/homelab.json";
   controlledConfig = "${(asked true).burrow.autoland.flow.base}/sam/homelab.json";
@@ -196,5 +198,10 @@ in pkgs.runCommand "landing-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   jq '.repos = "sam/homelab"' ${template} > type.json
   ! ${flowFiles} events key.json || fail "an events file with a key Conary doesn't know was taken"
   ! ${flowFiles} events type.json || fail "an events file with a value of the wrong type was taken"
+  sweepConfig=$(grep -aoE "/nix/store/[a-z0-9]{32}-renovate-sweep\.json" ${sweep} | head -1)
+  [ -n "$sweepConfig" ] || fail "no config found in renovate-sweep's wrapper"
+  jq -e --arg landing "${on.burrow.landing.record}" --arg flow "${on.burrow.autoland.flowConfigs}" \
+    '.landing == $landing and .flow == $flow' "$sweepConfig" >/dev/null \
+    || fail "renovate-sweep doesn't read the landing record and flow configs: $(jq -c '{landing, flow}' "$sweepConfig")"
   touch $out
 ''

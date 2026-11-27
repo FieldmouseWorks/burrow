@@ -24,12 +24,14 @@
 //! since, someone else's comment or another job quoting a marker can't
 //! clear a PR. The autoland steward merges an ok one once its CI is green
 //! (the same rule) in the repos it lands, and conaryd in its own
-//! (steward.rs). In a repo burrow-landing's record gives conaryd, the
-//! markers are Conary's v2 issuances instead (seal/v2.rs), the only form its
-//! flow reads: sealed on the PR's revision (its description too) and a
-//! generation, and the sweep reads them back as the flow does. The owner
-//! gets one notice listing the held ones, as waiting on a decision, and the
-//! ok ones in repos nothing lands, each repo once.
+//! (steward.rs). In a repo burrow-landing's record gives conaryd, it counts
+//! as covered from the record alone, takes its proofs from its flow
+//! configuration, and its markers are Conary's v2 issuances instead
+//! (seal/v2.rs), the only form its flow reads: sealed on the PR's revision
+//! (its description too) and a generation, and the sweep reads them back as
+//! the flow does. The owner gets one notice listing the held ones, as
+//! waiting on a decision, and the ok ones in repos nothing lands, each repo
+//! once.
 //!
 //! Security fixes (Renovate's `security` label) merge themselves even when
 //! they're majors: none is asked for a verdict or waits for one. A red one
@@ -176,10 +178,11 @@ impl Config {
     /// toolchain bump, a lint the new versions trip), and one job per PR
     /// would fix it several times over, side by side.
     fn repo(&self, project: &str, repo: &str, who: &Who, steward: &Steward, pass: &mut Pass) {
-        let info = steward.repo(repo, now());
-        // Who its majors' verdicts are sealed for: conaryd, when the record
-        // gives it the repo (or is handing it over to it). A record it
-        // can't read seals nothing, in either form.
+        // Who its majors' verdicts are sealed for, who lands it, and where
+        // its proofs come from: conaryd and its flow configuration when the
+        // landing record gives it the repo (or is handing it over to it),
+        // else the steward's repos.json. A record or flow configuration it
+        // can't read fails the pass and hands nothing over.
         let conaryd = match self.conaryd(repo) {
             Ok(conaryd) => conaryd,
             Err(Broke(why)) => {
@@ -187,6 +190,18 @@ impl Config {
                 pass.failed = true;
                 return;
             }
+        };
+        let info = if conaryd {
+            match steward::from_flow(self.flow.as_deref(), repo) {
+                Ok(info) => info,
+                Err(why) => {
+                    complain(&format!("{}: {why}", self.name));
+                    pass.failed = true;
+                    return;
+                }
+            }
+        } else {
+            steward.repo(repo, now())
         };
         let prs = match self.list(repo) {
             Ok(prs) => prs,

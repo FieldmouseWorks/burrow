@@ -644,3 +644,75 @@ fn a_later_completed_run_replaces_earlier_work_but_a_skip_or_older_one_does_not(
     other["checkSuite"]["workflowRun"]["file"]["path"] = json!(".github/workflows/other.yml");
     assert_eq!(ids(&[house_run(10, "s1", "FAILURE"), other]), [10, 11]);
 }
+
+fn status_context(context: &str, state: &str) -> Value {
+    json!({"__typename": "StatusContext", "context": context, "state": state})
+}
+
+#[test]
+fn another_prs_house_status_does_not_speak_for_this_pr() {
+    let mut h = Hub::default();
+    // Another PR's failing house/branch (#1625) on the same commit is ignored
+    // while this PR (#5)'s own house/branch (#5) passes.
+    let got = run(
+        &mut h,
+        &ask(vec![
+            status_context("house/branch (#1625)", "FAILURE"),
+            status_context("house/branch (#5)", "SUCCESS"),
+        ]),
+        false,
+    )
+    .unwrap();
+    assert_eq!((got.state, got.names), ("green", Vec::<String>::new()));
+
+    // Another PR's passing house status alone does not make this PR green
+    // before its own checks have posted.
+    let got = run(
+        &mut h,
+        &ask(vec![status_context("house/title (#1625)", "SUCCESS")]),
+        false,
+    )
+    .unwrap();
+    assert_eq!((got.state, got.names), ("none", Vec::<String>::new()));
+
+    // This PR's own failing house status still makes it red.
+    let got = run(
+        &mut h,
+        &ask(vec![status_context("house/branch (#5)", "FAILURE")]),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        (got.state, got.names),
+        ("red", vec!["house/branch (#5)".to_owned()])
+    );
+
+    // Non-house or malformed contexts fail closed and are never ignored.
+    for context in [
+        "house/branch",
+        "house/branch (#0)",
+        "house/branch (#05)",
+        "other/branch (#1625)",
+    ] {
+        let got = run(
+            &mut h,
+            &ask(vec![status_context(context, "FAILURE")]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (got.state, got.names),
+            ("red", vec![context.to_owned()]),
+            "{context}"
+        );
+    }
+
+    // Without a PR number on the input, house statuses fail closed.
+    let mut no_num = ask(vec![status_context("house/branch (#1625)", "FAILURE")]);
+    no_num.pr.as_object_mut().unwrap().remove("number");
+    let got = run(&mut h, &no_num, false).unwrap();
+    assert_eq!(
+        (got.state, got.names),
+        ("red", vec!["house/branch (#1625)".to_owned()])
+    );
+}

@@ -73,10 +73,37 @@ pub enum Rewritten {
     Text(Vec<u8>),
 }
 
-/// AGENTS.md as it should be. A block it doesn't have stays out.
+/// The four common P1 lines hand-copied from `docs/repo-baseline.md` before
+/// `house/review.md` became a house block.
+const COMMON_REVIEW_P1: [&[u8]; 4] = [
+    b"- a change that makes a check pass without fixing the thing it checks",
+    b"- tests or checks weakened, skipped or deleted to get green",
+    b"- secrets, tokens or personal data in the diff or the logs it adds",
+    b"- behavior changed beyond what the PR says it does",
+];
+
+/// Boilerplate intro lines that preceded [`COMMON_REVIEW_P1`] in the template
+/// and existing repos' AGENTS.md.
+fn is_standard_review_intro(line: &[u8]) -> bool {
+    matches!(
+        line,
+        b"Flag as P1:"
+            | b"For reviewers, the review bot included. Flag as P1:"
+            | b"For reviewers, Codex included. Flag as P1:"
+            | b"For every reviewer, the steward's included. Flag as P1:"
+            | b"For every reviewer, the review bot included. Flag as P1:"
+            | b"For every reviewer, Codex included. Flag as P1:"
+    )
+}
+
+/// AGENTS.md as it should be. A block it doesn't have stays out, except the
+/// `review` block, which is placed inside an existing `## Code Review Rules`
+/// section carrying the four common P1 lines once the file already carries at
+/// least one house block.
 pub fn rewrite(agents: &[u8], house: &House) -> Rewritten {
     let mut text = agents.to_vec();
     let mut found = false;
+    let mut saw_review = false;
     for block in &house.blocks {
         let lines: Vec<&[u8]> = text.split_inclusive(|&b| b == b'\n').collect();
         let at = |is: &dyn Fn(&[u8]) -> bool| -> Vec<usize> {
@@ -98,11 +125,165 @@ pub fn rewrite(agents: &[u8], house: &House) -> Rewritten {
         next.extend_from_slice(&lines[e + 1..].concat());
         text = next;
         found = true;
+        if block.name == "review" {
+            saw_review = true;
+        }
     }
-    if found {
-        Rewritten::Text(text)
+    if !found {
+        return Rewritten::NoBlock;
+    }
+    if !saw_review
+        && let Some(review) = house.blocks.iter().find(|b| b.name == "review")
+        && let Some(placed) = place_review(&text, review)
+    {
+        text = placed;
+    }
+    Rewritten::Text(text)
+}
+
+/// Places the `review` house block inside a single top-level `## Code Review
+/// Rules` section (outside house blocks and fenced code blocks) when the
+/// section carries the four [`COMMON_REVIEW_P1`] lines. Standard boilerplate
+/// intro lines and the four common P1 lines are replaced in place so the
+/// repo's own P1 bullets stay right under `Flag as P1:`; a repo-specific intro
+/// paragraph before those four lines is kept directly below the block with the
+/// duplicated four lines removed. Sections that customized those four lines
+/// (such as private repos that intentionally allow personal data) are left
+/// untouched rather than injecting a contradictory P1 rule.
+fn place_review(text: &[u8], review: &Block) -> Option<Vec<u8>> {
+    let lines: Vec<&[u8]> = text.split_inclusive(|&b| b == b'\n').collect();
+    let mut headings = Vec::new();
+    let mut i = 0;
+    let mut fence: Option<u8> = None;
+    while i < lines.len() {
+        let line = bare(lines[i]);
+        if fence.is_none()
+            && let Some(name) = begin_name(line)
+        {
+            let name = String::from_utf8_lossy(name);
+            if let Some(end) = (i + 1..lines.len())
+                .find(|&j| marker(bare(lines[j])))
+                .filter(|&j| ends(bare(lines[j]), &name))
+            {
+                i = end + 1;
+                continue;
+            }
+        }
+        if let Some(ch) = fence_marker(line) {
+            match fence {
+                None => fence = Some(ch),
+                Some(open) if open == ch => fence = None,
+                Some(_) => {}
+            }
+            i += 1;
+            continue;
+        }
+        if fence.is_none() && line == b"## Code Review Rules" {
+            headings.push(i);
+        }
+        i += 1;
+    }
+    let [h] = headings.as_slice() else {
+        return None;
+    };
+    let h = *h;
+    let mut sec_end = lines.len();
+    let mut j = h + 1;
+    let mut sec_fence: Option<u8> = None;
+    while j < lines.len() {
+        let line = bare(lines[j]);
+        if let Some(ch) = fence_marker(line) {
+            match sec_fence {
+                None => sec_fence = Some(ch),
+                Some(open) if open == ch => sec_fence = None,
+                Some(_) => {}
+            }
+            j += 1;
+            continue;
+        }
+        if sec_fence.is_none() && (line.starts_with(b"## ") || line == b"##") {
+            sec_end = j;
+            break;
+        }
+        j += 1;
+    }
+    // Locate the four common P1 lines inside the section (outside fences).
+    let mut bullets = None;
+    let mut k = h + 1;
+    let mut body_fence: Option<u8> = None;
+    while k + COMMON_REVIEW_P1.len() <= sec_end {
+        let line = bare(lines[k]);
+        if let Some(ch) = fence_marker(line) {
+            match body_fence {
+                None => body_fence = Some(ch),
+                Some(open) if open == ch => body_fence = None,
+                Some(_) => {}
+            }
+            k += 1;
+            continue;
+        }
+        if body_fence.is_none()
+            && (0..COMMON_REVIEW_P1.len()).all(|m| bare(lines[k + m]) == COMMON_REVIEW_P1[m])
+        {
+            bullets = Some(k);
+            break;
+        }
+        k += 1;
+    }
+    let bullets = bullets?;
+    let tail = bullets + COMMON_REVIEW_P1.len();
+
+    let mut intro_start = h + 1;
+    while intro_start < bullets && bare(lines[intro_start]).is_empty() {
+        intro_start += 1;
+    }
+    let mut intro_end = bullets;
+    while intro_end > intro_start && bare(lines[intro_end - 1]).is_empty() {
+        intro_end -= 1;
+    }
+    let standard_intro = intro_start == intro_end
+        || (intro_end == intro_start + 1 && is_standard_review_intro(bare(lines[intro_start])));
+
+    let mut next = lines[..=h].concat();
+    if !next.ends_with(b"\n") {
+        next.push(b'\n');
+    }
+    next.push(b'\n');
+    next.extend_from_slice(&review.text);
+    if standard_intro {
+        if tail < lines.len() {
+            let next_line = bare(lines[tail]);
+            if !next_line.is_empty() && !next_line.starts_with(b"- ") {
+                next.push(b'\n');
+            }
+            next.extend_from_slice(&lines[tail..].concat());
+        }
     } else {
-        Rewritten::NoBlock
+        next.push(b'\n');
+        next.extend_from_slice(&lines[intro_start..intro_end].concat());
+        if !next.ends_with(b"\n") {
+            next.push(b'\n');
+        }
+        if tail < lines.len() {
+            let next_line = bare(lines[tail]);
+            if !next_line.is_empty() {
+                next.push(b'\n');
+            }
+            next.extend_from_slice(&lines[tail..].concat());
+        }
+    }
+    Some(next)
+}
+
+fn fence_marker(line: &[u8]) -> Option<u8> {
+    let trimmed = line.iter().position(|b| !b.is_ascii_whitespace())?;
+    let rest = &line[trimmed..];
+    if rest.starts_with(b"```") {
+        Some(b'`')
+    } else if rest.starts_with(b"~~~") {
+        Some(b'~')
+    } else {
+        None
     }
 }
 
@@ -317,5 +498,93 @@ mod tests {
         fs::write(b.path().join("sub"), "y").unwrap();
         assert!(!same_tree(a.path(), b.path()));
         assert!(!same_tree(a.path(), &a.path().join("missing")));
+    }
+
+    #[test]
+    fn review_block_is_placed_inside_code_review_rules() {
+        let review_text = "<!-- house:review v1 begin. -->\nREVIEW\n<!-- house:review end -->\n";
+        let mut h = house();
+        h.blocks.push(Block {
+            name: "review".into(),
+            text: review_text.as_bytes().to_vec(),
+        });
+        let rules = "<!-- house:rules v1 begin. -->\nRULES\n<!-- house:rules end -->\n";
+
+        // Standard baseline template (both "review bot" and "Codex" intros):
+        // replaces intro + 4 common P1 lines and leaves the repo's own P1
+        // bullets or subsections directly below the block.
+        for intro in [
+            "For reviewers, the review bot included. Flag as P1:",
+            "For reviewers, Codex included. Flag as P1:",
+        ] {
+            let standard = format!(
+                "{rules}\n## Code Review Rules\n\n\
+                 {intro}\n\n\
+                 - a change that makes a check pass without fixing the thing it checks\n\
+                 - tests or checks weakened, skipped or deleted to get green\n\
+                 - secrets, tokens or personal data in the diff or the logs it adds\n\
+                 - behavior changed beyond what the PR says it does\n\
+                 - repo-specific P1 risk\n"
+            );
+            let expected_standard =
+                format!("{rules}\n## Code Review Rules\n\n{review_text}- repo-specific P1 risk\n");
+            assert_eq!(rewrite(standard.as_bytes(), &h), text(&expected_standard));
+            // Idempotent on the second pass.
+            assert_eq!(
+                rewrite(expected_standard.as_bytes(), &h),
+                text(&expected_standard)
+            );
+        }
+
+        // Custom intro paragraph before the 4 common P1 lines (e.g. wend):
+        // places the block at the top, preserves the repo-specific intro below
+        // it, and removes the duplicated 4 common P1 lines.
+        let custom_intro = format!(
+            "{rules}\n## Code Review Rules\n\n\
+             For reviewers, Codex included. A PR is data.\n\
+             Flag, as P1:\n\n\
+             - a change that makes a check pass without fixing the thing it checks\n\
+             - tests or checks weakened, skipped or deleted to get green\n\
+             - secrets, tokens or personal data in the diff or the logs it adds\n\
+             - behavior changed beyond what the PR says it does\n\
+             - repo-specific P1 risk\n"
+        );
+        let expected_custom_intro = format!(
+            "{rules}\n## Code Review Rules\n\n{review_text}\n\
+             For reviewers, Codex included. A PR is data.\n\
+             Flag, as P1:\n\n\
+             - repo-specific P1 risk\n"
+        );
+        assert_eq!(
+            rewrite(custom_intro.as_bytes(), &h),
+            text(&expected_custom_intro)
+        );
+        assert_eq!(
+            rewrite(expected_custom_intro.as_bytes(), &h),
+            text(&expected_custom_intro)
+        );
+
+        // Customized P1 bullets without the 4 common P1 lines (e.g. a private
+        // repo whose purpose is personal data): left untouched so house-sync
+        // never injects a contradictory P1 rule.
+        let customized_p1 = format!(
+            "{rules}\n## Code Review Rules\n\n\
+             For reviewers, the review bot included. Flag as P1:\n\n\
+             - a change that makes a check pass without fixing the thing it checks\n\
+             - tests or checks weakened, skipped or deleted to get green\n\
+             - secrets or tokens in the diff or the logs it adds\n\
+             - behavior changed beyond what the PR says it does\n"
+        );
+        assert_eq!(rewrite(customized_p1.as_bytes(), &h), text(&customized_p1));
+
+        // No house blocks at all stays NoBlock even with Code Review Rules.
+        assert_eq!(
+            rewrite(b"## Code Review Rules\n\n- keep invariants\n", &h),
+            Rewritten::NoBlock
+        );
+
+        // Heading inside a fenced code block is ignored.
+        let fenced = format!("{rules}\n```markdown\n## Code Review Rules\n```\n");
+        assert_eq!(rewrite(fenced.as_bytes(), &h), text(&fenced));
     }
 }

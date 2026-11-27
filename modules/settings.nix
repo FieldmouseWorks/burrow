@@ -67,6 +67,9 @@ in {
     };
     systemd.services.burrow-settings-door = {
       description = "Change operational settings without the pipeline";
+      # Oneshot with no Restart= and a 30s timer: don't let systemd's default
+      # 5-starts-in-10s limit refuse repeated manual or test invocations.
+      startLimitIntervalSec = 0;
       path = [ cfg.door.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = "${stateDir}/settings-door/wake.json";

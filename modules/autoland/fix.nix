@@ -145,8 +145,9 @@ in
       serviceConfig = lib.optionalAttrs (flow.controller != null) (flow.producer "fix") // {
         User = user;
         ExecStart = "${lib.getExe package} broker ${configFile}";
-        # A restart stops the jobs whose requests it lost, and their plugins
-        # see their connections close.
+        # A restart leaves its jobs at work: they're proj jobs, and it
+        # re-adopts them from its state. Their plugins see their connections
+        # close, and the flow's request made again is answered from the job.
         Restart = "on-failure";
       };
     };
