@@ -364,7 +364,7 @@ def run_pass(kick, continuing=False):
                 # Then every PR's look this round before any one's second
                 # (batch.due), first-labelled ahead within a round, then
                 # unvisited PRs before revisiting changed ones.
-                slots = C.repo_cfg(repo).get("proofSlots")
+                slots = (C.repo_cfg(repo) if "defaults" in CFG else (CFG.get("repos") or {}).get(repo, {})).get("proofSlots")
 
                 def order(pr, free_slot):
                     n = pr["number"]
