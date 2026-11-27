@@ -545,3 +545,41 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
+
+    # A PR step cut short by the pass's deadline (P.Cut) or a transient
+    # C.Unavailable leaves the PR pending for the next slice and never records
+    # a steward failure against it in watch.json.
+    for exc_factory, expected_partial in (
+        (lambda: S.P.Cut("nix cut short by the pass's deadline"), True),
+        (lambda: C.Unavailable("gh api: HTTP 502"), False),
+    ):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            old = dict(repo='sam/r', what='sam/r#1', link='https://github.com/sam/r/pull/1',
+                       phase='Settled; waiting its turn to build agents (1 ahead)',
+                       since=100, due=7300, kick='autoland/sam/r', claude=False, rev='head-1 main')
+            C.save('watch.json', {'at': 100, 'items': {'sam/r#1': old}})
+            calls = []
+
+            def flaky_handle(repo, p, info, mine, held, under):
+                calls.append(p['number'])
+                if p['number'] == 1 and len(calls) == 1:
+                    raise exc_factory()
+                W.note(repo, p, 'Settled; waiting its turn to build agents (1 ahead)', 120, 'autoland/sam/r', 'head-1 main')
+
+            with patch.object(S.step, 'handle', flaky_handle):
+                S.run_pass(['sam/r'])
+            watch_items = C.load('watch.json', {})['items']
+            assert watch_items.get('sam/r#1', {}).get('phase') != W.FAILS, watch_items
+            assert watch_items.get('sam/r#1') == old, watch_items
+            progress = C.load('pass-progress.json', {})['repos'].get('sam/r', {})
+            assert '1' not in progress.get('done', {}), progress
+            assert '1' not in progress.get('unseen', []), progress
+            if not expected_partial:
+                assert calls == [1, 2], calls
+            else:
+                assert calls == [1], calls
+            C.NOW = 1300
+            with patch.object(S.step, 'handle', flaky_handle):
+                S.run_pass(['sam/r'], continuing=True)
+            assert 1 in calls[1:], calls
+    print('Cut and Unavailable on a PR step yield without failing the PR: passed')

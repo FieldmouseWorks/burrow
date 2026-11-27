@@ -384,6 +384,18 @@ def run_pass(kick, continuing=False):
                     seen_to = True
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
+                    except C.Unavailable as e:
+                        log(f"{repo}#{pr['number']}: {e}")
+                        if isinstance(e, P.Cut) or batch.expired():
+                            partial = True
+                            batch.left = True
+                            break
+                        operations_complete = False
+                        batch.retry(repo, max(C.NOW + 5 * MIN, C.LIMITED[0] + 1 if C.LIMITED else 0))
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass retries the PR
+                        if T.seat(repo, pr["number"]) is not None:
+                            T.stop(repo, f"#{pr['number']} wasn't seen to")
+                        continue
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
