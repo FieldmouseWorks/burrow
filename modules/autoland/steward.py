@@ -370,7 +370,14 @@ def run_pass(kick, continuing=False):
                     n = pr["number"]
                     st_state, st_desc = our_status(pr) if pr.get("commits") else (None, "")
                     urg = P.urgent(repo, pr, st_state, st_desc, free_slot)
-                    return n not in held, not urg, not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
+                    return (
+                        n not in held,
+                        not (batch.due(repo, pr) or urg),
+                        n not in first,
+                        not urg,
+                        batch.visited(repo, pr),
+                        P.place(repo, n),
+                    )
 
                 # Read and ready: each PR's own step fails on its own.
                 waits.passed(repo, op)

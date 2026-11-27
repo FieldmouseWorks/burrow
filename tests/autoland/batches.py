@@ -168,11 +168,16 @@ with tempfile.TemporaryDirectory() as tmp:
         ]}}}}]}
         C.save('pr-sam_r-2.json', {'proved': 'head-2', 'provedJob': 'proof-sam-r-2-head2-1'})
         C.save('pr-sam_r-3.json', {'proofTurn': True})
+        C.save('pr-sam_r-5.json', {
+            'proofsLive': ['proof-sam-r-5-head5-1'],
+            'proofPaths': {'proof-sam-r-5-head5-1': {'at': 1, 'paths': ['/nix/store/built-5']}},
+        })
+        r_prs.append(pr(5))
         C.save('pass-progress.json', {'repos': {'sam/r': {
-            'done': {'1': None, '2': None, '3': None, '4': None},
-            'visits': {'1': 11, '2': 12, '3': 13, '4': 5},
+            'done': {'1': None, '2': None, '3': None, '4': None, '5': None},
+            'visits': {'1': 11, '2': 12, '3': 13, '4': 5, '5': 14},
             'round': 10,
-            'sequence': 13,
+            'sequence': 14,
         }}})
         u_clock, u_handled = [0], []
 
@@ -191,7 +196,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 (S, 'branches', lambda *a, **k: None), (S, 'upkeep', lambda *a: None),
                 (C, 'follow_renames', lambda *a: None), (C, 'taken', lambda *a: None),
                 (C, 'coverage', lambda rs, done: {}), (C, 'poke', lambda *a: None),
-                (C, 'build_state', lambda jid: 'done' if jid == 'proof-sam-r-2-head2-1' else None),
+                (C, 'build_state', lambda jid: 'done' if jid == 'proof-sam-r-2-head2-1' else ('running' if jid == 'proof-sam-r-5-head5-1' else None)),
+                (S.P, 'unbuilt', lambda paths: set()),
             ):
                 stack.enter_context(patch.object(obj, name, value))
             stack.enter_context(patch('time.monotonic', side_effect=lambda: u_clock[0]))
