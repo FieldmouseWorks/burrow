@@ -148,14 +148,7 @@ pub fn check_login(claude: &Path, dir: &Path) -> Result<Option<Checked>, Unshown
         &mut |left, on_answer| {
             // Each asking's log on its own: an earlier one's says nothing.
             let _ = std::fs::remove_file(&log);
-            ask_usage(
-                claude,
-                dir,
-                left,
-                Some(&log),
-                EXIT_GRACE.min(left),
-                on_answer,
-            )
+            ask_usage(claude, dir, left, Some(&log), EXIT_GRACE, on_answer)
         },
         &mut || String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned(),
     )
@@ -333,7 +326,7 @@ fn usage_statuses(log: &str) -> Vec<u16> {
 /// transcripts the meter has no use for. It makes no model call. With a
 /// LOG, Claude Code writes its debug log there. Invokes ON_ANSWER as soon as
 /// `control_response` arrives, then lets Claude Code exit cleanly on its
-/// closed stdin for up to EXIT_GRACE before killing it.
+/// closed stdin for up to EXIT_GRACE before killing it, all within TIMEOUT.
 fn ask_usage(
     claude: &Path,
     dir: &Path,
@@ -343,6 +336,7 @@ fn ask_usage(
     on_answer: OnAnswer<'_>,
 ) -> Result<Value, String> {
     {
+        let deadline = Instant::now() + timeout;
         let mut command = Command::new(claude);
         command
             .args([
@@ -388,42 +382,47 @@ fn ask_usage(
             });
         }
         let answer = sent.and_then(|_| {
-            rx.recv_timeout(timeout).map_err(|e| match e {
-                mpsc::RecvTimeoutError::Timeout => format!(
-                    "Claude Code didn't answer get_usage in {}s",
-                    timeout.as_secs()
-                ),
-                mpsc::RecvTimeoutError::Disconnected => {
-                    "Claude Code exited before it answered get_usage".to_owned()
-                }
-            })
+            rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| match e {
+                    mpsc::RecvTimeoutError::Timeout => format!(
+                        "Claude Code didn't answer get_usage in {}s",
+                        timeout.as_secs()
+                    ),
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "Claude Code exited before it answered get_usage".to_owned()
+                    }
+                })
         });
         if answer.is_ok() {
             on_answer();
         }
+        let answered = Instant::now();
         if let Some(log) = log
             && answer.as_ref().is_ok_and(|a| unfetched(&a["response"]))
         {
-            let answered = Instant::now();
-            while answered.elapsed() < LOGGED
-                && endpoint_failure(&String::from_utf8_lossy(
-                    &std::fs::read(log).unwrap_or_default(),
-                ))
-                .is_none()
-            {
-                if child.try_wait().ok().flatten().is_some() {
+            let log_deadline = (answered + LOGGED).min(deadline);
+            loop {
+                let rem = log_deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero()
+                    || child.try_wait().ok().flatten().is_some()
+                    || endpoint_failure(&String::from_utf8_lossy(
+                        &std::fs::read(log).unwrap_or_default(),
+                    ))
+                    .is_some()
+                {
                     break;
                 }
-                thread::sleep(LOG_POLL);
+                thread::sleep(LOG_POLL.min(rem));
             }
         }
         if answer.is_ok() {
-            let exiting = Instant::now();
-            while exiting.elapsed() < exit_grace {
-                if child.try_wait().ok().flatten().is_some() {
+            let exit_deadline = (answered + exit_grace).min(deadline);
+            loop {
+                let rem = exit_deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() || child.try_wait().ok().flatten().is_some() {
                     break;
                 }
-                thread::sleep(LOG_POLL);
+                thread::sleep(LOG_POLL.min(rem));
             }
         }
         if child.try_wait().ok().flatten().is_none() {

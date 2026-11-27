@@ -758,3 +758,87 @@ fn read_usage_reports_the_endpoints_failure() {
         "read_usage dropped the endpoint failure: {err}"
     );
 }
+
+#[test]
+fn ask_usage_clamps_exit_grace_to_remaining_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-fetched-hung");
+    burrow_test::executable(
+        &script,
+        "#!/bin/sh\nread -r _req\nsleep 0.3\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true,\"rate_limits\":{\"seven_day\":{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"},\"five_hour\":null,\"limits\":[]}}}}'\nsleep 30\n",
+    );
+    let t0 = Instant::now();
+    let answer = ask_usage(
+        &script,
+        dir.path(),
+        Duration::from_millis(600),
+        None,
+        Duration::from_secs(5),
+        &mut || {},
+    )
+    .unwrap();
+    assert_eq!(answer["rate_limits_available"], true);
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "exit_grace exceeded ask_usage timeout: {:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn ask_usage_clamps_logged_wait_to_remaining_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-unfetched-hung");
+    burrow_test::executable(
+        &script,
+        "#!/bin/sh\nread -r _req\nsleep 0.3\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true,\"rate_limits\":{\"seven_day\":{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"},\"five_hour\":null}}}}'\nsleep 30\n",
+    );
+    let log = dir.path().join("unfetched.log");
+    let t0 = Instant::now();
+    let answer = ask_usage(
+        &script,
+        dir.path(),
+        Duration::from_millis(600),
+        Some(&log),
+        Duration::ZERO,
+        &mut || {},
+    )
+    .unwrap();
+    assert!(unfetched(&answer));
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "LOGGED wait exceeded ask_usage timeout: {:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn ask_usage_clamps_rate_limited_post_answer_waits_to_remaining_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-429-hung");
+    burrow_test::executable(
+        &script,
+        "#!/bin/sh\nlog=/dev/null\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in --debug-file) log=$2; shift ;; esac\n  shift\ndone\nread -r _req\nsleep 0.2\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage\",\"response\":{\"rate_limits_available\":true,\"rate_limits\":{\"seven_day\":{\"utilization\":1.0,\"resets_at\":\"2030-01-01T00:00:00Z\"},\"five_hour\":null}}}}'\necho '[ERROR] Failed to load usage data: Request failed with status code 429' >>\"$log\"\nsleep 30\n",
+    );
+    let log = dir.path().join("rate-limited.log");
+    let t0 = Instant::now();
+    let answer = ask_usage(
+        &script,
+        dir.path(),
+        Duration::from_millis(600),
+        Some(&log),
+        Duration::from_secs(5),
+        &mut || {},
+    )
+    .unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "rate-limited exit_grace exceeded ask_usage timeout: {:?}",
+        t0.elapsed()
+    );
+    let log_text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        login_shown(Err("cached".into()), &answer, &log_text),
+        Ok(())
+    );
+}
