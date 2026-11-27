@@ -66,6 +66,7 @@ let
   readAg = withAntigravity.burrow.autoland.plugins.judge.config;
   lookAgClaude = withAntigravity.systemd.services."autoland-judge-look-claude@";
   lookAgAntigravity = withAntigravity.systemd.services."autoland-judge-look-antigravity@";
+  agJudgePlugin = withAntigravity.burrow.autoland.plugins.judge.antigravityPlugin;
   configFile = builtins.unsafeDiscardStringContext (
     lib.last (lib.splitString " " producer.serviceConfig.ExecStart)
   );
@@ -181,12 +182,28 @@ let
         lookAgAntigravity.serviceConfig.LoadCredential == [
           "judge-login-antigravity:/run/secrets/antigravity-agent-credential"
         ]
+      && lookAgAntigravity.serviceConfig.InaccessiblePaths == [ "-/nix/var/nix/daemon-socket" ]
+      && lib.hasInfix "bash" (plain (lookAgAntigravity.environment.PATH or ""))
       && lib.hasInfix "/^(autoland-judge-look-antigravity|autoland-judge-look-claude|autoland-judge-build)@[0-9a-f]+\\.service$/" withAntigravity.security.polkit.extraConfig;
   };
   wrong = lib.attrNames (lib.filterAttrs (_: ok: !ok) wiring);
 in
-pkgs.runCommand "autoland-judge-check" { } ''
+pkgs.runCommand "autoland-judge-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
   fail() { echo "$*"; exit 1; }
   ${lib.concatMapStrings (w: "fail 'the judge producer is wrong: ${w}'\n") wrong}
+  agCfg=${agJudgePlugin.config}
+  jq -e '
+    .mode == null
+    and .sandbox == false
+    and .disable_slash_commands == true
+    and .dangerously_skip_permissions == false
+    and .output_format == "stream-json"
+    and (.settings_file | type == "string")
+  ' "$agCfg" >/dev/null || fail "antigravity judge config is wrong: $(cat "$agCfg")"
+  agSettings=$(jq -r '.settings_file' "$agCfg")
+  jq -e '
+    .toolPermission == "always-proceed"
+    and (.permissions.deny | index("command(systemctl)") != null)
+  ' "$agSettings" >/dev/null || fail "antigravity judge settings are wrong: $(cat "$agSettings")"
   touch $out
 ''

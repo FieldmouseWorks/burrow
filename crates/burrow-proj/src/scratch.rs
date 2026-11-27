@@ -12,9 +12,20 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
 use crate::job::Job;
+
+/// Packfile count above which a repo's common git dir gets a serialized
+/// geometric repack when a finished job's worktrees are pruned.
+const PACK_LIMIT: usize = 32;
+/// Loose-object count above which a repo with few packfiles still gets a
+/// geometric repack (which packs reachable loose objects and prunes them).
+const LOOSE_LIMIT: usize = 2048;
+/// How old an orphaned pack lock or temp file must be before maintenance
+/// treats it as left behind by a crashed repack and clears it.
+const STALE_LOCK: Duration = Duration::from_secs(3600);
 
 /// Where job ID's scratch is.
 pub fn dir(cfg: &Config, id: &str) -> PathBuf {
@@ -93,7 +104,117 @@ pub fn clear(cfg: &Config, id: &str) {
                 common.display()
             );
         }
+        maintain(&cfg.tools.git, &common);
     }
+}
+
+/// Serialized, bounded repo maintenance on job end: under a non-blocking
+/// per-repo lock, clear stale pack locks/temps left by crashed repacks and
+/// collapse excess packfiles with an incremental geometric repack.
+fn maintain(git: &Path, common: &Path) {
+    let lock_path = common.join("burrow-gc.lock");
+    let Ok(lock) = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+    else {
+        return;
+    };
+    if lock.try_lock().is_err() {
+        return;
+    }
+    let objects = common.join("objects");
+    let pack_dir = objects.join("pack");
+    let now = SystemTime::now();
+    let mut packs = 0usize;
+    let mut active_midx_lock = false;
+    if let Ok(entries) = fs::read_dir(&pack_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".pack")
+                && !name.starts_with(".tmp-")
+                && !name.starts_with("tmp_pack_")
+            {
+                packs += 1;
+                continue;
+            }
+            let is_midx_lock = name == "multi-pack-index.lock";
+            let is_orphan_tmp = name.starts_with("tmp_pack_")
+                || name.starts_with("tmp_idx_")
+                || name.starts_with("tmp_rev_")
+                || name.starts_with(".tmp-");
+            if !is_midx_lock && !is_orphan_tmp {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age >= STALE_LOCK);
+            if stale {
+                let _ = fs::remove_file(&path);
+            } else if is_midx_lock {
+                active_midx_lock = true;
+            }
+        }
+    }
+    if active_midx_lock || (packs <= PACK_LIMIT && !excess_loose(&objects, LOOSE_LIMIT)) {
+        return;
+    }
+    let ok = Command::new(git)
+        .arg("--git-dir")
+        .arg(common)
+        .args([
+            "-c",
+            "pack.threads=2",
+            "-c",
+            "pack.windowMemory=256m",
+            "-c",
+            "pack.packSizeLimit=512m",
+            "repack",
+            "-q",
+            "-d",
+            "-l",
+            "--geometric=2",
+            "--write-midx",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("proj: couldn't repack {}", common.display());
+    }
+}
+
+/// Whether `objects`'s 2-hex-digit loose-object buckets hold more than `limit`
+/// entries, stopping as soon as the limit is crossed.
+fn excess_loose(objects: &Path, limit: usize) -> bool {
+    let Ok(buckets) = fs::read_dir(objects) else {
+        return false;
+    };
+    let mut count = 0usize;
+    for bucket in buckets.flatten() {
+        let name = bucket.file_name();
+        let name = name.to_string_lossy();
+        if name.len() != 2 || !name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        for _ in entries.flatten() {
+            count += 1;
+            if count > limit {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The repos outside `gone` that hold a worktree in it. A worktree's .git is a

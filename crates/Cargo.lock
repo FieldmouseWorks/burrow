@@ -13,7 +13,7 @@ name = "advisory-watch"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "rustix",
  "serde",
  "serde_json",
@@ -394,7 +394,7 @@ dependencies = [
  "burrow-grants",
  "burrow-test",
  "conary-core",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "rustix",
  "serde",
  "serde_json",
@@ -406,7 +406,7 @@ name = "burrow-backup"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "rustix",
  "serde",
  "serde_json",
@@ -497,7 +497,7 @@ dependencies = [
  "burrow-test",
  "burrow-watchdog",
  "gh-token",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -522,7 +522,7 @@ dependencies = [
  "burrow-settings",
  "burrow-test",
  "conary-core",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "rustix",
  "serde",
  "serde_json",
@@ -589,7 +589,7 @@ name = "burrow-firmware"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "rustix",
  "serde",
  "serde_json",
@@ -658,7 +658,7 @@ name = "burrow-guard"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "regex",
  "serde",
  "serde_json",
@@ -789,7 +789,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-door",
  "burrow-github",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -827,7 +827,7 @@ dependencies = [
  "burrow-process",
  "burrow-settings",
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "regex",
  "serde",
  "serde_json",
@@ -878,7 +878,7 @@ dependencies = [
  "burrow-watchdog",
  "conary-core",
  "gh-token",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "pulldown-cmark",
  "rustix",
  "schemars 1.2.3",
@@ -912,12 +912,13 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-settings",
  "burrow-test",
  "conary-core",
  "conary-github",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "md-5",
  "regex",
  "rustix",
@@ -971,7 +972,7 @@ dependencies = [
  "burrow-door",
  "burrow-github",
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "serde",
  "serde_json",
  "sha2",
@@ -1023,7 +1024,7 @@ dependencies = [
  "burrow-github",
  "burrow-switch",
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "nix",
  "rustix",
  "serde",
@@ -1038,11 +1039,12 @@ dependencies = [
  "base64 0.23.1",
  "burrow-brief",
  "burrow-github",
+ "burrow-house",
  "burrow-process",
  "burrow-test",
  "flaky",
  "gh-token",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "regex",
  "serde",
  "serde_json",
@@ -1056,7 +1058,7 @@ name = "burrow-usage-reset"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -1070,7 +1072,7 @@ dependencies = [
  "burrow-github",
  "burrow-settings",
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "serde",
  "serde_json",
  "sha2",
@@ -1194,14 +1196,14 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=745686cfb1d59ca983c535fe463927cd8db5d249#745686cfb1d59ca983c535fe463927cd8db5d249"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
 dependencies = [
  "blake3",
+ "conary-plugin",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "regex",
  "rustix",
- "schemars 1.2.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -1211,12 +1213,13 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=745686cfb1d59ca983c535fe463927cd8db5d249#745686cfb1d59ca983c535fe463927cd8db5d249"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
+ "conary-plugin",
  "ed25519-dalek",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "regex",
  "ring",
  "schemars 1.2.3",
@@ -1228,6 +1231,16 @@ dependencies = [
  "tempfile",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "conary-plugin"
+version = "5.0.0"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
+dependencies = [
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2282,12 +2295,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5e77cbfb9fff4798e283c2d69dff39fc2c45e7da017e5ce95b654e46ea41236"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
 dependencies = [
- "jiff-core 1.0.1",
- "jiff-static 1.0.2",
+ "jiff-core 1.0.2",
+ "jiff-static 1.0.3",
  "jiff-tzdb 1.0.0",
  "jiff-tzdb-platform 1.0.0",
  "log",
@@ -2308,9 +2321,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
 dependencies = [
  "log",
 ]
@@ -2329,11 +2342,11 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9067a0b23e5be3147d56b2dcf652b18e6b1364caca93fb157653b6fbcab23a9"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
 dependencies = [
- "jiff-core 1.0.1",
+ "jiff-core 1.0.2",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
@@ -2489,7 +2502,7 @@ name = "lock-age"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "json5",
  "serde",
  "serde_json",
@@ -3408,7 +3421,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.2",
  "jiff 0.2.46",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",

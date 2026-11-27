@@ -335,7 +335,7 @@ jobs:
         run: echo 'degraded/builds' >> "$GITHUB_STEP_SUMMARY"
       # The runner is compiled with Nix's compiler, as the gate's is.
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with: &nix-config
           extra_nix_config: |
             ${{ vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' && steps.builds.outcome != 'failure' && format('extra-substituters = {0}', vars.BURROW_BUILDS_URL) || '' }}
@@ -508,7 +508,7 @@ jobs:
         run: *builds-probe
       - *builds-degraded
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
-        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with: *nix-config
       # The gate's own files, at this workflow's commit: its script and the
       # plan it evaluates (crates/burrow-flake-check), beside the checkout, which
@@ -913,7 +913,7 @@ jobs:
         run: *builds-probe
       - *builds-degraded
       - if: inputs.install-nix && inputs.docs-checks != ''
-        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with: *nix-config
       - id: build
         shell: bash
@@ -993,7 +993,7 @@ jobs:
         run: *builds-probe
       - *builds-degraded
       - if: inputs.install-nix
-        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with: *nix-config
       # Whether it needs a negative, which git alone can tell.
       - id: paths

@@ -53,6 +53,49 @@ let
     printf '{"type":"result","subtype":"success","is_error":false,"session_id":"look-session","structured_output":{"verdict":"pass","why":"Read it."},"modelUsage":{"%s":{}}}\n' "$model"
   '';
   cn = pkgs.writeShellScriptBin "cn" "exit 0";
+  # Antigravity, as a look runs it: verifies --settings (with always-proceed),
+  # no --mode plan, no --sandbox, bash on PATH, isolated OAuth token file under
+  # $HOME (with the source credential env stripped), read-only checkout, and no
+  # network or Nix daemon access. Because burrow-engine-antigravity captures
+  # child stderr for scrubbing, observations are returned in structured_output's
+  # `why` (without quoting the token, which holds_login refuses).
+  antigravity = pkgs.writeShellScriptBin "antigravity" ''
+    model=
+    dir=
+    settings=
+    prev=
+    notes=""
+    for a in "$@"; do
+      [ "$prev" = --model ] && model=$a
+      [ "$prev" = --add-dir ] && dir=$a
+      [ "$prev" = --settings ] && settings=$a
+      [ "$a" = --sandbox ] && notes="$notes PASSED_SANDBOX"
+      [ "$prev" = --mode ] && notes="$notes PASSED_MODE=$a"
+      prev=$a
+    done
+    cat >/dev/null
+    notes="$notes uid=$(id -u)"
+    token_file="$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+    if [ -r "$token_file" ] && grep -qxF '{"access_token":"ag-the-looks-token"}' "$token_file"; then
+      notes="$notes token_ok"
+    fi
+    [ -z "''${BURROW_ANTIGRAVITY_CREDENTIAL:-}" ] && notes="$notes env_stripped"
+    case "$HTTPS_PROXY" in
+      http://127.0.0.1:*) notes="$notes proxy_ok" ;;
+    esac
+    if [ -n "$settings" ] && grep -qF '"toolPermission":"always-proceed"' "$settings"; then
+      notes="$notes settings_ok"
+    fi
+    command -v bash >/dev/null && notes="$notes has_bash"
+    test -r "$dir/head/f" && notes="$notes reads_checkout"
+    touch "$dir/head/f" 2>/dev/null && notes="$notes WROTE_checkout"
+    touch "$dir/forged" 2>/dev/null && notes="$notes WROTE_folder"
+    test -S /nix/var/nix/daemon-socket/socket && notes="$notes REACHED_nix"
+    (exec 3<>/dev/tcp/192.168.1.1/8080) 2>/dev/null && notes="$notes REACHED_net"
+    (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && notes="$notes REACHED_loopback"
+    printf '{"event":"init","conversation_id":"ag-look-session","init":{"model":"%s"}}\n' "$model"
+    printf '{"event":"result","result":{"conversation_id":"ag-look-session","status":"SUCCESS","response":"{\\"verdict\\":\\"pass\\",\\"why\\":\\"%s\\"}","structured_output":{"verdict":"pass","why":"%s"}}}\n' "$notes" "$notes"
+  '';
   git = "${pkgs.git}/bin/git";
 in
 pkgs.testers.runNixOSTest {
@@ -61,9 +104,18 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { lib, ... }: {
     imports = [
       self.nixosModules.autoland
+      self.nixosModules.agents
+      self.nixosModules.antigravity
       self.nixosModules.ledger
       self.nixosModules.github
     ];
+    burrow.engines.antigravity = {
+      enable = true;
+      package = antigravity;
+      credentialFile = "/run/keys/ag-token";
+      credentialMode = "home-file";
+      hosts = [ "*.googleapis.com" ];
+    };
     burrow.ledger = {
       enable = true;
       package = cn;
@@ -167,6 +219,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("head -c 32 /dev/urandom >/run/keys/judge")
         machine.succeed("printf %s abababababababababababababababababababababababababababababababab >/run/keys/seal")
         machine.succeed("printf 'sk-the-looks-token\\n' >/run/keys/claude-token")
+        machine.succeed("printf '{\"access_token\":\"ag-the-looks-token\"}\\n' >/run/keys/ag-token")
         machine.succeed("chmod 0400 /run/keys/*")
         machine.succeed("systemctl start autoland-judge.service")
         machine.wait_for_file("/run/conary-producers/judge/producer.sock")
@@ -188,6 +241,33 @@ pkgs.testers.runNixOSTest {
             assert never not in out, out
         answer = json.loads(producer(f"cat {folder('a1')}/answer.json"))
         assert answer == {"engine": "claude", "verdict": "pass", "why": "Read it.", "session": "look-session", "model": "a-model"}, answer
+
+    with subtest("an antigravity look runs headless with its settings, bash, isolated token, and no sandbox or mode plan"):
+        ag_spec = {"engine": "antigravity", "repo": "acme/widget", "prompt": "Judge it.", "model": "ag-model", "effort": "high"}
+        producer(" && ".join([
+            f"mkdir -m 0750 {folder('a2')} {folder('a2')}/head {folder('a2')}/base",
+            f"printf %s {shlex.quote(json.dumps(ag_spec))} >{folder('a2')}/spec.json",
+            f"echo code >{folder('a2')}/head/f",
+            f"echo diff >{folder('a2')}/changes.diff",
+            f": >{folder('a2')}/answer.json && chmod 0660 {folder('a2')}/answer.json",
+        ]))
+        ag_unit = "autoland-judge-look-antigravity@a2.service"
+        machine.succeed(f"runuser -u autoland-judge -- systemctl start {ag_unit}")
+        out = machine.succeed(f"systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus {ag_unit}")
+        s = dict(l.split("=", 1) for l in out.splitlines())
+        ag_log = machine.succeed(f"journalctl -u {shlex.quote(ag_unit)} -o cat")
+        assert (s["ActiveState"], s["Result"], s["ExecMainStatus"]) == ("active", "success", "0"), (s, ag_log)
+        ag_answer = json.loads(producer(f"cat {folder('a2')}/answer.json"))
+        assert ag_answer["engine"] == "antigravity", ag_answer
+        assert ag_answer["verdict"] == "pass", ag_answer
+        assert ag_answer["session"] == "ag-look-session", ag_answer
+        assert ag_answer["model"] == "ag-model", ag_answer
+        why = ag_answer["why"]
+        for expected in ["token_ok", "env_stripped", "proxy_ok", "settings_ok", "has_bash", "reads_checkout"]:
+            assert expected in why, (expected, why, ag_log)
+        for never in ["PASSED_SANDBOX", "PASSED_MODE", "WROTE", "REACHED"]:
+            assert never not in why, (never, why, ag_log)
+        producer(f"systemctl stop {ag_unit}")
 
     with subtest("burrow.user can't answer in the judge's place"):
         lay("b1")
