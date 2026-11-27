@@ -161,3 +161,52 @@ fn a_sweep_fails_only_on_what_it_leaves_under_the_watched_name() {
     done.held.push((".gone-d".into(), why()));
     assert!(done.failed());
 }
+
+#[test]
+fn a_max_length_entry_that_cant_be_removed_still_goes_stuck() {
+    if root() {
+        eprintln!("skipped: root removes what a read-only dir holds");
+        return;
+    }
+    let (_root, jobs) = jobs();
+    let rest = "a".repeat(255 - crate::GONE.len());
+    let gone = format!("{}{rest}", crate::GONE);
+    assert_eq!(gone.len(), 255);
+    tree(&jobs.join(&gone));
+    fs::set_permissions(
+        jobs.join(&gone).join("web"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    // Occupy the first truncated stuck slot too, so collision suffixing (.1) is exercised.
+    let taken = format!("{}{}", crate::STUCK, &rest[..255 - crate::STUCK.len()]);
+    assert_eq!(taken.len(), 255);
+    tree(&jobs.join(&taken));
+    fs::set_permissions(
+        jobs.join(&taken).join("web"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    let done = sweep(&jobs).unwrap();
+    assert!(done.held.is_empty(), "held: {:?}", done.held);
+    assert_eq!(done.stuck.len(), 1, "{done:?}");
+    let stuck_name = &done.stuck[0].0;
+    assert!(stuck_name.len() <= 255, "len={}", stuck_name.len());
+    assert!(
+        stuck_name.to_string_lossy().ends_with(".1"),
+        "{stuck_name:?}"
+    );
+
+    // Restore permissions so TempDir cleans up cleanly.
+    fs::set_permissions(
+        jobs.join(stuck_name).join("web"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::set_permissions(
+        jobs.join(&taken).join("web"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+}

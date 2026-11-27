@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use rustix::fs::{self as rfs, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, ResolveFlags};
 use rustix::io::Errno;
 
-use crate::{GONE, STUCK};
+use crate::{GONE, NAME_MAX, STUCK};
 
 /// How deep a tree it goes: each level holds a descriptor, and the job's user
 /// decides the depth. Deeper is stuck. The unit's LimitNOFILE is above it.
@@ -183,22 +183,36 @@ fn remove(parent: &OwnedFd, name: &OsStr, at: &Path, depth: usize) -> Result<(),
 }
 
 /// Renames set aside entry `name` (the watched prefix, then `rest`) to the
-/// stuck prefix and `rest`, or with a number after it if that's taken.
+/// stuck prefix and `rest`, trimmed to fit [`NAME_MAX`], or with a number
+/// after it if that's taken.
 fn set_stuck(jobs: &OwnedFd, name: &OsStr, rest: &[u8]) -> io::Result<OsString> {
-    let mut to = PathBuf::from(OsStr::from_bytes(&[STUCK.as_bytes(), rest].concat()));
+    let mut to = stuck_name(rest, "");
     for n in 1..=100 {
         match rfs::renameat_with(jobs, name, jobs.as_fd(), &to, RenameFlags::NOREPLACE) {
             Ok(()) => return Ok(to.into_os_string()),
-            Err(Errno::EXIST) => {
-                let mut next = OsString::from(STUCK);
-                next.push(OsStr::from_bytes(rest));
-                next.push(format!(".{n}"));
-                to = next.into();
-            }
+            Err(Errno::EXIST) => to = stuck_name(rest, &format!(".{n}")),
             Err(e) => return Err(e.into()),
         }
     }
     Err(io::Error::other("a hundred stuck names like it are taken"))
+}
+
+fn stuck_name(rest: &[u8], suffix: &str) -> PathBuf {
+    let max_rest = NAME_MAX.saturating_sub(STUCK.len() + suffix.len());
+    let kept = match std::str::from_utf8(rest) {
+        Ok(s) => {
+            let mut end = max_rest.min(s.len());
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            &rest[..end]
+        }
+        Err(_) => &rest[..rest.len().min(max_rest)],
+    };
+    let mut out = OsString::from(STUCK);
+    out.push(OsStr::from_bytes(kept));
+    out.push(suffix);
+    out.into()
 }
 
 #[cfg(test)]
