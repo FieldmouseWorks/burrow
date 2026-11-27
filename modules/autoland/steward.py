@@ -247,7 +247,6 @@ def carry_digest(repo, previous, *, left=None, ran_default=False, ran_branches=F
     if not previous:
         return []
     pr_prefix = f"[{repo}#"
-    default_line = f"[{repo}](https://github.com/{repo})"
     branch_prefix = f"{repo}: "
     left_prefixes = tuple(f"[{repo}#{pr['number']}](" for pr in (left or ()))
     kept = []
@@ -256,7 +255,7 @@ def carry_digest(repo, previous, *, left=None, ran_default=False, ran_branches=F
         if line.startswith(pr_prefix):
             if left is None or line.startswith(left_prefixes):
                 kept.append(entry)
-        elif line == default_line:
+        elif R.is_default_digest(repo, entry):
             if not ran_default:
                 kept.append(entry)
         elif why == C.TAKEN:
@@ -385,8 +384,7 @@ def run_pass(kick, continuing=False):
                 waits.read(repo, prs)
                 pending = batch.pending(repo, prs, mine, info)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
-                default_line = f"[{repo}](https://github.com/{repo})"
-                mine[:] = [x for x in mine if x[1] != default_line]
+                mine[:] = [x for x in mine if not R.is_default_digest(repo, x)]
                 held = R.watch_default(r, info, prs, mine) or {}
                 ran_default = True
                 pending = [pr for pr in prs if pr in pending or pr["number"] in held]

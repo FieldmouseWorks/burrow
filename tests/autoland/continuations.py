@@ -559,7 +559,7 @@ with tempfile.TemporaryDirectory() as tmp:
         pr1_old = ('Open over a day', '[sam/r#1](https://github.com/sam/r/pull/1) 1', 'waiting')
         pr2_old = ('Open over a day', '[sam/r#2](https://github.com/sam/r/pull/2) 2', 'waiting')
         pr3_closed = ('Open over a day', '[sam/r#3](https://github.com/sam/r/pull/3) 3', 'closed')
-        red_default = ('The default branch is red', '[sam/r](https://github.com/sam/r)', 'two jobs')
+        red_default = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
         C.save('digest-repos.json', {'sam/r': [list(x) for x in (flaky, branch, taken, pr1_old, pr2_old, pr3_closed, red_default)]})
         published = []
         original = S.step.handle
@@ -601,7 +601,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with fixture() as (clock, handled, facts, repos, prs, info):
         prs[:] = [pr(1), pr(2)]
         flaky = ('A Claude job for it didn\'t finish', 'sam/r#99', '`test`: job j1 failed')
-        red = ('The default branch is red', '[sam/r](https://github.com/sam/r)', 'two jobs')
+        red = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
         C.save('digest-repos.json', {'sam/r': [list(flaky)]})
         is_red = [True]
         original = S.step.handle
@@ -616,6 +616,13 @@ with tempfile.TemporaryDirectory() as tmp:
             clock[0] += 9 * 60
 
         with patch.object(S.R, 'watch_default', watch_red), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {red, flaky}, saved
+        # Failing open_prs before watch_default runs preserves the red notice.
+        C.WAKE.clear()
+        with patch.object(S, 'open_prs', side_effect=RuntimeError('gh: Resource limits for this query exceeded.')), \
+                patch.object(S, 'upkeep', lambda repo, mine: mine.append(flaky)):
             S.run_pass(['sam/r'])
         saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
         assert set(saved) == {red, flaky}, saved
