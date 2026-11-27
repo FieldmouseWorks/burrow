@@ -25,8 +25,9 @@ pub use command::{LONG, NEXT};
 pub use handoff::{first_prompt, first_prompt_for};
 pub use plugin::{PluginRefusal, RefusalKind, RunResult, Running, SpawnError, exec_plugin, spawn};
 pub use stream::{
-    Said, answer, is_error, last_result, names_session, record_session, refused_file, result_of,
-    results, resume_for, stream_names_session, stream_session, stream_tail,
+    Said, answer, clear_session, is_error, last_result, names_session, record_session,
+    refused_file, result_of, results, resume_for, stream_names_session, stream_session,
+    stream_tail,
 };
 
 /// Default engine name when legacy records predate explicit engine tracking.

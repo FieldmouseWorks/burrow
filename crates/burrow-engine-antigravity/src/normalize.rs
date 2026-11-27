@@ -73,6 +73,8 @@ pub enum Refusal {
     },
     /// Missing, invalid, or expired authentication/login state.
     Login { detail: String },
+    /// Continuation session state is missing or was replaced by a new conversation.
+    SessionLost { detail: String },
 }
 
 /// Failure category for a headless Antigravity turn.
@@ -104,6 +106,9 @@ impl fmt::Display for RunError {
             }) => write!(f, "antigravity quota refusal: {detail}"),
             Self::Refusal(Refusal::Login { detail }) => {
                 write!(f, "antigravity login refusal: {detail}")
+            }
+            Self::Refusal(Refusal::SessionLost { detail }) => {
+                write!(f, "antigravity session lost: {detail}")
             }
             Self::ProcessFailed {
                 exit_code,

@@ -546,40 +546,143 @@ with tempfile.TemporaryDirectory() as tmp:
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
 
-    # A PR step cut short by the pass's deadline (P.Cut) or a transient
-    # C.Unavailable leaves the PR pending for the next slice and never records
-    # a steward failure against it in watch.json.
-    for exc_factory, expected_partial in (
-        (lambda: S.P.Cut("nix cut short by the pass's deadline"), True),
-        (lambda: C.Unavailable("gh api: HTTP 502"), False),
-    ):
-        with fixture() as (clock, handled, facts, repos, prs, info):
-            old = dict(repo='sam/r', what='sam/r#1', link='https://github.com/sam/r/pull/1',
-                       phase='Settled; waiting its turn to build agents (1 ahead)',
-                       since=100, due=7300, kick='autoland/sam/r', claude=False, rev='head-1 main')
-            C.save('watch.json', {'at': 100, 'items': {'sam/r#1': old}})
-            calls = []
+    # Yielding mid-repo or failing an earlier operation must preserve
+    # previously published notices for unvisited PRs and deferred repo-wide
+    # steps (branches, upkeep, taken) instead of flapping them off the stuck
+    # issue and back on every slice; visited/closed PRs and finished traversals
+    # still clear resolved entries.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(1), pr(2)]
+        flaky = ('A Claude job for it didn\'t finish', 'sam/r#99', '`test`: job j1 failed')
+        branch = ('Branch left behind', 'sam/r: `old`', 'denied')
+        taken = (C.TAKEN, 'sam/r', 'move it aside')
+        pr1_old = ('Open over a day', '[sam/r#1](https://github.com/sam/r/pull/1) 1', 'waiting')
+        pr2_old = ('Open over a day', '[sam/r#2](https://github.com/sam/r/pull/2) 2', 'waiting')
+        pr3_closed = ('Open over a day', '[sam/r#3](https://github.com/sam/r/pull/3) 3', 'closed')
+        red_default = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
+        C.save('digest-repos.json', {'sam/r': [list(x) for x in (flaky, branch, taken, pr1_old, pr2_old, pr3_closed, red_default)]})
+        published = []
+        original = S.step.handle
 
-            def flaky_handle(repo, p, info, mine, held, under):
-                calls.append(p['number'])
-                if p['number'] == 1 and len(calls) == 1:
-                    raise exc_factory()
-                W.note(repo, p, 'Settled; waiting its turn to build agents (1 ahead)', 120, 'autoland/sam/r', 'head-1 main')
+        def long(repo, p, *args):
+            original(repo, p, *args)
+            clock[0] += 9 * 60
 
-            with patch.object(S.step, 'handle', flaky_handle):
-                S.run_pass(['sam/r'])
-            watch_items = C.load('watch.json', {})['items']
-            assert watch_items.get('sam/r#1', {}).get('phase') != W.FAILS, watch_items
-            assert watch_items.get('sam/r#1') == old, watch_items
-            progress = C.load('pass-progress.json', {})['repos'].get('sam/r', {})
-            assert '1' not in progress.get('done', {}), progress
-            assert '1' not in progress.get('unseen', []), progress
-            if not expected_partial:
-                assert calls == [1, 2], calls
-            else:
-                assert calls == [1], calls
-            C.NOW = 1300
-            with patch.object(S.step, 'handle', flaky_handle):
-                S.run_pass(['sam/r'], continuing=True)
-            assert 1 in calls[1:], calls
-    print('Cut and Unavailable on a PR step yield without failing the PR: passed')
+        with patch.object(S.R, 'publish', published.append), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        # PR #1 was visited and resolved, PR #3 is closed, watch_default ran
+        # and saw green; PR #2 (unvisited) and deferred branches/upkeep/taken
+        # must survive the yield without leaking into pass-progress.json.
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {flaky, branch, taken, pr2_old}, saved
+        assert set(published[-1]) == {flaky, branch, taken, pr2_old}, published[-1]
+        assert C.load('pass-progress.json', {})['repos']['sam/r']['digest'] == []
+        # A subsequent open_prs failure that runs upkeep and taken must keep
+        # unvisited PR #2 and deferred branch notices, update upkeep/taken,
+        # and not drop them while PRs could not be read.
+        C.WAKE.clear()
+        with patch.object(S.R, 'publish', published.append), \
+                patch.object(S, 'open_prs', side_effect=RuntimeError('gh: Resource limits for this query exceeded.')), \
+                patch.object(S, 'upkeep', lambda repo, mine: mine.append(flaky)):
+            S.run_pass(None)
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {flaky, branch, pr2_old}, saved
+        # Once the continuation finishes PR #2 and runs branches/upkeep/taken
+        # cleanly, resolved entries clear.
+        C.WAKE.clear()
+        with patch.object(S.R, 'publish', published.append):
+            S.run_pass(['sam/r'], continuing=True)
+        assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
+        assert published[-1] == [], published[-1]
+
+    # A red-branch notice recorded in an earlier slice clears as soon as a
+    # later slice's watch_default sees the default branch recover, and a
+    # failing upkeep preserves its prior upkeep notices until upkeep passes.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(1), pr(2)]
+        flaky = ('A Claude job for it didn\'t finish', 'sam/r#99', '`test`: job j1 failed')
+        red = ('The default branch is red', 'sam/r main at 1234567', 'two Claude jobs ended with it still red')
+        C.save('digest-repos.json', {'sam/r': [list(flaky)]})
+        is_red = [True]
+        original = S.step.handle
+
+        def watch_red(r, info, prs, mine):
+            if is_red[0]:
+                mine.append(red)
+            return {}
+
+        def long(repo, p, *args):
+            original(repo, p, *args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.R, 'watch_default', watch_red), patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {red, flaky}, saved
+        # Failing open_prs before watch_default runs preserves the red notice.
+        C.WAKE.clear()
+        with patch.object(S, 'open_prs', side_effect=RuntimeError('gh: Resource limits for this query exceeded.')), \
+                patch.object(S, 'upkeep', lambda repo, mine: mine.append(flaky)):
+            S.run_pass(['sam/r'])
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert set(saved) == {red, flaky}, saved
+        is_red[0] = False
+        C.WAKE.clear()
+        with patch.object(S.R, 'watch_default', watch_red), \
+                patch.object(S, 'upkeep', lambda repo, mine: S.failing(repo, 'upkeep down', 'upkeep')):
+            S.run_pass(['sam/r'], continuing=True)
+        saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+        assert saved == [flaky], saved
+        C.WAKE.clear()
+        with patch.object(S.R, 'watch_default', watch_red):
+            S.run_pass(['sam/r'])
+        assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
+    print('yielded passes and failed reads preserve deferred digest notices: passed')
+
+    # A PR step cut short by the pass's deadline (REMOTE_DEADLINE or expired
+    # slice) or a transient C.Unavailable leaves the PR pending for the next
+    # slice, preserves its watch.json wait or published digest notice, and
+    # never records a steward failure against it.
+    for mode, target, exp_calls in (('remote_deadline', 1, [1]), ('slice_expired', 2, [1, 2]), ('transient', 1, [1, 2])):
+        for digest_mode in (False, True):
+            with fixture() as (clock, handled, facts, repos, prs, info):
+                old = {f'sam/r#{n}': dict(repo='sam/r', what=f'sam/r#{n}', link=f'https://github.com/sam/r/pull/{n}',
+                       phase='Settled; waiting its turn to build agents', since=100, due=7300,
+                       kick='autoland/sam/r', claude=False, rev=f'head-{n} main') for n in (1, 2)}
+                notices = {n: ('Open over a day', f'[sam/r#{n}](https://github.com/sam/r/pull/{n}) {n}', 'waiting') for n in (1, 2)}
+                C.save('digest-repos.json', {'sam/r': [list(notices[1]), list(notices[2])]}) if digest_mode else C.save('watch.json', {'at': 100, 'items': old})
+                calls, failed = [], [False]
+
+                def flaky_handle(repo, p, info, mine, held, under):
+                    calls.append(p['number'])
+                    if p['number'] == target and not failed[0]:
+                        failed[0] = True
+                        clock[0] += 10 if mode == 'remote_deadline' else (4 * 60 if mode == 'slice_expired' else 0)
+                        raise C.Unavailable("pass remote-call deadline reached" if mode == 'remote_deadline' else "gh api: HTTP 502")
+                    clock[0] += 5 * 60 if mode == 'slice_expired' else 1
+
+                with patch.object(S.step, 'handle', flaky_handle):
+                    if mode == 'remote_deadline':
+                        with C.pass_deadline(10):
+                            S.run_pass(['sam/r'])
+                    else:
+                        S.run_pass(['sam/r'])
+                progress = C.load('pass-progress.json', {})
+                repo_prog = progress['repos'].get('sam/r', {})
+                assert calls == exp_calls, (mode, digest_mode, calls)
+                assert str(target) not in repo_prog.get('done', {}) and str(target) not in repo_prog.get('unseen', []), (mode, repo_prog)
+                assert ('sam/r' in progress.get('retry', {})) == (mode == 'transient'), (mode, progress)
+                if digest_mode:
+                    expected = {notices[1], notices[2]} if mode == 'remote_deadline' else {notices[target]}
+                    assert {tuple(x) for x in C.load('digest-repos.json', {})['sam/r']} == expected, mode
+                else:
+                    items = C.load('watch.json', {})['items']
+                    assert items.get(f'sam/r#{target}') == old[f'sam/r#{target}'] and all(v.get('phase') != W.FAILS for v in items.values()), (mode, items)
+                C.NOW = 1300
+                with patch.object(S.step, 'handle', flaky_handle):
+                    S.run_pass(['sam/r'], continuing=True)
+                assert target in calls[len(exp_calls):], (mode, calls)
+                assert C.load('pass-progress.json', {})['repos'] == {}, mode
+                if digest_mode:
+                    assert C.load('digest-repos.json', {})['sam/r'] == [], mode
+    print('deadline and transient Unavailable on a PR step yield without failing the PR: passed')

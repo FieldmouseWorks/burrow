@@ -22,13 +22,21 @@ pub struct Config {
     /// The autoland steward's own commit status, which isn't CI.
     pub settled: String,
     /// The autoland steward's list of its repos (its repos.json): who
-    /// lands each, and its proofs. None without a steward.
+    /// lands each, and its proofs, for repos the steward holds. None
+    /// without a steward.
     pub steward: Option<PathBuf>,
-    /// burrow-landing's record (burrow.landing.record), read at each pass: a
-    /// major in a repo it gives conaryd gets its verdicts sealed as conaryd
-    /// reads them (v2), the rest as the steward does (v1). None where
-    /// nothing hands landing over (no autoland): every repo the steward's.
+    /// burrow-landing's record (burrow.landing.record), read at each pass:
+    /// a repo it gives conaryd (or is handing over to it) counts as covered
+    /// directly from the record, takes its proofs from `flow`, and gets its
+    /// majors' verdicts sealed as conaryd reads them (v2); the rest read
+    /// `steward` and seal v1. None where nothing hands landing over (no
+    /// autoland): every repo the steward's.
     pub landing: Option<PathBuf>,
+    /// The flow's configurations (burrow.autoland.flowConfigs), one a repo
+    /// (`OWNER/NAME.json`, lowercased): where a repo the landing record
+    /// gives conaryd takes its proofs from. None where there's no flow
+    /// (no autoland).
+    pub flow: Option<PathBuf>,
     /// The machine's own App, when the jobs act as it.
     pub app: Option<App>,
     /// Who Renovate comments as, as REST spells it: its own App's bot

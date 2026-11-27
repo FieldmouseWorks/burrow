@@ -74,6 +74,7 @@ fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -226,4 +227,146 @@ fn two_clears_at_once() {
         );
     }
     assert_eq!(left(cfg), Vec::<PathBuf>::new());
+}
+
+fn pack_files(repo: &Path) -> Vec<PathBuf> {
+    let mut packs: Vec<_> = fs::read_dir(repo.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "pack"))
+        .collect();
+    packs.sort();
+    packs
+}
+
+/// Seed `n` separate valid packfiles in `repo`, simulating accumulated fetches.
+fn make_packs(repo: &Path, n: usize) {
+    for i in 0..n {
+        fs::write(repo.join("f"), format!("v{i}\n")).unwrap();
+        git(repo, &["add", "f"]);
+        git(repo, &["commit", "-q", "-m", &format!("c{i}")]);
+        git(repo, &["repack", "-q"]);
+        git(repo, &["prune-packed", "-q"]);
+    }
+}
+
+fn backdate(path: &Path, secs: u64) {
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(at))
+        .unwrap();
+}
+
+#[test]
+fn clearing_repacks_excess_packs_and_recovers_stale_midx_lock() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    make_packs(&web, 36);
+    assert!(
+        pack_files(&web).len() >= 36,
+        "got {} packs",
+        pack_files(&web).len()
+    );
+    let pack_dir = web.join(".git/objects/pack");
+    let midx_lock = pack_dir.join("multi-pack-index.lock");
+    let stale_tmp = pack_dir.join("tmp_pack_stale");
+    let fresh_tmp = pack_dir.join("tmp_pack_fresh");
+    for p in [&midx_lock, &stale_tmp, &fresh_tmp] {
+        fs::write(p, b"leftover").unwrap();
+    }
+    backdate(&midx_lock, 7200);
+    backdate(&stale_tmp, 7200);
+
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-a", &a.join("web"));
+    clear(cfg, "a");
+
+    assert!(!midx_lock.exists(), "stale multi-pack-index.lock stayed");
+    assert!(!stale_tmp.exists(), "stale tmp_pack stayed");
+    assert!(fresh_tmp.exists(), "fresh tmp_pack was removed too early");
+    assert!(
+        pack_files(&web).len() <= 8,
+        "expected geometric repack to collapse packs, left {}",
+        pack_files(&web).len()
+    );
+    assert!(
+        pack_dir.join("multi-pack-index").exists(),
+        "repack should write multi-pack-index"
+    );
+}
+
+#[test]
+fn clearing_skips_repack_when_locked_and_preserves_fresh_midx_lock() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    make_packs(&web, 36);
+    let pack_dir = web.join(".git/objects/pack");
+    let midx_lock = pack_dir.join("multi-pack-index.lock");
+    fs::write(&midx_lock, b"active").unwrap();
+
+    // Holding the repo's maintenance lock skips repacking without blocking.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(web.join(".git/burrow-gc.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-a", &a.join("web"));
+    clear(cfg, "a");
+    assert!(pack_files(&web).len() >= 36);
+    assert!(midx_lock.exists());
+    drop(lock);
+
+    // Even unlocked, a fresh (<1h) multi-pack-index.lock is left alone.
+    let c = dir(cfg, "b");
+    b.worktree(&web, "fix-b", &c.join("web"));
+    clear(cfg, "b");
+    assert!(
+        midx_lock.exists(),
+        "fresh multi-pack-index.lock was deleted"
+    );
+}
+
+fn loose_objects(repo: &Path) -> usize {
+    let mut total = 0;
+    for entry in fs::read_dir(repo.join(".git/objects")).unwrap().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            total += fs::read_dir(entry.path()).unwrap().count();
+        }
+    }
+    total
+}
+
+#[test]
+fn clearing_repacks_excess_loose_objects_without_excess_packs() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    let many = web.join("many");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..2100 {
+        fs::write(many.join(format!("f{i}")), format!("blob-{i}\n")).unwrap();
+    }
+    git(&web, &["add", "many"]);
+    git(&web, &["commit", "-q", "-m", "many loose objects"]);
+    assert!(loose_objects(&web) > 2048);
+    assert_eq!(pack_files(&web).len(), 0);
+
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-loose", &a.join("web"));
+    clear(cfg, "a");
+
+    assert_eq!(
+        loose_objects(&web),
+        0,
+        "expected excess loose objects to be packed and pruned"
+    );
+    assert_eq!(pack_files(&web).len(), 1);
 }
