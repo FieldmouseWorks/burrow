@@ -5,7 +5,6 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::{KEY, MOST, key, notice};
@@ -27,15 +26,13 @@ impl Box {
         let (jobs, records, notify, said) = (p("jobs"), p("records"), p("notify"), p("said"));
         fs::create_dir(&jobs).unwrap();
         fs::create_dir(&records).unwrap();
-        fs::write(
+        burrow_test::executable(
             &notify,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = pending ]; then [ -e {0}.open ] && exit 0; exit 1; fi\necho \"$1 $2\" >>{0}\n",
                 said.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&notify, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         Box {
             _root: root,
             jobs,

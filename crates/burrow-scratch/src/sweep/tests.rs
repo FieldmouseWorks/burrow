@@ -5,7 +5,7 @@
 // root: tests/proj-scratch.nix has those.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use super::{Sweep, sweep};
@@ -35,9 +35,9 @@ fn tree(at: &Path) {
 /// Whether this runs as root, whom a read-only dir doesn't stop.
 fn root() -> bool {
     let d = tempfile::tempdir().unwrap();
-    fs::set_permissions(d.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    burrow_test::permissions(d.path(), 0o555);
     let wrote = fs::write(d.path().join("f"), "").is_ok();
-    fs::set_permissions(d.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(d.path(), 0o755);
     wrote
 }
 
@@ -94,11 +94,7 @@ fn what_it_cant_remove_goes_stuck_and_the_rest_still_goes() {
     // isn't root), between two that go; and a stuck name already taken.
     tree(&jobs.join(".gone-a-1"));
     tree(&jobs.join(".gone-ro-2"));
-    fs::set_permissions(
-        jobs.join(".gone-ro-2/web"),
-        fs::Permissions::from_mode(0o555),
-    )
-    .unwrap();
+    burrow_test::permissions(jobs.join(".gone-ro-2/web"), 0o555);
     tree(&jobs.join(".gone-z-3"));
     fs::create_dir(jobs.join(".stuck-ro-2")).unwrap();
     let done = sweep(&jobs).unwrap();
@@ -127,11 +123,7 @@ fn what_it_cant_remove_goes_stuck_and_the_rest_still_goes() {
         "{again:?}"
     );
     assert_eq!(again.still.len(), 1);
-    fs::set_permissions(
-        jobs.join(".stuck-ro-2.1/web"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    burrow_test::permissions(jobs.join(".stuck-ro-2.1/web"), 0o755);
     assert_eq!(sweep(&jobs).unwrap().removed, [".stuck-ro-2.1"]);
     assert_eq!(names(&jobs), Vec::<String>::new());
 }
@@ -173,20 +165,12 @@ fn a_max_length_entry_that_cant_be_removed_still_goes_stuck() {
     let gone = format!("{}{rest}", crate::GONE);
     assert_eq!(gone.len(), 255);
     tree(&jobs.join(&gone));
-    fs::set_permissions(
-        jobs.join(&gone).join("web"),
-        fs::Permissions::from_mode(0o555),
-    )
-    .unwrap();
+    burrow_test::permissions(jobs.join(&gone).join("web"), 0o555);
     // Occupy the first truncated stuck slot too, so collision suffixing (.1) is exercised.
     let taken = format!("{}{}", crate::STUCK, &rest[..255 - crate::STUCK.len()]);
     assert_eq!(taken.len(), 255);
     tree(&jobs.join(&taken));
-    fs::set_permissions(
-        jobs.join(&taken).join("web"),
-        fs::Permissions::from_mode(0o555),
-    )
-    .unwrap();
+    burrow_test::permissions(jobs.join(&taken).join("web"), 0o555);
 
     let done = sweep(&jobs).unwrap();
     assert!(done.held.is_empty(), "held: {:?}", done.held);
@@ -199,14 +183,6 @@ fn a_max_length_entry_that_cant_be_removed_still_goes_stuck() {
     );
 
     // Restore permissions so TempDir cleans up cleanly.
-    fs::set_permissions(
-        jobs.join(stuck_name).join("web"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    fs::set_permissions(
-        jobs.join(&taken).join("web"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    burrow_test::permissions(jobs.join(stuck_name).join("web"), 0o755);
+    burrow_test::permissions(jobs.join(&taken).join("web"), 0o755);
 }
