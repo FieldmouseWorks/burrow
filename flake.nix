@@ -178,7 +178,7 @@
         { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
         # Conary at that pin: burrow.ledger.package's default, for every
         # platform the crates are built for.
-        (nixpkgs.lib.mapAttrs (sys: _: { conary = (self.lib.conary.flake self { inherit rust-overlay; }).packages.${sys}.default; }) crates.packages)
+        (nixpkgs.lib.mapAttrs (sys: _: { conary = (self.lib.conary.flake { inherit nixpkgs rust-overlay crane; }).packages.${sys}.default; }) crates.packages)
       ];
 
       # A bare machine with every module on, for the checks and as an example.

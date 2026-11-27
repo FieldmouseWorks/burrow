@@ -310,6 +310,7 @@ in
     (import ./autoland/proof.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
+    ./autoland/red-fix.nix
     (import ./autoland/review-ask.nix inputs)
     (import ./autoland/landing.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }

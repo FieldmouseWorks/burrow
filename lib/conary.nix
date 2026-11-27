@@ -21,12 +21,13 @@ else rec {
   rev = builtins.elemAt parsed 2;
   # The source at that rev, fetched as crane fetches it for the crates.
   src = builtins.fetchGit { inherit url rev; allRefs = true; submodules = true; };
-  # Its packages, from its own flake.nix with burrow as the burrow it gets:
-  # what a machine with Conary as an input that follows its burrow builds.
-  flake = burrow: inputs:
+  # Its packages, from its own flake.nix with the inputs it's given (its
+  # nixpkgs, rust-overlay and crane): what a machine with Conary as an
+  # input that follows its burrow's builds.
+  flake = inputs:
     let
       self = src // outputs // { inherit rev; outPath = src.outPath; };
-      outputs = (import (src + "/flake.nix")).outputs ({ inherit self burrow; } // inputs);
+      outputs = (import (src + "/flake.nix")).outputs ({ inherit self; } // inputs);
     in
     self;
 }

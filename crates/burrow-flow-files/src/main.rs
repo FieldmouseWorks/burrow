@@ -24,6 +24,11 @@
 //! `major_key_file` names) and succeeds only if its `judge_key` (the
 //! judge's seal key) or `major_key` (renovate-sweep's) is the key the file
 //! SEAL holds, printing neither.
+//!
+//! `burrow-flow-files schema` prints the flow config's schema as the pinned
+//! Conary publishes it (`flow::schema::flow`, what `cn flow settings
+//! --schema` prints as its `flow`), so a check can hold what the machine
+//! renders to every setting the pin has, not to a list written by hand.
 use conary_core::Policy;
 use conary_github::attest::service::Producers;
 use conary_github::events::Runtime;
@@ -55,6 +60,7 @@ fn main() -> ExitCode {
         Some("producers") => |p| Producers::load(p).map(drop),
         Some("render") => return render(&files),
         Some("key") => return key(&files),
+        Some("schema") if files.is_empty() => return schema(),
         _ => return usage(),
     };
     if files.is_empty() {
@@ -155,9 +161,22 @@ fn stand_in_keys(path: &Path) -> Result<(), String> {
     Config::load(&copy).map(drop).map_err(|e| e.to_string())
 }
 
+fn schema() -> ExitCode {
+    match conary_github::flow::schema::flow() {
+        Ok(schema) => {
+            println!("{schema}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("the flow's schema: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: burrow-flow-files flow [--stand-in-keys]|policy|events|producers FILE... | burrow-flow-files render MANIFEST | burrow-flow-files key judge|major CONFIG SEAL"
+        "usage: burrow-flow-files flow [--stand-in-keys]|policy|events|producers FILE... | burrow-flow-files render MANIFEST | burrow-flow-files key judge|major CONFIG SEAL | burrow-flow-files schema"
     );
     ExitCode::from(2)
 }

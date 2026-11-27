@@ -285,7 +285,9 @@ def proof_task(repo, pr, checks, proofs):
 
 # A fix for a red default branch comes from a branch named this, plus the
 # commit: while one is open, the steward starts no job of its own for the red
-# (repos.watch_default), and it lands only while the branch is red.
+# (repos.watch_default), and it lands only while the branch is red. A copy of
+# burrow.autoland.redFixBranch (autoland/red-fix.nix), which the build holds
+# this to until the steward's Python goes (burrow#1310).
 RED_BRANCH = "autoland/red-"
 # The branches the ledger's undos come from (Conary's docs/DESIGN.md,
 # section 5): conary/undo/CHANGE/ATTEMPT.

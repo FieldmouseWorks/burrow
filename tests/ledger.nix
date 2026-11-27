@@ -35,6 +35,7 @@ let
     echo "$*" >>/tmp/cn-calls
     echo "$CONARY_REVIEWERS" >/tmp/cn-reviewers
     echo "$CONARY_REVIEW_AUTHORS" >/tmp/cn-review-authors
+    echo "$CONARY_REVIEW_ADAPTER" >/tmp/cn-review-adapter
     echo "''${GH_TOKEN:-none} ''${CONARY_TOKEN_COMMAND:-none}" >/tmp/cn-auth
     case $1 in
       init) touch "$CONARY_LEDGER/anchor" ;;
@@ -126,6 +127,8 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the connector's posts are the reviewer's word, recorded unattested"):
         assert machine.succeed("cat /tmp/cn-review-authors") == "chatgpt-codex-connector[bot]\n"
+        # In the connector's own protocol, which cn's default isn't.
+        assert machine.succeed("cat /tmp/cn-review-adapter") == "codex\n"
 
     with subtest("as the user, cn has gh's login for every repo"):
         assert machine.succeed("cat /tmp/cn-auth") == "gho_stand_in none\n", machine.succeed("cat /tmp/cn-auth")

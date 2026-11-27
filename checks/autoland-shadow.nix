@@ -4,9 +4,9 @@
 # shadowed repo has no such unit. It runs `cn flow compare` on the ledger's
 # env and the steward's own token, only for a repo with a config, which is
 # at its lowercased name, as burrow-events names a pass's instance. Each
-# config holds exactly the keys Conary's flow::Config takes
-# (crates/conary-github/src/flow/pass.rs, types.rs, evidence.rs), which
-# refuses any other: the steward's settings for that repo, its overrides
+# config holds every setting the pinned Conary's schema lists but those
+# left to its defaults (`defaulted`, each with why), and Conary refuses any
+# other: the steward's settings for that repo, its overrides
 # found whatever their case, in seconds, trusting its authors and its bots
 # (the machinery's App only where there is one), with evidence only where
 # the repo has a train negative. The machine's cn loads each as it's built
@@ -64,18 +64,34 @@ let
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
-    settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
-      "job_login" "job_timeout" "judge_engines" "major_key_file" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
-      "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
-      "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
-      "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
-  # Every key a config has: all of Settings' but the seal keys (the
-  # example runs renovate-sweep, whose key the config names by its file),
-  # renovate_run and default_priority, left to Conary's defaults. Conary's defaults name no
+  # The settings burrow leaves to Conary's defaults, each with why. A config
+  # has every other key of Settings, as the pinned Conary's own schema
+  # (`burrow-flow-files schema`) lists them, not a list written here: a pin
+  # follow that adds a setting fails this check until burrow renders it or
+  # says here why its default is burrow's too. Conary's defaults name no
   # machine (Conary#381), so the engines a judge is owed for and the bots'
   # addresses are the steward's own.
+  defaulted = {
+    default_priority = "the steward's one priority is its first label: an unlabelled PR is at Conary's medium";
+    deferred = "the steward defers no check until review is ready, and Conary's default defers none";
+    disputed_p2 = "undecided: the steward has no rule for a re-raised P2 or P3, and Conary's block holds it as any finding (burrow#1602)";
+    fix_growth = "the steward hands no PR over for what its fix rounds add, nor does Conary's default";
+    judge_key = "a seal key is named by its file, never written in the config";
+    major_key = "a seal key is named by its file, never written in the config";
+    judge_key_file = "only a machine with the judge's seal has one, and the example has none";
+    renovate_run = "undecided: the steward waits Renovate's own timeout (renovateRun), the flow Conary's default (burrow#1602)";
+  };
   wiring = {
+    # The reviewer's protocol, as `cn` is told it, on every writer of the
+    # ledger: the shadow's here, the steward's and conaryd's from the same
+    # env. Without it `cn` reads the connector's posts as Conary's markers.
+    reviewAdapter = machine.burrow.ledger.env.CONARY_REVIEW_ADAPTER or null == "codex"
+      && shadow.environment.CONARY_REVIEW_ADAPTER or null == "codex";
+    # The steward's copy of the red-fix branch is held to the option until
+    # its Python goes (burrow#1310).
+    redFixHeld = let r = builtins.tryEval (lib.any (lib.hasInfix "burrow#1310")
+      (refused [{ burrow.autoland.redFixBranch = "fix/red-"; }])); in r.success && r.value;
     onSuccess = units."autoland@".unitConfig.OnSuccess == [ "autoland-shadow@%i.service" ];
     hourly = (units.autoland.unitConfig.OnSuccess or [ ]) == [ ];
     noPost = !(units."autoland@".serviceConfig ? ExecStartPost);
@@ -126,11 +142,22 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   ${lib.concatMapStrings (w: "fail 'a Conary file set by hand beside the rendered ones is not refused: ${w}'\n") unrefused}
   [ "$(cd ${configs} && find . -type l -o -type f | sort | tr '\n' ' ')" = "./sam/homelab.json ./sam/plain.json " ] \
     || fail "configs aren't each shadowed repo's, lowercased: $(cd ${configs} && find . -type l -o -type f)"
+  ${flowFiles} schema > schema.json || fail "burrow-flow-files can't print the pinned Conary's flow schema"
+  jq -e --argjson d '${builtins.toJSON (lib.attrNames defaulted)}' \
+    '(."$defs".Settings.properties | keys) as $s | ($d - $s) == [] and ($s | length) > ($d | length)' schema.json >/dev/null \
+    || fail "a setting left to Conary's default isn't one of the pin's: $(jq -c '."$defs".Settings.properties | keys' schema.json)"
+  jq -c --argjson d '${builtins.toJSON (lib.attrNames defaulted)}' \
+    '{settings: ((."$defs".Settings.properties | keys) - $d), stages: (."$defs".StageLabels.properties | keys)}' schema.json > pinned.json
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
-    jq -e --argjson k '${builtins.toJSON keys}' '
-      (keys == $k.top) and (.settings | keys == $k.settings)
+    jq -e --argjson k '${builtins.toJSON keys}' --slurpfile p pinned.json '
+      (keys == $k.top) and (.settings | keys == $p[0].settings)
+      and (.settings.stage_labels | keys == $p[0].stages)
       and (.evidence == null or (.evidence | keys == $k.evidence))' $f >/dev/null \
-      || fail "$f has keys Conary's doesn't: $(jq -c '[keys, (.settings | keys)]' $f)"
+      || fail "$f's keys aren't the pinned Conary's, but for those left to its defaults: $(jq -c --slurpfile p pinned.json '{top: keys, missing: ($p[0].settings - (.settings | keys)), extra: ((.settings | keys) - $p[0].settings)}' $f)"
+    # The settings the pin's defaults changed, at what the old code did:
+    # the connector's protocol, and the steward's red-fix branch.
+    jq -e '.settings.review_adapter == "codex" and .settings.red_fix_branch == "autoland/red-"' $f >/dev/null \
+      || fail "$f's reviewer protocol or red-fix branch isn't burrow's: $(jq -c '.settings | {review_adapter, red_fix_branch}' $f)"
   done
   jq -e '.evidence.negative == "negative" and .settings.train and .settings.train_size == 3' ${withApp.homelab} >/dev/null \
     || fail "homelab's overrides (its train, negative and train size) are lost to its name's case"

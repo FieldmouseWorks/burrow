@@ -374,6 +374,19 @@ in
       '';
     };
 
+    reviewAdapter = mkOption {
+      type = types.enum [ "codex" "conary" ];
+      default = "codex";
+      description = ''
+        The protocol `reviewAuthors` speak (Conary's review adapter): how
+        the reviewer is asked, how its verdicts and findings read, and the
+        name of its check in the ledger. `codex` is Codex's GitHub
+        connector's; `conary` is Conary's own marker protocol. Both `cn`
+        (CONARY_REVIEW_ADAPTER) and the flow (review_adapter) take it from
+        here.
+      '';
+    };
+
     ownContexts = mkOption {
       type = types.listOf types.str;
       default = lib.optional (autoland.enable or false) autoland.context;
@@ -457,6 +470,8 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         # The reviewer's own word, recorded unattested.
         CONARY_REVIEW_AUTHORS = lib.concatStringsSep "," cfg.reviewAuthors;
+        # And the protocol it speaks.
+        CONARY_REVIEW_ADAPTER = cfg.reviewAdapter;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
         # Whose attestations count: a train's gate and a PR's negative.

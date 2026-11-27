@@ -155,6 +155,8 @@ let
         reviewers = lib.optional codex "codex";
         # Codex's GitHub connector posts the reviews: the ledger's own list.
         review_authors = ledger.reviewAuthors;
+        # And the protocol they speak, as `cn` is told it (ledger.nix).
+        review_adapter = ledger.reviewAdapter;
         # The flow's own account: review-settled, the conary/train status and
         # its answers are read only from it.
         flow_authors = [ stewardLogin ];
@@ -178,6 +180,8 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
+        # The branch a red's fix comes from (autoland/red-fix.nix).
+        red_fix_branch = cfg.redFixBranch;
         inherit people;
         require_ci = rc.requireCi;
         inherit proofs;

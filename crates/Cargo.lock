@@ -1202,7 +1202,7 @@ dependencies = [
 [[package]]
 name = "conary-core"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=18b0baa149ed98ef217a4843f884e82aaadc284b#18b0baa149ed98ef217a4843f884e82aaadc284b"
 dependencies = [
  "blake3",
  "conary-plugin",
@@ -1219,7 +1219,7 @@ dependencies = [
 [[package]]
 name = "conary-github"
 version = "0.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=18b0baa149ed98ef217a4843f884e82aaadc284b#18b0baa149ed98ef217a4843f884e82aaadc284b"
 dependencies = [
  "base64 0.23.1",
  "conary-core",
@@ -1242,7 +1242,7 @@ dependencies = [
 [[package]]
 name = "conary-plugin"
 version = "5.0.0"
-source = "git+https://github.com/FieldmouseWorks/Conary?rev=28e9b1f86f5eb7f2a35c129dd52862ed391cccf3#28e9b1f86f5eb7f2a35c129dd52862ed391cccf3"
+source = "git+https://github.com/FieldmouseWorks/Conary?rev=18b0baa149ed98ef217a4843f884e82aaadc284b#18b0baa149ed98ef217a4843f884e82aaadc284b"
 dependencies = [
  "schemars 1.2.3",
  "serde",
