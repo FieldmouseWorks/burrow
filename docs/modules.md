@@ -655,8 +655,9 @@ see [README.md](../README.md).
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`house`** (`burrow.house`): `house-sync` (when the blocks change, and on
   each repo's pushes to its default branch): every repo's copies of the house
-  blocks (the house rules, [house/rules.md](../house/rules.md), and the Pull
-  requests section, [house/prs.md](../house/prs.md), each between its markers in
+  blocks (the house rules, [house/rules.md](../house/rules.md), the Pull
+  requests section, [house/prs.md](../house/prs.md), and the shared review
+  rules, [house/review.md](../house/review.md), each between its markers in
   AGENTS.md) kept the same as burrow's, as one PR per repo when a block
   changes. Broken markers, and repos it couldn't get through, go to the owner
   through `notify`; a pass GitHub's rate limit holds off is booked again for
