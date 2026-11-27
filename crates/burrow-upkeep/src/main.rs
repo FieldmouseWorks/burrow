@@ -9,7 +9,8 @@
 //! who made them; `ci`, which owns the CI verdict and cancelled workflow
 //! recovery; `tracked`, which runs a red check again once what tracks its
 //! cause outside the PR closes; `token`, which mints the pass
-//! that token; and `hooks`, which a full pass ends with, and which mints its
+//! that token, and with `--bare` is Conary's token command (conaryd's and
+//! `cn`'s, as the App); and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
 use std::collections::{BTreeSet, HashMap};
@@ -42,6 +43,10 @@ const USAGE: &str = "usage:
       a token of the App's installation on OWNER, minted with its key
       (systemd's credential app-key), and when it expires, as JSON on
       stdout; exit status 75 when GitHub can't be asked just now
+  burrow-upkeep CONFIG token OWNER/REPO --bare
+      the same token, for the repo's owner, alone on stdout: Conary's token
+      command (conaryd's, cn's); --bare may come before OWNER/REPO, as
+      Conary adds the repo last
   burrow-upkeep CONFIG settle OWNER/REPO --now SECONDS [--private] [--empty] [--dry]
       the repo's labels, settings and webhook, if they're due, as of the
       pass's time: what failed and a rate limit's reset, as JSON on stdout;
@@ -194,13 +199,10 @@ fn run(args: &[String]) -> Result<(), Stop> {
     let (config, words) = args
         .split_first()
         .ok_or_else(|| Stop::Usage("no config".into()))?;
-    if let [word, owner] = words
+    if let [word, rest @ ..] = words
         && word == "token"
     {
-        let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
-        let m = app_token(&cfg, owner)?;
-        println!("{}", json!({"token": m.token, "expires": m.expires}));
-        return Ok(());
+        return token_word(config, rest);
     }
     if let [word, rest @ ..] = words
         && word == "hooks"
@@ -499,20 +501,55 @@ fn hooks(config: &str, rest: &[String]) -> Result<(), Stop> {
     Ok(())
 }
 
-/// The App's token for `owner`, as of the clock now. An owner the App
-/// isn't installed on has none: GitHub's answer, said as such.
-fn app_token(cfg: &Config, owner: &str) -> Result<Minted, Stop> {
-    let creds: OsString = creds().map_err(Stop::Failed)?.into();
+/// `token`: the App's token for OWNER's repos and when it expires, as
+/// JSON (the steward's common.py), or with `--bare` the token alone for
+/// OWNER/REPO's owner, as Conary's token command prints it (its
+/// conary-github tokens.rs). Conary adds the repo after the command's own
+/// words, so `--bare` goes on either side of it. Nothing on stdout but
+/// the token.
+fn token_word(config: &str, rest: &[String]) -> Result<(), Stop> {
+    let bare = rest.iter().filter(|a| *a == "--bare").count();
+    let named: Vec<&String> = rest.iter().filter(|a| *a != "--bare").collect();
+    let (&[asked], 0 | 1) = (&named[..], bare) else {
+        return Err(Stop::Usage(
+            "token takes OWNER, or OWNER/REPO with --bare".into(),
+        ));
+    };
+    let owner = if bare == 1 {
+        if !burrow_github::repo_name(asked) {
+            return Err(Stop::Usage(format!("{asked:?} isn't OWNER/REPO")));
+        }
+        asked.split('/').next().unwrap_or_default()
+    } else {
+        asked.as_str()
+    };
+    let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+    let m = app_token(&cfg, owner, asked)?;
+    if bare == 1 {
+        println!("{}", m.token);
+    } else {
+        println!("{}", json!({"token": m.token, "expires": m.expires}));
+    }
+    Ok(())
+}
+
+/// The App's token for `owner`, as of the clock now, `asked` for (what
+/// its failures name). An owner the App isn't installed on has none:
+/// GitHub's answer, said as such.
+fn app_token(cfg: &Config, owner: &str, asked: &str) -> Result<Minted, Stop> {
+    let creds: OsString = creds()
+        .map_err(|e| Stop::Failed(format!("no token for {asked}: {e}")))?
+        .into();
     let proxy = ureq::Proxy::try_from_env();
     let app = token::app(cfg, Path::new(&creds), proxy)
-        .map_err(|e| Stop::Failed(format!("no token for {owner}: {e}")))?;
+        .map_err(|e| Stop::Failed(format!("no token for {asked}: {e}")))?;
     match token::token(&app, owner, clock()) {
         Ok(Token::Minted(m)) => Ok(m),
         Ok(Token::NotInstalled) => Err(Stop::Failed(format!(
             "the App {} isn't installed on {owner}",
             cfg.app.slug
         ))),
-        Err(e) if e.unavailable => Err(Stop::Later(format!("no token for {owner}: {e}"))),
-        Err(e) => Err(Stop::Failed(format!("no token for {owner}: {e}"))),
+        Err(e) if e.unavailable => Err(Stop::Later(format!("no token for {asked}: {e}"))),
+        Err(e) => Err(Stop::Failed(format!("no token for {asked}: {e}"))),
     }
 }

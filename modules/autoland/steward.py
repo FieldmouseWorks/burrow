@@ -61,8 +61,7 @@ it reviews each push on its own, and a pass reads what it posted.
 
 In a repo with `train` on, a settled PR goes into its merge train instead of
 being merged, and a pass ends with a step of the train (train.py). `cn`, which
-runs the train, gets the App's tokens from `autoland-steward token
-OWNER/REPO`, printed on stdout for it alone.
+runs the train, gets the App's tokens from burrow-upkeep's `token --bare`.
 """
 
 import fcntl
@@ -85,24 +84,7 @@ from prs import open_prs
 
 # ---------------------------------------------------------------- main
 
-def token(repo):
-    """The App's token for repo's owner, for cn (train.py), which runs it
-    inside a pass: so it takes no lock. Exits 75 when GitHub can't be asked
-    just now, as cn does."""
-    try:
-        print(C.token(repo.split("/")[0].lower()))
-    except C.Unavailable as e:
-        print(f"no token for {repo}: {e}", file=sys.stderr)
-        sys.exit(75)
-    except (RuntimeError, OSError) as e:
-        print(f"no token for {repo}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
-    if sys.argv[1:2] == ["token"] and len(sys.argv) == 3:
-        token(sys.argv[2])
-        return
     if sys.argv[1:2] == ["build"] and len(sys.argv) == 3:
         # A proof build's unit (proofs.build): no pass, so no lock.
         P.run(sys.argv[2])

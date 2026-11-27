@@ -15,7 +15,7 @@ sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
 with tempfile.TemporaryDirectory() as tmp:
     config = Path(tmp) / 'config.json'
     config.write_text(json.dumps(dict(context='test', stateDir=tmp, upkeep=['upkeep'],
-                                     conary={'cn': 'cn', 'env': {}}, trainContext='train')))
+                                     conary={'cn': 'cn', 'token': 'upkeep token --bare', 'env': {}}, trainContext='train')))
     os.environ['AUTOLAND_CONFIG'] = str(config)
     import common as C
 

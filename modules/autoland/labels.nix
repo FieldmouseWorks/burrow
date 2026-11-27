@@ -30,7 +30,8 @@ in
         fix the rest of the line waits on, opened after them. Conary's flow
         ranks it high too (priority_labels). Fixes that keep the pipeline
         moving get it by themselves: a red default branch's fix (the
-        steward's pass), HOST-update's PR (burrow-update's train), and the
+        steward's pass), HOST-update's PR (burrow-update's train),
+        cargo-follow's PRs in pipeline repos (crates/cargo-follow), and the
         PR a job run --first, --pipeline or --unstick opened and awaits
         (crates/burrow-proj/src/first.rs).
       '';

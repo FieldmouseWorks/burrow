@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
     cfg.write_text(json.dumps(dict(brief=[BRIEF], owner='Sam',
         context='test', stateDir=str(state), snapDir=str(Path(tmp) / 'trees'),
-        conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
+        conary={'cn': 'cn', 'token': 'upkeep token --bare', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {}}, kick='http://events/kick/autoland',
         continuationKick='http://events/kick/autoland-continue',
         watch={'kick': 'watchdog', 'escalated': f'{tmp}/escalated.json'},
