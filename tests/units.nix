@@ -41,6 +41,9 @@ pkgs.testers.runNixOSTest {
     };
     environment.etc."burrow-webhook".text = "hook-secret\n";
     burrow.watchdog.units.enable = true;
+    # The hourly catch-up fires on the wall clock, so a run that straddles
+    # the hour would see an unexpected full pass.
+    systemd.timers.burrow-events-catch-up.enable = false;
     # proj's slice, without proj: a crash in a unit there is its own.
     burrow.watchdog.units.ownedSlices = [ "claude-jobs.slice" ];
     # The state lives under /home, through a symlink: the clear handler
@@ -92,6 +95,67 @@ pkgs.testers.runNixOSTest {
     def root_crash():
         machine.succeed("bash -c 'ulimit -c unlimited; sleep 60 & p=$!; sleep 1; kill -SEGV $p; wait $p' || true")
 
+    # Journal filters matching burrow-units-watch's Want::Pass entries
+    # (UNIT_FAILURE_RESULT / UNIT_FAILED from pid 1, and systemd-coredump).
+    pass_events = (
+        "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c "
+        "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d _PID=1 + "
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1 "
+        "MESSAGE_ID=1f4e0a44a88649939aaea34fc6da8c95"
+    )
+
+    def journal_entries(args, needle=None):
+        out = machine.succeed(f"journalctl -b --quiet -o json --output-fields=MESSAGE {args}")
+        entries = []
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if needle is not None:
+                msg = entry.get("MESSAGE", "")
+                if not (isinstance(msg, str) and needle in msg):
+                    continue
+            entries.append(entry)
+        return entries
+
+    def last_ts(entries):
+        return max((int(e["__REALTIME_TIMESTAMP"]) / 1e6 for e in entries if "__REALTIME_TIMESTAMP" in e), default=0.0)
+
+    def asked():
+        machine.succeed("journalctl --sync")
+        return len(journal_entries("-u burrow-units-watch.service", "asked for a pass"))
+
+    def wait_for_units_idle():
+        # Wait until every prior failure/coredump has been asked for by the
+        # watcher, any resulting pass in burrow-events (held up to its 20s
+        # gap) has run, and burrow-units.service has exited.
+        def idle(_last_try):
+            machine.succeed("journalctl --sync")
+            t_event = last_ts(journal_entries(pass_events))
+            asks = journal_entries("-u burrow-units-watch.service", "asked for a pass")
+            t_ask = last_ts(asks)
+            if t_ask == 0.0 or t_ask < t_event:
+                return False
+            starts = [
+                e for e in journal_entries("-u burrow-events.service")
+                if e.get("MESSAGE") == "units: full pass"
+            ]
+            done = journal_entries("_PID=1 UNIT=burrow-units.service MESSAGE_ID=7ad2d189f7e94e70a38c781354912448")
+            t_pass = last_ts(starts)
+            if t_pass == 0.0 or last_ts(done) < t_pass:
+                return False
+            if machine.succeed("systemctl show -P ActiveState burrow-units.service").strip() != "inactive":
+                return False
+            if t_pass > t_ask + 1.0:
+                return True
+            if abs(t_pass - t_ask) <= 1.0:
+                t_now = float(machine.succeed("date +%s.%N").strip())
+                return t_now > t_pass + 25.0
+            return False
+
+        retry(idle, timeout_seconds=120)
+
+    machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("burrow-events.service")
     machine.wait_for_open_port(8788)
     machine.wait_for_unit("burrow-units-watch.service")
@@ -102,8 +166,9 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("systemctl show -p OnFailure --value broken.service").strip() == ""
 
     with subtest("a failed unit is in its watch file, and the watchdog is kicked"):
-        # The watcher asks for a pass as it starts.
+        # The watcher asks for a pass as it starts; wait for both startup passes.
         machine.wait_until_succeeds(f"test -e {watch_file}", timeout=120)
+        machine.wait_until_succeeds("[ $(wc -l </var/lib/watchdog-kicks/kicks 2>/dev/null || echo 0) -ge 1 ]", timeout=60)
         before = kicks()
         machine.fail("systemctl start broken.service")
         machine.wait_until_succeeds(f"grep -q unit:broken.service {watch_file}", timeout=120)
@@ -113,17 +178,16 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"[ $(wc -l </var/lib/watchdog-kicks/kicks) -gt {before} ]", timeout=60)
 
     with subtest("a unit that wasn't failed starting and succeeding asks for no pass"):
-        def asked():
-            return int(machine.succeed("journalctl -b -u burrow-units-watch.service -o cat | grep -c 'asked for a pass' || true").strip())
-        # What the failure's pass set off (the watchdog's kick) settles first.
-        machine.succeed("sleep 5")
+        # What the failure set off (any ask queued behind burrow-events' gap) settles first.
+        wait_for_units_idle()
         before, asks = json.loads(machine.succeed(f"cat {watch_file}"))["at"], asked()
         machine.succeed("systemctl start fine.service")
         machine.succeed("sleep 5")
         machine.succeed("systemctl start fine.service")
         machine.succeed("sleep 5")
         assert asked() == asks, (asks, asked())
-        assert json.loads(machine.succeed(f"cat {watch_file}"))["at"] == before
+        after = json.loads(machine.succeed(f"cat {watch_file}"))["at"]
+        assert after == before, (before, after)
 
     with subtest("a program that dumps core is in it too, whoever ran it, but a build's, a job's or a work tree's"):
         # A build user's crash fails its build, and a job's is the job's:
@@ -150,6 +214,9 @@ pkgs.testers.runNixOSTest {
         # dev can't read root's crashes itself, so they stay only if the
         # pass that follows its clear is the service's.
         assert root[len("core:"):] not in machine.succeed("su - dev -c 'coredumpctl list --no-pager --json=short' 2>&1 || true")
+        # Any crash burst's pass queued in burrow-events finishes before we
+        # assert a refused user pass leaves watch.json untouched.
+        wait_for_units_idle()
         # And a pass of its own, which would drop them, it's refused.
         before = machine.succeed(f"cat {watch_file}")
         machine.fail("su - dev -c 'burrow-units pass'")
