@@ -26,6 +26,8 @@ let
         proofRuns.gate = "make check"; proofBuilds.vm = "checks.x86_64-linux.vm";
       };
       burrow.github.machinery = lib.mkIf (!machinery) (lib.mkForce null);
+      # A stage label renamed: the flow's must follow it, not Conary's default.
+      burrow.autoland.labels.waiting.ci.name = "waiting: checks";
     }];
   }).config;
   machine = base true;
@@ -60,6 +62,15 @@ let
     }];
   }).config;
   failed = map (a: a.message) (lib.filter (a: !a.assertion) taken.assertions);
+  # The flow's label for each of its stages (Conary's StageLabels, by its
+  # keys) is burrow's own for that stage (autoland/labels.nix), so the flow
+  # puts on the labels the steward and proj read.
+  stageLabels = let w = machine.burrow.autoland.labels.waiting; in {
+    review = w.review.name; fix = w.fix.name; ci = w.ci.name;
+    proof_slot = w.proofSlot.name; proof = w.proof.name;
+    release_age = w.releaseAge.name; train = w.train.name;
+    merge = w.merge.name; owner = w.owner.name; base = w.base.name;
+  };
   uncontrolled = builtins.tryEval (builtins.deepSeq (machine.burrow.ledger.flow.producer "x") true);
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
@@ -67,7 +78,7 @@ let
     settings = [ "bot_emails" "flow_authors" "handoff_after" "hold_label" "hold_stall_after"
       "job_login" "job_timeout" "judge_engines" "major_key_file" "owner_label" "people" "priority_labels" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_sweep" "require_ci"
-      "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
+      "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stage_labels" "stall_after"
       "train" "train_size" "train_stall_after" "verdict_authors" ];
   };
   # Every key a config has: all of Settings' but the seal keys (the
@@ -126,6 +137,11 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   ${lib.concatMapStrings (w: "fail 'a Conary file set by hand beside the rendered ones is not refused: ${w}'\n") unrefused}
   [ "$(cd ${configs} && find . -type l -o -type f | sort | tr '\n' ' ')" = "./sam/homelab.json ./sam/plain.json " ] \
     || fail "configs aren't each shadowed repo's, lowercased: $(cd ${configs} && find . -type l -o -type f)"
+  for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
+    jq -e --argjson l '${builtins.toJSON stageLabels}' \
+      '.settings.stage_labels == $l and $l.ci == "waiting: checks" and $l.owner == "waiting: Sam"' $f >/dev/null \
+      || fail "$f's stage labels aren't burrow's: $(jq -c .settings.stage_labels $f)"
+  done
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
     jq -e --argjson k '${builtins.toJSON keys}' '
       (keys == $k.top) and (.settings | keys == $k.settings)
