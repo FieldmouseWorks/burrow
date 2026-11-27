@@ -152,85 +152,9 @@ pub fn rewrite(agents: &[u8], house: &House) -> Rewritten {
 /// untouched rather than injecting a contradictory P1 rule.
 fn place_review(text: &[u8], review: &Block) -> Option<Vec<u8>> {
     let lines: Vec<&[u8]> = text.split_inclusive(|&b| b == b'\n').collect();
-    let mut headings = Vec::new();
-    let mut i = 0;
-    let mut fence: Option<u8> = None;
-    while i < lines.len() {
-        let line = bare(lines[i]);
-        if fence.is_none()
-            && let Some(name) = begin_name(line)
-        {
-            let name = String::from_utf8_lossy(name);
-            if let Some(end) = (i + 1..lines.len())
-                .find(|&j| marker(bare(lines[j])))
-                .filter(|&j| ends(bare(lines[j]), &name))
-            {
-                i = end + 1;
-                continue;
-            }
-        }
-        if let Some(ch) = fence_marker(line) {
-            match fence {
-                None => fence = Some(ch),
-                Some(open) if open == ch => fence = None,
-                Some(_) => {}
-            }
-            i += 1;
-            continue;
-        }
-        if fence.is_none() && line == b"## Code Review Rules" {
-            headings.push(i);
-        }
-        i += 1;
-    }
-    let [h] = headings.as_slice() else {
-        return None;
-    };
-    let h = *h;
-    let mut sec_end = lines.len();
-    let mut j = h + 1;
-    let mut sec_fence: Option<u8> = None;
-    while j < lines.len() {
-        let line = bare(lines[j]);
-        if let Some(ch) = fence_marker(line) {
-            match sec_fence {
-                None => sec_fence = Some(ch),
-                Some(open) if open == ch => sec_fence = None,
-                Some(_) => {}
-            }
-            j += 1;
-            continue;
-        }
-        if sec_fence.is_none() && (line.starts_with(b"## ") || line == b"##") {
-            sec_end = j;
-            break;
-        }
-        j += 1;
-    }
-    // Locate the four common P1 lines inside the section (outside fences).
-    let mut bullets = None;
-    let mut k = h + 1;
-    let mut body_fence: Option<u8> = None;
-    while k + COMMON_REVIEW_P1.len() <= sec_end {
-        let line = bare(lines[k]);
-        if let Some(ch) = fence_marker(line) {
-            match body_fence {
-                None => body_fence = Some(ch),
-                Some(open) if open == ch => body_fence = None,
-                Some(_) => {}
-            }
-            k += 1;
-            continue;
-        }
-        if body_fence.is_none()
-            && (0..COMMON_REVIEW_P1.len()).all(|m| bare(lines[k + m]) == COMMON_REVIEW_P1[m])
-        {
-            bullets = Some(k);
-            break;
-        }
-        k += 1;
-    }
-    let bullets = bullets?;
+    let h = find_review_heading(&lines)?;
+    let sec_end = find_section_end(&lines, h);
+    let bullets = find_common_review_p1(&lines, h + 1, sec_end)?;
     let tail = bullets + COMMON_REVIEW_P1.len();
 
     let mut intro_start = h + 1;
@@ -273,6 +197,84 @@ fn place_review(text: &[u8], review: &Block) -> Option<Vec<u8>> {
         }
     }
     Some(next)
+}
+
+fn toggle_fence(fence: &mut Option<u8>, line: &[u8]) -> bool {
+    let Some(ch) = fence_marker(line) else {
+        return false;
+    };
+    match *fence {
+        None => *fence = Some(ch),
+        Some(open) if open == ch => *fence = None,
+        Some(_) => {}
+    }
+    true
+}
+
+fn find_review_heading(lines: &[&[u8]]) -> Option<usize> {
+    let mut headings = Vec::new();
+    let mut i = 0;
+    let mut fence = None;
+    while i < lines.len() {
+        let line = bare(lines[i]);
+        if fence.is_none()
+            && let Some(name) = begin_name(line)
+        {
+            let name = String::from_utf8_lossy(name);
+            if let Some(end) = (i + 1..lines.len())
+                .find(|&j| marker(bare(lines[j])))
+                .filter(|&j| ends(bare(lines[j]), &name))
+            {
+                i = end + 1;
+                continue;
+            }
+        }
+        if toggle_fence(&mut fence, line) {
+            i += 1;
+            continue;
+        }
+        if fence.is_none() && line == b"## Code Review Rules" {
+            headings.push(i);
+        }
+        i += 1;
+    }
+    let [h] = headings.as_slice() else {
+        return None;
+    };
+    Some(*h)
+}
+
+fn find_section_end(lines: &[&[u8]], heading: usize) -> usize {
+    let mut fence = None;
+    for (j, raw) in lines.iter().enumerate().skip(heading + 1) {
+        let line = bare(raw);
+        if toggle_fence(&mut fence, line) {
+            continue;
+        }
+        if fence.is_none() && (line.starts_with(b"## ") || line == b"##") {
+            return j;
+        }
+    }
+    lines.len()
+}
+
+fn find_common_review_p1(lines: &[&[u8]], start: usize, end: usize) -> Option<usize> {
+    let mut fence = None;
+    let mut k = start;
+    while k + COMMON_REVIEW_P1.len() <= end {
+        let line = bare(lines[k]);
+        if toggle_fence(&mut fence, line) {
+            k += 1;
+            continue;
+        }
+        if fence.is_none()
+            && (0..COMMON_REVIEW_P1.len()).all(|m| bare(lines[k + m]) == COMMON_REVIEW_P1[m])
+        {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
 }
 
 fn fence_marker(line: &[u8]) -> Option<u8> {
