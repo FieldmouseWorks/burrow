@@ -2,7 +2,8 @@
 
 The gate is the CI every repo's flake runs: the shared workflow
 (`.github/workflows/flake-check.yml`), the runner it starts
-(`crates/burrow-flake-check`) and the builds it keeps between runs. It grew
+(`crates/burrow-flake-check`) and the shared build store it substitutes from and
+uploads to. It grew
 one speed-up at a time and never had a design; this is it: what the gate is,
 why it thrashes, the shape it is moving to, where its line with Conary runs,
 and the stages that get it there with CI running. The stages and every open
@@ -22,9 +23,9 @@ One question, asked of a tree: do its checks pass? Around it:
   outputs, evaluates each in a process of its own, builds the checks and
   runs a PR's negative. The workflow compiles it on the runner with bare
   `rustc`, so it has no dependencies and shells out to `jq`.
-- **The kept builds.** `burrow-keep` (about 1,500 lines) and
-  `burrow-flake-wait`, both built with cargo on the runner, save what a
-  default-branch push built into the Actions cache and wait for it.
+- **The build store.** `burrow-keep` (`burrow-keep-upload`, built with cargo on
+  the runner) uploads what a door-authorized leg built to the shared Nix binary
+  cache (`BURROW_BUILDS_URL`), and every Nix-installing job substitutes from it.
 - **Beside them.** `heavy` (the machine's build slots), `flaky` (one more
   try and a quarantine, [flaky tests](flaky-tests.md)), `flake-gate` (the
   gate step, run locally), and `burrow-workflows` (about 8,100 lines that
@@ -38,13 +39,14 @@ attestations, and the machine, which builds what a hosted runner can't (the
 
 ## How it works today
 
-- **A hosted runner starts with an empty store.** Everything no public
-  cache has is built again: the packages burrow patches, and every check,
-  changed or not.
-- **So a push to the default branch keeps its builds**, one Actions cache
-  entry per leg, keyed by workflow, OS, leg and commit. A later run's leg
-  restores the newest entry of the same leg, whole, before Nix is
-  installed. The negative run restores every leg's.
+- **A hosted runner starts with an empty store and substitutes from the build
+  store** (`BURROW_BUILDS_URL`, `BURROW_BUILDS_PUBLIC_KEY`) when configured,
+  falling back to building cold and reporting `degraded/builds` (or
+  `degraded/builds-fallback` if it fails mid-run) when the store is
+  unreachable.
+- **Every door-authorized leg uploads what it built** (`soft/builds-write`)
+  after its gate runs, so later runs on any branch find those derivations in
+  the store instead of waiting on a default-branch cache entry.
 - **Legs share a gate out by name.** Every leg evaluates the plan, then the
   outputs whose names hash to it, then builds the checks among them. One
   more job checks that the legs agree and attests them together.
@@ -329,7 +331,8 @@ The rules the stages keep:
 Stage 0 (#937, #979) and stage 1 (#986, #988, #989) have landed. Every job
 that installs Nix substitutes from the build store named by the repo's or
 organization's Actions variables (`BURROW_BUILDS_URL`,
-`BURROW_BUILDS_PUBLIC_KEY`), reporting `degraded/builds` and building cold
+`BURROW_BUILDS_PUBLIC_KEY`), reporting `degraded/builds` (or
+`degraded/builds-fallback` on a mid-run substituter failure) and building cold
 when the store is unreachable; each leg uploads what it built after its gate
 runs, and the attested result's `gate` field names the store. The kept
 builds, the wait (`burrow-flake-wait`, `run.sh wait`, `cold`) and

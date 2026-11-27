@@ -66,8 +66,9 @@ fn refuses_unreported_soft_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    // The build store's probe (`soft/builds`) and upload (`soft/builds-write`).
-    assert_eq!(unreported(&old).len(), 2);
+    // The build store's probe (`soft/builds`), upload (`soft/builds-write`),
+    // and mid-run fallback check (`soft/builds-fallback`).
+    assert_eq!(unreported(&old).len(), 3);
 }
 
 #[test]
@@ -80,8 +81,11 @@ fn reporters_fire_only_when_their_soft_step_fails() {
         ("reuse", "lookup", "gate-reuse"),
         ("check", "builds", "builds"),
         ("check", "builds-write", "builds-write"),
+        ("check", "builds-fallback", "builds-fallback"),
         ("docs", "builds", "builds"),
+        ("docs", "builds-fallback", "builds-fallback"),
         ("negative", "builds", "builds"),
+        ("negative", "builds-fallback", "builds-fallback"),
     ] {
         let job = &flow["jobs"][job_name];
         let reporter = steps(job)

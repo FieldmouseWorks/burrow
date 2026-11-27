@@ -197,11 +197,12 @@ fn every_job_that_installs_nix_substitutes_from_the_store_with_no_restore_step()
             "{name}"
         );
 
-        // Either variable empty: no probe, no substituter.
+        // Either variable empty: no probe, no substituter, no upload.
         for (u, k) in [("", ""), (URL, ""), ("", KEY)] {
             let mut off = ctx_for(job, "pull_request", PR, Some("owner/repo"), true, u, k);
             let did = ran(job, &off, &BTreeMap::new());
             assert!(!did.iter().any(|l| l == "builds"), "{name} {u} {k}");
+            assert!(!did.iter().any(|l| l == "builds-write"), "{name} {u} {k}");
             off.insert("steps.builds.outcome".into(), "skipped".into());
             assert!(nix_config_lines(job, &off).is_empty(), "{name} {u} {k}");
         }
@@ -517,4 +518,93 @@ fn no_actions_cache_or_kept_builds_in_workflows() {
             );
         }
     }
+}
+
+/// When `soft/builds` passed so Nix configured `fallback = true`, a mid-run
+/// substituter failure recorded in the job's log fails `soft/builds-fallback`
+/// and runs `degraded/builds-fallback`.
+#[test]
+fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
+    let wf = wf();
+    let check = &wf["jobs"]["check"];
+    let fallback = step(check, "builds-fallback");
+    assert_eq!(fallback["continue-on-error"], true);
+    assert_eq!(fallback["name"], "soft/builds-fallback");
+
+    let s = Scratch::default();
+    let log = s.join("flake.log");
+    write(&log, "building '/nix/store/abc-foo.drv'...\n");
+    let ok = s.bash(
+        script(fallback),
+        s.path(),
+        &[("BUILDS", URL), ("LOG", log.to_str().unwrap())],
+    );
+    assert_eq!(ok.code, 0, "clean log failed: {}", ok.said());
+
+    for (case, line) in [
+        (
+            "disabled-cache",
+            format!("disabling binary cache '{URL}' for 60 seconds\n"),
+        ),
+        (
+            "unable-to-download",
+            format!("error: unable to download '{URL}/abc.narinfo': HTTP error 503\n"),
+        ),
+        (
+            "untrusted-substitute",
+            format!(
+                "warning: ignoring substitute for '/nix/store/abc-foo' from '{URL}', as it's not signed\n"
+            ),
+        ),
+        (
+            "falling-back",
+            "warning: falling back to building '/nix/store/abc-foo'\n".to_owned(),
+        ),
+    ] {
+        write(&log, &line);
+        let failed = s.bash(
+            script(fallback),
+            s.path(),
+            &[("BUILDS", URL), ("LOG", log.to_str().unwrap())],
+        );
+        assert_ne!(failed.code, 0, "{case} passed builds-fallback");
+    }
+
+    // Runs in check, docs, and negative only when soft/builds succeeded and
+    // the build step ran; degraded/builds-fallback runs on failure.
+    for name in ["check", "docs", "negative"] {
+        let job = &wf["jobs"][name];
+        let mut c = ctx_for(job, "pull_request", PR, Some("owner/repo"), true, URL, KEY);
+        if name == "negative" {
+            c.insert("steps.paths.outputs.needs".into(), "true".into());
+        }
+        let did = ran(job, &c, &BTreeMap::from([("builds-fallback", "failure")]));
+        assert!(
+            did.iter().any(|l| l == "builds-fallback"),
+            "{name}: {did:?}"
+        );
+        assert!(
+            did.iter().any(|l| l == "degraded/builds-fallback"),
+            "{name}: {did:?}"
+        );
+
+        let skipped = ran(job, &c, &BTreeMap::from([("builds", "failure")]));
+        assert!(
+            !skipped.iter().any(|l| l == "builds-fallback"),
+            "{name} ran builds-fallback after probe failed: {skipped:?}"
+        );
+    }
+
+    let reporter = steps(check)
+        .iter()
+        .find(|s| s["name"] == "degraded/builds-fallback")
+        .unwrap();
+    let summary = s.join("summary");
+    let reported = s.bash(
+        script(reporter),
+        s.path(),
+        &[("GITHUB_STEP_SUMMARY", summary.to_str().unwrap())],
+    );
+    assert_eq!(reported.code, 0, "{}", reported.said());
+    assert_eq!(read(&summary), "degraded/builds-fallback\n");
 }

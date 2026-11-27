@@ -708,7 +708,7 @@ jobs:
       # degradation, nothing more.
       - id: builds-write
         name: soft/builds-write
-        if: ${{ !cancelled() && vars.BURROW_BUILDS_URL != '' && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && steps.tools.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ !cancelled() && vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && steps.tools.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         continue-on-error: true
         timeout-minutes: 30
         shell: bash
@@ -726,6 +726,35 @@ jobs:
         if: ${{ always() && steps.builds-write.outcome == 'failure' }}
         shell: bash
         run: echo 'degraded/builds-write' >> "$GITHUB_STEP_SUMMARY"
+      # If soft/builds passed, Nix configured fallback = true on the build
+      # store; record a degradation if Nix fell back to building cold
+      # mid-run because the store failed during substitution.
+      - id: builds-fallback
+        name: soft/builds-fallback
+        if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BUILDS: ${{ vars.BURROW_BUILDS_URL }}
+          LOG: ${{ runner.temp }}/flake.log
+        run: &builds-fallback |
+          [ -f "$LOG" ] || exit 0
+          url=${BUILDS%/}
+          if grep -Fq "disabling binary cache '$url'" "$LOG" \
+              || grep -Fq "unable to download '$url/" "$LOG" \
+              || grep -Eq "substitution of .* failed|falling back to building" "$LOG"; then
+            echo "substituter $url failed during the build; Nix fell back to building cold"
+            exit 1
+          fi
+          if grep -Fq "ignoring substitute for " "$LOG" && grep -Fq "from '$url'" "$LOG"; then
+            echo "substituter $url served an untrusted substitute; Nix fell back to building cold"
+            exit 1
+          fi
+      - &builds-fallback-degraded
+        name: degraded/builds-fallback
+        if: ${{ always() && steps.builds-fallback.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/builds-fallback' >> "$GITHUB_STEP_SUMMARY"
       # gate-reuse's hit: every step above skipped, so nothing was built or
       # attested, and the gate passed as it did in the run named.
       - &reused
@@ -874,6 +903,7 @@ jobs:
         env:
           CHECKS: ${{ inputs.docs-checks }}
         run: |
+          set -eo pipefail
           if [ -z "$CHECKS" ]; then
             echo "no check reads the documentation, so there's nothing to build"
             exit 0
@@ -881,7 +911,21 @@ jobs:
           system=$(nix config show system)
           targets=()
           for c in $CHECKS; do targets+=(".#checks.$system.$c"); done
-          nix build -L --no-link --keep-going "${targets[@]}"
+          if [ -n "${RUNNER_TEMP:-}" ]; then
+            nix build -L --no-link --keep-going "${targets[@]}" 2>&1 | tee "$RUNNER_TEMP/docs.log"
+          else
+            nix build -L --no-link --keep-going "${targets[@]}"
+          fi
+      - id: builds-fallback
+        name: soft/builds-fallback
+        if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BUILDS: ${{ vars.BURROW_BUILDS_URL }}
+          LOG: ${{ runner.temp }}/docs.log
+        run: *builds-fallback
+      - *builds-fallback-degraded
   # A PR's new tests on its base's code, where they have to fail (Conary's
   # docs/ci-attestation.md, "Negative runs", says what and why). Every PR
   # gets one, whatever its lane, a train repo's too, whose PRs otherwise run
@@ -954,6 +998,16 @@ jobs:
           PATHS_ONLY: 'false'
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
         run: bash "$TOOLS/negative.sh"
+      - id: builds-fallback
+        name: soft/builds-fallback
+        if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.negative.outcome == 'success' || steps.negative.outcome == 'failure') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BUILDS: ${{ vars.BURROW_BUILDS_URL }}
+          LOG: ${{ runner.temp }}/negative.log
+        run: *builds-fallback
+      - *builds-fallback-degraded
       # What it found, signed as the gate's result is (subject, above), with
       # the subject `conary negative v1`: the PR's revision, under a name of
       # its own, so a negative is never read as the revision's gate result.

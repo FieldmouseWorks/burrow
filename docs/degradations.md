@@ -19,7 +19,9 @@ The build store's reachability probe (`soft/builds`, before Nix is installed,
 in `flake-check.yml`) degrades (`degraded/builds`) when the store named by
 `BURROW_BUILDS_URL` / `BURROW_BUILDS_PUBLIC_KEY` cannot be reached or does
 not answer as a Nix binary cache: the job skips adding it as a substituter
-and builds cold. Its upload (`soft/builds-write`, after the gate, in
+and builds cold. If the probe passes and Nix later falls back to building cold
+because the store failed during substitution, `soft/builds-fallback` degrades
+(`degraded/builds-fallback`). Its upload (`soft/builds-write`, after the gate, in
 `flake-check.yml`) degrades (`degraded/builds-write`) when the store can't
 be written: it doesn't answer, it fails, or it takes longer than the step's
 deadline. A store whose door refuses the job isn't degraded: who may write
