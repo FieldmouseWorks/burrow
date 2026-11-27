@@ -638,3 +638,82 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'])
         assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
     print('yielded passes and failed reads preserve deferred digest notices: passed')
+
+    # A PR whose step hits the pass remote deadline or a transient
+    # C.Unavailable is not marked as failing in watch.json and keeps no done
+    # receipt, so its continuation or retry revisits it.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        old = dict(repo='sam/r', what='sam/r#1', link='https://github.com/sam/r/pull/1',
+                   phase='Waiting for Codex', since=10, due=7210, kick='autoland/sam/r', claude=False, rev='head-1 main')
+        C.save('watch.json', {'at': 10, 'items': {'sam/r#1': old}})
+
+        def cut_first(repo, p, *args):
+            if p['number'] == 1:
+                clock[0] += C.PASS_SECONDS
+                raise C.Unavailable('nix-store timed out after 1 seconds')
+            handled.append((p['number'], facts['local'], None))
+
+        with C.pass_deadline(C.PASS_SECONDS), patch.object(S.step, 'handle', cut_first):
+            S.run_pass(['sam/r'])
+        assert C.load('watch.json', {})['items']['sam/r#1'] == old, C.load('watch.json', {})
+        assert '1' not in C.load('pass-progress.json', {})['repos'].get('sam/r', {}).get('done', {})
+        assert C.load('continue.json', {})['sam/r'] == C.NOW + 1
+        C.WAKE.clear()
+        S.run_pass(['sam/r'], continuing=True)
+        assert set(n for n, *_ in handled) == {1, 2}, handled
+        assert C.load('pass-progress.json', {})['repos'] == {}
+
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        steps = []
+
+        def transient_first(repo, p, *args):
+            if p['number'] == 1:
+                raise C.Unavailable('gh api: HTTP 502')
+            handled.append((p['number'], facts['local'], None))
+
+        with patch.object(S.T, 'step', steps.append):
+            with patch.object(S.step, 'handle', transient_first):
+                S.run_pass(['sam/r'])
+            assert 'sam/r#1' not in C.load('watch.json', {})['items'], C.load('watch.json', {})
+            assert [n for n, *_ in handled] == [2], handled
+            assert steps == [], steps
+            assert '1' not in C.load('pass-progress.json', {})['repos'].get('sam/r', {}).get('done', {})
+            assert C.load('wake.json', {})['sam/r'] == C.NOW + 5 * 60
+            C.WAKE.clear()
+            C.NOW += 5 * 60
+            S.run_pass(['sam/r'], continuing=True)
+        assert set(n for n, *_ in handled) == {1, 2}, handled
+        assert steps == ['sam/r'], steps
+        assert C.load('pass-progress.json', {})['repos'] == {}
+
+    # A PR aborted by C.Unavailable (deadline yield or transient) preserves its
+    # prior digest notice and drops partial digest lines from the aborted step
+    # until its continuation or retry finishes it cleanly.
+    for deadline in (True, False):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            pr1_old = ('Open over a day', '[sam/r#1](https://github.com/sam/r/pull/1) 1', 'waiting')
+            pr2_old = ('Open over a day', '[sam/r#2](https://github.com/sam/r/pull/2) 2', 'waiting')
+            partial_note = ('Partial', '[sam/r#1](https://github.com/sam/r/pull/1) 1', 'aborted')
+            C.save('digest-repos.json', {'sam/r': [list(pr1_old), list(pr2_old)]})
+
+            def fail_first(repo, p, info, mine, *args):
+                if p['number'] == 1:
+                    mine.append(partial_note)
+                    if deadline:
+                        clock[0] += C.PASS_SECONDS
+                        raise C.Unavailable('nix-store timed out after 1 seconds')
+                    raise C.Unavailable('gh api: HTTP 502')
+                handled.append((p['number'], facts['local'], None))
+
+            ctx = C.pass_deadline(C.PASS_SECONDS) if deadline else ExitStack()
+            with ctx, patch.object(S.step, 'handle', fail_first):
+                S.run_pass(['sam/r'])
+            saved = [tuple(x) for x in C.load('digest-repos.json', {})['sam/r']]
+            expected = {pr1_old, pr2_old} if deadline else {pr1_old}
+            assert set(saved) == expected, (deadline, saved)
+            C.WAKE.clear()
+            if not deadline:
+                C.NOW += 5 * 60
+            S.run_pass(['sam/r'], continuing=True)
+            assert C.load('digest-repos.json', {})['sam/r'] == [], (deadline, C.load('digest-repos.json', {}))
+    print('Unavailable in step.handle yields or retries without failing the PR: passed')
