@@ -258,6 +258,10 @@ P.begin("sam/r", {1, 2})
 st2_lost = line(2, 900)
 assert "can't be worked out here yet" in st2_lost and pr_state(2)["strikes"] == {"eval": 1}, (st2_lost, pr_state(2))
 assert "proofEval" not in pr_state(2) and pr_state(2)["proofOutputs"]["paths"] is None, pr_state(2)
+# Repeated passes during EVAL_RETRY cooldown must not increment the eval strike.
+P.begin("sam/r", {1, 2})
+st2_cooldown = line(2, 960)
+assert "can't be worked out here yet" in st2_cooldown and pr_state(2)["strikes"] == {"eval": 1}, (st2_cooldown, pr_state(2))
 # Past EVAL_RETRY, starts a fresh eval unit.
 P.begin("sam/r", {1, 2})
 st2_retry = line(2, 900 + P.EVAL_RETRY * 60)

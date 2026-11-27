@@ -464,11 +464,18 @@ class Actions:
             return
         if builds and outs is None:
             # Nothing to build without its derivations: tried again on a
-            # later pass (outputs).
-            self.strike("eval")
+            # later pass (outputs). Count one strike per failed eval, not
+            # every unrelated pass during its EVAL_RETRY cooldown.
+            failed_at = (self.st.get("proofOutputs") or {}).get("at")
+            if failed_at is None or self.st.get("evalStruckAt") != failed_at:
+                self.st["evalStruckAt"] = failed_at
+                self.strike("eval")
+            else:
+                C.wake(self.repo, failed_at + P.EVAL_RETRY * C.MIN + 1)
             self.settle("pending", f"Settled, but what {names} builds can't be worked out here yet"[:140], stage=S.PROOF)
             return
         if builds:
+            self.st.pop("evalStruckAt", None)
             self.cleared("eval")
         free = False
         # One whose next step is failing the PR (again) needs no slot.

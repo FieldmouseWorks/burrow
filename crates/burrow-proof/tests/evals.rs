@@ -355,3 +355,64 @@ fn resumed_eval_clears_policy_restoring_and_finishes_done() {
     assert_eq!(said["state"], "done", "{said}");
     assert_eq!(said["paths"], json!([out_path]));
 }
+
+#[test]
+fn eval_with_heavy_omits_runtime_max_sec_and_times_out_in_work() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let nix = tmp.path().join("nix");
+    fs::create_dir_all(&nix).unwrap();
+    write_exec(&nix.join("nix"), "#!/bin/sh\nsleep 5\n");
+    write_exec(&nix.join("nix-store"), "#!/bin/sh\nexit 0\n");
+
+    let dir = tmp.path().join("eval-heavy-timeout");
+    fs::create_dir_all(&dir).unwrap();
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let heavy = tmp.path().join("heavy");
+    write_exec(&heavy, "#!/bin/sh\nexit 0\n");
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-heavy-timeout.service".into(),
+        timeout: 1,
+        nix,
+        git: which("git"),
+        heavy: Some(heavy),
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+
+    // Waiting in heavy must not be bounded by RuntimeMaxSec.
+    let srun = tmp.path().join("systemd-run");
+    let captured = tmp.path().join("srun.args");
+    write_exec(
+        &srun,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+            captured.display()
+        ),
+    );
+    let fake_exe = tmp.path().join("burrow-proof");
+    write_exec(&fake_exe, "#!/bin/sh\nexit 0\n");
+    start(&dir, &fake_exe, &srun).unwrap();
+    let args = fs::read_to_string(&captured).unwrap();
+    assert!(
+        !args.contains("RuntimeMaxSec"),
+        "heavy-queued eval unit must not set RuntimeMaxSec: {args}"
+    );
+
+    // work() enforces rec.timeout once running and end() reports timed out.
+    let err = work(&dir).unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+    let said = end(&dir, &ended("failed", "exited", "1")).unwrap();
+    assert_eq!(said["state"], "timed out", "{said}");
+    assert_eq!(said["failed"], true, "{said}");
+}
