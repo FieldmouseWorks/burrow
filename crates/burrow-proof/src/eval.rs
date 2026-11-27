@@ -16,11 +16,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -422,60 +421,21 @@ fn run_nix(ctx: &WorkCtx<'_>, tool: &str, args: &[&str]) -> Result<String, Strin
 }
 
 fn run_cmd_deadline(ctx: &WorkCtx<'_>, cmd: &mut Command, label: &str) -> Result<Output, String> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{label}: {e}"))?;
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    thread::scope(|s| {
-        let read_out = s.spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(ref mut p) = out_pipe {
-                let _ = p.read_to_end(&mut buf);
+    const MAX_OUTPUT: usize = 4 * 1024 * 1024;
+    match burrow_process::output(cmd, None, ctx.deadline, MAX_OUTPUT) {
+        Ok(out) => Ok(out),
+        Err(why) => {
+            if Instant::now() >= ctx.deadline || why.contains("time limit") {
+                let _ = fs::write(ctx.dir.join(TIMED_OUT), b"");
+                note(
+                    ctx.log,
+                    &format!("eval timed out after {}s", ctx.rec.timeout),
+                );
+                return Err(format!("timed out after {}s", ctx.rec.timeout));
             }
-            buf
-        });
-        let read_err = s.spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(ref mut p) = err_pipe {
-                let _ = p.read_to_end(&mut buf);
-            }
-            buf
-        });
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if Instant::now() >= ctx.deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let _ = fs::write(ctx.dir.join(TIMED_OUT), b"");
-                        note(
-                            ctx.log,
-                            &format!("eval timed out after {}s", ctx.rec.timeout),
-                        );
-                        return Err(format!("timed out after {}s", ctx.rec.timeout));
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("{label}: {e}"));
-                }
-            }
-        };
-        let stdout = read_out.join().unwrap_or_default();
-        let stderr = read_err.join().unwrap_or_default();
-        Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
-    })
+            Err(format!("{label}: {why}"))
+        }
+    }
 }
 
 fn quote_path(path: &str) -> String {

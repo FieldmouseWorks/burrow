@@ -362,7 +362,9 @@ fn eval_with_heavy_omits_runtime_max_sec_and_times_out_in_work() {
     let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
     let nix = tmp.path().join("nix");
     fs::create_dir_all(&nix).unwrap();
-    write_exec(&nix.join("nix"), "#!/bin/sh\nsleep 5\n");
+    // Spawn a descendant that keeps stdout/stderr open to verify deadline
+    // reaping kills the process group without blocking on pipe EOF.
+    write_exec(&nix.join("nix"), "#!/bin/sh\nsleep 30 &\nsleep 5\n");
     write_exec(&nix.join("nix-store"), "#!/bin/sh\nexit 0\n");
 
     let dir = tmp.path().join("eval-heavy-timeout");
