@@ -1,50 +1,11 @@
-//! The machine's nix, as burrow-keep has it read the store and write the
-//! cache: `nix` and `nix-store` on PATH, on the store nix's config names.
+//! Reading the local Nix store via `nix path-info`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::path::Path;
+use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::{Info, Nix, Store};
-
-pub struct Real;
-
-/// Derivations per `nix-store --query --outputs`, well inside what a
-/// command line holds.
-const CHUNK: usize = 1000;
-
-/// Run it, with this on its stdin: what it printed, or why it failed.
-fn run(cmd: &mut Command, input: &str) -> Result<Vec<u8>, String> {
-    let what = format!("{cmd:?}");
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("{what}: {e}"))?;
-    let mut stdin = child.stdin.take().expect("a piped stdin");
-    stdin
-        .write_all(input.as_bytes())
-        .map_err(|e| format!("{what}: {e}"))?;
-    drop(stdin);
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("{what}: {e}"))?;
-    if out.status.success() {
-        Ok(out.stdout)
-    } else {
-        Err(format!("{what}: {}", out.status))
-    }
-}
-
-fn nix() -> Command {
-    let mut cmd = Command::new("nix");
-    cmd.args(["--extra-experimental-features", "nix-command"]);
-    cmd
-}
+use crate::{Info, Store};
 
 /// The store from `nix path-info --all --json --json-format 2`.
 pub fn parse_store(json: &[u8]) -> Result<Store, String> {
@@ -101,37 +62,27 @@ pub fn parse_store(json: &[u8]) -> Result<Store, String> {
     Ok(Store { dir, paths })
 }
 
-impl Nix for Real {
-    fn store(&self) -> Result<Store, String> {
-        let out = run(
-            nix().args(["path-info", "--all", "--json", "--json-format", "2"]),
-            "",
-        )?;
-        parse_store(&out)
+/// Reads the local store on PATH as `nix path-info` sees it.
+pub fn store() -> Result<Store, String> {
+    let mut cmd = Command::new("nix");
+    cmd.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "path-info",
+        "--all",
+        "--json",
+        "--json-format",
+        "2",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit());
+    let what = format!("{cmd:?}");
+    let out = cmd.output().map_err(|e| format!("{what}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{what}: {}", out.status));
     }
-
-    fn outputs(&self, drvs: &[String]) -> Result<BTreeSet<String>, String> {
-        let mut made = BTreeSet::new();
-        for chunk in drvs.chunks(CHUNK) {
-            let out = run(
-                Command::new("nix-store")
-                    .args(["--query", "--outputs"])
-                    .args(chunk),
-                "",
-            )?;
-            made.extend(String::from_utf8_lossy(&out).lines().map(str::to_owned));
-        }
-        Ok(made)
-    }
-
-    fn copy(&self, paths: &[String], to: &Path) -> Result<(), String> {
-        let to = format!("file://{}?compression=none", to.display());
-        run(
-            nix().args(["copy", "--to", &to, "--stdin"]),
-            &paths.join("\n"),
-        )
-        .map(drop)
-    }
+    parse_store(&out.stdout)
 }
 
 #[cfg(test)]

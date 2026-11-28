@@ -134,7 +134,7 @@ pkgs.runCommand "engine-antigravity-config-check" { nativeBuildInputs = [ pkgs.j
 
   pluginCfg=${plugin.config}
   jq -e '.models == [{id: "test-model", efforts: ["low", "medium", "high", "xhigh", "max"], context_tokens: null, max_output_tokens: null}]' "$pluginCfg" >/dev/null
-  jq -e '.default_model == "test-model" and .default_effort == "high" and .network == true and (has("mcp") | not) and .devices == [] and .meters == ["quota"]' "$pluginCfg" >/dev/null
+  jq -e '.default_model == "test-model" and .default_effort == "high" and .network == true and (has("mcp") | not) and .devices == [] and .meters == ["quota"] and .deadline_secs == null' "$pluginCfg" >/dev/null
   jq -e '.credential_mode == "env" and .credential_home_path == ".gemini/antigravity-cli/antigravity-oauth-token"' "$pluginCfg" >/dev/null
 
   homeFileCfg=${homeFilePlugin.config}

@@ -7,8 +7,8 @@ use crate::producer::GitHub;
 use burrow_github::fake::ok;
 use burrow_github::{Api, Failed, Response as GhResponse};
 use conary_github::api::{
-    ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review, Status, User,
-    WorkflowRun,
+    Annotation, ApiError, CheckRun, Comment, Commit, Event, History, PullRequest, Pulls, Review,
+    Status, User, WorkflowRun,
 };
 use conary_github::branches::{Branches, Merged};
 use conary_github::flow::{self, ReviewThread, Revision, Snapshot, ThreadComment, fingerprint};
@@ -243,7 +243,7 @@ impl conary_github::Source for World {
     fn files(&self, _: &str, _: &str, _: &str) -> Result<conary_core::policy::Paths, ApiError> {
         unreachable!()
     }
-    fn annotations(&self, _: &str, _: u64) -> Result<Vec<String>, ApiError> {
+    fn annotations(&self, _: &str, _: u64) -> Result<Vec<Annotation>, ApiError> {
         unreachable!()
     }
 }

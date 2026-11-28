@@ -20,10 +20,14 @@ remaining work fits the active redesigns.
   model/effort/capability/meter negotiation and session-independence checks.
   `conaryd` reloads its configured `plugins` and `execution` choices on every
   pass ([flow.md](https://github.com/FieldmouseWorks/Conary/blob/main/docs/flow.md)).
-- **Live routing, offers and saved setups.** Per-role and per-repo engine
-  routing, per-engine model and effort offers, and atomic setup switches
-  (`proj engines use NAME` / `use back`) already live in `burrow-settings`
-  and the engines door ([settings.md](settings.md#engines-models-and-efforts-per-role),
+- **Live routing, pinned plugin installs, offers and saved setups.** Per-role
+  and per-repo engine routing, owner-authenticated pinned plugin installation /
+  update / removal with sandboxed `cn plugin check` and atomic removal
+  fallback, per-engine model, effort and capability offers, per-job overrides,
+  and atomic setup switches (`proj engines use NAME` / `use back`) live in
+  `burrow-settings` and the settings/engines doors
+  ([settings.md](settings.md#pinned-engine-plugins),
+  [settings.md](settings.md#engines-models-and-efforts-per-role),
   [settings-reference.md](settings-reference.md)). Ordered engine chains for
   failover are tracked in [#1326](https://github.com/FieldmouseWorks/burrow/pull/1326).
 - **Cross-engine conversation handoff.** When a job's next turn runs on an

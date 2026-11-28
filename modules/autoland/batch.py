@@ -174,6 +174,13 @@ class Batch:
     def stopped(self, repo):
         return next(iter(self.state["repos"].get(repo.lower(), {}).get("stops", {}).values()), None)
 
+    def stop(self, repo, pr, why):
+        if why:
+            st = self.state["repos"].setdefault(repo.lower(), {"done": {}})
+            st.setdefault("stops", {})[str(pr["number"])] = why
+        elif st := self.state["repos"].get(repo.lower()):
+            st.get("stops", {}).pop(str(pr["number"]), None)
+
     def seen_to(self, repo):
         return not self.state["repos"].get(repo.lower(), {}).get("unseen")
 

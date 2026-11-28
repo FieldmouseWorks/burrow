@@ -27,7 +27,7 @@ fn base_config(binary: PathBuf) -> Config {
         }],
         default_model: Some("test-model".to_owned()),
         default_effort: Some(Effort::Medium),
-        deadline_secs: 30,
+        deadline_secs: Some(30),
         meters: vec!["quota".to_owned()],
         ..Config::default()
     }

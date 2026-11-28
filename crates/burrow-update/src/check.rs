@@ -15,10 +15,22 @@ use std::process::Stdio;
 use crate::Config;
 use crate::follow::UNLESS_MOVED;
 use crate::limit::Limit;
+use crate::running::daemon_lost;
 
-/// Whether the VM test `name` passes on `commit`, with all it says in `log`:
+/// How a VM test went: passed, failed, or lost `nix-daemon` mid-run (which
+/// says nothing about the tree or the test's reliability).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Check {
+    Pass,
+    Fail,
+    DaemonLost,
+}
+
+/// How the VM test `name` goes on `commit`, with all it says in `log`:
 /// in a slot, not when origin's main has moved past `main` by the time it
-/// has one, and with the wait for it handed back to `limit`.
+/// has one, bounded to `--max-jobs 1` so an aggregate check (`linkFarm` of
+/// VM tests) never boots multiple VMs at once, and with the wait for its
+/// slot handed back to `limit`.
 pub(crate) fn run_check(
     cfg: &Config,
     limit: &Limit,
@@ -26,12 +38,12 @@ pub(crate) fn run_check(
     commit: &str,
     main: &str,
     log: &Path,
-) -> bool {
+) -> Check {
     let Ok(out) = File::create(log) else {
-        return false;
+        return Check::Fail;
     };
     let Ok(err) = out.try_clone() else {
-        return false;
+        return Check::Fail;
     };
     let mut c = match &cfg.heavy {
         Some(heavy) => {
@@ -52,7 +64,7 @@ pub(crate) fn run_check(
         }
     };
     let Ok(mut child) = c
-        .args(["build", "--no-link", "-L"])
+        .args(["build", "--no-link", "-L", "--max-jobs", "1"])
         .arg(format!(
             "git+file://{}?rev={commit}#checks.{}.{name}",
             cfg.work.display(),
@@ -62,12 +74,18 @@ pub(crate) fn run_check(
         .stderr(err)
         .spawn()
     else {
-        return false;
+        return Check::Fail;
     };
     if let Some(said) = child.stdout.take() {
         limit.wait(said);
     }
-    child.wait().is_ok_and(|s| s.success())
+    if child.wait().is_ok_and(|s| s.success()) {
+        Check::Pass
+    } else if daemon_lost(log) {
+        Check::DaemonLost
+    } else {
+        Check::Fail
+    }
 }
 
 #[cfg(test)]
