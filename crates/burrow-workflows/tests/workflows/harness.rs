@@ -45,6 +45,26 @@ pub fn script(step: &Value) -> &str {
     step["run"].as_str().expect("a step that runs a script")
 }
 
+/// The most legs the gate splits across: burrow-flake-check's `MAX_LEGS`,
+/// read from the gate that enforces it, a program with no library to link.
+pub fn max_legs() -> usize {
+    let path = repo_file("crates/burrow-flake-check/src/gate.rs");
+    let file = syn::parse_file(&read(&path)).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    file.items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Const(c) if c.ident == "MAX_LEGS" => match &*c.expr {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(n),
+                    ..
+                }) => n.base10_parse().ok(),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{}: no `const MAX_LEGS: usize = N`", path.display()))
+}
+
 /// A string value, or none.
 pub fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_else(|| panic!("not a string: {v:?}"))

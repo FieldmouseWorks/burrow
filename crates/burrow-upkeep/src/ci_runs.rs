@@ -46,16 +46,26 @@ pub(crate) fn job(c: &Value) -> (&str, &str) {
     name.rsplit_once(" / ").unwrap_or(("", name))
 }
 
-/// Whether a job name denotes a whole gate, docs gate, or matrix leg.
+/// Whether a job name denotes a whole gate, docs gate, or matrix leg, `leg K
+/// of N` for any 1 <= K <= N with N >= 2. The leg count has no cap here, so
+/// the shared workflow's own (burrow-flake-check's MAX_LEGS) can't outgrow
+/// it. The same rule as Conary's flow, copied rather than linked; this copy
+/// serves only the steward and goes with it (#1310).
 pub fn gate(job: &str) -> bool {
-    let leg = job.as_bytes();
-    job == "check"
-        || job.starts_with(DOCS)
-        || (leg.len() == 10
-            && &leg[..4] == b"leg "
-            && (b'1'..=b'8').contains(&leg[4])
-            && &leg[5..9] == b" of "
-            && (b'2'..=b'8').contains(&leg[9]))
+    job == "check" || job.starts_with(DOCS) || leg(job).is_some()
+}
+
+/// A matrix leg's `K of N`: plain decimal numbers, no sign or leading zero,
+/// single spaces.
+fn leg(job: &str) -> Option<(u64, u64)> {
+    let number = |s: &str| {
+        (!s.is_empty() && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u64>().ok())
+            .flatten()
+    };
+    let (k, n) = job.strip_prefix("leg ")?.split_once(" of ")?;
+    let (k, n) = (number(k)?, number(n)?);
+    (n >= 2 && k <= n).then_some((k, n))
 }
 
 /// The same job, or explicit gate coverage in one validated shared call. A
