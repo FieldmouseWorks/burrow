@@ -201,13 +201,8 @@ class Jobs:
         that broke), its wait stays overdue, as a step failing on every pass
         does (strike): the watchdog takes it, however long the retries go
         on. One that finishes its turn ends the run (started)."""
-        times = self.st.get("strikes", {}).get("lost", 0)
-        if times < STRIKE_LIMIT or not self.st.get(kind + "Broke") or "lost" in self.struck:
-            return
-        if not waits.overdue(self.repo, self.pr, STRIKES["lost"]):
-            self.digest.append(
-                ("Failing again and again", self.line, f"{STRIKES['lost']}, {times} times in a row (journalctl -u autoland)")
-            )
+        if self.st.get(kind + "Broke"):
+            self.keep_overdue("lost")
 
     def again(self, kind, task, doing, answer, at=_HEAD, begin=None, unit=None):
         """A job that ended without its answer is started once more; one that

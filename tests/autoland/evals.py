@@ -371,6 +371,39 @@ with C.pass_deadline(5), patch.object(C.subprocess, "run", side_effect=capture_t
     P.unbuilt([X])
 assert seen_timeouts and seen_timeouts[0] <= 5, seen_timeouts
 
+# 7. Repeated eval failures preserve waits.overdue across EVAL_RETRY cooldown
+# and retry eval passes, and moving to a new head clears evalStruckAt.
+fresh_pr_state()
+STATES.clear()
+t_eval = 2000
+for attempt in range(1, 4):
+    P.begin("sam/r", {2})
+    line(2, t_eval)
+    STATES[pr_state(2)["proofEval"]["job"]] = "failed"
+    P.begin("sam/r", {2})
+    line(2, t_eval + 10)
+    assert pr_state(2)["strikes"] == {"eval": attempt}, (attempt, pr_state(2))
+    t_eval += 10 + P.EVAL_RETRY * 60
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Pass during EVAL_RETRY cooldown keeps waits.FAILING overdue without bumping strikes.
+waits.begin()
+P.begin("sam/r", {2})
+line(2, t_eval - P.EVAL_RETRY * 60 + 60)
+assert pr_state(2)["strikes"] == {"eval": 3}, pr_state(2)
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Pass past EVAL_RETRY when retry eval starts also keeps waits.FAILING overdue.
+waits.begin()
+P.begin("sam/r", {2})
+st2_retrying = line(2, t_eval)
+assert "working out what remi-proof builds" in st2_retrying, st2_retrying
+assert pr_state(2)["strikes"] == {"eval": 3}, pr_state(2)
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Moving to a new head clears evalStruckAt.
+STATES[pr_state(2)["proofEval"]["job"]] = "done"
+P.begin("sam/r", {2})
+run(clean(checks=proof, number=2, sha=heads[3]), t_eval + 20)
+assert "evalStruckAt" not in pr_state(2), pr_state(2)
+
 # Restore harness globals.
 del S.CFG["repos"]["sam/r"]
 os.environ["PATH"], S.CFG["nix"], P.build = kept_path, kept_nix, kept_build

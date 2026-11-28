@@ -80,6 +80,7 @@ class Context:
             got = pushed(self.pr)
             seen = C.NOW if got is None else min(got, C.NOW)
             self.st.update(head=self.head, seen=seen, handed=None, strikes={})
+            self.st.pop("evalStruckAt", None)
         if DRY:
             # A status run keeps state of its own, but takes what the live
             # passes found on this head from theirs: their failures in a row,
@@ -147,6 +148,18 @@ class Context:
         failed this pass too."""
         if kind not in self.struck:
             self.st.setdefault("strikes", {}).pop(kind, None)
+
+    def keep_overdue(self, kind):
+        """Re-assert an overdue wait (or digest entry) on every pass while
+        `kind` has reached STRIKE_LIMIT and hasn't cleared yet, so retry
+        cooldowns or running retries don't drop the stall in watch.json."""
+        times = self.st.get("strikes", {}).get(kind, 0)
+        if times < STRIKE_LIMIT or kind in self.struck:
+            return
+        if not waits.overdue(self.repo, self.pr, STRIKES[kind]):
+            self.digest.append(
+                ("Failing again and again", self.line, f"{STRIKES[kind]}, {times} times in a row (journalctl -u autoland)")
+            )
 
     def tried(self, kind, refused):
         """The step was tried: refused (what GitHub said), a strike, or
