@@ -239,6 +239,15 @@ tools(systemctl={"rc": 1})
 assert C.build_state(made({"vm": X + ".drv"})) is None
 assert ran("systemctl")[0]["args"][:4] == ["--user", "show", "-P", "ActiveState"], ran("systemctl")
 assert ran("systemctl")[0]["env"]["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}", ran("systemctl")
+# A policy-paused build, or one mid-restoration whose unit isn't active yet,
+# reports parked rather than failed; once the restored unit is active it is running.
+for marker, active, want in (("policy-paused", "inactive", "parked"),
+                             ("policy-restoring", "inactive", "parked"),
+                             ("policy-restoring", "active", "running")):
+    jid = made({"vm": X + ".drv"})
+    open(f"{tmp}/state/builds/{jid}/{marker}", "w").close()
+    tools(systemctl={"active": active})
+    assert C.build_state(jid) == want, (marker, active, C.build_state(jid))
 # Stopped like a job: its unit is, and it's over once systemd says so.
 jid = made({"vm": X + ".drv"})
 tools(systemctl={"active": "inactive"})
@@ -397,32 +406,54 @@ RED = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "FAI
 run(clean(checks=RED), 1000)
 assert [s["state"] for s in statuses("other")] == ["failure"] and "provedUnposted" not in pr_state(), (WROTE, pr_state())
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
-# A done build that kept no verdicts broke: built again, never a verdict.
+# A done build that kept no verdicts broke: handled on the first pass, never a
+# verdict, and built again once its retry is due.
 fresh_pr_state()
 BUILT.clear()
 tools()
 run(clean(checks=VM), 700)
 C.save(f"builds/{BUILT[0]}/end.json", {"state": "done", "exit": 0, "at": time.time()})
 STATES[BUILT[0]] = "done"
-run(clean(checks=VM), 900)
-run(clean(checks=VM), 960)
+status, _ = run(clean(checks=VM), 900)
+assert statuses() == [] and "Settled; the last build of vm crashed, so another starts at" in status, (status, BUILT)
 status, _ = run(clean(checks=VM), 1100)
 assert len(BUILT) == 2 and statuses() == [] and "building vm here again" in status, (status, BUILT, WROTE)
-# A build that stopped short is the machine's failure: no verdict, and
-# another builds it later.
+# A build that stopped short is the machine's failure: handled on the first
+# pass (no stale "building ... here" wait), no verdict, and another builds it
+# later.
 fresh_pr_state()
 BUILT.clear()
 tools()  # nothing built yet
 run(clean(checks=VM), 700)
 STATES[BUILT[0]] = "failed"
-run(clean(checks=VM), 900)
-status, _ = run(clean(checks=VM), 960)
+status, _ = run(clean(checks=VM), 900)
 assert statuses() == [] and "Settled; the last build of vm crashed, so another starts at" in status, (status, BUILT)
 status, _ = run(clean(checks=VM), 1100)
 assert len(BUILT) == 2 and "Settled; building vm here again (the last one crashed)" in status, (status, BUILT)
 assert statuses() == [] and JOBS == [], WROTE
 # Its deadline is proofTimeout's, not a Claude job's.
 assert min(C.WAKE.values()) >= C.NOW + S.CFG["proofTimeout"] * 60, C.WAKE
+# A parked proof build awaiting policy restoration after its repo is
+# re-allowed is never treated as lost or broken, even across passes past the
+# retry delay, so reconciliation never races a duplicate build.
+fresh_pr_state()
+BUILT.clear()
+tools()
+run(clean(checks=VM), 700)
+parked_jid = BUILT[0]
+STATES[parked_jid] = "parked"
+for at in (900, 1100):
+    status, _ = run(clean(checks=VM), at)
+    assert "Settled; build of vm awaits policy restoration" in status, (at, status)
+    assert BUILT == [parked_jid] and statuses() == [], (at, BUILT, WROTE)
+    assert "provedBroke" not in pr_state() and "provedLost" not in pr_state() and not pr_state().get("strikes"), pr_state()
+    assert C.WAKE["sam/r"] == C.NOW + 61, C.WAKE
+STATES[parked_jid] = "running"
+status, _ = run(clean(checks=VM), 1200)
+assert "Settled; building vm here" in status and BUILT == [parked_jid], (status, BUILT)
+finish(parked_jid, [X], 0)
+status, _ = run(clean(checks=VM), 1300)
+assert statuses()[0]["state"] == "success" and "verdict posted" in status and BUILT == [parked_jid], (status, WROTE, BUILT)
 # A Claude job from before its check had a build, on this head: stopped
 # while it's at work, and a build starts afresh, the job's lost answer and
 # retries not carried over; one that ended without its verdict, the same.

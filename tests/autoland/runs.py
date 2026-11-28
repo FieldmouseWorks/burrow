@@ -189,20 +189,40 @@ finish(long_jid, verdicts={"gate": PASSED}, comment="Serial replays passed on th
 status, _ = run(clean(sha=HEAD, checks=GATE), at + 100)
 assert statuses()[0]["state"] == "success" and "verdict posted" in status, (status, WROTE)
 assert JOBS == [] and STOPPED == [] and STARTED == [long_jid]
-# One that failed (stopped, timed out, ended short): no verdict, and
-# another runs it later.
+# One that failed (stopped, timed out, ended short): handled on the first
+# pass, no verdict, and another runs it later.
 for state in ("failed", "timed out"):
     fresh_pr_state()
     STARTED.clear()
     S.CFG["repos"]["sam/r"] = {"proofRuns": {"gate": "make gate"}}
     run(clean(sha=HEAD, checks=GATE), 700)
     finish(STARTED[0], state)
-    run(clean(sha=HEAD, checks=GATE), 900)
-    status, _ = run(clean(sha=HEAD, checks=GATE), 960)
+    status, _ = run(clean(sha=HEAD, checks=GATE), 900)
     assert statuses() == [] and "Settled; the last run of gate" in status and "another starts at" in status, (status, WROTE)
     status, _ = run(clean(sha=HEAD, checks=GATE), 1100)
     assert len(STARTED) == 2 and "Settled; running gate here again" in status, (status, STARTED)
     assert statuses() == [] and JOBS == [], WROTE
+# A parked proof run awaiting policy restoration after its repo is re-allowed
+# is never treated as lost or broken, even across passes past the retry delay,
+# so reconciliation never races a duplicate run.
+fresh_pr_state()
+STARTED.clear()
+S.CFG["repos"]["sam/r"] = {"proofRuns": {"gate": "make gate"}}
+run(clean(sha=HEAD, checks=GATE), 700)
+parked_jid = STARTED[0]
+STATES[parked_jid] = "parked"
+for at in (900, 1100):
+    status, _ = run(clean(sha=HEAD, checks=GATE), at)
+    assert "Settled; run of gate awaits policy restoration" in status, (at, status)
+    assert STARTED == [parked_jid] and statuses() == [] and JOBS == [], (at, STARTED, WROTE, JOBS)
+    assert "provedBroke" not in pr_state() and "provedLost" not in pr_state() and not pr_state().get("strikes"), pr_state()
+    assert C.WAKE["sam/r"] == C.NOW + 61, C.WAKE
+STATES[parked_jid] = "running"
+status, _ = run(clean(sha=HEAD, checks=GATE), 1200)
+assert "Settled; running gate here" in status and STARTED == [parked_jid], (status, STARTED)
+finish(parked_jid, verdicts={"gate": PASSED})
+status, _ = run(clean(sha=HEAD, checks=GATE), 1300)
+assert statuses()[0]["state"] == "success" and "verdict posted" in status and STARTED == [parked_jid], (status, WROTE, STARTED)
 # One that can't start says so.
 fresh_pr_state()
 P.start_run = lambda repo, pr, checks, st: None

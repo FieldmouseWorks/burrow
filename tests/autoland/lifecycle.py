@@ -196,6 +196,18 @@ with tempfile.TemporaryDirectory() as tmp:
     state = {'provedJob': 'job', 'proofsLive': ['job'], 'proofPaths': {'job': {'paths': ['kept']}}}
     assert P.live(state) == []
     assert state['proofsLive'] == ['job'] and state['proofPaths']['job']['paths'] == ['kept']
+    # A parked job or proof awaiting policy restoration is never lost or ended
+    # (even with confirm=False), and schedules a wake-up to recheck.
+    says('parked')
+    assert not C.at_work('job')
+    for kind in KINDS:
+        C.WAKE.clear()
+        reader = Reader(kind, 'original')
+        assert reader.running(kind, 'original') == 'parked', kind
+        assert not reader.ends and not reader.lost(kind, 'original') and not reader.lost(kind, 'original', confirm=False), kind
+        assert C.WAKE['sam/r'] == C.NOW + 61, (kind, C.WAKE)
+        if kind in ON:
+            assert reader.fixing() == kind, kind
     folder = Path(tmp) / 'builds' / 'proof-paused'
     folder.mkdir(parents=True)
     (folder / 'policy-paused').write_text('paused')
