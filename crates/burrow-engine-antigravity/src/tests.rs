@@ -281,6 +281,7 @@ fn conformance_fixture_passes_offline_with_and_without_models() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn fresh_job_and_continuation_fixture_verify_flags_and_normalization() {
     let dir = TempDir::new().unwrap();
     let args_log = dir.path().join("args.log");

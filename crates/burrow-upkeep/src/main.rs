@@ -194,6 +194,7 @@ fn flags(rest: &[String]) -> Result<Flags, Stop> {
     Ok(f)
 }
 
+#[expect(clippy::too_many_lines, reason = "subcommand dispatch")]
 fn run(args: &[String]) -> Result<(), Stop> {
     let (config, words) = args
         .split_first()

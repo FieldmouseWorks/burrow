@@ -96,6 +96,64 @@ fn text<'a>(file: &'a Value, key: &str) -> &'a str {
     file[key].as_str().unwrap_or_default()
 }
 
+struct FileInfo<'a> {
+    status: &'a str,
+    file: &'a str,
+    previous: &'a str,
+    added: i64,
+    removed: i64,
+    new_file: bool,
+}
+
+fn check_file_size(
+    diff: &mut Diff,
+    contents: &mut Contents,
+    info: &FileInfo,
+    refs: (&str, &str),
+    head_language: Option<Option<Language>>,
+    lines: usize,
+    file_size_allow: &AllowList,
+) -> Result<(), String> {
+    let (origin, head) = refs;
+    let became_code = info.status == "renamed"
+        && (rules::is_test(info.previous)
+            || !rules::is_code(info.previous, contents.language(info.previous, origin)?));
+    let maybe_grew = info.added > info.removed || (info.added > 0 && info.file.ends_with(".rs"));
+    if info.status == "removed"
+        || !(info.new_file || maybe_grew || became_code)
+        || rules::is_test(info.file)
+        || file_size_allow.matches(info.file)
+    {
+        return Ok(());
+    }
+    let now = match head_language {
+        Some(lang) => lang,
+        None => contents.language(info.file, head)?,
+    };
+    if !rules::is_code(info.file, now) {
+        return Ok(());
+    }
+    let length = contents.code_length(info.file, head)?;
+    if length > lines {
+        let had = if info.new_file || rules::is_test(info.previous) {
+            0
+        } else {
+            let prev_lang = contents.language(info.previous, origin)?;
+            if rules::is_code(info.previous, prev_lang) {
+                contents.code_length(info.previous, origin)?
+            } else {
+                0
+            }
+        };
+        if had <= lines {
+            diff.crossed.push((info.file.to_owned(), length));
+        } else if length > had {
+            diff.already_over.push((info.file.to_owned(), length));
+        }
+    }
+    Ok(())
+}
+
 /// Read the diff of `head` over `base`, where `lines` is how long a non-test
 /// code file may grow and the allow lists hold standing per-path waivers.
 pub fn read(
@@ -162,40 +220,23 @@ pub fn read(
                 (None, None) => {}
             }
         }
-        let became_code = status == "renamed"
-            && (rules::is_test(previous)
-                || !rules::is_code(previous, contents.language(previous, origin)?));
-        let maybe_grew = added > removed || (added > 0 && file.ends_with(".rs"));
-        if status != "removed"
-            && (new_file || maybe_grew || became_code)
-            && !rules::is_test(file)
-            && !file_size_allow.matches(file)
-        {
-            let now = match head_language {
-                Some(lang) => lang,
-                None => contents.language(file, head)?,
-            };
-            if rules::is_code(file, now) {
-                let length = contents.code_length(file, head)?;
-                if length > lines {
-                    let had = if new_file || rules::is_test(previous) {
-                        0
-                    } else {
-                        let prev_lang = contents.language(previous, origin)?;
-                        if rules::is_code(previous, prev_lang) {
-                            contents.code_length(previous, origin)?
-                        } else {
-                            0
-                        }
-                    };
-                    if had <= lines {
-                        diff.crossed.push((file.to_owned(), length));
-                    } else if length > had {
-                        diff.already_over.push((file.to_owned(), length));
-                    }
-                }
-            }
-        }
+        let info = FileInfo {
+            status,
+            file,
+            previous,
+            added,
+            removed,
+            new_file,
+        };
+        check_file_size(
+            &mut diff,
+            &mut contents,
+            &info,
+            (origin, head),
+            head_language,
+            lines,
+            file_size_allow,
+        )?;
         if status != "removed" && rules::is_guide(file) {
             let own = contents.own_lines(file, head)?;
             let had = match (new_file, rules::is_guide(previous)) {

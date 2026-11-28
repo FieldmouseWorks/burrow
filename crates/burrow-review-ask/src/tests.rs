@@ -173,6 +173,7 @@ fn never_on_unlisted_held_or_draft() {
 // open. Findings all answered without a push are asked once for that word,
 // and again once it has spoken again.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn only_when_unreviewed_or_answered() {
     let dir = tempfile::tempdir().unwrap();
     let with = |comments: Value, threads: Value| {

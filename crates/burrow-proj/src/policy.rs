@@ -374,6 +374,7 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn reconcile_job(
     cfg: &Config,
     id: &str,

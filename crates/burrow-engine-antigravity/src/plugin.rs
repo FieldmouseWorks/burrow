@@ -234,6 +234,7 @@ pub fn answer_cancellable(
         .map_err(|e| e.message())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn answer_detailed(
     config: &Config,
     request: &Request,

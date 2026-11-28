@@ -194,6 +194,7 @@ mod tests {
     use super::matches;
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn a_glob_matches_as_bash_matches_it() {
         for (pattern, yes, no) in [
             (

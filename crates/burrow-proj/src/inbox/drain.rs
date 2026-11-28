@@ -123,6 +123,7 @@ impl Pass<'_> {
     /// `claude-api` credit with no room one for when it may have some, and
     /// GitHub not answering about the issue picked, or not taking its label,
     /// one for five minutes on.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn drain(&mut self) -> Result<(), Fail> {
         let Some(t) = self.inbox.triage.clone() else {
             return Ok(());

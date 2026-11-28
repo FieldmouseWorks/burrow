@@ -20,6 +20,63 @@ use crate::world::World;
 /// How many of its moves the log keeps.
 pub const LOG: usize = 100;
 
+fn execute_move(
+    cfg: &Config,
+    world: &dyn World,
+    snap: &Snapshot,
+    dir: &std::path::Path,
+    state: &mut State,
+    m: &Move,
+    now: f64,
+) -> Result<String, String> {
+    let result = match still(cfg, world, m) {
+        Err(why) => format!("not made: {why}"),
+        Ok(()) => {
+            // Kept before it's made, whatever comes of it, so a pass cut
+            // short (its timeout, a crash) still counts it.
+            match m {
+                Move::Runner { unit, .. } => {
+                    state.restarts.entry(unit.clone()).or_default().push(now);
+                }
+                Move::Cancel { repo, run, .. } => {
+                    state.cancels.insert(format!("{repo}#{run}"), now);
+                }
+                Move::PrivateFresh { .. }
+                | Move::Fresh { .. }
+                | Move::Retire { .. }
+                | Move::Halt { .. } => {}
+            }
+            save(dir, "state.json", state)?;
+            let done = match m {
+                Move::Runner { unit, verb, .. } => world.restart(unit, verb),
+                Move::Cancel { repo, run, .. } => world.cancel(repo, *run),
+                Move::Fresh { instance, .. } => match &cfg.fresh {
+                    Some(f) => world.fresh(f, instance),
+                    None => Err("the machine has no fresh runners".into()),
+                },
+                Move::PrivateFresh { repo, instance, .. } => {
+                    match snap
+                        .private
+                        .iter()
+                        .find(|(f, _)| f.repository.as_ref() == Some(repo))
+                    {
+                        Some((f, _)) => world.fresh(f, instance),
+                        None => Err("private repository was not discovered".into()),
+                    }
+                }
+                Move::Retire { unit, .. } => world.restart(unit, "stop"),
+                // What starts it first: stopped while that's up, it's
+                // started again.
+                Move::Halt {
+                    unit, reg, stop, ..
+                } => halt::stop(cfg, world, unit, reg, stop),
+            };
+            done.map_or_else(|e| e, |()| "ok".to_owned())
+        }
+    };
+    Ok(result)
+}
+
 pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     let dir = &cfg.state_dir;
     let st: State = load(dir, "state.json");
@@ -47,51 +104,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut state,
     } = decide(cfg, &snap, &st, &was, now);
     for m in moves {
-        let result = match still(cfg, world, &m) {
-            Err(why) => format!("not made: {why}"),
-            Ok(()) => {
-                // Kept before it's made, whatever comes of it, so a pass cut
-                // short (its timeout, a crash) still counts it.
-                match &m {
-                    Move::Runner { unit, .. } => {
-                        state.restarts.entry(unit.clone()).or_default().push(now);
-                    }
-                    Move::Cancel { repo, run, .. } => {
-                        state.cancels.insert(format!("{repo}#{run}"), now);
-                    }
-                    Move::PrivateFresh { .. }
-                    | Move::Fresh { .. }
-                    | Move::Retire { .. }
-                    | Move::Halt { .. } => {}
-                }
-                save(dir, "state.json", &state)?;
-                let done = match &m {
-                    Move::Runner { unit, verb, .. } => world.restart(unit, verb),
-                    Move::Cancel { repo, run, .. } => world.cancel(repo, *run),
-                    Move::Fresh { instance, .. } => match &cfg.fresh {
-                        Some(f) => world.fresh(f, instance),
-                        None => Err("the machine has no fresh runners".into()),
-                    },
-                    Move::PrivateFresh { repo, instance, .. } => {
-                        match snap
-                            .private
-                            .iter()
-                            .find(|(f, _)| f.repository.as_ref() == Some(repo))
-                        {
-                            Some((f, _)) => world.fresh(f, instance),
-                            None => Err("private repository was not discovered".into()),
-                        }
-                    }
-                    Move::Retire { unit, .. } => world.restart(unit, "stop"),
-                    // What starts it first: stopped while that's up, it's
-                    // started again.
-                    Move::Halt {
-                        unit, reg, stop, ..
-                    } => halt::stop(cfg, world, unit, reg, stop),
-                };
-                done.map_or_else(|e| e, |()| "ok".to_owned())
-            }
-        };
+        let result = execute_move(cfg, world, &snap, dir, &mut state, &m, now)?;
         println!("{} ({}): {result}", m.what(), m.why());
         state.log.push(Done {
             at: now,
@@ -275,10 +288,7 @@ fn render(cfg: &Config, snap: &Snapshot, st: &State, d: &Decision, planned: bool
     out.trim_end().to_owned()
 }
 
-fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
-    if snap.switching {
-        out.push_str("a switch is in flight\n");
-    }
+fn seen_runners(out: &mut String, cfg: &Config, snap: &Snapshot) {
     for (unit, r) in &cfg.runners {
         let Some(s) = snap.runners.get(unit) else {
             let _ = writeln!(out, "{unit} ({}): couldn't read its repo", r.repo);
@@ -314,6 +324,13 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             Registered::Unchecked | Registered::Listed => {}
         }
     }
+}
+
+fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
+    if snap.switching {
+        out.push_str("a switch is in flight\n");
+    }
+    seen_runners(out, cfg, snap);
     for (f, pool) in &snap.private {
         match pool {
             Ok(p) => {
@@ -651,6 +668,7 @@ pub(crate) mod tests {
     // been run again, since the pass's look, whose later run was cancelled,
     // or either of which can't be looked at again, isn't.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn cancel() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config(dir.path());

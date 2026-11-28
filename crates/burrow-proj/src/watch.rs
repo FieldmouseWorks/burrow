@@ -24,6 +24,7 @@ use crate::{Fail, io_fail, now, read, swap, usage};
 /// couldn't start, is looked at again.
 const RETRY: i64 = 300;
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let lock = PathBuf::from(format!("{}.lock", cfg.wake.display()));
     let pass = OpenOptions::new()

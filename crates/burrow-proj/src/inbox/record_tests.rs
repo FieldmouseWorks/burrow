@@ -92,6 +92,7 @@ fn the_view_and_the_pass_agree_on_a_finished_planners_slot_and_asking_changes_no
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn each_stage_an_issue_can_be_in_derives_to_its_record() {
     let check =
         |b: &Box, n: u64, given: Option<serde_json::Value>, stage: Stage, wait: Option<Wait>| {

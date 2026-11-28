@@ -4,7 +4,7 @@ use super::Machine;
 use serde_json::Value;
 use std::fs;
 
-pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, String> {
+fn running_revisions(m: &Machine, repo: &str) -> Result<Vec<String>, String> {
     let is_system = m
         .cfg
         .system_repo
@@ -48,6 +48,11 @@ pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, St
             "{repo} is neither the machine's repo nor one of the running system's inputs"
         ));
     }
+    Ok(revisions)
+}
+
+pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, String> {
+    let revisions = running_revisions(m, repo)?;
     let projects = m
         .cfg
         .projects

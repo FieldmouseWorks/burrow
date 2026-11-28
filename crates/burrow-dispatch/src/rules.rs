@@ -105,6 +105,7 @@ pub struct Decision {
 /// The pass's decision, from what it saw (`snap`), what it kept (`st`) and
 /// its last watch file's items (`was`), which stand for a repo it couldn't
 /// read this time.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn decide(
     cfg: &Config,
     snap: &Snapshot,

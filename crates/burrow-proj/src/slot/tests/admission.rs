@@ -687,6 +687,7 @@ fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);

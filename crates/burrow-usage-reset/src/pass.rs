@@ -137,6 +137,80 @@ pub struct Outcome {
 
 /// A pass at NOW (STAMP, as the owner's clock says it), with the reset due
 /// once the week has less than BELOW percent left. KEEP saves a state for
+#[allow(clippy::too_many_arguments)]
+fn attempt_reset(
+    meter: &mut impl Account,
+    keep: &mut impl FnMut(&State) -> Result<(), String>,
+    state: &mut State,
+    notices: &mut Vec<Notice>,
+    reading: &mut Reading,
+    read_at: &mut f64,
+    now: f64,
+    stamp: &str,
+) -> bool {
+    let mut then = Unsettled {
+        used: reading.used,
+        at: stamp.to_owned(),
+        week: reading.week.clone(),
+        ends: reading.ends,
+        said: None,
+    };
+    let reserved = State {
+        pressed: true,
+        unsettled: Some(then.clone()),
+        ..state.clone()
+    };
+    match meter.reset(&mut || keep(&reserved)) {
+        Reset::Pressed(said) => {
+            then.said = Some(said);
+            state.pressed = true;
+            match meter.read() {
+                Ok(r) => {
+                    settle(state, notices, &then, &r);
+                    *reading = r;
+                    *read_at = now;
+                }
+                Err(e) => {
+                    // Spent, and settled by the next pass that can read
+                    // the meter.
+                    eprintln!("couldn't read the meter after the reset: {e}");
+                    state.unsettled = Some(then);
+                }
+            }
+            false
+        }
+        Reset::NoneBanked(said) => {
+            eprintln!("nothing banked: {said}");
+            state.none_at = Some(now);
+            false
+        }
+        Reset::AtLimitOnly(said) if reading.used < 100.0 => {
+            eprintln!("banked, for the limit only: {said}");
+            state.at_limit_only = true;
+            false
+        }
+        Reset::AtLimitOnly(said) | Reset::NotPressed(said) => {
+            state.failed_tries += 1;
+            let again = state.failed_tries < TRIES;
+            eprintln!(
+                "the reset wasn't confirmed ({} of {TRIES}): {said}",
+                state.failed_tries
+            );
+            if state.failed_tries == TRIES {
+                notices.push(Notice::Open(
+                    FAILED,
+                    "Couldn't use the banked Claude reset".to_owned(),
+                    format!(
+                        "The week's meter reads {:.0}% used, but {TRIES} tries at the banked reset confirmed nothing, so the usage watcher has stopped trying this week. Claude Code said, last: \"{said}\". Run /limit-reset in Claude Code to use it by hand.",
+                        reading.used
+                    ),
+                ));
+            }
+            again
+        }
+    }
+}
+
 /// good before the reset's yes is pressed, so a pass cut off after pressing
 /// it can't leave the next one free to press another.
 pub fn pass(
@@ -219,63 +293,16 @@ pub fn pass(
     // while the week still has room.
     let mut again = false;
     if due {
-        let mut then = Unsettled {
-            used: reading.used,
-            at: stamp.to_owned(),
-            week: reading.week.clone(),
-            ends: reading.ends,
-            said: None,
-        };
-        let reserved = State {
-            pressed: true,
-            unsettled: Some(then.clone()),
-            ..state.clone()
-        };
-        match meter.reset(&mut || keep(&reserved)) {
-            Reset::Pressed(said) => {
-                then.said = Some(said);
-                state.pressed = true;
-                match meter.read() {
-                    Ok(r) => {
-                        settle(&mut state, &mut notices, &then, &r);
-                        reading = r;
-                        read_at = now;
-                    }
-                    Err(e) => {
-                        // Spent, and settled by the next pass that can read
-                        // the meter.
-                        eprintln!("couldn't read the meter after the reset: {e}");
-                        state.unsettled = Some(then);
-                    }
-                }
-            }
-            Reset::NoneBanked(said) => {
-                eprintln!("nothing banked: {said}");
-                state.none_at = Some(now);
-            }
-            Reset::AtLimitOnly(said) if reading.used < 100.0 => {
-                eprintln!("banked, for the limit only: {said}");
-                state.at_limit_only = true;
-            }
-            Reset::AtLimitOnly(said) | Reset::NotPressed(said) => {
-                state.failed_tries += 1;
-                again = state.failed_tries < TRIES;
-                eprintln!(
-                    "the reset wasn't confirmed ({} of {TRIES}): {said}",
-                    state.failed_tries
-                );
-                if state.failed_tries == TRIES {
-                    notices.push(Notice::Open(
-                        FAILED,
-                        "Couldn't use the banked Claude reset".to_owned(),
-                        format!(
-                            "The week's meter reads {:.0}% used, but {TRIES} tries at the banked reset confirmed nothing, so the usage watcher has stopped trying this week. Claude Code said, last: \"{said}\". Run /limit-reset in Claude Code to use it by hand.",
-                            reading.used
-                        ),
-                    ));
-                }
-            }
-        }
+        again = attempt_reset(
+            meter,
+            keep,
+            &mut state,
+            &mut notices,
+            &mut reading,
+            &mut read_at,
+            now,
+            stamp,
+        );
     }
     // Room again, after a reset or without one: a failure the owner heard
     // of is over, unless this pass just had one.

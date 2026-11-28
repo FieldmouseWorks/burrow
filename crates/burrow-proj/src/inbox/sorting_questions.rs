@@ -9,6 +9,7 @@ use std::path::Path;
 impl Pass<'_> {
     /// An outstanding question is never a sorting verdict. Timed-out one-way
     /// questions retain a reply route, but no longer occupy a sorting slot.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn sorting_question(
         &mut self,
         repo: &str,

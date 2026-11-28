@@ -85,6 +85,7 @@ fn credential_home_path_serde_and_validation_enforce_relative_normal_paths() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn home_file_materializes_private_writable_oauth_token_and_handles_edge_cases() {
     let dir = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
@@ -219,6 +220,7 @@ exit 1
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn unauthenticated_cli_outputs_classify_as_login_refusal_and_stdin_does_not_block() {
     // Real headless CLI stdout + stderr.
     let real_json = normalize_output(

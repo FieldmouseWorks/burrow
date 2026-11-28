@@ -91,6 +91,7 @@ pub(crate) fn write_prompt(path: &Path, message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn start_with(
     cfg: &Config,
     id: &str,
@@ -288,6 +289,7 @@ pub(crate) fn initialize_deadline(
 
 /// One turn of a job, inside its own systemd unit: `first` or `normal`, as
 /// it was started.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     let n = job

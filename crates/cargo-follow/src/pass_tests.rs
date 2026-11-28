@@ -59,6 +59,7 @@ impl Local for FakeLocal {
 /// sam/home follows sam/Up (PIN) in crates/Cargo.toml, and sam/Up's main
 /// is at HEAD. `open` is the PR from follow/sam/up/crates/Cargo.toml, if any: its labels,
 /// and the rev its manifest pins.
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn github(open: Option<(&[&str], &str)>) -> Fake {
     let mut gh = Fake::default();
     gh.on(

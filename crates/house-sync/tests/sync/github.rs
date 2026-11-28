@@ -92,6 +92,7 @@ pub fn answer(status: u16, body: Value, link: Option<String>) -> Result<Response
 }
 
 impl Api for GitHub {
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn request(
         &mut self,
         method: &str,

@@ -249,6 +249,7 @@ fn parse_single_json(stdout: &str) -> ParsedRecords {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn normalize_records(
     parsed: ParsedRecords,
     stdout_str: &str,

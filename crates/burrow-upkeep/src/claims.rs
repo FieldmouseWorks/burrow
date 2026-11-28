@@ -172,6 +172,7 @@ pub struct Tracker {
     pub at: String,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn claims(p: &mut Pass, l: &Look) -> Seen {
     let mut seen = Seen {
         pushed_by: l.pushed_by.clone(),

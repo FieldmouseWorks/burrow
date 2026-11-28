@@ -280,6 +280,7 @@ esac
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn claude_api_mode_against_local_fake_api_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let workdir = dir.path().join("repo");

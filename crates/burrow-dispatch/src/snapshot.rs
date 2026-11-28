@@ -170,54 +170,58 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         );
     }
     if let Some(d) = &cfg.deploy {
-        let status = fs::read(&d.status)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        snap.behind = status
-            .as_ref()
-            .and_then(|v| v.get("behind"))
-            .and_then(Value::as_u64);
-        snap.off_main = status
-            .as_ref()
-            .and_then(|v| v.get("offMain"))
-            .and_then(Value::as_f64);
-        let said = status
-            .map(|v| {
-                let s = |k| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-                format!("{} at {}: {}", s("result"), s("time"), s("message"))
-            })
-            .unwrap_or_else(|| "nothing yet".to_owned());
-        snap.update = Some((world.unit(&d.unit), said));
-        snap.progress = newest(&d.logs);
-        let mut compare: Vec<(&String, String)> = Vec::new();
-        // Its own repo, at how far HOST-update found main live in the system
-        // that runs; a record or a system that can't be read is a repo it
-        // can't read.
-        if let Some(own) = &d.own {
-            match live(&d.live, &d.unit, world) {
-                Ok(Live::At(main)) => compare.push((own, main)),
-                Ok(Live::Unknown(why)) => {
-                    snap.unknown.insert(own.clone(), why);
-                }
-                Err(e) => {
-                    snap.unread.insert(own.clone(), e);
-                }
-            }
-        }
-        compare.extend(d.running.iter().map(|(r, c)| (r, c.clone())));
-        for (repo, running) in compare {
-            match behind(world, repo, &running) {
-                Ok(b) => {
-                    snap.deploys.insert(repo.clone(), b);
-                }
-                Err(e) => {
-                    snap.unread.insert(repo.clone(), e);
-                }
-            }
-        }
+        take_deploy(d, world, &mut snap);
     }
     crate::private::take(cfg, world, &mut snap);
     snap
+}
+
+fn take_deploy(d: &crate::config::Deploy, world: &dyn World, snap: &mut Snapshot) {
+    let status = fs::read(&d.status)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    snap.behind = status
+        .as_ref()
+        .and_then(|v| v.get("behind"))
+        .and_then(Value::as_u64);
+    snap.off_main = status
+        .as_ref()
+        .and_then(|v| v.get("offMain"))
+        .and_then(Value::as_f64);
+    let said = status
+        .map(|v| {
+            let s = |k| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+            format!("{} at {}: {}", s("result"), s("time"), s("message"))
+        })
+        .unwrap_or_else(|| "nothing yet".to_owned());
+    snap.update = Some((world.unit(&d.unit), said));
+    snap.progress = newest(&d.logs);
+    let mut compare: Vec<(&String, String)> = Vec::new();
+    // Its own repo, at how far HOST-update found main live in the system
+    // that runs; a record or a system that can't be read is a repo it
+    // can't read.
+    if let Some(own) = &d.own {
+        match live(&d.live, &d.unit, world) {
+            Ok(Live::At(main)) => compare.push((own, main)),
+            Ok(Live::Unknown(why)) => {
+                snap.unknown.insert(own.clone(), why);
+            }
+            Err(e) => {
+                snap.unread.insert(own.clone(), e);
+            }
+        }
+    }
+    compare.extend(d.running.iter().map(|(r, c)| (r, c.clone())));
+    for (repo, running) in compare {
+        match behind(world, repo, &running) {
+            Ok(b) => {
+                snap.deploys.insert(repo.clone(), b);
+            }
+            Err(e) => {
+                snap.unread.insert(repo.clone(), e);
+            }
+        }
+    }
 }
 
 /// The fresh runners' units, and the jobs queued in their repos that ask
@@ -639,6 +643,7 @@ pub mod tests {
     // repo's push runs on its default branch that haven't finished are
     // listed, oldest first and each once, a run seen under way as started.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn runners() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
@@ -839,6 +844,7 @@ pub mod tests {
     // what's live is unknown; a record or a system that can't be read leaves
     // the repo unread.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn deploys() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());

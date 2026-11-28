@@ -52,6 +52,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
 /// A command, its output rendered for `view`. Only
 /// [`crate::host_jobs::view`] asks for [`View::Bridge`], after validating
 /// the bridge's grammar.
+#[expect(clippy::too_many_lines, reason = "subcommand dispatch")]
 pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
         Some("_retry_format") => {

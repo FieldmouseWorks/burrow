@@ -11,9 +11,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::{
-    InstalledPlugin, MovedRole, OwnerAuth, PluginCapabilities, PluginModel, SourceKind, hex_digest,
-    normalize_sha256, sandboxed_check, stage_and_verify, valid_engine, valid_version,
-    verify_installed,
+    InstalledPlugin, MovedRole, OwnerAuth, PluginCapabilities, PluginModel, SourceKind,
+    format_install_answer, format_removal_answer, hex_digest, normalize_sha256, sandboxed_check,
+    stage_and_verify, valid_engine, valid_version, verify_installed,
 };
 use crate::roles::{Hop, Roles, Route, default_routes};
 use crate::{Config, live, now};
@@ -348,27 +348,7 @@ impl Config {
         {
             return Ok(prev);
         }
-
-        // Check static collision before executing anything.
-        let static_engines = self.static_engines();
-        if static_engines.iter().any(|e| e == engine) {
-            return Err(format!(
-                "engine {engine} is configured statically in the machine flake and cannot be replaced via live plugin install"
-            ));
-        }
-
-        // Pre-check install vs update existence before staging/running checks.
-        let current = self.installed_plugins()?;
-        if is_update && !current.contains_key(engine) {
-            return Err(format!(
-                "engine plugin {engine} is not installed; use plugin install first"
-            ));
-        }
-        if !is_update && current.contains_key(engine) {
-            return Err(format!(
-                "engine plugin {engine} is already installed; use plugin update to replace it"
-            ));
-        }
+        self.precheck_plugin_target(is_update, engine)?;
 
         // 1. Stage and verify SHA-256 BEFORE executing anything.
         let plugins_dir = self.plugins_dir();
@@ -428,90 +408,14 @@ impl Config {
             receipt,
             args,
             |doc: &mut crate::roles::store::Document| {
-                self.ready_doc(doc, true)?;
-                let previous = doc.plugins.get(engine).cloned();
-                if is_update && previous.is_none() {
-                    return Err(format!(
-                        "engine plugin {engine} is not installed; use plugin install first"
-                    ));
-                }
-                if !is_update && previous.is_some() {
-                    return Err(format!(
-                        "engine plugin {engine} is already installed; use plugin update to replace it"
-                    ));
-                }
-
-                let mut next_plugins = doc.plugins.clone();
-                next_plugins.insert(engine.to_owned(), record.clone());
-                let mut next_offers = doc.offers.clone();
-                // The plugin's validated describe offers take immediate effect.
-                next_offers.remove(engine);
-                // Reinstalling an engine clears any previous removal fallback.
-                let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
-                next_removed_fallbacks.remove(engine);
-
-                // Validate existing roles and tunings against the new offers so
-                // an incompatible update fails cleanly and preserves the prior
-                // active installation.
-                doc.routing.in_force_with_plugins(
-                    &next_offers,
-                    &self.engines,
-                    &next_plugins,
-                    &next_removed_fallbacks,
-                )?;
-
-                if let Some(prev) = &previous
-                    && prev.source_kind == SourceKind::Release
-                    && prev.path != record.path
-                {
-                    old_release_to_clean = Some(prev.path.clone());
-                }
-
-                doc.plugins = next_plugins;
-                doc.offers = next_offers;
-                doc.removed_fallbacks = next_removed_fallbacks;
-                doc.migrated.get_or_insert_with(now);
-
-                let mut audit = Map::new();
-                audit.insert("actorId".into(), json!(auth.id));
-                audit.insert(
-                    "plugin".into(),
-                    json!({
-                        "operation": if is_update { "update" } else { "install" },
-                        "engine": engine,
-                        "sourceKind": record.source_kind,
-                        "source": record.source,
-                        "version": record.version,
-                        "sha256": record.sha256,
-                        "previousSource": previous.as_ref().map(|p| &p.source),
-                        "previousVersion": previous.as_ref().map(|p| &p.version),
-                        "previousSha256": previous.as_ref().map(|p| &p.sha256),
-                    }),
-                );
-
-                let verb = if is_update { "Updated" } else { "Installed" };
-                let models: Vec<&str> = record.models.iter().map(|m| m.id.as_str()).collect();
-                let answer = format!(
-                    "{verb} engine plugin {engine} {} ({}, {}).\nModels: {}\nCapabilities: {} (sandbox: {})\n",
-                    record.version,
-                    record.source_kind.name(),
-                    record.sha256,
-                    if models.is_empty() {
-                        "(none)".to_owned()
-                    } else {
-                        models.join(", ")
-                    },
-                    if record.capabilities.declared.is_empty() {
-                        "(none)".to_owned()
-                    } else {
-                        record.capabilities.declared.join(", ")
-                    },
-                    record.capabilities.sandbox,
-                );
-                Ok(live::Outcome {
-                    answer: Some(answer),
-                    audit: Some(audit),
-                })
+                self.commit_installed_plugin(
+                    doc,
+                    auth,
+                    is_update,
+                    engine,
+                    &record,
+                    &mut old_release_to_clean,
+                )
             },
         );
 
@@ -537,6 +441,82 @@ impl Config {
                 Err(err)
             }
         }
+    }
+
+    fn commit_installed_plugin(
+        &self,
+        doc: &mut crate::roles::store::Document,
+        auth: &OwnerAuth,
+        is_update: bool,
+        engine: &str,
+        record: &InstalledPlugin,
+        old_release_to_clean: &mut Option<PathBuf>,
+    ) -> Result<live::Outcome, String> {
+        self.ready_doc(doc, true)?;
+        let previous = doc.plugins.get(engine).cloned();
+        if is_update && previous.is_none() {
+            return Err(format!(
+                "engine plugin {engine} is not installed; use plugin install first"
+            ));
+        }
+        if !is_update && previous.is_some() {
+            return Err(format!(
+                "engine plugin {engine} is already installed; use plugin update to replace it"
+            ));
+        }
+
+        let mut next_plugins = doc.plugins.clone();
+        next_plugins.insert(engine.to_owned(), record.clone());
+        let mut next_offers = doc.offers.clone();
+        // The plugin's validated describe offers take immediate effect.
+        next_offers.remove(engine);
+        // Reinstalling an engine clears any previous removal fallback.
+        let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
+        next_removed_fallbacks.remove(engine);
+
+        // Validate existing roles and tunings against the new offers so
+        // an incompatible update fails cleanly and preserves the prior
+        // active installation.
+        doc.routing.in_force_with_plugins(
+            &next_offers,
+            &self.engines,
+            &next_plugins,
+            &next_removed_fallbacks,
+        )?;
+
+        if let Some(prev) = &previous
+            && prev.source_kind == SourceKind::Release
+            && prev.path != record.path
+        {
+            *old_release_to_clean = Some(prev.path.clone());
+        }
+
+        doc.plugins = next_plugins;
+        doc.offers = next_offers;
+        doc.removed_fallbacks = next_removed_fallbacks;
+        doc.migrated.get_or_insert_with(now);
+
+        let mut audit = Map::new();
+        audit.insert("actorId".into(), json!(auth.id));
+        audit.insert(
+            "plugin".into(),
+            json!({
+                "operation": if is_update { "update" } else { "install" },
+                "engine": engine,
+                "sourceKind": record.source_kind,
+                "source": record.source,
+                "version": record.version,
+                "sha256": record.sha256,
+                "previousSource": previous.as_ref().map(|p| &p.source),
+                "previousVersion": previous.as_ref().map(|p| &p.version),
+                "previousSha256": previous.as_ref().map(|p| &p.sha256),
+            }),
+        );
+
+        Ok(live::Outcome {
+            answer: Some(format_install_answer(is_update, engine, record)),
+            audit: Some(audit),
+        })
     }
 
     fn remove_plugin(
@@ -572,130 +552,7 @@ impl Config {
             receipt,
             args,
             |doc: &mut crate::roles::store::Document| {
-                self.ready_doc(doc, true)?;
-                let removed = doc
-                    .plugins
-                    .get(engine)
-                    .cloned()
-                    .ok_or_else(|| format!("engine plugin {engine} is not installed"))?;
-
-                let mut next_plugins = doc.plugins.clone();
-                next_plugins.remove(engine);
-                let mut next_offers = doc.offers.clone();
-                next_offers.remove(engine);
-
-                // Verify fallback is a valid remaining active engine.
-                let remaining_offers = crate::roles::merge_offers_with_plugins(
-                    &next_offers,
-                    &self.engines,
-                    &next_plugins,
-                )?;
-                if !remaining_offers.contains_key(&fallback) {
-                    return Err(format!(
-                        "cannot remove engine plugin {engine}: fallback engine {fallback:?} is not a valid remaining engine"
-                    ));
-                }
-
-                // Atomically rewrite affected live roles and clean removed
-                // engine tunings.
-                let mut next_routing = doc.routing.clone();
-                let moved_roles = rewrite_roles_for_removal(&mut next_routing, engine, &fallback)?;
-
-                // Also rewrite any saved/previous setups referencing the
-                // removed engine so they stay valid.
-                let mut next_setups = doc.setups.clone();
-                let mut moved_setups = Vec::new();
-                for (setup_name, setup) in &mut next_setups.saved {
-                    let moved = rewrite_roles_for_removal(setup, engine, &fallback)?;
-                    if !moved.is_empty() {
-                        moved_setups.push(setup_name.clone());
-                    }
-                }
-                if let Some(prev) = &mut next_setups.previous {
-                    rewrite_roles_for_removal(prev, engine, &fallback)?;
-                }
-
-                // Record the fallback for persisted job pins (from `--engine`
-                // or inbox labels), updating any transitive chains that pointed
-                // to the engine being removed.
-                let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
-                for target in next_removed_fallbacks.values_mut() {
-                    if target == engine {
-                        *target = fallback.clone();
-                    }
-                }
-                next_removed_fallbacks.insert(engine.to_owned(), fallback.clone());
-
-                // Validate live post-removal routing completely before
-                // committing. Saved/previous setups may already hold unrelated
-                // stale tunings from earlier `offer` or `plugin update` changes
-                // (checked at activation time by `engines use`), so verify here
-                // only that no reference to the removed engine remains and that
-                // every route stays structurally valid.
-                next_routing.in_force_with_plugins(
-                    &next_offers,
-                    &self.engines,
-                    &next_plugins,
-                    &next_removed_fallbacks,
-                )?;
-                for (setup_name, setup) in &next_setups.saved {
-                    ensure_removed_engine_absent(setup, engine)
-                        .map_err(|e| format!("setup {setup_name}: {e}"))?;
-                }
-                if let Some(prev) = &next_setups.previous {
-                    ensure_removed_engine_absent(prev, engine)
-                        .map_err(|e| format!("previous setup: {e}"))?;
-                }
-
-                if removed.source_kind == SourceKind::Release {
-                    removed_release_path = Some(removed.path.clone());
-                }
-
-                doc.plugins = next_plugins;
-                doc.offers = next_offers;
-                doc.routing = next_routing;
-                doc.setups = next_setups;
-                doc.removed_fallbacks = next_removed_fallbacks;
-                doc.migrated.get_or_insert_with(now);
-
-                let mut audit = Map::new();
-                audit.insert("actorId".into(), json!(auth.id));
-                audit.insert(
-                    "plugin".into(),
-                    json!({
-                        "operation": "remove",
-                        "engine": engine,
-                        "sourceKind": removed.source_kind,
-                        "source": removed.source,
-                        "version": removed.version,
-                        "sha256": removed.sha256,
-                        "fallback": fallback,
-                        "movedRoles": moved_roles,
-                        "movedSetups": moved_setups,
-                    }),
-                );
-
-                let mut answer = format!(
-                    "Removed engine plugin {engine} {} ({}, {}).\nFallback engine: {fallback}.\n",
-                    removed.version,
-                    removed.source_kind.name(),
-                    removed.sha256
-                );
-                if moved_roles.is_empty() {
-                    answer.push_str("Moved roles: none.\n");
-                } else {
-                    answer.push_str("Moved roles:\n");
-                    for mv in &moved_roles {
-                        answer.push_str(&format!("- {}: {} -> {}\n", mv.role, mv.from, mv.to));
-                    }
-                }
-                if !moved_setups.is_empty() {
-                    answer.push_str(&format!("Updated setups: {}.\n", moved_setups.join(", ")));
-                }
-                Ok(live::Outcome {
-                    answer: Some(answer),
-                    audit: Some(audit),
-                })
+                self.commit_plugin_removal(doc, auth, engine, &fallback, &mut removed_release_path)
             },
         )?;
 
@@ -703,6 +560,149 @@ impl Config {
             let _ = fs::remove_file(path);
         }
         Ok(result.unwrap_or_default())
+    }
+
+    fn commit_plugin_removal(
+        &self,
+        doc: &mut crate::roles::store::Document,
+        auth: &OwnerAuth,
+        engine: &str,
+        fallback: &str,
+        removed_release_path: &mut Option<PathBuf>,
+    ) -> Result<live::Outcome, String> {
+        self.ready_doc(doc, true)?;
+        let removed = doc
+            .plugins
+            .get(engine)
+            .cloned()
+            .ok_or_else(|| format!("engine plugin {engine} is not installed"))?;
+
+        let mut next_plugins = doc.plugins.clone();
+        next_plugins.remove(engine);
+        let mut next_offers = doc.offers.clone();
+        next_offers.remove(engine);
+
+        // Verify fallback is a valid remaining active engine.
+        let remaining_offers =
+            crate::roles::merge_offers_with_plugins(&next_offers, &self.engines, &next_plugins)?;
+        if !remaining_offers.contains_key(fallback) {
+            return Err(format!(
+                "cannot remove engine plugin {engine}: fallback engine {fallback:?} is not a valid remaining engine"
+            ));
+        }
+
+        // Atomically rewrite affected live roles and clean removed
+        // engine tunings.
+        let mut next_routing = doc.routing.clone();
+        let moved_roles = rewrite_roles_for_removal(&mut next_routing, engine, fallback)?;
+
+        // Also rewrite any saved/previous setups referencing the
+        // removed engine so they stay valid.
+        let mut next_setups = doc.setups.clone();
+        let mut moved_setups = Vec::new();
+        for (setup_name, setup) in &mut next_setups.saved {
+            let moved = rewrite_roles_for_removal(setup, engine, fallback)?;
+            if !moved.is_empty() {
+                moved_setups.push(setup_name.clone());
+            }
+        }
+        if let Some(prev) = &mut next_setups.previous {
+            rewrite_roles_for_removal(prev, engine, fallback)?;
+        }
+
+        // Record the fallback for persisted job pins (from `--engine`
+        // or inbox labels), updating any transitive chains that pointed
+        // to the engine being removed.
+        let mut next_removed_fallbacks = doc.removed_fallbacks.clone();
+        for target in next_removed_fallbacks.values_mut() {
+            if target == engine {
+                *target = fallback.to_owned();
+            }
+        }
+        next_removed_fallbacks.insert(engine.to_owned(), fallback.to_owned());
+
+        // Validate live post-removal routing completely before
+        // committing. Saved/previous setups may already hold unrelated
+        // stale tunings from earlier `offer` or `plugin update` changes
+        // (checked at activation time by `engines use`), so verify here
+        // only that no reference to the removed engine remains and that
+        // every route stays structurally valid.
+        next_routing.in_force_with_plugins(
+            &next_offers,
+            &self.engines,
+            &next_plugins,
+            &next_removed_fallbacks,
+        )?;
+        for (setup_name, setup) in &next_setups.saved {
+            ensure_removed_engine_absent(setup, engine)
+                .map_err(|e| format!("setup {setup_name}: {e}"))?;
+        }
+        if let Some(prev) = &next_setups.previous {
+            ensure_removed_engine_absent(prev, engine)
+                .map_err(|e| format!("previous setup: {e}"))?;
+        }
+
+        if removed.source_kind == SourceKind::Release {
+            *removed_release_path = Some(removed.path.clone());
+        }
+
+        doc.plugins = next_plugins;
+        doc.offers = next_offers;
+        doc.routing = next_routing;
+        doc.setups = next_setups;
+        doc.removed_fallbacks = next_removed_fallbacks;
+        doc.migrated.get_or_insert_with(now);
+
+        let mut audit = Map::new();
+        audit.insert("actorId".into(), json!(auth.id));
+        audit.insert(
+            "plugin".into(),
+            json!({
+                "operation": "remove",
+                "engine": engine,
+                "sourceKind": removed.source_kind,
+                "source": removed.source,
+                "version": removed.version,
+                "sha256": removed.sha256,
+                "fallback": fallback,
+                "movedRoles": moved_roles,
+                "movedSetups": moved_setups,
+            }),
+        );
+
+        Ok(live::Outcome {
+            answer: Some(format_removal_answer(
+                engine,
+                fallback,
+                &removed,
+                &moved_roles,
+                &moved_setups,
+            )),
+            audit: Some(audit),
+        })
+    }
+
+    fn precheck_plugin_target(&self, is_update: bool, engine: &str) -> Result<(), String> {
+        // Check static collision before executing anything.
+        let static_engines = self.static_engines();
+        if static_engines.iter().any(|e| e == engine) {
+            return Err(format!(
+                "engine {engine} is configured statically in the machine flake and cannot be replaced via live plugin install"
+            ));
+        }
+        // Pre-check install vs update existence before staging/running checks.
+        let current = self.installed_plugins()?;
+        if is_update && !current.contains_key(engine) {
+            return Err(format!(
+                "engine plugin {engine} is not installed; use plugin install first"
+            ));
+        }
+        if !is_update && current.contains_key(engine) {
+            return Err(format!(
+                "engine plugin {engine} is already installed; use plugin update to replace it"
+            ));
+        }
+        Ok(())
     }
 
     fn static_engines(&self) -> Vec<String> {

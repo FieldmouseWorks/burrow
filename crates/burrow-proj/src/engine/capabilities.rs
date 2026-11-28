@@ -62,6 +62,7 @@ fn var(env: Env, name: &str) -> Option<PathBuf> {
     env(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn resolve(
     cfg: &Config,
     job: &Job,

@@ -142,6 +142,7 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn waits() {
     // In line: watched for stallAfterMinutes from when it was started.
     case(&["state queued"], |w| {

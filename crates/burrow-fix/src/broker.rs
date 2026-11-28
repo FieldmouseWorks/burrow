@@ -44,7 +44,7 @@ use burrow_github::{Api, call, pages};
 use burrow_producer::jobs::{self, Jobs};
 use burrow_producer::serve::Work;
 use conary_core::plugin::{
-    Answer, Context, Executed, FixResult, Identity, Next, Request, Response, Task, version,
+    Answer, Context, Executed, FixResult, Identity, Next, Problem, Request, Response, Task, version,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -355,12 +355,10 @@ impl Broker {
         }
     }
 
-    /// One request's fix, or its stuck-role job ([`Broker::handle_job`]):
-    /// its answer, or why there's none.
-    pub fn handle(&self, request: Request, work: &Work) -> Result<Response, String> {
-        if matches!(request.task, Task::Job { .. }) {
-            return self.handle_job(request, work);
-        }
+    fn validate_fix_request<'a>(
+        &self,
+        request: &'a Request,
+    ) -> Result<(&'a str, u64, &'a str, &'a [Problem]), String> {
         if version(&request.contract).is_none_or(|v| v < 4) {
             return Err(format!(
                 "{} names no PR: a fix needs conary-plugin v4",
@@ -391,11 +389,21 @@ impl Broker {
             &jobs::offered(&self.cfg.settings, &self.cfg.role)?,
             request.execution.as_ref().and_then(|e| e.choice.as_ref()),
         )?;
+        Ok((repo, *pr, head, problems))
+    }
+
+    /// One request's fix, or its stuck-role job ([`Broker::handle_job`]):
+    /// its answer, or why there's none.
+    pub fn handle(&self, request: Request, work: &Work) -> Result<Response, String> {
+        if matches!(request.task, Task::Job { .. }) {
+            return self.handle_job(request, work);
+        }
+        let (repo, pr, head, problems) = self.validate_fix_request(&request)?;
         let asks = asked(&(head, problems))?;
-        let (now, branch) = self.pr(repo, *pr)?;
-        let current = (now == *head).then_some(head.as_str());
+        let (now, branch) = self.pr(repo, pr)?;
+        let current = (now == head).then_some(head);
         let mut held = self.hold(
-            key(repo, *pr),
+            key(repo, pr),
             &format!("a fix of {repo}#{pr}"),
             &asks,
             current,
@@ -411,7 +419,7 @@ impl Broker {
                         "{repo}#{pr}'s head is {now}, not the {head} the fix was asked for"
                     ));
                 }
-                let task = brief::task(repo, *pr, head, &branch, problems, &self.cfg.jobs);
+                let task = brief::task(repo, pr, head, &branch, problems, &self.cfg.jobs);
                 held.record(head, &asks, None)?;
                 // Stopped before the answer is let go of, so no fix is left
                 // at work for a request that's over: a start that read as
@@ -431,7 +439,7 @@ impl Broker {
             .answers(&id)?
             .ok_or_else(|| format!("the fix job {id} left no answers"))?;
         let (result, answers) = Said::read(&said)?.settle(problems)?;
-        let now = self.pr(repo, *pr)?.0;
+        let now = self.pr(repo, pr)?.0;
         match &result {
             FixResult::Pushed { head: pushed } if *pushed != now => {
                 return Err(format!(
@@ -439,7 +447,7 @@ impl Broker {
                 ));
             }
             FixResult::Pushed { head: pushed } => self.pushed_on(repo, head, pushed)?,
-            FixResult::Unchanged if now != *head => {
+            FixResult::Unchanged if now != head => {
                 return Err(format!(
                     "the fix job pushed nothing, and the PR's head moved from {head} to {now}"
                 ));
@@ -592,12 +600,10 @@ impl Broker {
         Ok(())
     }
 
-    /// One request for the stuck role: its answer, or why there's none.
-    pub fn handle_job(&self, request: Request, work: &Work) -> Result<Response, String> {
-        let starter = self
-            .stuck
-            .as_deref()
-            .ok_or("the broker serves no job kind: no stuck role is configured")?;
+    fn validate_stuck_request<'a>(
+        &self,
+        request: &'a Request,
+    ) -> Result<(&'a str, &'a str, Ask, &std::path::Path), String> {
         let role = self
             .cfg
             .stuck
@@ -644,14 +650,24 @@ impl Broker {
             &jobs::offered(&self.cfg.settings, role)?,
             choice,
         )?;
-        let pr = ask.pr;
         let flow = self
             .cfg
             .flow
             .as_deref()
             .ok_or("the broker has no flow configurations to read a repo's authors from")?;
+        Ok((repo, prompt, ask, flow))
+    }
+
+    /// One request for the stuck role: its answer, or why there's none.
+    pub fn handle_job(&self, request: Request, work: &Work) -> Result<Response, String> {
+        let starter = self
+            .stuck
+            .as_deref()
+            .ok_or("the broker serves no job kind: no stuck role is configured")?;
+        let (repo, prompt, ask, flow) = self.validate_stuck_request(&request)?;
+        let pr = ask.pr;
         let accounts = discussion::accounts(flow, repo)?;
-        let asks = asked(prompt)?;
+        let asks = asked(&prompt)?;
         let (now, branch) = self.pr(repo, pr)?;
         let mut held = self.hold(
             stuck_key(repo, pr),

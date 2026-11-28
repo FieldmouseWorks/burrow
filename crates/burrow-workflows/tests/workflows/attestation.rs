@@ -634,6 +634,7 @@ struct Legs<'a> {
 /// Each leg's step, then the gate job's, as GitHub gives it the legs'
 /// combined outputs and their artifacts: its exit code, what it said and the
 /// log it leaves to attest.
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn legs(r: &Repo, l: Legs) -> (i32, String, String, String) {
     let wf = workflow(".github/workflows/flake-check.yml");
     let leg_step = step(&wf["jobs"]["check"], "leg");

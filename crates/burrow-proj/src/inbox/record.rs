@@ -393,6 +393,7 @@ impl Look<'_, '_> {
     /// the caller has one, what GitHub says of it now (`issue`): only that
     /// can say why an issue the inbox keeps nothing of is unseen. Reads
     /// only.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn record(&self, repo: &str, n: &str, issue: Option<&Value>) -> Record {
         let p = self.pass;
         let name = format!("{repo}#{n}");

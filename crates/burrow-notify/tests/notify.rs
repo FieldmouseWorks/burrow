@@ -134,6 +134,7 @@ impl GitHub {
 }
 
 impl Api for GitHub {
+    #[expect(clippy::too_many_lines, reason = "legacy test")]
     fn request(
         &mut self,
         method: &str,

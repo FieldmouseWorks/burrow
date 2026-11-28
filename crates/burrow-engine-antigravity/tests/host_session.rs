@@ -70,22 +70,11 @@ fn run_plugin(
     child.wait_with_output().unwrap()
 }
 
-#[test]
-fn host_mode_persists_home_across_continuation_turns_when_proj_engine_home_is_set() {
-    let dir = TempDir::new().unwrap();
-    let real_home = dir.path().join("real-home");
-    fs::create_dir_all(&real_home).unwrap();
-    let engine_home = dir.path().join("job-dir").join("engine-home");
-    fs::create_dir_all(engine_home.parent().unwrap()).unwrap();
-    let cred_src = dir.path().join("host-oauth.json");
-    fs::write(&cred_src, r#"{"access_token":"secret-host-token"}"#).unwrap();
-    let env_dump = dir.path().join("child-env.txt");
-
-    // Mirrors real `antigravity` CLI behavior: conversations live under
-    // `$HOME/.gemini/antigravity-cli/conversations/<id>`. Continuing an ID that
-    // is missing from `$HOME` starts a new session with a fresh ID.
-    let fixture = write_executable(
-        dir.path(),
+/// Fake `antigravity` CLI mirroring `$HOME/.gemini/antigravity-cli/conversations/<id>`:
+/// continuing an ID missing from `$HOME` starts a new session with a fresh ID.
+fn write_session_store_fixture(dir: &Path, env_dump: &Path) -> PathBuf {
+    write_executable(
+        dir,
         "ag-session-store",
         &format!(
             r#"#!/bin/sh
@@ -124,7 +113,20 @@ fi
             env_dump = env_dump.display(),
             cred_rel = DEFAULT_CREDENTIAL_HOME_PATH,
         ),
-    );
+    )
+}
+
+#[test]
+fn host_mode_persists_home_across_continuation_turns_when_proj_engine_home_is_set() {
+    let dir = TempDir::new().unwrap();
+    let real_home = dir.path().join("real-home");
+    fs::create_dir_all(&real_home).unwrap();
+    let engine_home = dir.path().join("job-dir").join("engine-home");
+    fs::create_dir_all(engine_home.parent().unwrap()).unwrap();
+    let cred_src = dir.path().join("host-oauth.json");
+    fs::write(&cred_src, r#"{"access_token":"secret-host-token"}"#).unwrap();
+    let env_dump = dir.path().join("child-env.txt");
+    let fixture = write_session_store_fixture(dir.path(), &env_dump);
 
     let cfg = Config {
         binary: fixture,

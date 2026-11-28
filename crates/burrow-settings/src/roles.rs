@@ -630,29 +630,7 @@ pub(crate) fn apply(
             *roles = next;
         }
         ["offer", on, what @ ("models" | "efforts"), words @ ..] => {
-            if !plugins.contains_key(*on) {
-                offerable_engine(on, configured_engines)?;
-            } else {
-                engine_syntax(on)?;
-            }
-            if let Some(w) = words.iter().find(|w| !plain(w)) {
-                return Err(format!("{w:?} is not a plain word"));
-            }
-            let mut next = offered(offers)?;
-            let offer = next.entry((*on).to_owned()).or_default();
-            let list: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
-            if *what == "models" {
-                offer.models = list;
-            } else {
-                offer.efforts = list;
-            }
-            let mut stored = offers.clone();
-            stored.insert((*on).to_owned(), next[*on].clone());
-            // Withdrawing what a role is set to would leave it on a model
-            // its engine doesn't have.
-            let pm = plugin_models_for(&stored, plugins);
-            roles.check_with_plugins(&next, &pm)?;
-            *offers = stored;
+            apply_offer(roles, offers, configured_engines, plugins, on, what, words)?;
         }
         ["engines", "save", name, rest @ ..] => {
             if !valid_setup(name) {
@@ -694,6 +672,41 @@ pub(crate) fn apply(
         setups.active = None;
     }
     Ok(status(before.as_deref(), roles, setups))
+}
+
+fn apply_offer(
+    roles: &Roles,
+    offers: &mut BTreeMap<String, Offer>,
+    configured_engines: &[String],
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
+    on: &str,
+    what: &str,
+    words: &[&str],
+) -> Result<(), String> {
+    if !plugins.contains_key(on) {
+        offerable_engine(on, configured_engines)?;
+    } else {
+        engine_syntax(on)?;
+    }
+    if let Some(w) = words.iter().find(|w| !plain(w)) {
+        return Err(format!("{w:?} is not a plain word"));
+    }
+    let mut next = merge_offers_with_plugins(offers, configured_engines, plugins)?;
+    let offer = next.entry(on.to_owned()).or_default();
+    let list: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
+    if what == "models" {
+        offer.models = list;
+    } else {
+        offer.efforts = list;
+    }
+    let mut stored = offers.clone();
+    stored.insert(on.to_owned(), next[on].clone());
+    // Withdrawing what a role is set to would leave it on a model
+    // its engine doesn't have.
+    let pm = plugin_models_for(&stored, plugins);
+    roles.check_with_plugins(&next, &pm)?;
+    *offers = stored;
+    Ok(())
 }
 
 pub(crate) const USAGE: &str = "usage: settings role ROLE ENGINE [over PCT ENGINE]... | role ROLE unset | model ROLE ENGINE MODEL|- [EFFORT|-] | model ROLE ENGINE unset | offer ENGINE models|efforts WORD... | engines [save NAME [--replace] | use NAME | use back]";

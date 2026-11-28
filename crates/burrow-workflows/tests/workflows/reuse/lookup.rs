@@ -463,6 +463,7 @@ fn another_tree_workflow_or_input_misses() {
 /// tree for, a lookup that isn't https (or this machine's), and a token
 /// the job can't get.
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn errors_and_malformed_answers_run_the_gate() {
     let l = Lookup::new();
     let at = l.s.mkdtemp();

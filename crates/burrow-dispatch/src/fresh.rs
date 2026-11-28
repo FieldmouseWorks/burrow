@@ -46,6 +46,60 @@ pub fn decide(
 
 const KEY: &str = "fresh";
 
+/// Those waiting for a job, newest first: the newest `idle` are kept for
+/// jobs to come, however long, and any other is stopped once it has sat
+/// `quiet`. So is one that has sat `quiet` beside a job queued for it:
+/// it would have taken it within seconds.
+fn retire_idle(
+    cfg: &Config,
+    f: &Fresh,
+    up: &[(&String, &crate::world::Unit)],
+    oldest: Option<&crate::snapshot::Job>,
+    now: f64,
+    d: &mut Decision,
+) -> (usize, usize) {
+    let mut idle: Vec<_> = up
+        .iter()
+        .filter(|(i, u)| f.owns(i) && u.state == "active" && !u.busy)
+        .collect();
+    idle.sort_by(|(_, a), (_, b)| b.since.unwrap_or(now).total_cmp(&a.since.unwrap_or(now)));
+    let mut waiting = 0;
+    let mut retired = 0;
+    for (instance, u) in idle {
+        let since = u.since.unwrap_or(now);
+        let missed = oldest.map(|job| job.at.max(since) + cfg.quiet);
+        let extra = (waiting >= f.idle).then_some(since + cfg.quiet);
+        match missed.into_iter().chain(extra).reduce(f64::min) {
+            Some(due) if now >= due => {
+                retired += 1;
+                let why = if extra.is_some_and(|e| now >= e) {
+                    format!(
+                        "idle since {}, and a runner for one job takes it in seconds",
+                        clock(since)
+                    )
+                } else {
+                    format!(
+                        "idle since {} beside a job queued since {}, which it would have taken in seconds",
+                        clock(since),
+                        clock(oldest.map_or(since, |job| job.at))
+                    )
+                };
+                d.moves.push(Move::Retire {
+                    unit: format!("{}{instance}.service", f.template),
+                    why,
+                });
+            }
+            due => {
+                waiting += 1;
+                if let Some(due) = due {
+                    book(d, due);
+                }
+            }
+        }
+    }
+    (waiting, retired)
+}
+
 /// The moves, and the wait the queue is, if it is one.
 fn wait(
     cfg: &Config,
@@ -76,49 +130,9 @@ fn wait(
         .iter()
         .filter(|(i, u)| f.owns(i) && !matches!(u.state.as_str(), "active" | "deactivating"))
         .count();
-    // Those waiting for a job, newest first: the newest `idle` are kept for
-    // jobs to come, however long, and any other is stopped once it has sat
-    // `quiet`. So is one that has sat `quiet` beside a job queued for it:
-    // it would have taken it within seconds.
-    let mut idle: Vec<_> = up
-        .iter()
-        .filter(|(i, u)| f.owns(i) && u.state == "active" && !u.busy)
-        .collect();
-    idle.sort_by(|(_, a), (_, b)| b.since.unwrap_or(now).total_cmp(&a.since.unwrap_or(now)));
     let oldest = pool.queued.first();
-    let mut waiting = 0;
-    for (instance, u) in idle {
-        let since = u.since.unwrap_or(now);
-        let missed = oldest.map(|job| job.at.max(since) + cfg.quiet);
-        let extra = (waiting >= f.idle).then_some(since + cfg.quiet);
-        match missed.into_iter().chain(extra).reduce(f64::min) {
-            Some(due) if now >= due => {
-                leaving += 1;
-                let why = if extra.is_some_and(|e| now >= e) {
-                    format!(
-                        "idle since {}, and a runner for one job takes it in seconds",
-                        clock(since)
-                    )
-                } else {
-                    format!(
-                        "idle since {} beside a job queued since {}, which it would have taken in seconds",
-                        clock(since),
-                        clock(oldest.map_or(since, |job| job.at))
-                    )
-                };
-                d.moves.push(Move::Retire {
-                    unit: format!("{}{instance}.service", f.template),
-                    why,
-                });
-            }
-            due => {
-                waiting += 1;
-                if let Some(due) = due {
-                    book(d, due);
-                }
-            }
-        }
-    }
+    let (waiting, retired) = retire_idle(cfg, f, &up, oldest, now, d);
+    leaving += retired;
     let queued = pool.queued.len();
     let room = f.most.saturating_sub(up.len());
     let start = (queued + f.idle).saturating_sub(waiting + coming).min(room);

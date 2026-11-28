@@ -66,6 +66,7 @@ pub struct Facts {
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
 /// watch.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     if f.state == "parked" {
         return None;

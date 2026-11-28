@@ -358,6 +358,7 @@ fn read(p: &mut Pass, recovery: &mut Recovery) -> Result<(), Error> {
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn classify(
     p: &Pass,
     ask: &Ask,

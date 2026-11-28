@@ -435,6 +435,7 @@ struct Target {
     drv: String,
     base: String,
 }
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn negative() -> Result<bool> {
     let mut n = Negative {
         work: Work::new("negative")?,
@@ -670,6 +671,7 @@ pub fn negative() -> Result<bool> {
         n.found("pass", Some(&tree))
     }
 }
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn coverage(
     n: &mut Negative,
     targets: &[Target],

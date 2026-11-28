@@ -169,45 +169,7 @@ fn install_update_schema_picker_audit_and_removal_fallback_for_nix_and_release()
     assert!(bwrap_log.contains("--clearenv"), "{bwrap_log}");
 
     // Immediate schema choices, picker data, and role/model usability.
-    let picker = cfg.picker().unwrap();
-    let third_picker = picker.engines.get("third").expect("third in picker");
-    assert!(third_picker.installed && third_picker.removable);
-    assert_eq!(third_picker.version.as_deref(), Some("1.0.0"));
-    assert_eq!(third_picker.sha256.as_deref(), Some(hash_v1.as_str()));
-    assert_eq!(third_picker.models.len(), 1);
-    assert_eq!(third_picker.models[0].id, "third-m1");
-    assert_eq!(third_picker.models[0].efforts, vec!["low", "high"]);
-    let caps = third_picker.capabilities.as_ref().unwrap();
-    assert_eq!(caps.sandbox, "none");
-    assert!(caps.network && !caps.mcp);
-    assert!(caps.declared.contains(&"workspace".to_owned()));
-    assert!(caps.declared.contains(&"network".to_owned()));
-    assert!(!caps.declared.contains(&"github".to_owned()));
-
-    let live_schema = cfg.live_schema().unwrap();
-    let role_enum = live_schema
-        .pointer("/properties/options/properties/proj.roles/properties/value/additionalProperties/properties/engine/enum")
-        .unwrap()
-        .as_array()
-        .unwrap();
-    assert!(role_enum.contains(&json!("third")), "{role_enum:?}");
-    let job_variants = live_schema
-        .pointer("/$defs/jobChoice/oneOf")
-        .unwrap()
-        .as_array()
-        .unwrap();
-    let third_variant = job_variants
-        .iter()
-        .find(|v| v.pointer("/properties/engine/const") == Some(&json!("third")))
-        .expect("third in $defs.jobChoice");
-    assert_eq!(
-        third_variant.pointer("/properties/model/anyOf/1/enum"),
-        Some(&json!(["third-m1"]))
-    );
-    assert_eq!(
-        third_variant.pointer("/x-capabilities/sandbox"),
-        Some(&json!("none"))
-    );
+    assert_third_v1_picker_and_schema(&cfg, &hash_v1);
 
     // Route roles and pick a declared model immediately.
     cfg.command(&words("role work third"), "host").unwrap();
@@ -274,6 +236,55 @@ fn install_update_schema_picker_audit_and_removal_fallback_for_nix_and_release()
         .unwrap();
 
     // 4. Removal atomically moves affected roles and saved setups to fallback and reports moves.
+    assert_third_removal_moves_roles(&cfg);
+
+    // 5. Audit log recorded actor, actorId, source, version, hash for install, update, remove.
+    assert_plugin_audit_log(&cfg, &hash_v1, &hash_v2);
+}
+
+fn assert_third_v1_picker_and_schema(cfg: &Config, hash_v1: &str) {
+    let picker = cfg.picker().unwrap();
+    let third_picker = picker.engines.get("third").expect("third in picker");
+    assert!(third_picker.installed && third_picker.removable);
+    assert_eq!(third_picker.version.as_deref(), Some("1.0.0"));
+    assert_eq!(third_picker.sha256.as_deref(), Some(hash_v1));
+    assert_eq!(third_picker.models.len(), 1);
+    assert_eq!(third_picker.models[0].id, "third-m1");
+    assert_eq!(third_picker.models[0].efforts, vec!["low", "high"]);
+    let caps = third_picker.capabilities.as_ref().unwrap();
+    assert_eq!(caps.sandbox, "none");
+    assert!(caps.network && !caps.mcp);
+    assert!(caps.declared.contains(&"workspace".to_owned()));
+    assert!(caps.declared.contains(&"network".to_owned()));
+    assert!(!caps.declared.contains(&"github".to_owned()));
+
+    let live_schema = cfg.live_schema().unwrap();
+    let role_enum = live_schema
+        .pointer("/properties/options/properties/proj.roles/properties/value/additionalProperties/properties/engine/enum")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(role_enum.contains(&json!("third")), "{role_enum:?}");
+    let job_variants = live_schema
+        .pointer("/$defs/jobChoice/oneOf")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let third_variant = job_variants
+        .iter()
+        .find(|v| v.pointer("/properties/engine/const") == Some(&json!("third")))
+        .expect("third in $defs.jobChoice");
+    assert_eq!(
+        third_variant.pointer("/properties/model/anyOf/1/enum"),
+        Some(&json!(["third-m1"]))
+    );
+    assert_eq!(
+        third_variant.pointer("/x-capabilities/sandbox"),
+        Some(&json!("none"))
+    );
+}
+
+fn assert_third_removal_moves_roles(cfg: &Config) {
     let removed = cfg
         .command_as(&owner_auth(), &words("plugin remove third"))
         .unwrap();
@@ -299,8 +310,9 @@ fn install_update_schema_picker_audit_and_removal_fallback_for_nix_and_release()
     assert_eq!(force.route("triage", Some("sam/box")).text(), "claude");
     assert_eq!(force.route("fix", None).text(), "claude over 95 claude-api");
     assert!(!force.offers.contains_key("third"));
+}
 
-    // 5. Audit log recorded actor, actorId, source, version, hash for install, update, remove.
+fn assert_plugin_audit_log(cfg: &Config, hash_v1: &str, hash_v2: &str) {
     let log_lines: Vec<Value> = fs::read_to_string(cfg.overlay.with_extension("log"))
         .unwrap()
         .lines()
@@ -659,6 +671,13 @@ fn model_specific_efforts_are_enforced_in_roles_updates_and_live_schema() {
     );
 
     // Live schema `$defs.jobChoice` preserves exact per-model effort pairs via `anyOf`.
+    assert_third_live_schema_per_model_efforts(&cfg);
+
+    // Single-model plugin allows selecting its efforts without repeating the model.
+    assert_single_model_plugin_effort_selection(dir.path(), &cfg);
+}
+
+fn assert_third_live_schema_per_model_efforts(cfg: &Config) {
     let schema = cfg.live_schema().unwrap();
     let variants = schema
         .pointer("/$defs/jobChoice/oneOf")
@@ -693,9 +712,10 @@ fn model_specific_efforts_are_enforced_in_roles_updates_and_live_schema() {
         branch("m3").pointer("/properties/effort"),
         Some(&json!({"type": "null"}))
     );
+}
 
-    // Single-model plugin allows selecting its efforts without repeating the model.
-    let single = dir.path().join("single-v1");
+fn assert_single_model_plugin_effort_selection(dir: &Path, cfg: &Config) {
+    let single = dir.join("single-v1");
     let single_hash = write_plugin_fixture(
         &single,
         "solo",

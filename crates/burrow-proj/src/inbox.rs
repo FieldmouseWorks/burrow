@@ -735,6 +735,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// of reach, and for how long. Not a failed unit when GitHub couldn't be
     /// asked: one would read as a broken update in the health check after a
     /// switch. The journal says it every pass, the owner after an hour.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     fn finish(&self, only: &str) -> Result<(), Fail> {
         let now = now();
         let wake = &self.inbox.wake;

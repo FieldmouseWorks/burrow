@@ -396,6 +396,7 @@ impl Pass<'_> {
     /// sorted again as it stands. The issues whose verdicts were carried
     /// out, which the rest of this pass leaves be: its list of them is from
     /// before.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub(super) fn verdicts(
         &mut self,
         repo: &str,

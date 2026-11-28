@@ -353,6 +353,7 @@ enum Target {
     NonItem,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn classify_target(b: &[u8], after_attr: usize) -> (Target, usize) {
     let start = skip_attrs(b, after_attr);
     let mut j = start;

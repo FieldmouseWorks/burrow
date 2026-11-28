@@ -580,6 +580,7 @@ impl NoticeBody {
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
 /// for a later question, even while an older close is still pending.
 /// Caller holds the job lock, including during resume rollback.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, String> {
     use std::process::{Command, Stdio};
     recover(job)?;

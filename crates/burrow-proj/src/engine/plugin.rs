@@ -322,6 +322,7 @@ fn resolve_model_effort(
 /// Start one `conary-plugin v5` (`job`) run for `job` turn `n`: on the host,
 /// or, given its sandbox (`agent`), inside that sandbox ([`launch`]).
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn spawn(
     cfg: &Config,
     job: &Job,
@@ -628,6 +629,7 @@ impl Running {
     /// Complete the run after `watch` observes process exit, validate the
     /// `conary-plugin v5` response on stdout, persist session/result/refusal
     /// records to `N.jsonl`, and return the structured outcome.
+    #[expect(clippy::too_many_lines, reason = "legacy; split by job")]
     pub fn finish(
         mut self,
         status: ExitStatus,

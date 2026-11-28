@@ -410,6 +410,7 @@ fn triage_uses_the_pass_repository_for_every_state_lookup() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() {
     for change in [
         "body",
@@ -740,6 +741,7 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn unstick_children_keep_admission_execution_and_sequence() {
     for kind in ["generated", "reused", "nested", "offered"] {
         {

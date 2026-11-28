@@ -306,10 +306,29 @@ impl Pass<'_> {
                 short(&head)
             )));
         }
-        let title = format!("{TITLE}{upstream} to {}", short(&head));
-        let sha = self.commit(repo, t.base, &files, &title)?;
-        self.point(repo, &branch, &sha)?;
-        let body = body(&upstream, &up_branch, f, &head, path, &counted);
+        self.publish_bump(
+            t, &upstream, &up_branch, f, &head, &branch, &counted, &files, open,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_bump(
+        &mut self,
+        t: &Target,
+        upstream: &str,
+        up_branch: &str,
+        f: &Follow,
+        head: &str,
+        branch: &str,
+        counted: &[String],
+        files: &[(String, Vec<u8>)],
+        open: Option<Open>,
+    ) -> Result<(), Error> {
+        let (repo, path) = (t.repo, t.path);
+        let title = format!("{TITLE}{upstream} to {}", short(head));
+        let sha = self.commit(repo, t.base, files, &title)?;
+        self.point(repo, branch, &sha)?;
+        let body = body(upstream, up_branch, f, head, path, counted);
         let pr = json!({ "title": title, "body": body });
         match open {
             Some(pr_open) => {
@@ -322,7 +341,7 @@ impl Pass<'_> {
                 self.say(format!(
                     "{repo}: #{} now moves {upstream} to {}",
                     pr_open.number,
-                    short(&head)
+                    short(head)
                 ));
                 self.ensure_first(repo, pr_open.number, &pr_open.labels, t.first)?;
             }
@@ -333,10 +352,7 @@ impl Pass<'_> {
                 let path = format!("repos/{repo}/pulls");
                 let made = send(self.api, "POST", &path, &pr)?;
                 let url = field(&made, &path, "/html_url")?.to_string();
-                self.say(format!(
-                    "{repo}: {url} moves {upstream} to {}",
-                    short(&head)
-                ));
+                self.say(format!("{repo}: {url} moves {upstream} to {}", short(head)));
                 if t.first.is_some() {
                     let number = made["number"].as_u64().ok_or_else(|| {
                         Error::said(format!("{path}: GitHub's answer has no number"))

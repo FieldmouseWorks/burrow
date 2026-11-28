@@ -287,6 +287,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
 /// The barrier is mandatory: observing a busy legacy census alone is not a
 /// barrier; the system service owns it for the entire deployment, including
 /// this consumer's restarts. A health check verifies its unit is active.
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 pub fn pass(cfg: &Config) -> io::Result<()> {
     // Repair the intermediate generation's serialized admission field before
     // replacing parents: still-running old writers must be able to record a

@@ -721,6 +721,14 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         .unwrap();
 
     // Case 1: repo-scoped route (`work@sam/box -> third`).
+    assert_repo_scoped_run_validation(&cfg);
+
+    // Case 2: live meter hop (`work` routes `claude over 80 third`, with
+    // `claude` at 90% and `third` at 10% so turn startup selects `third`).
+    assert_live_hop_run_validation(&cfg);
+}
+
+fn assert_repo_scoped_run_validation(cfg: &crate::config::Config) {
     // A claude-only model must be rejected because sam/box routes to `third`.
     let wrong_for_repo = New {
         role: Some("work".into()),
@@ -728,7 +736,7 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         admission: Some(crate::policy::Identity::Repository("sam/box".into())),
         ..Default::default()
     };
-    let fail = start_job(&cfg, &wrong_for_repo, "demo", "task").unwrap_err();
+    let fail = start_job(cfg, &wrong_for_repo, "demo", "task").unwrap_err();
     assert_eq!(fail.code, 2, "{:?}", fail.say);
     assert!(
         fail.say.as_deref().unwrap_or_default().contains("third"),
@@ -744,8 +752,8 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         admission: Some(crate::policy::Identity::Repository("sam/box".into())),
         ..Default::default()
     };
-    let id = start_job(&cfg, &right_for_repo, "demo", "task").unwrap();
-    let req = crate::job::Request::load(&Job::new(&cfg, &id)).unwrap();
+    let id = start_job(cfg, &right_for_repo, "demo", "task").unwrap();
+    let req = crate::job::Request::load(&Job::new(cfg, &id)).unwrap();
     assert_eq!(req.model.as_deref(), Some("third-m1"));
     assert_eq!(req.override_engine.as_deref(), Some("third"));
 
@@ -770,7 +778,7 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         model: Some("claude-m1".into()),
         ..Default::default()
     };
-    let fail = start_job(&cfg, &wrong_for_git_repo, "box", "task").unwrap_err();
+    let fail = start_job(cfg, &wrong_for_git_repo, "box", "task").unwrap_err();
     assert_eq!(fail.code, 2, "{:?}", fail.say);
     assert!(
         fail.say.as_deref().unwrap_or_default().contains("third"),
@@ -783,17 +791,18 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         effort: Some("low".into()),
         ..Default::default()
     };
-    let id_git = start_job(&cfg, &right_for_git_repo, "box", "task").unwrap();
+    let id_git = start_job(cfg, &right_for_git_repo, "box", "task").unwrap();
     assert_eq!(
-        crate::job::Request::load(&Job::new(&cfg, &id_git))
+        crate::job::Request::load(&Job::new(cfg, &id_git))
             .unwrap()
             .model
             .as_deref(),
         Some("third-m1")
     );
+}
 
-    // Case 2: live meter hop (`work` routes `claude over 80 third`, with
-    // `claude` at 90% and `third` at 10% so turn startup selects `third`).
+fn assert_live_hop_run_validation(cfg: &crate::config::Config) {
+    let settings = cfg.settings.as_ref().unwrap();
     settings
         .command(
             &["role", "work", "claude", "over", "80", "third"].map(String::from),
@@ -821,7 +830,7 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         local_work: true,
         ..Default::default()
     };
-    let fail = start_job(&cfg, &wrong_for_hop, "demo", "task").unwrap_err();
+    let fail = start_job(cfg, &wrong_for_hop, "demo", "task").unwrap_err();
     assert_eq!(fail.code, 2, "{:?}", fail.say);
     assert!(
         fail.say.as_deref().unwrap_or_default().contains("third"),
@@ -837,8 +846,8 @@ fn proj_run_validates_against_repo_scoped_and_live_hopped_route_engine() {
         local_work: true,
         ..Default::default()
     };
-    let id2 = start_job(&cfg, &right_for_hop, "demo", "task").unwrap();
-    let req2 = crate::job::Request::load(&Job::new(&cfg, &id2)).unwrap();
+    let id2 = start_job(cfg, &right_for_hop, "demo", "task").unwrap();
+    let req2 = crate::job::Request::load(&Job::new(cfg, &id2)).unwrap();
     assert_eq!(req2.model.as_deref(), Some("third-m1"));
     assert_eq!(req2.override_engine.as_deref(), Some("third"));
 }

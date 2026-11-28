@@ -234,6 +234,7 @@ fn a_stuck_item_reads_the_same_wherever_the_dashboard_moves_it() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy test")]
 fn whats_stuck_goes_to_a_job_then_the_stuck_issue() {
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());

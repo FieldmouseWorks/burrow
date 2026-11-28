@@ -315,6 +315,14 @@ owner's (the steward's stalls are the stall watchdog's).
   describes: a `flake.nix` from burrow's template, the workflow that calls
   `nix flake check`, and the template's house workflow beside it. Jobs
   the flake can't hold stay alongside it.
+- **Rust workspaces** turn on `too_many_lines = "warn"` under
+  `[workspace.lints.clippy]` (or `[lints.clippy]` in a single-crate repo,
+  alongside `unsafe_code = "forbid"` in
+  [the house style](house-style.md#the-gate-is-the-flake)), with every
+  member inheriting `[lints] workspace = true`, so CI's
+  `cargo clippy --all-targets -- -D warnings` holds function length by
+  machine. Existing over-length functions carry a per-function
+  `#[expect(clippy::too_many_lines, reason = "...")]` until shortened.
 - **Code scanning** in a public repo: a `code-scanning.yml` like
   [burrow's](../.github/workflows/code-scanning.yml) (its triggers and
   `concurrency` included) that calls the shared

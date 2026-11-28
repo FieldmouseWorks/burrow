@@ -73,102 +73,115 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
     // receipt while its recovered switch is still waiting for publication.
     cfg.settings.roles()?;
     for issue in door.issues(api)? {
-        // A non-author's text is ignored, including edits by outsiders.
-        let (text, cycle) = match door.written_cycle(api, &issue)? {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let cycle: String = Sha256::digest(cycle.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let receipt = state.join(format!("{}-{cycle}.json", issue.number));
-        let operation = receipt.with_extension("operation");
-        let pending = match fs::read(&receipt) {
-            Ok(bytes) => Some(
-                serde_json::from_slice::<Pending>(&bytes)
-                    .map_err(|e| format!("{}: {e}", receipt.display()))?,
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", receipt.display()).into()),
-        };
-        if let Some(pending) = pending {
-            door.reply(api, issue.number, &pending.body, &pending.reason)?;
-            continue;
-        }
-        // A request the door before the settings completed, its answer
-        // still to post: answered again, never made again.
-        let legacy = match cfg.settings.legacy_answer(&operation, None)? {
-            Some(said) => Some(said),
-            None => match fs::read(&operation) {
-                Ok(bytes) => serde_json::from_slice::<Legacy>(&bytes)
-                    .map_err(|e| format!("{}: {e}", operation.display()))?
-                    .result
-                    .map(|said| cfg.settings.legacy_answer(&operation, Some(&said)))
-                    .transpose()?
-                    .flatten(),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(format!("{}: {e}", operation.display()).into()),
-            },
-        };
-        let lines = asked(&text);
-        let args = match lines.as_slice() {
-            [line] if line == "list" => Some(vec!["engines".into(), "list".into()]),
-            [line] => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
-                ["use", name] if *name == "back" || valid_setup(name) => {
-                    Some(vec!["engines".into(), "use".into(), (*name).into()])
-                }
-                _ => None,
-            },
+        handle_issue(api, cfg, &door, &state, &issue)?;
+    }
+    Ok(())
+}
+
+fn parse_request(lines: &[String]) -> Option<Vec<String>> {
+    match lines {
+        [line] if line == "list" => Some(vec!["engines".into(), "list".into()]),
+        [line] => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["use", name] if *name == "back" || valid_setup(name) => {
+                Some(vec!["engines".into(), "use".into(), (*name).into()])
+            }
             _ => None,
-        };
-        let current = || {
-            cfg.settings
-                .engines()
-                .map(|s| fenced(&s))
-                .unwrap_or_else(|e| diagnostic(&e))
-        };
-        let (body, reason) = match (legacy, args) {
-            (Some(said), _) => (fenced(&said), "completed"),
-            (None, args) => match args {
-                // The receipt is the overlay's: a retried delivery of this open
-                // cycle's request answers again, never switches again.
-                Some(args) => match cfg.settings.request(
-                    &operation,
-                    &args,
-                    &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
-                ) {
-                    Ok(said) => (fenced(&said), "completed"),
-                    // Published, though a step after it failed, so maybe not on
-                    // disk: no answer yet. The next pass's retry finds its
-                    // receipt, makes it durable and answers then.
-                    Err(e) if cfg.settings.answered(&operation)?.is_some() => {
-                        return Err(e.into());
-                    }
-                    Err(e) => (
-                        format!("Nothing changed. {}\n\n{}", diagnostic(&e), current()),
-                        "not_planned",
-                    ),
-                },
-                None => (
-                    format!(
-                        "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
-                        current()
-                    ),
+        },
+        _ => None,
+    }
+}
+
+fn handle_issue(
+    api: &mut dyn Api,
+    cfg: &Config,
+    door: &Door<'_>,
+    state: &Path,
+    issue: &burrow_door::Issue,
+) -> Result<(), Error> {
+    // A non-author's text is ignored, including edits by outsiders.
+    let Ok((text, cycle)) = door.written_cycle(api, issue)? else {
+        return Ok(());
+    };
+    let cycle: String = Sha256::digest(cycle.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let receipt = state.join(format!("{}-{cycle}.json", issue.number));
+    let operation = receipt.with_extension("operation");
+    let pending = match fs::read(&receipt) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<Pending>(&bytes)
+                .map_err(|e| format!("{}: {e}", receipt.display()))?,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", receipt.display()).into()),
+    };
+    if let Some(pending) = pending {
+        door.reply(api, issue.number, &pending.body, &pending.reason)?;
+        return Ok(());
+    }
+    // A request the door before the settings completed, its answer
+    // still to post: answered again, never made again.
+    let legacy = match cfg.settings.legacy_answer(&operation, None)? {
+        Some(said) => Some(said),
+        None => match fs::read(&operation) {
+            Ok(bytes) => serde_json::from_slice::<Legacy>(&bytes)
+                .map_err(|e| format!("{}: {e}", operation.display()))?
+                .result
+                .map(|said| cfg.settings.legacy_answer(&operation, Some(&said)))
+                .transpose()?
+                .flatten(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", operation.display()).into()),
+        },
+    };
+    let args = parse_request(&asked(&text));
+    let current = || {
+        cfg.settings
+            .engines()
+            .map(|s| fenced(&s))
+            .unwrap_or_else(|e| diagnostic(&e))
+    };
+    let (body, reason) = match (legacy, args) {
+        (Some(said), _) => (fenced(&said), "completed"),
+        (None, args) => match args {
+            // The receipt is the overlay's: a retried delivery of this open
+            // cycle's request answers again, never switches again.
+            Some(args) => match cfg.settings.request(
+                &operation,
+                &args,
+                &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
+            ) {
+                Ok(said) => (fenced(&said), "completed"),
+                // Published, though a step after it failed, so maybe not on
+                // disk: no answer yet. The next pass's retry finds its
+                // receipt, makes it durable and answers then.
+                Err(e) if cfg.settings.answered(&operation)?.is_some() => {
+                    return Err(e.into());
+                }
+                Err(e) => (
+                    format!("Nothing changed. {}\n\n{}", diagnostic(&e), current()),
                     "not_planned",
                 ),
             },
-        };
-        let pending = Pending {
-            body,
-            reason: reason.into(),
-        };
-        let tmp = receipt.with_extension("next");
-        let bytes = serde_json::to_vec(&pending).map_err(|e| e.to_string())?;
-        stored(&tmp, fs::write(&tmp, bytes))?;
-        stored(&receipt, fs::rename(&tmp, &receipt))?;
-        door.reply(api, issue.number, &pending.body, reason)?;
-    }
+            None => (
+                format!(
+                    "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
+                    current()
+                ),
+                "not_planned",
+            ),
+        },
+    };
+    let pending = Pending {
+        body,
+        reason: reason.into(),
+    };
+    let tmp = receipt.with_extension("next");
+    let bytes = serde_json::to_vec(&pending).map_err(|e| e.to_string())?;
+    stored(&tmp, fs::write(&tmp, bytes))?;
+    stored(&receipt, fs::rename(&tmp, &receipt))?;
+    door.reply(api, issue.number, &pending.body, reason)?;
     Ok(())
 }
 

@@ -41,6 +41,7 @@ fn evaluate(flake: &Path, system: &str, entry: &str) -> Command {
         ],
     )
 }
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn apart(skip: &str, legs: usize, leg: usize, flaky: Option<&Flaky>) -> Result<bool> {
     let system = system()?;
     let work = Work::new("eval-apart")?;
@@ -187,6 +188,7 @@ pub(crate) fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
     }
     v
 }
+#[expect(clippy::too_many_lines, reason = "legacy; split by job")]
 fn whole(skip: &str, flaky: Option<&Flaky>) -> Result<bool> {
     let work = Work::new("roots")?;
     let roots = &work.0;
