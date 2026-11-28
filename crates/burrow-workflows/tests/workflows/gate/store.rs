@@ -571,6 +571,26 @@ fn the_store_down_builds_cold() {
     }
 }
 
+/// Move signed narinfos and NARs from `src` into `dst`, keeping `nix-cache-info`
+/// in both caches so `src` stays a healthy (empty) binary cache.
+fn move_cache_entries(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst.join("nar")).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_file() {
+            burrow_test::copy_file(&p, dst.join(p.file_name().unwrap()));
+            if p.file_name().unwrap() != "nix-cache-info" {
+                fs::remove_file(&p).unwrap();
+            }
+        }
+    }
+    for entry in fs::read_dir(src.join("nar")).unwrap() {
+        let p = entry.unwrap().path();
+        burrow_test::copy_file(&p, dst.join("nar").join(p.file_name().unwrap()));
+        fs::remove_file(&p).unwrap();
+    }
+}
+
 /// Serve a binary cache directory over HTTP where the first `fail_nars`
 /// `/nar/*` requests return HTTP 503 and subsequent requests succeed.
 fn flaky_upstream_store(cache: &Path, fail_nars: usize) -> String {
@@ -652,21 +672,7 @@ fn transient_upstream_cache_failure_retries_without_bootstrapping_from_source() 
     // Copy the signed stage0 output into a separate upstream cache directory,
     // leaving the build store cache empty (healthy, just a miss).
     let upstream_cache = rs.s.join("upstream-cache");
-    fs::create_dir_all(upstream_cache.join("nar")).unwrap();
-    for entry in fs::read_dir(&rs.cache).unwrap() {
-        let p = entry.unwrap().path();
-        if p.is_file() {
-            fs::copy(&p, upstream_cache.join(p.file_name().unwrap())).unwrap();
-            if p.file_name().unwrap() != "nix-cache-info" {
-                fs::remove_file(&p).unwrap();
-            }
-        }
-    }
-    for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
-        let p = entry.unwrap().path();
-        fs::copy(&p, upstream_cache.join("nar").join(p.file_name().unwrap())).unwrap();
-        fs::remove_file(&p).unwrap();
-    }
+    move_cache_entries(&rs.cache, &upstream_cache);
 
     // Upstream fails its first NAR download (503), then succeeds on retry.
     let upstream_url = flaky_upstream_store(&upstream_cache, 1);
@@ -781,21 +787,7 @@ fn build_store_nar_failure_drops_only_build_store_and_keeps_upstream_cache() {
     rs.populate_signed(&stage0_drv, "stage0-ok\n");
 
     let upstream_cache = rs.s.join("upstream-cache");
-    fs::create_dir_all(upstream_cache.join("nar")).unwrap();
-    for entry in fs::read_dir(&rs.cache).unwrap() {
-        let p = entry.unwrap().path();
-        if p.is_file() {
-            fs::copy(&p, upstream_cache.join(p.file_name().unwrap())).unwrap();
-            if p.file_name().unwrap() != "nix-cache-info" {
-                fs::remove_file(&p).unwrap();
-            }
-        }
-    }
-    for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
-        let p = entry.unwrap().path();
-        fs::copy(&p, upstream_cache.join("nar").join(p.file_name().unwrap())).unwrap();
-        fs::remove_file(&p).unwrap();
-    }
+    move_cache_entries(&rs.cache, &upstream_cache);
 
     // Build store has a signed narinfo for the check, with a truncated NAR.
     let check_expr = format!(
