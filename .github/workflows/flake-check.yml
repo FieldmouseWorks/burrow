@@ -333,7 +333,8 @@ jobs:
         if: ${{ always() && steps.builds.outcome == 'failure' }}
         shell: bash
         run: echo 'degraded/builds' >> "$GITHUB_STEP_SUMMARY"
-      # The runner is compiled with Nix's compiler, as the gate's is.
+      # The runner is built from the workflow's flake with Nix, substituting
+      # from the build store when configured.
       - if: inputs.install-nix
         uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with: &nix-config
@@ -348,11 +349,12 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .flake-check
           persist-credentials: false
-          # Cone mode: crates/'s own files (its rust-toolchain.toml) and the
-          # root's (flake.lock, for compiler.nix) come too.
+          # Cone mode: the root's flake.nix and flake.lock come too, so Nix
+          # builds burrow-flake-check from this pinned commit.
           sparse-checkout: |
             .github/flake-check
-            crates/burrow-flake-check
+            crates
+            lib
       # The gate this run is: this workflow, by its repository, file, commit
       # and the commit's tree, its inputs that can change a result, and the
       # build store when configured. Every job that attests names it in its
@@ -525,6 +527,7 @@ jobs:
             .github/flake-check
             .github/actions/flaky
             crates
+            lib
       # The gate this is, for the attestation to name.
       - *identity
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
@@ -981,9 +984,10 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/flake-check
-            crates/burrow-flake-check
-      # Nix supplies the bootstrap compiler even for the paths-only step, and
-      # substitutes from the build store from its first step when configured.
+            crates
+            lib
+      # Nix delivers burrow-flake-check even for the paths-only step,
+      # substituting from the build store from its first step when configured.
       - id: builds
         name: soft/builds
         if: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' }}

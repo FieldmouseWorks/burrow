@@ -107,28 +107,11 @@ struct Run<'a> {
 impl Gate {
     fn new() -> Gate {
         let s = Scratch::default();
-        // Nix provisioning has its own real build check. Here it returns an
-        // isolated compiler bundle, so workflow tests need no network/store
-        // dependencies for the bootstrap and still compile the actual runner.
-        let compiler = std::process::Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .unwrap();
-        assert!(compiler.status.success());
-        let sysroot = String::from_utf8(compiler.stdout).unwrap();
-        fs::create_dir_all(s.join("compiler/bin")).unwrap();
-        crate::harness::executable(
-            &s.join("compiler/bin/rustc"),
-            &format!("exec {}/bin/rustc \"$@\"\n", sysroot.trim()),
-        );
-        std::os::unix::fs::symlink(which("cc"), s.join("compiler/bin/cc")).unwrap();
-        let expression = repo_file(".github/flake-check/compiler.nix")
-            .canonicalize()
-            .unwrap();
-        s.stub("nix-build", &format!(r#"[ "$#" = 5 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
-[ "$3" = '{}' ] && [ "$4" = --out-link ] && [ -d "${{5%/*}}" ] || exit 90
-printf '%s\n' '{}'
-"#, expression.display(), s.join("compiler").display()));
+        // Store delivery of burrow-flake-check has its own real-Nix test in
+        // store.rs and flake-gate. Here the nix stub intercepts run.sh's
+        // `nix build ...#burrow-flake-check` and links the workspace binary so
+        // workflow tests run the real runner without network/store inputs.
+        let runner_hook = crate::harness::runner_build_hook(&s);
         let nix = which("nix");
         let (real_nix, real_bin) = (nix.display(), nix.parent().unwrap().display());
         // No binary cache: nothing in a case's store comes from one, and
@@ -147,7 +130,7 @@ printf '%s\n' '{}'
         s.stub(
             "nix",
             &format!(
-                r#"case $1 in
+                r#"{runner_hook}case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
     {real_nix} config show max-silent-time >> "$NIX_LOG.silent"
@@ -509,7 +492,7 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
         tools["with"],
         crate::harness::yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\n.github/actions/flaky\\ncrates\\n\"}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\n.github/actions/flaky\\ncrates\\nlib\\n\"}"
         )
     );
     // Every run but gate-reuse's hit, which builds nothing (reuse.rs).

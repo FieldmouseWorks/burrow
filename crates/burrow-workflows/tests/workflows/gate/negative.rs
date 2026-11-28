@@ -336,7 +336,7 @@ fn every_pr_gets_one_from_the_workflows_own_files() {
         st[1]["with"],
         yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates/burrow-flake-check\\n\"}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates\\nlib\\n\"}"
         )
     );
     for (id, paths_only) in [("paths", "true"), ("negative", "false")] {

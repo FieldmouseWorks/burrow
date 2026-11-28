@@ -306,13 +306,13 @@ fn slots_a_closure_it_cant_read() {
 #[test]
 fn slots_unsure_takes_the_slot() {
     let t = Slotted::new();
-    let broken = t.g.s.join("nojq");
+    let broken = t.g.s.join("badshow");
     fs::create_dir(&broken).unwrap();
     executable(
-        &broken.join("jq"),
+        &broken.join("nix"),
         &format!(
-            "if [[ \"$*\" == *requiredSystemFeatures* ]]; then exit 1; fi\nexec {} \"$@\"\n",
-            which("jq").display()
+            "if [ \"$1\" = derivation ] && [ \"$2\" = show ]; then echo '{{\"x.drv\":{{}}}}'; exit 0; fi\nexec {} \"$@\"\n",
+            t.g.s.join("bin/nix").display()
         ),
     );
     let path = format!("{}:{}", broken.display(), t.path);

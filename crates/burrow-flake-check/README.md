@@ -5,8 +5,8 @@ workflow's evaluation, build scheduling, checkout snapshots and negative
 classification. The workflow's `.github/flake-check/*.sh` files only bootstrap
 it. `plan.rs` owns the Nix expression used to plan and evaluate outputs.
 
-The gate and negative runner have no Rust dependencies. It uses the workflow's existing `jq`
-for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
+The runner uses `serde` and `serde_json` for JSON, and invokes git, Nix and,
+where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
 builds start. They run side by side, a core and 2G each, as long as the
 job's memory lasts: what one holds isn't known before it runs (`memory.rs`
@@ -20,45 +20,34 @@ input it wasn't given can't tell.
 
 ## Delivery and caller cost
 
-The workflow checks out its own immutable `job.workflow_sha`, including this
-crate, its lock file and the crate toolchain specification. `compiler.nix`
-gets Nixpkgs and rust-overlay from that lock, and the minimal Rust channel
-from `crates/rust-toolchain.toml`. Nix supplies both the compiler and C linker;
-no runner needs a Rustup default, a Rust installation or an ambient linker.
-This also covers burrow's fresh runners without changing the machine flake.
-The local `flake-gate` fetches the same files at the named workflow commit.
+The workflow checks out its own immutable `job.workflow_sha` (including
+`.github/flake-check`, `crates`, `lib`, and the root `flake.nix` and
+`flake.lock`). `.github/flake-check/run.sh` builds (or substitutes) the
+workflow's `burrow-flake-check` package with Nix:
 
-The compiler closure stays rooted while the bootstrap compiles the runner
-in a private directory. No Cargo dependency build, registry access, release
-download or caller-writable executable cache sits between the pinned sources
-and the runner. Caller toolchain files cannot choose its compiler. Both gate
-and paths-only runs require Nix: the negative job installs it before its
-path filter, configured with the build store when set.
+```sh
+nix build --extra-experimental-features 'nix-command flakes' \
+  --no-update-lock-file --out-link "$work/runner" "$repo#burrow-flake-check"
+```
 
-The earlier 16–20 second hosted Cargo build remains avoided for gate and negative runs. The bootstrap
-reports toolchain provisioning and direct compilation separately. A real run
-with broken ambient `rustc` and `cc` commands took 1 second for provisioning
-and 2 seconds for compilation with the compiler already in the local store.
-The earlier [hosted CI run](https://github.com/FieldmouseWorks/burrow/actions/runs/42508563466)
-reported 1 second per gate compilation using the host toolchain; that excludes
-the new Nix provisioning and is not an end-to-end timing of this bootstrap.
+Keeping `--out-link` in a private temporary directory roots the store path
+while the runner executes and never reuses an executable a preceding step
+could have left in `RUNNER_TEMP`. No ambient `rustc`, C linker, Rustup
+default, or caller toolchain file is consulted. The local `flake-gate`
+fetches the same workflow commit and runs the same `run.sh`.
 
-A cold store must fetch compiler inputs and their closure (about 1.1 GiB
-uncompressed on x86_64 Linux). The first completed hosted leg of the
-[new bootstrap run](https://github.com/FieldmouseWorks/burrow/actions/runs/42517486906/job/128843615710)
-reported 720.6 MiB of compiler fetches, 11 seconds of provisioning and
-1 second of compilation. This is one observed cold run, not a timing bound.
-Using the minimal pinned toolchain reduces that from about 1.9 GiB with
-Nixpkgs' general rustc package. The store shares those inputs with Rust gates
-and subsequent runs, but a non-Rust caller still pays that cold setup cost.
-We accept it to supply a working, pinned compiler on every supported runner
-without a separate binary publication and verification system. Paths-only
-runs now pay Nix setup as well. This is a cold provisioning cost, not just
-the one-second compilation figure; CI logs expose both costs explicitly.
-No runner executable is reused between invocations.
+When the build store (`BURROW_BUILDS_URL`, `BURROW_BUILDS_PUBLIC_KEY`) is
+configured, `install-nix-action` adds it as a substituter before `run.sh`
+runs in `reuse`, `check`, and `negative`, so Nix substitutes
+`burrow-flake-check` directly from the store whenever that derivation is
+cached (and `check`'s `builds-write` step uploads it after a cold build). On
+self-hosted NixOS runners (`install-nix: false`), Nix reuses the machine's
+own store. Both gate and paths-only negative runs require Nix: the negative
+job installs it before its path filter, configured with the build store when
+set.
 
 The behavioral tests live in `burrow-workflows/tests/workflows/gate`: they run the workflow's
-own steps with real git and Nix evaluation, including the private-store retry,
+own steps with real git and Nix evaluation, including store substitution, the private-store retry,
 base failures, fetches, signals, VM slots, memory limits and test coverage.
 
 ## The build store
@@ -187,7 +176,7 @@ A gate that didn't pass is signed `fail` only when it said that a check, or
 the flake, failed. Anything else is `error`, with the reason as the
 predicate's `error` (`src/verdict.rs`, #1400): a log or file it couldn't
 write, a command killed or unable to run, a tool of its own failing (git,
-tar, jq, mktemp, a GC root), a runner that died or never started. It's that
+tar, mktemp, a GC root), a runner that died or never started. It's that
 way round because a gate on a full disk can't be counted on to write that
 it broke.
 

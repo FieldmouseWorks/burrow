@@ -151,10 +151,11 @@ fn what_was_killed_or_couldnt_be_rooted_is_an_error() {
 
     let g = Gate::new();
     let nix = crate::harness::which("nix");
+    let runner_hook = crate::harness::runner_build_hook(&g.s);
     g.s.stub(
         "nix",
         &format!(
-            "[ \"$1\" != build ] || exit 137\nexec {} \"$@\"\n",
+            "{runner_hook}[ \"$1\" != build ] || exit 137\nexec {} \"$@\"\n",
             nix.display()
         ),
     );
@@ -176,7 +177,7 @@ fn what_was_killed_or_couldnt_be_rooted_is_an_error() {
 #[test]
 fn a_gate_that_never_started_is_an_error() {
     let g = Gate::new();
-    g.s.stub("nix-build", &format!("echo '{ENOSPC}' >&2\nexit 1\n"));
+    g.s.stub("nix", &format!("echo '{ENOSPC}' >&2\nexit 1\n"));
     signed(&g, CHECKS, &[], Run::default()).is_error("without saying a check failed");
 }
 

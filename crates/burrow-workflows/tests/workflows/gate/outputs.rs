@@ -297,22 +297,26 @@ fn an_unknown_limit_takes_one_at_a_time() {
     }
 }
 
-/// A jq that fails listing the leg's outputs fails the gate, rather than
-/// leaving nothing to evaluate.
+/// Malformed plan JSON fails the gate before evaluating any outputs, rather
+/// than leaving nothing to evaluate.
 #[test]
 fn a_failing_list_of_the_legs_outputs_fails_it() {
     let g = Gate::new();
-    g.s.stub(
-        "jq",
+    let wrapped = g.s.join("badplan");
+    fs::create_dir(&wrapped).unwrap();
+    crate::harness::executable(
+        &wrapped.join("nix"),
         &format!(
-            "case \"$*\" in *'select(.value.mine)'*) exit 5 ;; esac\nexec {} \"$@\"\n",
-            crate::harness::which("jq").display()
+            "if [ \"$1\" = eval ]; then\n  case \"$*\" in *'entry = '*) ;; *'{{ system = \"'*) echo 'not json'; exit 0 ;; esac\nfi\nexec {} \"$@\"\n",
+            g.s.join("bin/nix").display()
         ),
     );
+    let path = format!("{}:{}", wrapped.display(), g.s.path_var());
     let r = g.run(
         &g.flake(EVERY),
         Run {
             skip: "vm",
+            env: &[("PATH", &path)],
             ..Run::default()
         },
     );

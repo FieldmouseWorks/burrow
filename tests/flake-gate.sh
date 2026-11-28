@@ -111,38 +111,46 @@ d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@v1)")
 (cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "a named workflow that runs its files failed"
 [ "$(tail -n 1 "$tmp/out")" = "v1 $d" ] || fail "ran v1's files as $(cat "$tmp/out")"
 
-# The Rust bootstrap needs its crate from that same workflow commit too.
-mkdir -p "$tools/crates/burrow-flake-check/src"
-printf 'fn main() { println!("rust runner"); }\n' > "$tools/crates/burrow-flake-check/src/main.rs"
-cp "$burrow/.github/flake-check/gate.sh" "$burrow/.github/flake-check/run.sh" "$burrow/.github/flake-check/compiler.nix" "$tools/.github/flake-check/"
-cp "$burrow/flake.lock" "$tools/flake.lock"
-cp "$burrow/crates/rust-toolchain.toml" "$tools/crates/rust-toolchain.toml"
-# Nix built this compiler as a native input of the check. The stand-in
-# verifies which expression and lock the remote adapter supplies; the real
-# bootstrap then compiles its Rust source with that compiler and linker.
-mkdir "$tmp/bootstrap-bin"
-printf '#!%s\n' "$(command -v bash)" > "$tmp/bootstrap-bin/nix-build"
-cat >> "$tmp/bootstrap-bin/nix-build" <<'NIX_BUILD'
+# The runner is delivered from the pinned workflow commit's flake via Nix,
+# never from the caller's checkout or compiler.nix.
+[ ! -e "$burrow/.github/flake-check/compiler.nix" ] || fail "compiler.nix still exists"
+[ -z "${FLAKE_CHECK_RUNNER-}" ] || [ -x "$FLAKE_CHECK_RUNNER/bin/burrow-flake-check" ] || fail "FLAKE_CHECK_RUNNER has no burrow-flake-check binary"
+printf '{ # pinned workflow flake\n}\n' > "$tools/flake.nix"
+printf '{ }\n' > "$tools/flake.lock"
+mkdir -p "$tools/lib" "$tools/crates/burrow-flake-check/src"
+printf '# pinned lib\n' > "$tools/lib/project.nix"
+printf 'fn main() {}\n' > "$tools/crates/burrow-flake-check/src/main.rs"
+cp "$burrow/.github/flake-check/gate.sh" "$burrow/.github/flake-check/run.sh" "$tools/.github/flake-check/"
+# Stand in for `nix build` to verify the exact invocation and that the pinned
+# workflow commit's flake (never the caller's) is built and rooted.
+mkdir -p "$tmp/fake-runner/bin" "$tmp/bootstrap-bin"
+printf '#!%s\nprintf "nix runner %%s\\n" "$1"\n' "$(command -v bash)" > "$tmp/fake-runner/bin/burrow-flake-check"
+chmod +x "$tmp/fake-runner/bin/burrow-flake-check"
+printf '#!%s\n' "$(command -v bash)" > "$tmp/bootstrap-bin/nix"
+cat >> "$tmp/bootstrap-bin/nix" <<'NIX_STUB'
 set -e
-[ "$#" = 5 ]
-[ "$1" = --extra-experimental-features ]
-[ "$2" = 'nix-command flakes' ]
-[ "$4" = --out-link ]
-[ -d "${5%/*}" ]
-test -f "$3"
-test -f "${3%/*}/../../flake.lock"
-test -f "${3%/*}/../../crates/rust-toolchain.toml"
-printf '%s\n' "$FLAKE_CHECK_COMPILER"
-NIX_BUILD
-chmod +x "$tmp/bootstrap-bin/nix-build"
+[ "$#" = 7 ]
+[ "$1" = build ]
+[ "$2" = --extra-experimental-features ]
+[ "$3" = 'nix-command flakes' ]
+[ "$4" = --no-update-lock-file ]
+[ "$5" = --out-link ]
+[ -d "${6%/*}" ]
+repo=${7%#burrow-flake-check}
+[ "$7" = "$repo#burrow-flake-check" ]
+grep -q 'pinned workflow flake' "$repo/flake.nix"
+test -f "$repo/flake.lock"
+test -f "$repo/lib/project.nix"
+ln -s "$FAKE_RUNNER" "$6"
+NIX_STUB
+chmod +x "$tmp/bootstrap-bin/nix"
 export PATH="$tmp/bootstrap-bin:$PATH"
 git -C "$tools" add . && git -C "$tools" commit -qm rust && git -C "$tools" tag rust
-# Caller sources with the same path must not supply the remote's executable.
+# Caller sources with the same path must not supply the remote's runner.
 d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@rust)")
-mkdir -p "$d/crates/burrow-flake-check/src"
-printf 'compile_error!("caller source");\n' > "$d/crates/burrow-flake-check/src/main.rs"
-(cd "$d" && GATE_OUT=$tmp/out flake-gate) > "$tmp/rust" || fail "the pinned Rust runner wasn't fetched"
-grep -qx 'rust runner' "$tmp/rust" || fail "ran another Rust runner"
+printf '{ # caller flake\n}\n' > "$d/flake.nix"
+(cd "$d" && FAKE_RUNNER="$tmp/fake-runner" GATE_OUT=$tmp/out flake-gate) > "$tmp/rust" || fail "the pinned Nix runner wasn't built"
+grep -qx 'nix runner gate' "$tmp/rust" || fail "ran another runner: $(cat "$tmp/rust")"
 
 # What it can't run as GitHub would, it refuses, and runs nothing.
 refused() {

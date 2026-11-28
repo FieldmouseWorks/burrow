@@ -2,6 +2,74 @@
 use super::flaky::{Check, Flaky};
 use super::plan::PLAN;
 use super::*;
+use serde::{Deserialize, Serialize};
+#[derive(Deserialize)]
+struct Plan {
+    #[serde(default)]
+    other: Vec<String>,
+    #[serde(default)]
+    unknown: Vec<String>,
+    #[serde(default)]
+    entries: Vec<PlanEntry>,
+    #[serde(default, rename = "nixConfig")]
+    nix_config: bool,
+}
+#[derive(Deserialize)]
+struct PlanEntry {
+    what: String,
+    #[serde(default)]
+    check: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    nixos: bool,
+}
+#[derive(Debug, PartialEq, Serialize)]
+struct AnnotatedEntry {
+    what: String,
+    check: bool,
+    name: Option<String>,
+    nixos: bool,
+    build: bool,
+    skip: bool,
+    mine: bool,
+}
+#[derive(Deserialize)]
+struct EvalOut {
+    #[serde(default)]
+    drv: Option<String>,
+}
+#[derive(Deserialize)]
+struct FlakeMetadata {
+    url: String,
+}
+fn hash_what(what: &str) -> usize {
+    what.chars()
+        .fold(0u64, |acc, c| (acc * 31 + u64::from(c as u32)) % 1_000_003) as usize
+}
+fn annotate_entries(
+    entries: &[PlanEntry],
+    skip: &str,
+    legs: usize,
+    leg: usize,
+) -> Vec<AnnotatedEntry> {
+    let skipped: Vec<&str> = skip.split(' ').filter(|s| !s.is_empty()).collect();
+    entries
+        .iter()
+        .map(|e| {
+            let build = e.check && e.name.as_deref().is_none_or(|n| !skipped.contains(&n));
+            AnnotatedEntry {
+                what: e.what.clone(),
+                check: e.check,
+                name: e.name.clone(),
+                nixos: e.nixos,
+                build,
+                skip: e.check && !build,
+                mine: hash_what(&e.what) % legs == leg - 1,
+            }
+        })
+        .collect()
+}
 fn plan_args(url: &str, system: &str, skip: &str) -> Vec<String> {
     vec![
         "--option".into(),
@@ -73,37 +141,30 @@ fn apart(skip: &str, legs: usize, leg: usize, flaky: Option<&Flaky>) -> Result<b
             "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole `nix flake check`, without eval-apart.",
         ));
     }
-    let plan = judged(evaluate(&flake, &system, ""))?;
-    save(&temp().join("plan.json"), &plan)?;
-    if jq(&plan, ".other | length")? != "0" {
+    let plan_bytes = judged(evaluate(&flake, &system, ""))?;
+    save(&temp().join("plan.json"), &plan_bytes)?;
+    let plan: Plan = serde_json::from_slice(&plan_bytes)?;
+    if !plan.other.is_empty() {
         return Err(failed(format!(
             "eval-apart doesn't check apps, overlays, hydraJobs, bundlers or the old default* outputs, and this flake has {}. Its gate is a whole `nix flake check`, without eval-apart.",
-            jq(&plan, ".other")?
+            serde_json::to_string(&plan.other)?
         )));
     }
-    for unknown in jq(&plan, ".unknown[]")?.lines() {
+    for unknown in &plan.unknown {
         println!("warning: unknown flake output '{unknown}'");
     }
-    let entries = jq(
-        &plan,
-        &format!(
-            r#"def hash: reduce explode[] as $c (0; (. * 31 + $c) % 1000003);
-        ({} | split(" ") | map(select(. != ""))) as $s
-        | .entries | map(.check and (.name as $n | $s | index([$n]) | not)) as $build
-        | [range(length) as $i | .[$i] + {{build: $build[$i], skip: (.[$i].check and ($build[$i] | not)), mine: (.[$i].what | hash % {legs} == {leg} - 1)}}]"#,
-            quote(skip)
-        ),
-    )?;
-    save(&temp().join("entries.json"), &entries)?;
-    let mine = lines(&jq(
-        entries.as_bytes(),
-        "to_entries[] | select(.value.mine) | .key",
-    )?);
+    let entries = annotate_entries(&plan.entries, skip, legs, leg);
+    save(&temp().join("entries.json"), serde_json::to_vec(&entries)?)?;
+    let mine: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.mine.then_some(i))
+        .collect();
     if legs > 1 {
         println!(
             "leg {leg} of {legs}: {} of the plan's {} outputs, those whose names hash to it",
             mine.len(),
-            jq(entries.as_bytes(), "length")?
+            entries.len()
         );
     }
     let roots = work.join("roots");
@@ -112,9 +173,9 @@ fn apart(skip: &str, legs: usize, leg: usize, flaky: Option<&Flaky>) -> Result<b
     fs::create_dir(&evals)?;
     let side = memory::side();
     println!("{} outputs to evaluate, {side} side by side", mine.len());
-    let results = memory::parallel(&mine, side, |i, slot| -> Result<Option<Check>> {
-        let entry = jq(entries.as_bytes(), &format!(".[{i}]"))?;
-        let what = jq(entry.as_bytes(), ".what")?;
+    let results = memory::parallel(&mine, side, |&i, slot| -> Result<Option<Check>> {
+        let entry = &entries[i];
+        let what = &entry.what;
         let mut log = format!("evaluating {what}\n");
         let result = (|| -> Result<Option<Check>> {
             let o = slot.output(
@@ -125,27 +186,29 @@ fn apart(skip: &str, legs: usize, leg: usize, flaky: Option<&Flaky>) -> Result<b
             if !verdict::passed("nix eval", o.status)? {
                 return Err(failed("evaluation failed"));
             }
-            if jq(entry.as_bytes(), ".nixos")? == "true" {
+            if entry.nixos {
                 return Ok(None);
             }
-            let drv = jq(&o.stdout, ".drv // empty")?;
+            let drv = serde_json::from_slice::<EvalOut>(&o.stdout)?
+                .drv
+                .unwrap_or_default();
             let none = || failed(format!("evaluating {what} gave no derivation"));
             if drv.is_empty() {
                 return Err(none());
             }
-            if let Err(e) = root(&drv, &roots.join(i)) {
+            if let Err(e) = root(&drv, &roots.join(i.to_string())) {
                 // The flake's, if it named one the store hasn't got; rooting
                 // one it has is the gate's own work.
                 let has = output(cmd("nix-store", &["--check-validity", &drv]))?;
                 return Err(if has.status.success() { e } else { none() });
             }
-            if jq(entry.as_bytes(), ".build")? == "true" {
+            if entry.build {
                 return Ok(Some(Check {
-                    name: Some(jq(entry.as_bytes(), ".name")?),
+                    name: entry.name.clone(),
                     target: format!("{drv}^*"),
                 }));
             }
-            if jq(entry.as_bytes(), ".skip")? == "true" {
+            if entry.skip {
                 log.push_str(&format!("not building {what}\n"));
             }
             Ok(None)
@@ -192,15 +255,16 @@ fn whole(skip: &str, flaky: Option<&Flaky>) -> Result<bool> {
     let roots = &work.0;
     let mut unbuildable = false;
     let mut built = false;
-    let plan = (|| -> Result<(Vec<String>, Vec<u8>)> {
+    let plan = (|| -> Result<(Vec<String>, Plan)> {
         let metadata = judged(cmd("nix", &locked(&["flake", "metadata", "--json", "."])))?;
-        let url = jq(&metadata, ".url")?;
+        let url = serde_json::from_slice::<FlakeMetadata>(&metadata)?.url;
         let args = plan_args(&url, &system()?, skip);
         let mut c = cmd("nix-instantiate", &["--eval", "--strict", "--json"]);
         c.args(&args);
-        let plan = judged(c)?;
-        save(&temp().join("plan.json"), &plan)?;
-        if jq(&plan, ".nixConfig")? == "true" {
+        let plan_bytes = judged(c)?;
+        save(&temp().join("plan.json"), &plan_bytes)?;
+        let plan: Plan = serde_json::from_slice(&plan_bytes)?;
+        if plan.nix_config {
             return Err(failed("flake has nixConfig"));
         }
         Ok((args, plan))
@@ -233,16 +297,13 @@ fn whole(skip: &str, flaky: Option<&Flaky>) -> Result<bool> {
             }
             // The checks' names, in the order the plan builds them (its
             // `builds`), for their second tries: none if they don't pair.
-            let names = jq(
-                &plan,
-                &format!(
-                    r#"({} | split(" ") | map(select(. != ""))) as $s
-                | .entries[] | select(.check and (.name as $n | $s | index([$n]) | not)) | .name"#,
-                    quote(skip)
-                ),
-            )
-            .map(|n| lines(&n))
-            .unwrap_or_default();
+            let skipped: Vec<&str> = skip.split(' ').filter(|s| !s.is_empty()).collect();
+            let names: Vec<String> = plan
+                .entries
+                .iter()
+                .filter(|e| e.check && e.name.as_deref().is_some_and(|n| !skipped.contains(&n)))
+                .filter_map(|e| e.name.clone())
+                .collect();
             let paired = names.len() == targets.len();
             let checks: Vec<Check> = targets
                 .into_iter()
@@ -365,5 +426,41 @@ pub fn gate() -> Result<bool> {
         apart(&var("SKIP"), legs, leg, flaky.as_ref())
     } else {
         whole(&var("SKIP"), flaky.as_ref())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_deserializes_and_assigns_legs_and_skips() {
+        let raw = br#"{
+            "other": [],
+            "unknown": ["extra"],
+            "nixConfig": true,
+            "entries": [
+                {"what": "checks.x86_64-linux.a", "check": true, "name": "a", "nixos": false},
+                {"what": "checks.x86_64-linux.agents", "check": true, "name": "agents", "nixos": false},
+                {"what": "packages.x86_64-linux.p", "check": false, "name": "p", "nixos": false},
+                {"what": "nixosConfigurations.box", "check": false, "name": null, "nixos": true}
+            ]
+        }"#;
+        let plan: Plan = serde_json::from_slice(raw).unwrap();
+        assert!(plan.nix_config);
+        assert_eq!(plan.unknown, ["extra"]);
+        let annotated = annotate_entries(&plan.entries, " agents ", 3, 1);
+        assert!(annotated[0].build && !annotated[0].skip);
+        assert!(!annotated[1].build && annotated[1].skip);
+        assert!(!annotated[2].build && !annotated[2].skip);
+        assert!(annotated[3].nixos && annotated[3].name.is_none());
+        // Every entry belongs to exactly one leg across 1..=3.
+        for idx in 0..plan.entries.len() {
+            let owners: Vec<usize> = (1..=3)
+                .filter(|&leg| annotate_entries(&plan.entries, "", 3, leg)[idx].mine)
+                .collect();
+            assert_eq!(owners.len(), 1, "entry {idx}: {owners:?}");
+        }
+        // Polynomial rolling hash over Unicode codepoints mod 1_000_003.
+        assert_eq!(hash_what("checks.x86_64-linux.a"), 883_929);
     }
 }

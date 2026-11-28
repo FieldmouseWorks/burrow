@@ -138,6 +138,23 @@ impl RealStore {
     /// Pre-populate and sign the output of `drv` in `self.cache`, then
     /// delete it from the helper store so only the HTTP build store has it.
     fn populate_signed(&self, drv: &str, contents: &str) -> String {
+        self.populate_signed_with(drv, |dst| {
+            fs::create_dir_all(dst.parent().unwrap()).unwrap();
+            write(dst, contents);
+        })
+    }
+
+    /// Pre-populate and sign a directory output holding `bin/<name>` in
+    /// `self.cache`, then delete it from the helper store so only the HTTP
+    /// build store has it.
+    fn populate_signed_bin(&self, drv: &str, name: &str, script_body: &str) -> String {
+        self.populate_signed_with(drv, |dst| {
+            fs::create_dir_all(dst.join("bin")).unwrap();
+            crate::harness::executable(&dst.join("bin").join(name), script_body);
+        })
+    }
+
+    fn populate_signed_with(&self, drv: &str, build_output: impl FnOnce(&Path)) -> String {
         let cfg = self.base_config(&self.state, &self.log);
         let run = |program: &str, args: &[&str]| {
             let mut c = self.s.command(which(program));
@@ -155,9 +172,7 @@ impl RealStore {
             String::from_utf8(o.stdout).unwrap().trim().to_owned()
         };
         let out = run("nix-store", &["--query", "--outputs", drv]);
-        let dst = PathBuf::from(&out);
-        fs::create_dir_all(dst.parent().unwrap()).unwrap();
-        write(&dst, contents);
+        build_output(Path::new(&out));
         let mut reg = self
             .s
             .command(which("nix-store"))
@@ -216,34 +231,15 @@ impl RealStore {
         String::from_utf8(o.stdout).unwrap().trim().to_owned()
     }
 
-    /// Stub only `nix-build` for compiler provisioning so `gate.sh` and
-    /// `negative.sh` compile the real runner while invoking REAL `nix`.
-    fn stub_compiler(&self) {
-        let compiler = std::process::Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .unwrap();
-        assert!(compiler.status.success());
-        let sysroot = String::from_utf8(compiler.stdout).unwrap();
-        fs::create_dir_all(self.s.join("compiler/bin")).unwrap();
-        crate::harness::executable(
-            &self.s.join("compiler/bin/rustc"),
-            &format!("exec {}/bin/rustc \"$@\"\n", sysroot.trim()),
-        );
-        std::os::unix::fs::symlink(which("cc"), self.s.join("compiler/bin/cc")).unwrap();
-        let expression = repo_file(".github/flake-check/compiler.nix")
-            .canonicalize()
-            .unwrap();
+    /// Stub only `nix build ...#burrow-flake-check` so `gate.sh` and
+    /// `negative.sh` run the workspace's runner while every other `nix` call
+    /// uses REAL `nix`.
+    fn stub_runner(&self) {
+        let hook = crate::harness::runner_build_hook(&self.s);
+        let real_nix = which("nix");
         self.s.stub(
-            "nix-build",
-            &format!(
-                r#"[ "$#" = 5 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
-[ "$3" = '{}' ] && [ "$4" = --out-link ] && [ -d "${{5%/*}}" ] || exit 90
-printf '%s\n' '{}'
-"#,
-                expression.display(),
-                self.s.join("compiler").display()
-            ),
+            "nix",
+            &format!("{hook}exec {} \"$@\"\n", real_nix.display()),
         );
     }
 }
@@ -276,7 +272,7 @@ fn make_writable(p: &Path) {
 #[test]
 fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     let rs = RealStore::new();
-    rs.stub_compiler();
+    rs.stub_runner();
     let system = &rs.system;
 
     // A derivation whose builder fails if executed: only substitution from
@@ -462,7 +458,7 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
 #[test]
 fn the_store_down_builds_cold() {
     let rs = RealStore::new();
-    rs.stub_compiler();
+    rs.stub_runner();
     let system = &rs.system;
     let cold_expr = format!(
         r#"derivation {{ name = "cold"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo built-cold > $out" ]; }}"#
@@ -586,5 +582,118 @@ fn a_writing_leg_refuses_flake_config_and_enforces_sandbox() {
     assert_eq!(ran.code, 0, "{}", ran.out);
     for c in lines(&g.s.join("nix.log.config")) {
         assert!(c.contains(r#""accept-flake-config":true"#), "{c}");
+    }
+}
+
+/// Real Nix (no `nix` stub at all) substitutes `burrow-flake-check` from the
+/// HTTP build store through `.github/flake-check/run.sh`, `gate.sh`, and
+/// `negative.sh` using each job's `install-nix-action` `extra_nix_config`:
+/// the derivation's builder exits 42 if ever run, so passing proves store
+/// delivery without compiling or touching the caller's flake or ambient rustc.
+#[test]
+fn run_sh_substitutes_burrow_flake_check_from_the_build_store() {
+    let rs = RealStore::new();
+    let system = &rs.system;
+    let runner_expr = format!(
+        r#"derivation {{ name = "burrow-flake-check"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "exit 42" ]; }}"#
+    );
+    let runner_drv = rs.instantiate(&runner_expr);
+    let runner_out = rs.populate_signed_bin(
+        &runner_drv,
+        "burrow-flake-check",
+        "printf 'store-delivered:%s\\n' \"$1\"\n",
+    );
+    let url = burrow_test::build_store(&rs.cache);
+
+    // Pinned workflow checkout with the real bootstrap scripts and a flake
+    // exposing packages.<system>.burrow-flake-check.
+    let wf_repo = rs.s.join("wf-repo");
+    fs::create_dir_all(wf_repo.join(".github/flake-check")).unwrap();
+    for f in ["run.sh", "gate.sh", "negative.sh"] {
+        burrow_test::copy_file(
+            repo_file(&format!(".github/flake-check/{f}")),
+            wf_repo.join(".github/flake-check").join(f),
+        );
+    }
+    write(
+        &wf_repo.join("flake.nix"),
+        &format!(
+            r#"{{
+  outputs = {{ self }}: {{
+    packages.{system}.burrow-flake-check = {runner_expr};
+  }};
+}}
+"#
+        ),
+    );
+    write(
+        &wf_repo.join("flake.lock"),
+        "{\"nodes\":{\"root\":{}},\"root\":\"root\",\"version\":7}\n",
+    );
+    rs.s.git(&wf_repo, &["init", "-q"]);
+    rs.s.git(&wf_repo, &["add", "-A"]);
+    rs.s.git(&wf_repo, &["commit", "-qm", "workflow"]);
+
+    // Caller directory with a broken flake and failing rustc/cc on PATH.
+    let caller = rs.s.join("caller");
+    fs::create_dir_all(&caller).unwrap();
+    write(&caller.join("flake.nix"), "throw \"caller flake read\"\n");
+    rs.s.stub("rustc", "echo 'rustc must not run' >&2; exit 99\n");
+    rs.s.stub("cc", "echo 'cc must not run' >&2; exit 99\n");
+
+    let tools = wf_repo.join(".github/flake-check");
+    for (job, cmd_str, expected) in [
+        (
+            "reuse",
+            "bash \"$TOOLS/run.sh\" reuse",
+            "store-delivered:reuse",
+        ),
+        ("check", "bash \"$TOOLS/gate.sh\"", "store-delivered:gate"),
+        (
+            "negative",
+            "bash \"$TOOLS/negative.sh\"",
+            "store-delivered:negative",
+        ),
+    ] {
+        rs.clear_store();
+        let cfg = format!(
+            "{}\n{}",
+            rs.base_config(
+                &rs.s.join(&format!("runner-state-{job}")),
+                &rs.s.join(&format!("runner-log-{job}")),
+            ),
+            extra_nix_config(job, &url, &rs.pk, "success")
+        );
+        let temp = rs.s.mkdtemp();
+        let ran = rs.s.bash(
+            cmd_str,
+            &caller,
+            &[
+                ("NIX_CONFIG", &cfg),
+                ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
+                (
+                    "XDG_CACHE_HOME",
+                    rs.s.join(&format!("runner-xdg-{job}")).to_str().unwrap(),
+                ),
+                ("RUNNER_TEMP", temp.to_str().unwrap()),
+                ("TOOLS", tools.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(ran.code, 0, "{job}:\n{}", ran.said());
+        assert!(
+            ran.stdout.lines().any(|l| l == expected),
+            "{job}: expected {expected:?}, got:\n{}",
+            ran.said()
+        );
+        assert!(
+            Path::new(&runner_out).is_dir(),
+            "{job}: runner wasn't substituted into store"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&temp)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.starts_with("runner."))
+            .collect();
+        assert!(leftovers.is_empty(), "{job}: leftover {leftovers:?}");
     }
 }

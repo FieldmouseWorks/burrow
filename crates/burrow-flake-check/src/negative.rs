@@ -68,24 +68,25 @@ struct Negative {
 }
 impl Negative {
     fn found(&self, result: &str, tree: Option<&str>) -> Result<bool> {
-        let list = |v: &[String]| {
-            format!(
-                "[{}]",
-                v.iter().map(|v| quote(v)).collect::<Vec<_>>().join(",")
-            )
-        };
-        fs::write(
-            temp().join("negative.json"),
-            format!(
-                "{{\"result\":{},\"tree\":{},\"tests\":{},\"checks\":{},\"skipped\":{},\"unrun\":{}}}\n",
-                quote(result),
-                tree.map(quote).unwrap_or_else(|| "null".into()),
-                list(&self.tests),
-                list(&self.checks),
-                list(&self.skipped),
-                list(&self.unrun)
-            ),
-        )?;
+        #[derive(serde::Serialize)]
+        struct Found<'a> {
+            result: &'a str,
+            tree: Option<&'a str>,
+            tests: &'a [String],
+            checks: &'a [String],
+            skipped: &'a [String],
+            unrun: &'a [String],
+        }
+        let mut line = serde_json::to_string(&Found {
+            result,
+            tree,
+            tests: &self.tests,
+            checks: &self.checks,
+            skipped: &self.skipped,
+            unrun: &self.unrun,
+        })?;
+        line.push('\n');
+        fs::write(temp().join("negative.json"), line)?;
         append_output("result", result)?;
         Ok(result != "pass")
     }
@@ -178,10 +179,7 @@ impl Negative {
         }
         // The inputs' paths, not the tree's own: the evaluation copies its
         // source itself, as the base's does.
-        let paths = lines(&jq(
-            &o.stdout,
-            r#".inputs | .. | objects | select(has("path")) | .path"#,
-        )?);
+        let paths = input_paths(&o.stdout)?;
         let mut c = cmd("nix-store", &["--check-validity", "--print-invalid"]);
         c.args(&paths);
         let absent = lines(&string(c)?);
@@ -536,9 +534,9 @@ pub fn negative() -> Result<bool> {
             }
         }
     }
-    let base_names = lines(&jq(&bn.stdout, ".[]")?);
+    let base_names: Vec<String> = serde_json::from_slice(&bn.stdout)?;
     let mut names = base_names.clone();
-    names.extend(lines(&jq(&new_names, ".[]")?));
+    names.extend(serde_json::from_slice::<Vec<String>>(&new_names)?);
     names.sort();
     names.dedup();
     fs::create_dir(work.join("roots"))?;
@@ -710,30 +708,24 @@ fn coverage(
             "which tests the checks run doesn't evaluate on the base, so it can't tell",
         ));
     }
+    let all_runs: Vec<serde_json::Value> = serde_json::from_slice(&o.stdout)?;
     let mut covered = Vec::new();
     let mut undeclared = Vec::new();
     for (k, t) in targets.iter().enumerate() {
         // Preserve the JSON type: the string "null" is invalid metadata,
-        // not an absent declaration. jq's raw output alone loses that distinction.
-        let runs = jq(&o.stdout, &format!(".[{k}] | tojson"))?;
-        if runs == "null" {
+        // not an absent declaration.
+        let runs = all_runs.get(k).unwrap_or(&serde_json::Value::Null);
+        let Some(globs) = parse_test_files(runs) else {
             undeclared.push(k);
             continue;
-        }
-        if !jq(
-            runs.as_bytes(),
-            r#"type == "array" and all(.[]; type == "string" and length > 0 and (test("^[:/]") | not) and (test("[[:cntrl:]]") | not) and (split("/") | index("..") | not))"#,
-        ).is_ok_and(|valid| valid == "true")
-        {
+        };
+        let Ok(globs) = globs else {
             return Err(err(format!(
                 "{}'s testFiles isn't a list of paths from the repo's root, so it can't tell",
                 t.drv
             )));
-        }
-        let globs: Vec<_> = lines(&jq(runs.as_bytes(), ".[]")?)
-            .iter()
-            .map(|v| format!(":(glob){v}"))
-            .collect();
+        };
+        let globs: Vec<_> = globs.iter().map(|v| format!(":(glob){v}")).collect();
         let refs: Vec<_> = globs.iter().map(String::as_str).collect();
         if !refs.is_empty() {
             covered.extend(diff(fork, head, true, &refs)?);
@@ -818,4 +810,102 @@ fn coverage(
     n.unrun.sort();
     n.unrun.dedup();
     Ok(())
+}
+/// Every `.path` under `.inputs` in `nix flake archive --dry-run --json`.
+fn input_paths(json: &[u8]) -> Result<Vec<String>> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) -> Result<()> {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(path) = map.get("path") {
+                    let p = path
+                        .as_str()
+                        .ok_or_else(|| err("input path is not a string"))?;
+                    out.push(p.to_owned());
+                }
+                for child in map.values() {
+                    walk(child, out)?;
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    walk(child, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let root: serde_json::Value = serde_json::from_slice(json)?;
+    let mut out = Vec::new();
+    if let Some(inputs) = root.get("inputs") {
+        walk(inputs, &mut out)?;
+    }
+    Ok(out)
+}
+/// Parses a check's `testFiles` metadata: `None` when absent (`null`),
+/// `Some(Ok(paths))` when a valid list of repo-relative globs, or `Some(Err)`
+/// on malformed metadata.
+fn parse_test_files(v: &serde_json::Value) -> Option<Result<Vec<String>>> {
+    if v.is_null() {
+        return None;
+    }
+    let Some(arr) = v.as_array() else {
+        return Some(Err(err("not an array")));
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(s) = item.as_str() else {
+            return Some(Err(err("not a string")));
+        };
+        if s.is_empty()
+            || s.starts_with([':', '/'])
+            || s.chars().any(char::is_control)
+            || s.split('/').any(|part| part == "..")
+        {
+            return Some(Err(err("invalid testFiles glob")));
+        }
+        out.push(s.to_owned());
+    }
+    Some(Ok(out))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_paths_collects_nested_input_paths_only() {
+        let archive = br#"{
+            "path": "/nix/store/self",
+            "inputs": {
+                "a": {"path": "/nix/store/a", "inputs": {"b": {"path": "/nix/store/b"}}},
+                "c": {"inputs": {}}
+            }
+        }"#;
+        assert_eq!(
+            input_paths(archive).unwrap(),
+            ["/nix/store/a", "/nix/store/b"]
+        );
+    }
+
+    #[test]
+    fn parse_test_files_preserves_null_and_rejects_bad_paths() {
+        assert!(parse_test_files(&serde_json::Value::Null).is_none());
+        assert_eq!(
+            parse_test_files(&serde_json::json!(["tests/**", "foo/bar.rs"]))
+                .unwrap()
+                .unwrap(),
+            ["tests/**", "foo/bar.rs"]
+        );
+        for bad in [
+            serde_json::json!("null"),
+            serde_json::json!([""]),
+            serde_json::json!([":(glob)tests/**"]),
+            serde_json::json!(["/etc/passwd"]),
+            serde_json::json!(["../outside"]),
+            serde_json::json!(["a\nb"]),
+            serde_json::json!([123]),
+        ] {
+            assert!(parse_test_files(&bad).unwrap().is_err(), "{bad}");
+        }
+    }
 }

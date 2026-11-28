@@ -182,6 +182,10 @@ fn off_by_default_and_only_a_default_branch_push_asks() {
     assert_eq!(lookup["continue-on-error"], true);
     assert_eq!(lookup["name"], "soft/gate-reuse");
     assert_eq!(script(lookup), "bash \"$TOOLS/run.sh\" reuse");
+    assert_eq!(
+        step(reuse, "tools")["with"]["sparse-checkout"],
+        ".github/flake-check\ncrates\nlib\n"
+    );
 }
 
 /// Off (the default), every run's steps are what they were: the lookup's
