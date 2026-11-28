@@ -453,6 +453,10 @@ class Actions:
             self.retry_at("proved")
         slots = self.rc.get("proofSlots")
         outs = P.outputs(self.repo, self.pr, checks, self.st) if slots or builds else None
+        if builds and outs in (P.EVALUATING, P.EVAL_WAITING):
+            verb = "working out" if outs == P.EVALUATING else "waiting to work out"
+            self.settle("pending", f"Settled; {verb} what {names} builds{ci_too}"[:140], stage=S.PROOF)
+            return
         if builds and outs is None and P.untold(self.repo, self.pr, checks, self.st):
             # A status run's: it works no eval out, so has no failure of one
             # to count, only the live passes' (outputs).
@@ -466,32 +470,39 @@ class Actions:
             return
         if builds:
             self.cleared("eval")
-        # Behind its base (the default branch, whose tip this pass read),
-        # with what it builds merged in all built already: brought up to
-        # date, its new head's verdicts come from the store. Not a
-        # dependency update's: its bot keeps that branch.
-        default = self.repo_info.get("defaultBranchRef") or {}
-        tip = (default.get("target") or {}).get("oid") if self.pr["baseRefName"] == default.get("name") else None
-        if (
-            builds
-            and not retry
-            and not DEP_RE.match(self.pr["headRefName"])
-            and (up := P.merged(self.repo, self.pr, checks, self.st, tip))
-            and not P.unbuilt(up)
-        ):
-            if self.update_branch(proof=True):
-                self.settle(
-                    "pending",
-                    f"Settled; brought up to date with {self.pr['baseRefName']}, which has {names} built here already"[:140],
-                    stage=S.PROOF,
-                )
-                return
-            self.settle("pending", "Settled; GitHub didn't take its update with its base, so trying again"[:140], stage=S.PROOF)
-            return
         free = False
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and self.st.get("provedAgain") == self.head and not self.broke("proved")
         ahead = P.ahead(self.repo, self.n, self.st, slots, outs) if slots and not last else None
+        # Behind its base (the default branch, whose tip this pass read),
+        # with what it builds merged in all built already: brought up to
+        # date, its new head's verdicts come from the store. Not a
+        # dependency update's: its bot keeps that branch. A fresh merged eval
+        # is started only when this PR is next in line (ahead is None), so a
+        # new base tip doesn't trigger evals for every waiting PR.
+        default = self.repo_info.get("defaultBranchRef") or {}
+        tip = (default.get("target") or {}).get("oid") if self.pr["baseRefName"] == default.get("name") else None
+        if builds and not retry and not DEP_RE.match(self.pr["headRefName"]):
+            up = P.merged(self.repo, self.pr, checks, self.st, tip, start=ahead is None)
+            if up in (P.EVALUATING, P.EVAL_WAITING):
+                verb = "working out" if up == P.EVALUATING else "waiting to work out"
+                self.settle(
+                    "pending",
+                    f"Settled; {verb} what {names} builds brought up to date with {self.pr['baseRefName']}{ci_too}"[:140],
+                    stage=S.PROOF,
+                    turn=ahead is None and bool(slots),
+                )
+                return
+            if isinstance(up, list) and not P.unbuilt(up):
+                if self.update_branch(proof=True):
+                    self.settle(
+                        "pending",
+                        f"Settled; brought up to date with {self.pr['baseRefName']}, which has {names} built here already"[:140],
+                        stage=S.PROOF,
+                    )
+                    return
+                self.settle("pending", "Settled; GitHub didn't take its update with its base, so trying again"[:140], stage=S.PROOF)
+                return
         # A build in line builds what it's built from first, outside the line
         # (proofs.prebuild); one whose outputs a proof is building needn't.
         if builds and slots and not last and ahead != P.FREE and (pre := P.prebuild(self.repo, self.pr, checks, self.st, stage)):

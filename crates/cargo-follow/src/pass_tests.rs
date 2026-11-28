@@ -146,9 +146,19 @@ fn github(open: Option<(&[&str], &str)>) -> Fake {
         "repos/sam/home/pulls",
         vec![ok(
             201,
-            json!({"html_url": "https://github.com/sam/home/pull/8"}),
+            json!({"number": 8, "html_url": "https://github.com/sam/home/pull/8"}),
             &[],
         )],
+    )
+    .on(
+        "POST",
+        "repos/sam/home/issues/8/labels",
+        vec![ok(200, json!([]), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/home/issues/7/labels",
+        vec![ok(200, json!([]), &[])],
     )
     .on(
         "POST",
@@ -190,14 +200,35 @@ fn cfg() -> Config {
         work: "/w".into(),
         wake: "/w/wake.json".into(),
         frozen: vec!["waiting: train".into()],
+        first: None,
+        pipeline_repos: vec![],
     }
 }
 
-fn pass(gh: &mut Fake, local: &mut FakeLocal, only: Option<&str>) -> (bool, String) {
+fn pipeline_cfg() -> Config {
+    Config {
+        first: Some("first".into()),
+        pipeline_repos: vec!["Sam/Home".into()],
+        ..cfg()
+    }
+}
+
+fn pass_with(
+    config: &Config,
+    gh: &mut Fake,
+    local: &mut FakeLocal,
+    only: Option<&str>,
+    dry: bool,
+) -> (Ran, String) {
     let mut out = Vec::new();
-    let ran = run(&cfg(), &Ask { only, dry: false }, gh, local, &mut out);
+    let ran = run(config, &Ask { only, dry }, gh, local, &mut out);
+    (ran, String::from_utf8(out).unwrap())
+}
+
+fn pass(gh: &mut Fake, local: &mut FakeLocal, only: Option<&str>) -> (bool, String) {
+    let (ran, out) = pass_with(&cfg(), gh, local, only, false);
     assert_eq!(ran.held, None);
-    (ran.ok, String::from_utf8(out).unwrap())
+    (ran.ok, out)
 }
 
 fn changed(gh: &Fake) -> Vec<String> {
@@ -591,4 +622,301 @@ fn a_rate_limit_is_a_wait_not_a_failure() {
         "{out}"
     );
     assert!(out.contains("held off until 2000000000"), "{out}");
+}
+
+#[test]
+fn pipeline_repo_labels_new_pr_with_first() {
+    let mut gh = github(None);
+    let mut local = FakeLocal {
+        counted: vec!["crates/core/src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(
+        changed(&gh),
+        vec![
+            "POST repos/sam/home/git/trees",
+            "POST repos/sam/home/git/commits",
+            "POST repos/sam/home/git/refs",
+            "PATCH repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
+            "POST repos/sam/home/pulls",
+            "POST repos/sam/home/issues/8/labels",
+        ]
+    );
+    let label_post = gh
+        .asked("POST")
+        .into_iter()
+        .find(|a| a.1 == "repos/sam/home/issues/8/labels")
+        .unwrap();
+    assert_eq!(label_post.2, Some(json!({"labels": ["first"]})));
+}
+
+#[test]
+fn non_pipeline_repo_leaves_pr_unlabelled() {
+    let config = Config {
+        first: Some("first".into()),
+        pipeline_repos: vec!["sam/other".into()],
+        ..cfg()
+    };
+    for open in [None, Some((&[][..], PIN))] {
+        let mut gh = github(open);
+        let mut local = FakeLocal {
+            counted: vec!["src/lib.rs".into()],
+            ..Default::default()
+        };
+        let (ran, out) = pass_with(&config, &mut gh, &mut local, None, false);
+        assert_eq!(
+            ran,
+            Ran {
+                ok: true,
+                held: None
+            },
+            "{out}"
+        );
+        let c = changed(&gh);
+        assert!(
+            !c.iter().any(|call| call.contains("/labels")),
+            "non-pipeline repo should not add labels: {c:?}"
+        );
+    }
+}
+
+#[test]
+fn pipeline_repo_labels_refreshed_pr_once() {
+    // Open PR without `first`: refreshing also adds the label.
+    let mut gh = github(Some((&[], PIN)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    let c = changed(&gh);
+    assert_eq!(
+        &c[c.len() - 2..],
+        [
+            "PATCH repos/sam/home/pulls/7",
+            "POST repos/sam/home/issues/7/labels",
+        ]
+    );
+    let label_post = gh
+        .asked("POST")
+        .into_iter()
+        .find(|a| a.1 == "repos/sam/home/issues/7/labels")
+        .unwrap();
+    assert_eq!(label_post.2, Some(json!({"labels": ["first"]})));
+
+    // Open PR that already has `first` (any case): no redundant label call.
+    let mut gh = github(Some((&["FIRST"], PIN)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    let c = changed(&gh);
+    assert_eq!(c.last().unwrap(), "PATCH repos/sam/home/pulls/7");
+    assert!(!c.iter().any(|call| call.contains("/labels")), "{c:?}");
+}
+
+#[test]
+fn pipeline_repo_labels_existing_open_pr_without_pushing() {
+    // Open PR already at HEAD without `first`: gets labelled without pushing.
+    let mut gh = github(Some((&[], HEAD)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), vec!["POST repos/sam/home/issues/7/labels"]);
+
+    // Open PR with a commit a pass didn't make: gets labelled without touching commits.
+    let mut gh = github(Some((&[], PIN)));
+    theirs(&mut gh);
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), vec!["POST repos/sam/home/issues/7/labels"]);
+
+    // Open PR with a commit a pass didn't make when nothing counts: left open
+    // and labelled with `first`.
+    let mut gh = github(Some((&[], HEAD)));
+    theirs(&mut gh);
+    let (ran, out) = pass_with(
+        &pipeline_cfg(),
+        &mut gh,
+        &mut FakeLocal::default(),
+        None,
+        false,
+    );
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), vec!["POST repos/sam/home/issues/7/labels"]);
+
+    // Open PR without another commit when nothing counts: closed without labelling.
+    let mut gh = github(Some((&[], HEAD)));
+    let (ran, out) = pass_with(
+        &pipeline_cfg(),
+        &mut gh,
+        &mut FakeLocal::default(),
+        None,
+        false,
+    );
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(
+        changed(&gh),
+        vec![
+            "POST repos/sam/home/issues/7/comments",
+            "PATCH repos/sam/home/pulls/7",
+            "DELETE repos/sam/home/git/refs/heads/follow/sam/up/crates/Cargo.toml",
+        ]
+    );
+
+    // Dry-run never mutates GitHub, and reports what it would label.
+    let mut gh = github(Some((&[], HEAD)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, true);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), Vec::<String>::new());
+    assert!(out.contains("would label #7 \"first\""), "{out}");
+}
+
+#[test]
+fn pipeline_repo_leaves_frozen_pr_untouched() {
+    let mut gh = github(Some((&["waiting: train"], PIN)));
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert_eq!(changed(&gh), Vec::<String>::new());
+}
+
+#[test]
+fn label_failure_is_best_effort_unless_rate_limited() {
+    let mut gh = github(None);
+    gh.answers.insert(
+        0,
+        (
+            "POST".into(),
+            "repos/sam/home/issues/8/labels".into(),
+            vec![ok(422, json!({"message": "Validation Failed"}), &[])].into(),
+        ),
+    );
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: None
+        },
+        "{out}"
+    );
+    assert!(out.contains("#8 didn't get its \"first\" label"), "{out}");
+
+    let mut gh = github(None);
+    gh.answers.insert(
+        0,
+        (
+            "POST".into(),
+            "repos/sam/home/issues/8/labels".into(),
+            vec![ok(
+                403,
+                json!({"message": "API rate limit exceeded"}),
+                &[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "2000000000"),
+                ],
+            )]
+            .into(),
+        ),
+    );
+    let mut local = FakeLocal {
+        counted: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let (ran, out) = pass_with(&pipeline_cfg(), &mut gh, &mut local, None, false);
+    assert_eq!(
+        ran,
+        Ran {
+            ok: true,
+            held: Some(2_000_000_000)
+        },
+        "{out}"
+    );
 }

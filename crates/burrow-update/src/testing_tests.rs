@@ -128,7 +128,13 @@ esac
 case "$*" in *'#checks.'*)
   echo "ran $*"
   echo "a VM test's log" >&2
+  disconnect=
+  if [ -f "$HOME/check-disconnects" ]; then rm -f "$HOME/check-disconnects"; disconnect=1; fi
   if [ -e "$HOME/after-check" ]; then mv "$HOME/after-check" "$HOME/after-check.now"; sh "$HOME/after-check.now"; rm "$HOME/after-check.now"; fi
+  if [ -n "$disconnect" ]; then
+    echo "error: read of 32768 bytes: Connection reset by peer" >&2
+    exit 1
+  fi
   [ ! -e "$HOME/check-fails" ] || exit 1
   if [ -e "$HOME/check-flaky" ]; then rm "$HOME/check-flaky"; exit 1; fi
   ref=$(printf '%s\n' "$*" | sed -n 's|.*git+file://\([^?]*\)?rev=\([0-9a-f]*\)#.*|\1 \2|p')

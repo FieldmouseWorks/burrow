@@ -105,7 +105,6 @@ fn push(git_ref: &str, legs: u64, reuse: bool, hit: V) -> Ctx {
     ctx(&[
         ("cancelled()", false.into()),
         ("always()", true.into()),
-        ("inputs.keep-builds", true.into()),
         ("inputs.install-nix", true.into()),
         ("inputs.legs", legs.into()),
         ("inputs.gate-reuse", reuse.into()),
@@ -122,6 +121,7 @@ fn push(git_ref: &str, legs: u64, reuse: bool, hit: V) -> Ctx {
         // No build store named: the steps are what they were without one
         // (builds.rs).
         ("vars.BURROW_BUILDS_URL", "".into()),
+        ("vars.BURROW_BUILDS_PUBLIC_KEY", "".into()),
     ])
 }
 
@@ -198,14 +198,9 @@ fn off_nothing_changes() {
         let steps = ran(check, &c);
         for want in [
             "actions/checkout",
-            "kept-lookup",
-            "kept-restore",
             "cachix/install-nix-action",
             "tools",
             "gate",
-            "keep-tool",
-            "keep",
-            "keep-save",
         ] {
             assert!(
                 steps.iter().any(|s| s == want),
@@ -335,12 +330,9 @@ fn a_hit_with_legs_runs_no_leg() {
 }
 
 /// No hit (a miss, or no answer at all): the whole gate, as without
-/// gate-reuse, which also names the gate in what it attests; and only the
-/// run that builds keeps what it built: a push to the default branch that
-/// missed, not one that hit, nor a PR's, nor a train's candidate's, whose
-/// entries only their own ref could restore.
+/// gate-reuse, which also names the gate in what it attests.
 #[test]
-fn no_hit_runs_the_whole_gate_and_the_building_run_keeps() {
+fn no_hit_runs_the_whole_gate() {
     let wf = wf();
     let (check, gate) = (&wf["jobs"]["check"], &wf["jobs"]["gate"]);
     for hit in [V::from("false"), V::from(""), V::Null] {
@@ -350,12 +342,10 @@ fn no_hit_runs_the_whole_gate_and_the_building_run_keeps() {
             let steps = ran(check, &c);
             for want in [
                 "actions/checkout",
-                "kept-restore",
                 "cachix/install-nix-action",
                 "tools",
                 "identity",
                 "gate",
-                "keep-save",
             ] {
                 assert!(
                     steps.iter().any(|s| s == want),
@@ -376,27 +366,6 @@ fn no_hit_runs_the_whole_gate_and_the_building_run_keeps() {
             }
         }
     }
-    let keeps = |c: &Ctx| ran(check, c).iter().any(|s| s == "keep-save");
-    let restores = |c: &Ctx| ran(check, c).iter().any(|s| s == "kept-restore");
-    assert!(keeps(&push(MAIN, 1, true, "false".into())));
-    assert!(!keeps(&push(MAIN, 1, true, "true".into())));
-    assert!(!restores(&push(MAIN, 1, true, "true".into())));
-    assert!(!keeps(&push("refs/heads/conary/train/7", 1, true, V::Null)));
-    assert!(restores(&push(
-        "refs/heads/conary/train/7",
-        1,
-        true,
-        V::Null
-    )));
-    let mut pr = push("refs/pull/12/merge", 1, true, V::Null);
-    pr.insert("github.event_name".into(), "pull_request".into());
-    pr.insert(
-        "github.event.pull_request.head.repo.full_name".into(),
-        "owner/repo".into(),
-    );
-    pr.insert("steps.kept-restore.outputs.cache-hit".into(), "true".into());
-    assert!(!keeps(&pr));
-    assert!(restores(&pr));
 }
 
 /// The identity step's environment, as the workflow gives it.
@@ -410,8 +379,10 @@ fn identity_env<'a>(over: &[(&'a str, &'a str)], sha: &'a str) -> Vec<(&'a str, 
         ("APART", "true"),
         ("LEGS", "4"),
         ("SKIP", "agents"),
-        ("KEEP", "true"),
         ("FLAKY", "true"),
+        ("REUSE", "true"),
+        ("BUILDS", ""),
+        ("BUILDS_KEY", ""),
     ]
     .into_iter()
     .collect();
@@ -457,7 +428,7 @@ fn the_identity_is_the_workflows_commit_and_the_inputs_that_change_a_result() {
     assert_eq!(id, step(&wf["jobs"]["gate"], "identity"));
     assert_eq!(
         id["if"],
-        "${{ inputs.gate-reuse && steps.tools.outcome == 'success' }}"
+        "${{ (inputs.gate-reuse || (inputs.install-nix && vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '')) && steps.tools.outcome == 'success' }}"
     );
     for job in ["reuse", "check", "gate"] {
         let tools = step(&wf["jobs"][job], "tools");
@@ -477,7 +448,28 @@ fn the_identity_is_the_workflows_commit_and_the_inputs_that_change_a_result() {
     assert_eq!(
         gate.as_deref().unwrap(),
         format!(
-            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"flaky\":true,\"install-nix\":true,\"keep-builds\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"tree\",\
+            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"flaky\":true,\"install-nix\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"tree\",\
+             \"workflow\":{{\"commit\":\"{sha}\",\"file\":\".github/workflows/flake-check.yml\",\"repository\":\"FieldmouseWorks/burrow\",\"tree\":\"{tree}\"}}}}\n"
+        )
+    );
+    // With a build store configured, the gate identity names it too.
+    let (code, said, gate) = identity(
+        &s,
+        &at,
+        &identity_env(
+            &[
+                ("REUSE", "false"),
+                ("BUILDS", "https://builds.example/builds"),
+                ("BUILDS_KEY", "machine-1:K"),
+            ],
+            &sha,
+        ),
+    );
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        gate.as_deref().unwrap(),
+        format!(
+            "{{\"builds\":{{\"public-key\":\"machine-1:K\",\"url\":\"https://builds.example/builds\"}},\"inputs\":{{\"build-skip\":[\"agents\"],\"eval-apart\":true,\"flaky\":true,\"install-nix\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"commit\",\
              \"workflow\":{{\"commit\":\"{sha}\",\"file\":\".github/workflows/flake-check.yml\",\"repository\":\"FieldmouseWorks/burrow\",\"tree\":\"{tree}\"}}}}\n"
         )
     );
@@ -547,13 +539,13 @@ fn the_attestation_names_the_gate() {
     assert!(!predicates[1].contains("gate"), "{}", predicates[1]);
 }
 
-/// Whatever plans the gate's derivations plans them from the source the gate
-/// checks: the kept-build waiter's planner and the gate are told the same.
+/// The gate checks from the tree source when gate-reuse is on.
 #[test]
-fn the_planner_and_the_gate_check_one_source() {
+fn the_gate_checks_the_tree_source() {
     let wf = wf();
     let check = &wf["jobs"]["check"];
-    let mode = "${{ inputs.gate-reuse }}";
-    assert_eq!(step(check, "gate")["env"]["TREE_SOURCE"], mode);
-    assert_eq!(step(check, "kept-wait")["env"]["TREE_SOURCE"], mode);
+    assert_eq!(
+        step(check, "gate")["env"]["TREE_SOURCE"],
+        "${{ inputs.gate-reuse }}"
+    );
 }

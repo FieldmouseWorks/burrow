@@ -33,7 +33,7 @@ fn what_the_guidance_said_before_fails() {
         found("prove a mismatch fails. A project has its own share (`maxJobsPerProject`, two)"),
         ["1: `proj.maxJobsPerProject` with a value"]
     );
-    // One file keeps four options: naming it states where each is kept.
+    // One file keeps five options: naming it states where each is kept.
     assert_eq!(
         found("Role settings live in `settings/overlay.roles.json`, beside the overlay"),
         [
@@ -41,6 +41,7 @@ fn what_the_guidance_said_before_fails() {
             "1: where `proj.models` is kept (`settings/overlay.roles.json`)",
             "1: where `proj.engineOffers` is kept (`settings/overlay.roles.json`)",
             "1: where `proj.engineSetups` is kept (`settings/overlay.roles.json`)",
+            "1: where `proj.enginePlugins` is kept (`settings/overlay.roles.json`)",
         ]
     );
     assert_eq!(

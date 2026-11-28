@@ -23,10 +23,12 @@ def moved(repo, pr, st):
     old = P.superseded(repo, pr, st)
     if st.get("judged") and st.get("judgedJob") and P.running(st["judgedJob"]):
         old.append(st["judgedJob"])
-    # And the build of what its last head's proof is built from.
-    pre = st.pop("proofInputs", None) or {}
-    if pre.get("job") and pre["for"][0] != pr["headRefOid"] and P.running(pre["job"]):
-        old.append(pre["job"])
+    # And the build of what its last head's proof is built from, and any
+    # running derivation eval units for the old head.
+    for field in ("proofInputs", "proofEval", "mergedEval"):
+        rec = st.pop(field, None) or {}
+        if rec.get("job") and rec["for"][0] != pr["headRefOid"] and P.running(rec["job"]):
+            old.append(rec["job"])
     for kind in KINDS:
         if st.get(kind + "Job") in old:
             for k in (kind, kind + "Lost", kind + "Again"):

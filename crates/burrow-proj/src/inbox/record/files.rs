@@ -94,6 +94,10 @@ pub(crate) enum File {
     Drained,
     /// What its job was last handed of the issue.
     Input,
+    /// The handed body and edit-history counts for an issue opened by one of
+    /// `inbox.authors`'s machine accounts, so its own body edits don't count
+    /// as the issue changing under its job.
+    BodyEdits,
     /// That the inbox refused it, and said so on the issue.
     Refused,
     /// A sorting verdict's steps, as first planned.
@@ -125,6 +129,7 @@ impl File {
             File::Seen => "seen",
             File::Drained => "drained",
             File::Input => "input",
+            File::BodyEdits => "body-edits",
             File::Refused => "refused",
             File::Plan => "plan",
             File::Did => "did",
@@ -245,6 +250,24 @@ pub(in crate::inbox) fn input(d: &Path) -> io::Result<String> {
 /// Whether what its job was handed is kept.
 pub(in crate::inbox) fn has_input(d: &Path) -> bool {
     path(d, File::Input).exists()
+}
+/// The handed body and edit-history counts kept for a machine-opened issue.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::inbox) struct BodyEdits {
+    pub body: String,
+    pub total: u64,
+    pub by_others: u64,
+    pub deleted: u64,
+}
+/// What body and edit-history counts its job was last handed, if kept.
+pub(in crate::inbox) fn body_edits(d: &Path) -> Option<BodyEdits> {
+    let text = fs::read_to_string(path(d, File::BodyEdits)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+/// Whether body-edit state is kept for this record.
+pub(in crate::inbox) fn has_body_edits(d: &Path) -> bool {
+    path(d, File::BodyEdits).exists()
 }
 /// Whether the inbox refused it.
 pub(in crate::inbox) fn refused(d: &Path) -> bool {

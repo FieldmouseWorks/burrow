@@ -718,3 +718,264 @@ fn failed_answered_turn_without_session_still_restarts() {
         .unwrap();
     assert_eq!(files::job(&d).as_deref(), Some(second.as_str()));
 }
+
+/// Start a job for a machine-authored issue through `new_issues` so its
+/// record matches production, then mark turn 1 done with a session.
+fn started_machine_job(b: &mut Box, opener: &str, labels: &[&str]) -> (PathBuf, String, Value) {
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.tools.systemctl = "false".into();
+    b.cfg.projects = b.path("src");
+    fs::create_dir_all(b.path("src/box")).unwrap();
+    let inbox = b.cfg.inbox.as_mut().unwrap();
+    inbox.planning = false;
+    inbox.authors.push(burrow_github::fake::author(opener));
+    let mut on = issue(7, opener, labels);
+    on["state"] = json!("open");
+    on["body"] = json!("Item A");
+    fs::write(b.path("comments"), "[[]]").unwrap();
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .new_issues("sam/box", std::slice::from_ref(&on))
+        .unwrap();
+    let d = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+    let id = files::job(&d).expect("job started");
+    let job = b.cfg.jobs.join(&id);
+    fs::write(job.join("session"), "s1\n").unwrap();
+    fs::write(job.join("1.outcome"), "done\n").unwrap();
+    fs::write(job.join("1.end"), "done\n").unwrap();
+    fs::write(
+        job.join("1.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type": "result", "result": "Checked item A."})
+        ),
+    )
+    .unwrap();
+    fs::write(d.join(files::File::Answered), "1\n").unwrap();
+    let _ = fs::remove_file(d.join(files::File::Unannounced));
+    (d, id, on)
+}
+
+fn body_edit(editor: &str) -> Value {
+    json!({"editor": burrow_github::fake::actor(editor), "deletedBy": null})
+}
+
+fn set_edits(issue: &mut Value, edits: &[Value]) {
+    issue["userContentEdits"] = json!({"totalCount": edits.len(), "nodes": edits});
+}
+
+#[test]
+fn a_machine_authors_own_body_edit_does_not_rehand_its_job() {
+    let mut b = Box::new();
+    let (_d, id, mut on) = started_machine_job(&mut b, "steward[bot]", &["claude", "stuck"]);
+    let job = b.cfg.jobs.join(&id);
+
+    // First in-place body edit by the opener machine account: no new turn.
+    on["body"] = json!("Item A\nItem B");
+    set_edits(&mut on, &[body_edit("steward[bot]")]);
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert!(
+        !job.join("prompt.2").exists(),
+        "machine self-edit must not start a turn: {:?}",
+        fs::read_to_string(job.join("prompt.2"))
+    );
+    assert!(!b.log().contains("state=closed"), "{}", b.log());
+
+    // A second body edit by the same machine account also starts no turn.
+    on["body"] = json!("Item B");
+    set_edits(
+        &mut on,
+        &[body_edit("steward[bot]"), body_edit("steward[bot]")],
+    );
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert!(!job.join("prompt.2").exists());
+
+    // A title edit by the machine account still re-hands the job.
+    on["title"] = json!("Pipeline stuck (renamed)");
+    on["timelineItems"] =
+        json!({"totalCount": 1, "nodes": [{"actor": burrow_github::fake::actor("steward[bot]")}]});
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt = fs::read_to_string(job.join("prompt.2")).unwrap_or_default();
+    assert!(
+        prompt.starts_with("The issue has changed since you were handed it"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("# Pipeline stuck (renamed)"), "{prompt}");
+}
+
+#[test]
+fn another_accounts_body_edit_to_a_machine_issue_still_rehands_its_job() {
+    let mut b = Box::new();
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .authors
+        .push(burrow_github::fake::author("other[bot]"));
+    let (d, id, mut on) = started_machine_job(&mut b, "steward[bot]", &["claude", "stuck"]);
+    let job = b.cfg.jobs.join(&id);
+
+    // An edit by a human author re-hands the job.
+    on["body"] = json!("Item A\nAlso check X");
+    set_edits(&mut on, &[body_edit("sam")]);
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt2 = fs::read_to_string(job.join("prompt.2")).unwrap_or_default();
+    assert!(
+        prompt2.starts_with("The issue has changed since you were handed it"),
+        "{prompt2}"
+    );
+    assert!(prompt2.contains("Also check X"), "{prompt2}");
+
+    // Turn 2 finishes; a later self-edit by steward[bot] starts no turn even
+    // though sam's earlier edit remains in userContentEdits.
+    fs::write(job.join("2.outcome"), "done\n").unwrap();
+    fs::write(job.join("2.end"), "done\n").unwrap();
+    fs::write(d.join(files::File::Answered), "2\n").unwrap();
+    on["body"] = json!("Item C");
+    set_edits(&mut on, &[body_edit("steward[bot]"), body_edit("sam")]);
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert!(
+        !job.join("prompt.3").exists(),
+        "self-edit after handed human edit must not start turn 3"
+    );
+
+    // Another bot author editing followed by a self-edit before the pass runs
+    // must still re-hand the job (a later self-edit cannot hide another's edit).
+    on["body"] = json!("Item D");
+    set_edits(
+        &mut on,
+        &[
+            body_edit("steward[bot]"),
+            body_edit("other[bot]"),
+            body_edit("steward[bot]"),
+            body_edit("sam"),
+        ],
+    );
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt3 = fs::read_to_string(job.join("prompt.3")).unwrap_or_default();
+    assert!(
+        prompt3.starts_with("The issue has changed since you were handed it"),
+        "{prompt3}"
+    );
+    assert!(prompt3.contains("Item D"), "{prompt3}");
+}
+
+#[test]
+fn a_human_authors_own_body_edit_still_rehands_its_job() {
+    let had = issue(7, "sam", &["claude"]);
+    let mut now = had.clone();
+    now["body"] = json!("Updated by sam.");
+    set_edits(&mut now, &[body_edit("sam")]);
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 0, &[], &now);
+    let prompt = handed_whole(&b, &d, &now, &[]);
+    assert!(prompt.contains("Updated by sam."), "{prompt}");
+}
+
+#[test]
+fn an_outsiders_body_edit_to_a_machine_issue_is_still_withheld() {
+    let mut b = Box::new();
+    let (_d, id, mut on) = started_machine_job(&mut b, "steward[bot]", &["claude", "stuck"]);
+    let job = b.cfg.jobs.join(&id);
+    on["body"] = json!("MALICIOUS INPUT");
+    set_edits(&mut on, &[body_edit("mallory")]);
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt = fs::read_to_string(job.join("prompt.2")).unwrap_or_default();
+    assert!(
+        prompt.starts_with("The issue has changed since you were handed it"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Issue text withheld"), "{prompt}");
+    assert!(!prompt.contains("MALICIOUS INPUT"), "{prompt}");
+}
+
+#[test]
+fn machine_self_edits_fail_closed_on_missing_history_and_preserve_comment_checks() {
+    let mut b = Box::new();
+    let (d, id, mut on) = started_machine_job(&mut b, "steward[bot]", &["claude", "stuck"]);
+    let job = b.cfg.jobs.join(&id);
+
+    // A legacy record without `body-edits` backfills on an unchanged pass, so
+    // the next self-edit by steward[bot] starts no turn.
+    fs::remove_file(d.join(files::File::BodyEdits)).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert!(d.join(files::File::BodyEdits).exists());
+    assert!(!job.join("prompt.2").exists());
+
+    // Machine edits body, then sam posts a reply: handed as a reply alone.
+    on["body"] = json!("Item A\nItem B");
+    set_edits(&mut on, &[body_edit("steward[bot]")]);
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    fs::write(
+        b.path("comments"),
+        json!([[said(5, "check item B")]]).to_string(),
+    )
+    .unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(job.join("prompt.2")).unwrap(),
+        "sam replied on the issue:\n\ncheck item B\n"
+    );
+
+    // Turn 2 finishes; deleting a handed comment alongside a self-edit still
+    // re-hands the job.
+    fs::write(job.join("2.outcome"), "done\n").unwrap();
+    fs::write(job.join("2.end"), "done\n").unwrap();
+    fs::write(d.join(files::File::Answered), "2\n").unwrap();
+    on["body"] = json!("Item B");
+    set_edits(
+        &mut on,
+        &[body_edit("steward[bot]"), body_edit("steward[bot]")],
+    );
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    fs::write(b.path("comments"), "[[]]").unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt3 = fs::read_to_string(job.join("prompt.3")).unwrap_or_default();
+    assert!(
+        prompt3.starts_with("The issue has changed since you were handed it"),
+        "{prompt3}"
+    );
+
+    // Turn 3 finishes; a body change with no new edit node fails closed.
+    fs::write(job.join("3.outcome"), "done\n").unwrap();
+    fs::write(job.join("3.end"), "done\n").unwrap();
+    fs::write(d.join(files::File::Answered), "3\n").unwrap();
+    on["body"] = json!("Item B (unrecorded)");
+    fs::write(b.path("repos_sam_box_issues_7"), on.to_string()).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&on))
+        .unwrap();
+    let prompt4 = fs::read_to_string(job.join("prompt.4")).unwrap_or_default();
+    assert!(
+        prompt4.starts_with("The issue has changed since you were handed it"),
+        "{prompt4}"
+    );
+    assert!(prompt4.contains("Item B (unrecorded)"), "{prompt4}");
+}

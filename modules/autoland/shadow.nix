@@ -38,12 +38,14 @@
 # engines use` takes effect with no deploy (burrow#1393). A role whose
 # choice its jobs would refuse (no model, or one its engine doesn't offer)
 # fails the render, which then writes nothing.
-{ lib, pkgs, cfg, settings, ledger, steward, credentials, flowFiles, config }:
+{ lib, pkgs, cfg, settings, ledger, credentials, tokenCommand, flowFiles, config }:
 let
   inherit (config.burrow) stateDir;
   settingsSource = config.burrow.settings;
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
+  # A camelCase name in snake_case, as Conary's keys are: proofSlot, proof_slot.
+  snake = s: lib.concatMapStrings (c: if c != lib.toLower c then "_${lib.toLower c}" else c) (lib.stringToCharacters s);
   stewardLogin = "${cfg.app.slug}[bot]";
   # The plugins turned on, by the kind the flow knows each by.
   enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix job judge proof; };
@@ -178,6 +180,10 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
+        # Each stage's label is the steward's own (autoland/labels.nix), by
+        # Conary's name for the stage (proofSlot as proof_slot), so the flow
+        # puts on what the steward and proj read, never Conary's default.
+        stage_labels = lib.mapAttrs' (stage: l: lib.nameValuePair (snake stage) l.name) cfg.labels.waiting;
         inherit people;
         require_ci = rc.requireCi;
         inherit proofs;
@@ -356,7 +362,7 @@ in
     requires = needs;
     unitConfig.ConditionPathExists = instanceConfig;
     environment = ledger.env // ledger.flow.env // {
-      CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
+      CONARY_TOKEN_COMMAND = tokenCommand;
     };
     serviceConfig = {
       Type = "oneshot";
@@ -366,7 +372,7 @@ in
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";
       Nice = 15;
-      # The App's key, which the steward's token reads.
+      # The App's key, which the token command reads.
       LoadCredential = credentials;
     };
   };

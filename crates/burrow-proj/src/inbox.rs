@@ -238,6 +238,14 @@ fn trimmed(s: &str) -> String {
     s.trim_end_matches('\n').to_owned()
 }
 
+/// An issue's body text, empty when GitHub gives null or false.
+pub(super) fn issue_body(issue: &Value) -> String {
+    match &issue["body"] {
+        Value::Null | Value::Bool(false) => String::new(),
+        b => b.as_str().map_or_else(|| raw(b), str::to_owned),
+    }
+}
+
 /// A label as a URL's query takes it.
 fn uri(s: &str) -> String {
     s.bytes()
@@ -468,11 +476,19 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// The issue as any job of it reads it: where it's from, its title and
     /// text, and the authors' comments on it.
     fn issue_text(&self, repo: &str, issue: &Value, comments: &[Value]) -> String {
+        let body = issue_body(issue);
+        self.issue_text_with_body(repo, issue, &body, comments)
+    }
+
+    /// [`Pass::issue_text`], with `body` substituted for `issue["body"]`.
+    fn issue_text_with_body(
+        &self,
+        repo: &str,
+        issue: &Value,
+        body: &str,
+        comments: &[Value],
+    ) -> String {
         let n = raw(&issue["number"]);
-        let body = match &issue["body"] {
-            Value::Null | Value::Bool(false) => String::new(),
-            b => b.as_str().map_or_else(|| raw(b), str::to_owned),
-        };
         let said: String = comments
             .iter()
             .filter(|c| self.heard(c))

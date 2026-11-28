@@ -51,3 +51,5 @@ pub mod diff;
 pub mod github;
 pub mod rules;
 mod rust_cfg_test;
+
+pub use rules::{status_context, status_pr};

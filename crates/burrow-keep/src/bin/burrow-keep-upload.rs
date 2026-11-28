@@ -10,8 +10,7 @@ use std::env;
 use std::io::Write;
 use std::process::ExitCode;
 
-use burrow_keep::Nix as _;
-use burrow_keep::nix::Real;
+use burrow_keep::nix;
 use burrow_keep::upload::{Dump, Http, summary, upload};
 
 fn main() -> ExitCode {
@@ -30,7 +29,7 @@ fn main() -> ExitCode {
     } else {
         let run = || -> Result<String, String> {
             let door = Http::new(url, &token_url, &bearer)?;
-            let store = Real.store()?;
+            let store = nix::store()?;
             Ok(summary(&upload(&store, &Dump, &door)?))
         };
         match run() {

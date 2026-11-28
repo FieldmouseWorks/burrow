@@ -1,5 +1,5 @@
 //! Issue labels govern both enrollment and every later turn.
-use super::{Pass, dirs, key, raw, say, written};
+use super::{Pass, dirs, key, raw, say};
 use crate::inbox::record::files;
 use crate::record::JobFile;
 use crate::{Fail, config::Inbox, github::api, held::Held, io_fail, job::Job, read};
@@ -327,18 +327,14 @@ impl Pass<'_> {
             }
             // Comments already there are part of the task; replies after
             // this are turns.
-            let Some(written::Written {
-                issue: safe,
-                comments,
-                ..
-            }) = self.written(repo, issue)
-            else {
+            let Some(written) = self.written(repo, issue) else {
                 self.miss(repo);
                 continue;
             };
-            let issue = &safe;
+            let issue = &written.issue;
+            let comments = &written.comments;
             if self.inbox.planning
-                && (!self.approved_input(repo, &n, &self.issue_text(repo, issue, &comments))
+                && (!self.approved_input(repo, &n, &self.issue_text(repo, issue, comments))
                     || !self.child_admissible(repo, &n))
             {
                 continue;
@@ -356,7 +352,7 @@ impl Pass<'_> {
                     continue;
                 }
             }
-            let id = match self.start(repo, issue, &comments) {
+            let id = match self.start(repo, issue, comments) {
                 Ok(id) => id,
                 Err(f) => {
                     say(f);
@@ -372,7 +368,7 @@ impl Pass<'_> {
             files::mark(&d, files::File::Seen).put(format!("{}\n", seen.unwrap_or(0)))?;
             // What it was handed, so it's closed with the issue only as long
             // as the issue is still that (jobs.rs).
-            Self::hand(&d, &self.issue_text(repo, issue, &comments))?;
+            Self::hand_written(&d, &self.issue_text(repo, issue, comments), &written)?;
             // Said on the issue, or tried again next pass.
             files::mark(&d, files::File::Unannounced).put("")?;
         }

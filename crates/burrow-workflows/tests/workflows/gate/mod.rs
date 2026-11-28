@@ -36,7 +36,6 @@ mod negative;
 mod outputs;
 mod slots;
 mod store;
-mod waiting;
 mod whole;
 
 /// What the stand-ins keep beside their log, `nix.log`, cleared before
@@ -126,9 +125,8 @@ impl Gate {
         let expression = repo_file(".github/flake-check/compiler.nix")
             .canonicalize()
             .unwrap();
-        s.stub("nix-build", &format!(r#"[ "$#" = 8 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
+        s.stub("nix-build", &format!(r#"[ "$#" = 5 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
 [ "$3" = '{}' ] && [ "$4" = --out-link ] && [ -d "${{5%/*}}" ] || exit 90
-[ "$6" = --option ] && [ "$7" = extra-substituters ] && [ -z "$8" ] || exit 90
 printf '%s\n' '{}'
 "#, expression.display(), s.join("compiler").display()));
         let nix = which("nix");
@@ -490,8 +488,7 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
             "{TREE_SOURCE: '${{ inputs.gate-reuse }}', APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
              LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}', \
              TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check', \
-             BUILDS: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\", \
-             BUILDS_KEY: \"${{ inputs.install-nix && vars.BURROW_BUILDS_PUBLIC_KEY || '' }}\"}"
+             BUILDS: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\"}"
         )
     );
     assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);
@@ -500,7 +497,6 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
     // tools, the flaky action its flaky steps use, and the crates.
     let steps = crate::harness::steps(check);
     let at = steps.iter().position(|x| x["id"] == "gate").unwrap();
-    // (The wait for a base's kept builds, if any, runs between them.)
     let tools = steps[..at]
         .iter()
         .rfind(|x| x["with"]["path"] == ".flake-check")
