@@ -235,8 +235,8 @@ see [README.md](../README.md).
   usage records intact.
 
   Saved engine setups are named sets of those settings: `proj engines save
-  NAME`, `proj engines use NAME` and `use back` check and switch them;
-  `proj engines` lists them. `proj check-config` reads them as a turn does
+  NAME`, `proj engines use NAME`, `use back` and `proj engines delete NAME`
+  check, switch and remove them; `proj engines` lists them. `proj check-config` reads them as a turn does
   and must pass the update's health check before confirmation.
   With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
   switches setups without an agent ([engines door](front-door.md#engines-with-no-agent)).

@@ -662,7 +662,7 @@ pub static SETTINGS: &[Setting] = &[
         &SETUPS,
         r#"{"active": null, "saved": {}}"#,
         ROLES_OVERLAY,
-        "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
+        "Saved engine setups (proj engines save/use/delete), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
         "proj.enginePlugins",

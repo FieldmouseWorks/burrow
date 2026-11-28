@@ -1,6 +1,6 @@
 //! The engines door is a caller of the settings door: `engines use NAME`
-//! there, with a receipt for the issue's open cycle. Issue text is never a
-//! command.
+//! or `engines delete NAME` there, with a receipt for the issue's open cycle.
+//! Issue text is never a command.
 use burrow_door::{Door, asked, fenced};
 use burrow_github::{Api, Error};
 use burrow_settings::roles::valid_setup;
@@ -118,6 +118,9 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
                 ["use", name] if *name == "back" || valid_setup(name) => {
                     Some(vec!["engines".into(), "use".into(), (*name).into()])
                 }
+                ["delete", name] if valid_setup(name) => {
+                    Some(vec!["engines".into(), "delete".into(), (*name).into()])
+                }
                 _ => None,
             },
             _ => None,
@@ -152,7 +155,7 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
                 },
                 None => (
                     format!(
-                        "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
+                        "Nothing changed. Ask one line: `list`, `use NAME`, `use back` or `delete NAME`.\n\n{}",
                         current()
                     ),
                     "not_planned",
@@ -178,6 +181,8 @@ fn diagnostic(error: &str) -> String {
         "Unknown setup.".into()
     } else if error == "no previous setup" {
         "No previous setup.".into()
+    } else if error.starts_with("cannot delete active setup:") {
+        "Cannot delete the active setup.".into()
     } else if error.contains("doesn't offer") {
         "The setup names a model or effort its engine doesn't offer now.".into()
     } else {

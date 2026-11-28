@@ -491,3 +491,130 @@ fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
         }
     }
 }
+
+#[test]
+fn delete_setup_refuses_active_invalid_and_non_authors_and_retries_cleanly() {
+    let d = tempfile::tempdir().unwrap();
+    let cfg = door(
+        d.path(),
+        &[
+            "offer claude models secret-model",
+            "model judge claude secret-model",
+            "engines save bad",
+            "model judge claude unset",
+            "offer claude models",
+            "role work claude",
+            "engines save old",
+            "role work@sam/extra claude",
+            "engines save extra",
+            "role work@sam/extra unset",
+            "role work@sam/two claude",
+            "engines save current",
+            "engines use old",
+            "engines use current",
+        ],
+    );
+    let reply = |gh: &Fake| {
+        gh.asked("POST")
+            .into_iter()
+            .find(|a| a.1.ends_with("/comments"))
+            .unwrap()
+            .2
+            .as_ref()
+            .unwrap()["body"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let closed_reason = |gh: &Fake| {
+        gh.asked("PATCH").last().unwrap().2.as_ref().unwrap()["state_reason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // Deleting `old` (which `previous` points to) succeeds, clears `previous`,
+    // and never leaks model ids.
+    let mut gh = github("sam", "delete old", None);
+    cycle(&mut gh, "del-old");
+    pass(&mut gh, &cfg).unwrap();
+    let comment = reply(&gh);
+    assert!(
+        comment.contains("Was active: current\nActive: current\nPrevious: none\n")
+            && !comment.contains("  old\n")
+            && !comment.contains("secret-model"),
+        "{comment}"
+    );
+    assert_eq!(closed_reason(&gh), "completed");
+    assert_eq!(
+        cfg.settings
+            .command(&["engines".into(), "use".into(), "back".into()], "test")
+            .unwrap_err(),
+        "no previous setup"
+    );
+
+    // Deleting an obsolete setup referencing a withdrawn model succeeds.
+    let mut gh = github("sam", "delete bad", None);
+    cycle(&mut gh, "del-bad");
+    pass(&mut gh, &cfg).unwrap();
+    let comment = reply(&gh);
+    assert!(
+        !comment.contains("bad") && !comment.contains("secret-model"),
+        "{comment}"
+    );
+    assert_eq!(closed_reason(&gh), "completed");
+
+    // Refusing active, unknown, and malformed delete requests leaves state intact.
+    let before = cfg.settings.engines().unwrap();
+    for (body, expected) in [
+        ("delete current", "Cannot delete the active setup."),
+        ("delete absent", "Unknown setup."),
+        (
+            "delete back",
+            "Ask one line: `list`, `use NAME`, `use back` or `delete NAME`.",
+        ),
+        (
+            "delete ../current",
+            "Ask one line: `list`, `use NAME`, `use back` or `delete NAME`.",
+        ),
+        (
+            "delete extra again",
+            "Ask one line: `list`, `use NAME`, `use back` or `delete NAME`.",
+        ),
+    ] {
+        let mut gh = github("sam", body, None);
+        cycle(&mut gh, body);
+        pass(&mut gh, &cfg).unwrap();
+        let comment = reply(&gh);
+        assert!(comment.contains(expected), "{body}: {comment}");
+        assert!(!comment.contains("secret-model"), "{body}: {comment}");
+        assert_eq!(closed_reason(&gh), "not_planned", "{body}");
+        assert_eq!(cfg.settings.engines().unwrap(), before, "{body}");
+    }
+
+    // Non-authors and outsider edits are ignored.
+    for (author, editor) in [("outsider", None), ("sam", Some("outsider"))] {
+        let mut gh = github(author, "delete extra", editor);
+        cycle(&mut gh, "unauth");
+        pass(&mut gh, &cfg).unwrap();
+        assert!(gh.asked("PATCH").is_empty());
+        assert_eq!(cfg.settings.engines().unwrap(), before);
+    }
+
+    // A failed close after deleting `extra` retries by replaying the stored
+    // receipt rather than failing with "Unknown setup.".
+    let mut gh = github("sam", "delete extra", None);
+    cycle(&mut gh, "del-extra");
+    gh.answers
+        .iter_mut()
+        .find(|(method, _, _)| method == "PATCH")
+        .unwrap()
+        .2 = vec![ok(403, json!({"message":"refused"}), &[])].into();
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert!(!cfg.settings.engines().unwrap().contains("extra"));
+    let mut gh = github("sam", "delete extra", None);
+    cycle(&mut gh, "del-extra");
+    pass(&mut gh, &cfg).unwrap();
+    assert_eq!(closed_reason(&gh), "completed");
+    assert!(!reply(&gh).contains("Unknown setup."));
+}
