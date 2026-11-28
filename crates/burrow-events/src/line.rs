@@ -60,8 +60,12 @@ pub enum Scope {
 
 #[derive(Default)]
 struct State {
-    /// When each pass is due to look at everything.
+    /// When each pass is due from an event, kick or retry.
     due: HashMap<Pass, f64>,
+    /// When each pass is due from its wake file: kept apart from `due`, so
+    /// a newer wake file replaces a stale booking read while a pass ran
+    /// without clobbering events or retries.
+    wakes: HashMap<Pass, f64>,
     /// When each pass is due to look at only some issues, and which: kept
     /// apart from `due`, so a look at everything booked for later (a
     /// wake-up) doesn't turn an issue's event into one now.
@@ -81,6 +85,7 @@ struct State {
 /// What a take removed for one pass, and when the pass fell due.
 struct Took {
     due: Option<f64>,
+    wake: Option<f64>,
     issues: Option<(f64, BTreeSet<u64>)>,
     last: Option<f64>,
     since: f64,
@@ -93,10 +98,20 @@ impl State {
         at.max(self.last.get(pass).copied().unwrap_or(0.0) + gap)
     }
 
+    /// The earliest full-scope booking (event/retry or wake) for `pass`.
+    fn all_due(&self, pass: &Pass) -> Option<f64> {
+        match (self.due.get(pass), self.wakes.get(pass)) {
+            (Some(&a), Some(&b)) => Some(a.min(b)),
+            (Some(&a), None) | (None, Some(&a)) => Some(a),
+            (None, None) => None,
+        }
+    }
+
     /// When each booking falls due.
     fn falls_due(&self, gap: f64) -> impl Iterator<Item = f64> + '_ {
         self.due
             .iter()
+            .chain(self.wakes.iter())
             .chain(self.issues.iter().map(|(p, (at, _))| (p, at)))
             .map(move |(p, &at)| self.ready_at(gap, p, at))
     }
@@ -105,6 +120,9 @@ impl State {
 pub struct Line {
     /// How far apart one pass's starts are, at least.
     gap: f64,
+    /// Serializes reading a wake file with applying its deadlines so a
+    /// delayed read of an older file cannot overwrite a newer deadline.
+    wake_lock: Mutex<()>,
     state: Mutex<State>,
     cond: Condvar,
 }
@@ -119,6 +137,7 @@ impl Line {
     pub fn new(gap: f64) -> Line {
         Line {
             gap,
+            wake_lock: Mutex::new(()),
             state: Mutex::default(),
             cond: Condvar::new(),
         }
@@ -155,23 +174,41 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The wake file: only a wake-up booked after the pass's last start is
-    /// new (that pass rewrote its own).
-    pub fn wakes(&self, booked: &Map<String, Value>) {
+    fn apply_wakes(&self, booked: &Map<String, Value>) {
         let mut s = self.lock();
         for (key, at) in booked {
             if !(key.is_empty() || burrow_github::repo_name(key)) {
                 continue;
             }
             let pass = Pass::key(key);
-            if let Some(at) = at.as_f64()
-                && at > s.last.get(&pass).copied().unwrap_or(0.0)
-            {
-                Self::book(&mut s, pass, at);
+            if let Some(at) = at.as_f64() {
+                if at > s.last.get(&pass).copied().unwrap_or(0.0) {
+                    s.wakes.insert(pass, at);
+                } else {
+                    s.wakes.remove(&pass);
+                }
             }
         }
         s.news = true;
         self.cond.notify_all();
+    }
+
+    /// Read a wake file and apply its wake-ups in one serialized step for
+    /// this line, so concurrent refreshes cannot let a delayed older read
+    /// replace a newer deadline.
+    pub fn refresh_wakes(&self, read: impl FnOnce() -> Map<String, Value>) {
+        let _guard = self.wake_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let booked = read();
+        self.apply_wakes(&booked);
+    }
+
+    /// The wake file: only a wake-up booked after the pass's last start is
+    /// new (that pass rewrote its own). Each entry replaces any prior wake
+    /// booking for that pass, so a stale wake read while a pass ran is
+    /// superseded once the pass finishes and rewrites its wake file.
+    pub fn wakes(&self, booked: &Map<String, Value>) {
+        let _guard = self.wake_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.apply_wakes(booked);
     }
 
     /// The passes that start now, each with what it looks at, and how long
@@ -191,13 +228,18 @@ impl Line {
         s.news = false;
         let gap = self.gap;
         let by = until.map_or(now, |u| u.min(now));
-        let passes: BTreeSet<Pass> = s.due.keys().chain(s.issues.keys()).cloned().collect();
+        let passes: BTreeSet<Pass> = s
+            .due
+            .keys()
+            .chain(s.wakes.keys())
+            .chain(s.issues.keys())
+            .cloned()
+            .collect();
         let mut ready: Vec<(Pass, Scope)> = passes
             .into_iter()
             .filter_map(|p| {
-                if s.due
-                    .get(&p)
-                    .is_some_and(|&at| s.ready_at(gap, &p, at) <= by)
+                if s.all_due(&p)
+                    .is_some_and(|at| s.ready_at(gap, &p, at) <= by)
                 {
                     Some((p, Scope::All))
                 } else {
@@ -208,14 +250,15 @@ impl Line {
             .collect();
         ready.sort_by_key(|(p, _)| *p == Pass::Full);
         for (pass, scope) in &ready {
-            let due = if *scope == Scope::All {
-                s.due.remove(pass)
+            let (due, wake) = if *scope == Scope::All {
+                (s.due.remove(pass), s.wakes.remove(pass))
             } else {
-                None
+                (None, None)
             };
             let issues = s.issues.remove(pass);
             let since = due
                 .iter()
+                .chain(wake.iter())
                 .chain(issues.as_ref().map(|(at, _)| at))
                 .map(|&at| s.ready_at(gap, pass, at))
                 .fold(f64::INFINITY, f64::min);
@@ -224,6 +267,7 @@ impl Line {
                 pass.clone(),
                 Took {
                     due,
+                    wake,
                     issues,
                     last,
                     since,
@@ -247,6 +291,10 @@ impl Line {
         };
         if let Some(at) = took.due {
             Self::book(&mut s, pass.clone(), at);
+        }
+        if let Some(at) = took.wake {
+            let wake = s.wakes.entry(pass.clone()).or_insert(at);
+            *wake = wake.min(at);
         }
         if let Some((at, ns)) = took.issues {
             let (due, all) = s
@@ -352,13 +400,20 @@ impl Line {
 
     #[cfg(test)]
     pub fn due(&self) -> HashMap<Pass, f64> {
-        self.lock().due.clone()
+        let s = self.lock();
+        let mut out = s.due.clone();
+        for (p, &at) in &s.wakes {
+            let entry = out.entry(p.clone()).or_insert(at);
+            *entry = entry.min(at);
+        }
+        out
     }
 
     #[cfg(test)]
     pub fn clear(&self) {
         let mut s = self.lock();
         s.due.clear();
+        s.wakes.clear();
         s.issues.clear();
     }
 
@@ -690,5 +745,86 @@ mod tests {
         line.done(&r("sam/r"), false, 406.0);
         assert_eq!(line.due(), due(&[(r("sam/r"), 466.0)]));
         assert!(line.issues().is_empty());
+    }
+
+    // A catch-up pass starts while the handler's wake file still holds its
+    // earlier booking; another handler's refresh reads that stale file, then
+    // the catch-up pass finishes and rewrites it for later. The new booking
+    // replaces the stale one, so the pass doesn't run twice in 20 seconds.
+    #[test]
+    fn stale_wake_read_while_pass_runs_is_replaced_when_it_finishes() {
+        let line = Line::default();
+        line.wakes(&booked(json!({"": 1021})));
+        line.event(Pass::Full, 997.0);
+        assert_eq!(took(&line, 1002.0).0, vec![Pass::Full]);
+        // Another handler finishes at 1005 and refreshes from the still-old wake file.
+        line.wakes(&booked(json!({"": 1021})));
+        // The catch-up pass finishes at 1010 and books 15 minutes on.
+        line.done(&Pass::Full, true, 1010.0);
+        line.wakes(&booked(json!({"": 1910})));
+        assert_eq!(line.due(), due(&[(Pass::Full, 1910.0)]));
+        assert_eq!(took(&line, 1022.0), (vec![], Some(888.0)));
+    }
+
+    // Two threads refreshing the same wake file concurrently cannot let a
+    // thread that read the old file replace a newer deadline applied by the
+    // other thread.
+    #[test]
+    fn concurrent_wake_refreshes_never_replace_newer_with_older() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        std::fs::write(&wake, r#"{"": 1021}"#).unwrap();
+        let line = Arc::new(Line::default());
+        line.event(Pass::Full, 997.0);
+        assert_eq!(took(&line, 1002.0).0, vec![Pass::Full]);
+
+        let (entered_read, wait_entered) = mpsc::channel();
+        let (release_read, wait_release) = mpsc::channel();
+        let t1 = {
+            let (line, wake) = (line.clone(), wake.clone());
+            thread::spawn(move || {
+                line.refresh_wakes(|| {
+                    let data = std::fs::read(&wake).unwrap();
+                    let parsed = serde_json::from_slice::<Value>(&data)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .clone();
+                    entered_read.send(()).unwrap();
+                    wait_release.recv().unwrap();
+                    parsed
+                });
+            })
+        };
+        wait_entered.recv().unwrap();
+        // The catch-up pass finishes, rewrites wake.json for later, and another
+        // thread refreshes before the first thread finishes applying its read.
+        line.done(&Pass::Full, true, 1010.0);
+        std::fs::write(&wake, r#"{"": 1910}"#).unwrap();
+        let t2 = {
+            let (line, wake) = (line.clone(), wake.clone());
+            thread::spawn(move || {
+                line.refresh_wakes(|| {
+                    let data = std::fs::read(&wake).unwrap();
+                    serde_json::from_slice::<Value>(&data)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                });
+            })
+        };
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !t2.is_finished(),
+            "newer refresh must wait for the in-flight wake read"
+        );
+        release_read.send(()).unwrap();
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert_eq!(line.due(), due(&[(Pass::Full, 1910.0)]));
+        assert_eq!(took(&line, 1022.0), (vec![], Some(888.0)));
     }
 }

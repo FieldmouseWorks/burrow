@@ -62,6 +62,11 @@ pub trait Account {
     /// looks, is an error: a pass presses and settles only on a fresh
     /// reading, and only a copy from [`Account::copy`] stands in for one.
     fn read(&mut self) -> Result<Reading, String>;
+    /// A fresh reading already recorded in the shared meters file (for
+    /// instance by `burrow-claude-login`), and when it was taken.
+    fn recorded(&mut self) -> Option<(f64, Reading)> {
+        None
+    }
     /// The meter as another reader of the same account last fetched it
     /// from its endpoint, and when, if one is kept: a real reading, only an
     /// older one. Nothing when there's none, or it can't be told to be that.
@@ -148,16 +153,30 @@ pub fn pass(
     stamp: &str,
 ) -> Outcome {
     let mut notices = Vec::new();
-    // Other readers of the account share its endpoint's rate limit, so it
-    // often refuses, or isn't asked for a minute after one read it: what
-    // the last of them read stands in then, when it can.
-    let read = meter.read().map(|r| (now, r, false)).or_else(|e| {
-        meter
-            .copy()
-            .filter(|(at, copy)| shows_room(&state, *at, copy, below, now))
-            .map(|(at, copy)| (at, copy, true))
-            .ok_or(e)
-    });
+    // Another reader on this machine (such as heartbeat's claude-login)
+    // shares the same rate-limited endpoint and records every fresh reading
+    // it gets to the meters file. Reuse it when it is newer than our last
+    // reading, still within METERED for proj, and shows the week has room,
+    // instead of asking the endpoint a second time. Pressing and settling a
+    // reset still ask live.
+    let read = meter
+        .recorded()
+        .filter(|(at, r)| {
+            now - *at < crate::meter::METERED && shows_room(&state, *at, r, below, now)
+        })
+        .map(|(at, r)| Ok((at, r, false)))
+        .unwrap_or_else(|| {
+            // Other readers of the account share its endpoint's rate limit, so it
+            // often refuses, or isn't asked for a minute after one read it: what
+            // the last of them read stands in then, when it can.
+            meter.read().map(|r| (now, r, false)).or_else(|e| {
+                meter
+                    .copy()
+                    .filter(|(at, copy)| shows_room(&state, *at, copy, below, now))
+                    .map(|(at, copy)| (at, copy, true))
+                    .ok_or(e)
+            })
+        });
     let (mut read_at, reading, copied) = match read {
         Ok(r) => r,
         Err(e) => {

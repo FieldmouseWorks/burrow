@@ -81,11 +81,19 @@ let
   '';
 in
 assert lib.hasInfix "burrow-claude-login" (builtins.unsafeDiscardStringContext config.burrow.updates.health.claude-login);
+assert lib.hasInfix "--meters" (builtins.unsafeDiscardStringContext config.burrow.updates.health.claude-login);
 pkgs.runCommand "health-claude-login-check" { } ''
   export ASKED=$PWD/asked HOME=$PWD
   LOGIN=ok ${check} || { echo "a working login failed"; exit 1; }
   [ -s asked ] || { echo "Claude Code wasn't asked"; exit 1; }
   LOGIN=rate-limited ${check} || { echo "the endpoint's rate limit failed a working login"; exit 1; }
+  # With --meters, a live reading is kept for proj and usage-reset, and a
+  # 429 rate-limit pass leaves no stale reading behind.
+  probe=${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-usage-reset}/bin/burrow-claude-login
+  LOGIN=rate-limited $probe ${claude}/bin/claude ${user} --meters "$PWD/meters" || { echo "rate-limited --meters failed"; exit 1; }
+  [ ! -e "$PWD/meters/claude.json" ] || { echo "rate-limited pass recorded a meter"; exit 1; }
+  LOGIN=ok $probe ${claude}/bin/claude ${user} --meters "$PWD/meters" || { echo "ok --meters failed"; exit 1; }
+  grep -qF '"used":10.0' "$PWD/meters/claude.json" || { echo "ok pass didn't record meter: $(cat "$PWD/meters/claude.json")"; exit 1; }
   again="Log in again on this machine as ${user} (run claude, then /login)."
   login_failed() {
     grep -qF "$again" err || { echo "$1 wasn't told to log in again: $(cat err)"; exit 1; }

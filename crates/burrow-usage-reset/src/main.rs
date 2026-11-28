@@ -78,10 +78,11 @@ fn run() -> Result<(), String> {
     let mut claude = Meter {
         inner: claude,
         dir: cfg.meters.clone(),
+        recorded_at: None,
     };
     let now = now();
     let mut keep = |state: &State| save(&state_file, state);
-    let outcome = pass(
+    let mut outcome = pass(
         &mut claude,
         &mut keep,
         state,
@@ -89,6 +90,11 @@ fn run() -> Result<(), String> {
         now,
         &local_time(now),
     );
+    if let (Some(at), Some((last_at, used))) = (claude.recorded_at, outcome.state.last)
+        && at > last_at
+    {
+        outcome.state.last = Some((at, used));
+    }
 
     save(&state_file, &outcome.state)?;
     write(

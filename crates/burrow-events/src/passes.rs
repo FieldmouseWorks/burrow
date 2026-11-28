@@ -94,7 +94,7 @@ fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Option<PathBuf> 
 pub fn refresh(handlers: &Handlers, lines: &Lines) {
     for (name, h) in handlers.iter() {
         if let Some(wake) = &h.wake {
-            lines[name].wakes(&booked(wake));
+            lines[name].refresh_wakes(|| booked(wake));
         } else if h.yield_to.is_some() || !yielders(handlers, name).is_empty() {
             lines[name].nudge();
         }
@@ -191,7 +191,7 @@ pub fn serve(
     refresh: impl Fn(),
 ) {
     if let Some(wake) = &h.wake {
-        line.wakes(&booked(wake));
+        line.refresh_wakes(|| booked(wake));
     }
     loop {
         if once && yields.held(line.since(now())) {
