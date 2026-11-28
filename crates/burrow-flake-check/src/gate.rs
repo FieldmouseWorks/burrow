@@ -2,6 +2,10 @@
 use super::flaky::{Check, Flaky};
 use super::plan::PLAN;
 use super::*;
+/// The most legs the gate splits across. The shared workflow's leg lists and
+/// outputs (flake-check.yml) are held to it by its tests, and nothing that
+/// reads a leg's name has a cap of its own.
+pub const MAX_LEGS: usize = 12;
 fn plan_args(url: &str, system: &str, skip: &str) -> Vec<String> {
     vec![
         "--option".into(),
@@ -331,11 +335,8 @@ pub fn gate() -> Result<bool> {
     let legs = var("LEGS");
     let leg = var("LEG");
     let parse = |v: &str| {
-        if (1..=2).contains(&v.len())
-            && v.bytes().all(|b| b.is_ascii_digit())
-            && !v.starts_with('0')
-        {
-            v.parse::<usize>().ok().filter(|v| (1..=12).contains(v))
+        if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) && !v.starts_with('0') {
+            v.parse::<usize>().ok().filter(|v| *v <= MAX_LEGS)
         } else {
             None
         }
@@ -344,7 +345,7 @@ pub fn gate() -> Result<bool> {
         (Some(ls), Some(l)) if l <= ls => (ls, l),
         _ => {
             return Err(failed(format!(
-                "can't run leg {leg} of {legs}: there are 1 to 12 legs, numbered from 1"
+                "can't run leg {leg} of {legs}: there are 1 to {MAX_LEGS} legs, numbered from 1"
             )));
         }
     };

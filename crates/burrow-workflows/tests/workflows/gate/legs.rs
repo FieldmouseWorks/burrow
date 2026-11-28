@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{EVERY, Gate, Run};
-use crate::harness::read;
+use crate::harness::{max_legs, read};
 
 /// With legs, each leg evaluates its own share of the outputs, said in the
 /// plan's order, and builds only its checks: together, each once.
@@ -189,17 +189,20 @@ fn legs_of(g: &Gate, d: &Path, n: usize) -> BTreeMap<String, usize> {
     legs
 }
 
-/// Legs without eval-apart, or a leg that isn't one of 1 to 12, are refused
-/// before anything is evaluated.
+/// Legs without eval-apart, or a leg that isn't one of 1 to the cap
+/// (`MAX_LEGS`), are refused before anything is evaluated.
 #[test]
 fn legs_it_cant_run_are_refused() {
     let g = Gate::new();
     let every = g.flake(EVERY);
+    let (max, past) = (max_legs().to_string(), (max_legs() + 1).to_string());
+    let past_why = format!("can't run leg 1 of {past}: there are 1 to {max} legs");
+    let zero_why = format!("can't run leg 01 of {max}");
     for (apart, leg, legs, why) in [
         (false, "1", "2", "legs need eval-apart"),
         (true, "3", "2", "can't run leg 3 of 2"),
-        (true, "1", "13", "can't run leg 1 of 13"),
-        (true, "01", "12", "can't run leg 01 of 12"),
+        (true, "1", past.as_str(), past_why.as_str()),
+        (true, "01", max.as_str(), zero_why.as_str()),
         (true, "0", "1", "can't run leg 0 of 1"),
         (true, "", "", "can't run leg  of"),
         (true, "1", "x", "can't run leg 1 of x"),
@@ -217,16 +220,17 @@ fn legs_it_cant_run_are_refused() {
     }
 }
 
-/// Up to 12 legs (including two-digit leg numbers 10..=12) partition a flake's
-/// outputs cleanly across legs.
+/// As many legs as the cap, two-digit leg numbers included, partition a
+/// flake's outputs cleanly across legs.
 #[test]
-fn twelve_legs_partition_outputs_cleanly() {
+fn legs_to_the_cap_partition_outputs_cleanly() {
     let g = Gate::new();
     let every = g.flake(EVERY);
-    let assigned = legs_of(&g, &every, 12);
+    let max = max_legs();
+    let assigned = legs_of(&g, &every, max);
     assert!(!assigned.is_empty());
     assert!(
-        assigned.values().all(|k| (1..=12).contains(k)),
+        assigned.values().all(|k| (1..=max).contains(k)),
         "{assigned:?}"
     );
 }

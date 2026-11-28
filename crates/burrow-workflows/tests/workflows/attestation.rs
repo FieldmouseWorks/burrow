@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
-use crate::harness::{Scratch, read, script, step, steps, workflow, write, yaml};
+use crate::harness::{Scratch, max_legs, read, script, step, steps, workflow, write, yaml};
 
 const TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJ4In0.c2ln";
 
@@ -545,7 +545,7 @@ fn with_legs_the_gate_job_attests_for_them() {
         leg_up["with"],
         yaml("{name: '${{ steps.leg.outputs.name }}', path: '${{ runner.temp }}/flake.log'}")
     );
-    let outputs: String = (1..=12)
+    let outputs: String = (1..=max_legs())
         .map(|k| format!("leg-{k}: '${{{{ steps.leg.outputs.leg-{k} }}}}'\n"))
         .collect();
     assert_eq!(job["outputs"], yaml(&outputs));

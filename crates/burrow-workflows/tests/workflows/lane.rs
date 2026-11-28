@@ -20,7 +20,9 @@ use burrow_upkeep::ci::{DOCS, LANE, gate_job, workflow as ci_workflow};
 use serde_json::json;
 use yaml_serde::Value;
 
-use crate::harness::{Scratch, read, script, step, steps, workflow, write, yaml};
+use crate::harness::{
+    Scratch, max_legs, read, repo_file, script, step, steps, text, workflow, write, yaml,
+};
 
 const FLAKE_CHECK: &str = ".github/workflows/flake-check.yml";
 /// Every caller, and what runs it again for a new base: burrow's own, and the
@@ -142,14 +144,13 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
         check["name"],
         "${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}"
     );
+    // Every name a leg can get, up to the gate's cap (the_legs_go_to_the_cap),
+    // is one autoland knows; upkeep's own tests hold the grammar.
     assert!(gate_job("check"));
-    for n in 2..=8 {
+    for n in 2..=max_legs() {
         for k in 1..=n {
             assert!(gate_job(&format!("leg {k} of {n}")), "{k} of {n}");
         }
-    }
-    for not in ["leg 1 of 1", "leg 0 of 2", "leg 9 of 9", "check again"] {
-        assert!(!gate_job(not), "{not}");
     }
     assert_eq!(
         docs["name"],
@@ -668,4 +669,50 @@ fn the_docs_lane_builds_only_the_docs_checks() {
             "build -L --no-link --keep-going .#checks.x86_64-linux.lychee .#checks.x86_64-linux.docs"
         ]
     );
+}
+
+/// The workflow's own lists of legs go to the gate's cap and no further:
+/// the matrix's list of each leg count's legs (`legs` indexes it, so entry
+/// i is 1 to i, and entry 0 is one leg), the cap its `legs` input states,
+/// and every caller in the repo, the template's included, within it. The
+/// legs' outputs are attestation.rs's.
+#[test]
+fn the_legs_go_to_the_cap() {
+    let max = max_legs();
+    let wf = workflow(FLAKE_CHECK);
+    let leg = text(&wf["jobs"]["check"]["strategy"]["matrix"]["leg"]);
+    let list = leg
+        .strip_prefix("${{ fromJSON('")
+        .and_then(|l| l.strip_suffix("')[inputs.legs] }}"))
+        .unwrap_or_else(|| panic!("not one list per leg count: {leg}"));
+    let list: Vec<Vec<usize>> = serde_json::from_str(list).unwrap();
+    assert_eq!(list.len(), max + 1, "{list:?}");
+    for (i, legs) in list.iter().enumerate() {
+        assert_eq!(*legs, (1..=i.max(1)).collect::<Vec<_>>(), "entry {i}");
+    }
+    let said = text(&wf["on"]["workflow_call"]["inputs"]["legs"]["description"]);
+    assert!(said.contains(&format!(", 1 to {max}, ")), "{said}");
+    let mut callers = 0;
+    for dir in [".github/workflows", "templates/project/.github/workflows"] {
+        for file in std::fs::read_dir(repo_file(dir)).unwrap() {
+            let file = file.unwrap().path();
+            if file.extension().is_none_or(|e| e != "yml") {
+                continue;
+            }
+            let caller = yaml(&read(&file));
+            for (name, call) in calls(&caller) {
+                let legs = match &call["with"]["legs"] {
+                    Value::Null => 1,
+                    v => v.as_u64().unwrap_or_else(|| panic!("{name:?}: legs {v:?}")),
+                };
+                assert!(
+                    (1..=max as u64).contains(&legs),
+                    "{}: {name:?} runs {legs} legs, past {max}",
+                    file.display()
+                );
+                callers += 1;
+            }
+        }
+    }
+    assert!(callers >= CALLERS.len() * 2, "{callers} callers");
 }

@@ -716,3 +716,144 @@ fn another_prs_house_status_does_not_speak_for_this_pr() {
         ("red", vec!["house/branch (#1625)".to_owned()])
     );
 }
+
+/// A job of the shared gate's call `check`, in flake.yml's run `run` (its
+/// suite `s{run}`): the lane, a leg, the whole gate or the docs job.
+fn gate_run(job: &str, id: u64, run: u64, conclusion: &str) -> Value {
+    json!({"__typename": "CheckRun", "databaseId": id, "name": format!("check / {job}"), "status": "COMPLETED",
+           "conclusion": conclusion,
+           "checkSuite": {"id": format!("s{run}"), "status": "COMPLETED", "app": {"slug": "github-actions"},
+                          "workflowRun": {"databaseId": run, "file": {"path": ".github/workflows/flake.yml"},
+                                          "workflow": {"id": "flake", "name": "flake"}}}})
+}
+
+/// The names `leg K of N` the gate's legs get, for any 1 <= K <= N with
+/// N >= 2: plain decimal, no sign or leading zero, single spaces. The same
+/// rule and cases as Conary's flow (crates/conary-github/src/flow/ci.rs),
+/// copied, not linked. Uncapped, so no leg count can outgrow it.
+#[test]
+fn a_leg_is_any_k_of_n() {
+    for job in [
+        "check",
+        "docs only into main from 0123",
+        "leg 1 of 2",
+        "leg 2 of 2",
+        "leg 9 of 9",
+        "leg 1 of 12",
+        "leg 11 of 12",
+        "leg 12 of 12",
+        "leg 11 of 120",
+        "leg 40 of 64",
+    ] {
+        assert!(gate_job(job), "{job}");
+    }
+    for job in [
+        "leg 0 of 2",
+        "leg 3 of 2",
+        "leg 8 of 2",
+        "leg 13 of 12",
+        "leg 01 of 12",
+        "leg 1 of 1",
+        "leg 1 of 02",
+        "leg +1 of 2",
+        "leg -1 of 2",
+        "leg 1  of 2",
+        "leg 1 of 2 ",
+        " leg 1 of 2",
+        "leg 1 of ",
+        "leg  of 2",
+        "leg 1 of 99999999999999999999999",
+        "check again",
+    ] {
+        assert!(!gate_job(job), "{job}");
+    }
+}
+
+/// A cancelled leg of burrow's own twelve is the gate's work: a later run's
+/// whole gate, its legs skipped on a reuse hit, does it, and nothing is run
+/// again. A failed one likewise follows the later run's verdict, under the
+/// one replacement relation every check has.
+#[test]
+fn a_later_whole_gate_does_a_twelve_leg_runs_work() {
+    for old in ["CANCELLED", "FAILURE"] {
+        let mut h = Hub::default();
+        let a = ask(vec![
+            gate_run("lane into main", 1, 7, "SUCCESS"),
+            gate_run("leg 11 of 12", 2, 7, old),
+            gate_run("check", 3, 7, "SKIPPED"),
+            gate_run("lane into main", 10, 8, "SUCCESS"),
+            gate_run("leg 11 of 12", 11, 8, "SKIPPED"),
+            gate_run("check", 12, 8, "SUCCESS"),
+        ]);
+        let got = run(&mut h, &a, false).unwrap();
+        assert_eq!(
+            (got.state, got.names),
+            ("green", Vec::<String>::new()),
+            "{old}"
+        );
+        assert_eq!(posts(&h), 0, "{old}: {:?}", h.asked);
+    }
+}
+
+/// What replaces a twelve-leg run's leg, by its id: a later suite's whole
+/// gate that ran, or its docs job where the docs lane holds. Not one that was
+/// skipped or cancelled, a stale one, the docs job outside the docs lane, a
+/// different leg, nor its own run's gate job: within one run a failed leg
+/// and the failed verdict it caused both speak, so the leg's own annotations
+/// are still read for a lost runner.
+#[test]
+fn what_replaces_a_leg_of_twelve() {
+    let fork = format!("docs only into main from {}", "b".repeat(40));
+    let effective = |c: &[Value], stale: &[&str], docs: bool| -> Vec<u64> {
+        let stale = stale.iter().map(|s| s.to_string()).collect();
+        ci_runs::effective(c, &stale, docs)
+            .iter()
+            .map(|x| x["databaseId"].as_u64().unwrap())
+            .collect()
+    };
+    let old = || {
+        vec![
+            gate_run("lane into main", 1, 7, "SUCCESS"),
+            gate_run("leg 5 of 12", 2, 7, "FAILURE"),
+        ]
+    };
+    let with = |later: Vec<Value>| [old(), later].concat();
+    let check = |conclusion| {
+        vec![
+            gate_run("lane into main", 10, 8, "SUCCESS"),
+            gate_run("check", 11, 8, conclusion),
+        ]
+    };
+    // The later lane stands for the earlier, as any lane does.
+    assert_eq!(effective(&with(check("SUCCESS")), &[], false), [10, 11]);
+    assert_eq!(effective(&with(check("FAILURE")), &[], false), [10, 11]);
+    let docs = vec![gate_run(&fork, 11, 8, "SUCCESS")];
+    assert_eq!(effective(&with(docs.clone()), &[], true), [1, 11]);
+    assert_eq!(effective(&with(docs), &[], false), [1, 2, 11]);
+    for skipped in ["SKIPPED", "CANCELLED"] {
+        assert_eq!(
+            effective(&with(check(skipped)), &[], false),
+            [2, 10, 11],
+            "{skipped}"
+        );
+    }
+    assert_eq!(effective(&with(check("SUCCESS")), &["s8"], false), [1, 2]);
+    let other_leg = vec![
+        gate_run("lane into main", 10, 8, "SUCCESS"),
+        gate_run("leg 6 of 12", 11, 8, "SUCCESS"),
+    ];
+    assert_eq!(effective(&with(other_leg), &[], false), [2, 10, 11]);
+    // Its own run's verdict.
+    let own = with(vec![gate_run("check", 3, 7, "FAILURE")]);
+    assert_eq!(effective(&own, &[], false), [1, 2, 3]);
+    let mut h = Hub::default();
+    let got = run(&mut h, &ask(own), false).unwrap();
+    assert_eq!(got.state, "red");
+    assert!(
+        h.asked
+            .iter()
+            .any(|(_, p)| p.ends_with("/check-runs/2/annotations?per_page=100")),
+        "{:?}",
+        h.asked
+    );
+}
