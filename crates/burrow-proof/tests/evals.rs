@@ -405,7 +405,7 @@ fn heavy_queue_wait_does_not_eat_eval_timeout_and_work_enforces_it() {
             captured.display()
         ),
     );
-    let proof_bin = Path::new(env!("CARGO_BIN_EXE_burrow-proof"));
+    let proof_bin = Path::new(burrow_test::program!("burrow-proof"));
     start(&dir, proof_bin, &srun).unwrap();
     let args = fs::read_to_string(&captured).unwrap();
     assert!(
