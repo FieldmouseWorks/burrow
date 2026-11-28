@@ -809,6 +809,6 @@ fn is_etxtbsy(err: &impl std::fmt::Display) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod tests;
