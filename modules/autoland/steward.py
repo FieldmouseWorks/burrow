@@ -382,13 +382,16 @@ def run_pass(kick, continuing=False):
                 heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
+                # Then PRs whose GitHub/repo inputs changed since their last
+                # look, so a fresh review or check isn't starved behind
+                # unchanged PRs in the same round.
                 # Then every PR's look this round before any one's second
                 # (batch.due), first-labelled ahead within a round, then
                 # unvisited PRs before revisiting changed ones.
 
                 def order(pr):
                     n = pr["number"]
-                    return n not in held, not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
+                    return n not in held, not batch.changed(repo, pr), not batch.due(repo, pr), n not in first, batch.visited(repo, pr), P.place(repo, n)
 
                 # Read and ready: each PR's own step fails on its own.
                 waits.passed(repo, op)
