@@ -252,6 +252,19 @@ pub(crate) fn hex_digest(normalized: &str) -> &str {
     normalized.strip_prefix("sha256:").unwrap_or(normalized)
 }
 
+/// Whether `words` is a read-only `plugin` command (`list`, `show`, `picker`,
+/// or `verify`) that does not require owner authentication.
+pub fn is_read_command(words: &[&str]) -> bool {
+    matches!(words, ["plugin", "list" | "show" | "picker" | "verify", ..])
+}
+
+/// Whether `words` is a `plugin` mutation command requiring owner
+/// authentication (`install`, `update`, `remove`, or any non-read `plugin`
+/// subcommand, failing closed).
+pub fn is_mutation_command(words: &[&str]) -> bool {
+    matches!(words, ["plugin", ..]) && !is_read_command(words)
+}
+
 /// Syntax validation for `plugin ...` commands (used by the issue door before
 /// executing mutations).
 pub fn valid_command(words: &[&str]) -> bool {
@@ -268,8 +281,7 @@ pub fn valid_command(words: &[&str]) -> bool {
             sha256,
         ] => {
             valid_engine(engine).is_ok()
-                && SourceKind::parse(kind).is_some()
-                && valid_source_syntax(SourceKind::parse(kind).unwrap(), source)
+                && SourceKind::parse(kind).is_some_and(|k| valid_source_syntax(k, source))
                 && valid_version(version)
                 && normalize_sha256(sha256).is_ok()
         }
@@ -798,3 +810,5 @@ fn is_etxtbsy(err: &impl std::fmt::Display) -> bool {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_regressions;

@@ -20,12 +20,37 @@ pub struct DoorConfig {
     pub settings: Config,
 }
 
+fn parse_args(text: &serde_json::Value) -> Vec<String> {
+    match asked(text).as_slice() {
+        [line] => line
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    }
+}
+
+fn receipt_path(state: &std::path::Path, repo: &str, number: u64, cycle: &str) -> PathBuf {
+    let digest: String =
+        Sha256::digest(format!("{}:{number}:{cycle}", repo.to_ascii_lowercase()).as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+    state.join(digest)
+}
+
 pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
     let door = Door {
         repo: &cfg.repo,
         label: &cfg.label,
         authors: &cfg.authors,
         what: "automated work settings",
+    };
+    let owner_door = Door {
+        repo: &cfg.repo,
+        label: &cfg.label,
+        authors: &cfg.settings.owners,
+        what: "engine plugin changes",
     };
     fs::create_dir_all(&cfg.state).map_err(|e| e.to_string())?;
     let lock = File::options()
@@ -40,43 +65,67 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
             Ok(value) => value,
             Err(_) => continue,
         };
-        let digest: String = Sha256::digest(
-            format!("{}:{}:{cycle}", cfg.repo.to_ascii_lowercase(), issue.number).as_bytes(),
-        )
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-        let receipt = cfg.state.join(digest);
-        let lines = asked(&text);
-        let args = match lines.as_slice() {
-            [line] => line
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
+        let args = parse_args(&text);
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
         let (body, reason) = if !crate::valid_command(&args) {
             (
                 "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, landing OWNER/REPO steward|conaryd, pipeline TIMESTAMP, back, credit BUDGET RENEWS MONTHLY RESERVE, credit off, or plugin list|show|picker|verify|install|update|remove.".into(),
                 "completed",
             )
-        } else if args.first().map(String::as_str) == Some("plugin") {
-            let Some(opener_id) = issue.opener_id else {
-                continue;
-            };
-            let auth = crate::plugins::OwnerAuth {
-                id: opener_id,
-                login: issue.opener.clone(),
-                actor: format!(
-                    "github:{}#{}:id:{}:{}",
-                    cfg.repo, issue.number, opener_id, issue.opener
-                ),
-            };
-            match cfg.settings.request_as(&auth, &receipt, &args) {
+        } else if crate::plugins::is_mutation_command(&words) {
+            if cfg.settings.owners.is_empty() {
+                (
+                    "Nothing changed: no authorized owners are configured for engine plugin changes (burrow.settings.owners)".into(),
+                    "not_planned",
+                )
+            } else {
+                // Vet opener, author, body edits, edit deletions, and title
+                // renames against `cfg.settings.owners` (which may be a strict
+                // subset of `cfg.authors`), and parse the request from that
+                // owner-vetted snapshot so there is no TOCTOU gap.
+                match owner_door.written_cycle(api, &issue)? {
+                    Err(why) => (format!("Nothing changed: {why}"), "not_planned"),
+                    Ok((owner_text, owner_cycle)) => {
+                        let owner_args = parse_args(&owner_text);
+                        let owner_words: Vec<&str> =
+                            owner_args.iter().map(String::as_str).collect();
+                        if !crate::valid_command(&owner_args)
+                            || !crate::plugins::is_mutation_command(&owner_words)
+                        {
+                            continue;
+                        }
+                        let Some(opener_id) = issue.opener_id else {
+                            continue;
+                        };
+                        let owner_receipt =
+                            receipt_path(&cfg.state, &cfg.repo, issue.number, &owner_cycle);
+                        let auth = crate::plugins::OwnerAuth {
+                            id: opener_id,
+                            login: issue.opener.clone(),
+                            actor: format!(
+                                "github:{}#{}:id:{}:{}",
+                                cfg.repo, issue.number, opener_id, issue.opener
+                            ),
+                        };
+                        match cfg.settings.request_as(&auth, &owner_receipt, &owner_args) {
+                            Ok(said) => (said, "completed"),
+                            Err(why) => (format!("Nothing changed: {why}"), "not_planned"),
+                        }
+                    }
+                }
+            }
+        } else if crate::plugins::is_read_command(&words) {
+            let receipt = receipt_path(&cfg.state, &cfg.repo, issue.number, &cycle);
+            match cfg.settings.request(
+                &receipt,
+                &args,
+                &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
+            ) {
                 Ok(said) => (said, "completed"),
                 Err(why) => (format!("Nothing changed: {why}"), "not_planned"),
             }
         } else {
+            let receipt = receipt_path(&cfg.state, &cfg.repo, issue.number, &cycle);
             (
                 cfg.settings.request(
                     &receipt,

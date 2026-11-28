@@ -542,7 +542,7 @@ impl Route {
     }
 
     /// Every engine valid and named once, every percent from 0 to 100.
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn check(&self) -> Result<(), String> {
         let mut seen = Vec::new();
         for name in self.engines() {
             engine_syntax(name)?;

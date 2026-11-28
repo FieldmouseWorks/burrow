@@ -190,7 +190,7 @@ impl Config {
                 }
                 let mut out = String::new();
                 for (name, p) in plugins {
-                    let short = &hex_digest(&p.sha256)[..12];
+                    let short: String = hex_digest(&p.sha256).chars().take(12).collect();
                     let models: Vec<&str> = p.models.iter().map(|m| m.id.as_str()).collect();
                     out.push_str(&format!(
                         "{name} {} {} sha256:{short} models=[{}] sandbox={}\n",
@@ -233,8 +233,11 @@ impl Config {
             }
             ["plugin", "verify", engine] => {
                 valid_engine(engine)?;
-                let path = self.verify_installed_plugin(engine)?;
-                let plugin = self.installed_plugin(engine)?.unwrap();
+                let plugin = self
+                    .installed_plugin(engine)?
+                    .ok_or_else(|| format!("engine plugin {engine} is not installed"))?;
+                let path =
+                    verify_installed(engine, &plugin, &self.nix_store(), &self.plugins_dir())?;
                 Ok(format!(
                     "{engine} verified {} ({})\n",
                     plugin.sha256,
@@ -623,9 +626,12 @@ impl Config {
                 }
                 next_removed_fallbacks.insert(engine.to_owned(), fallback.clone());
 
-                // Validate complete post-removal document before committing.
-                let remaining_plugin_models =
-                    crate::roles::plugin_models_for(&next_offers, &next_plugins);
+                // Validate live post-removal routing completely before
+                // committing. Saved/previous setups may already hold unrelated
+                // stale tunings from earlier `offer` or `plugin update` changes
+                // (checked at activation time by `engines use`), so verify here
+                // only that no reference to the removed engine remains and that
+                // every route stays structurally valid.
                 next_routing.in_force_with_plugins(
                     &next_offers,
                     &self.engines,
@@ -633,9 +639,12 @@ impl Config {
                     &next_removed_fallbacks,
                 )?;
                 for (setup_name, setup) in &next_setups.saved {
-                    setup
-                        .check_with_plugins(&remaining_offers, &remaining_plugin_models)
+                    ensure_removed_engine_absent(setup, engine)
                         .map_err(|e| format!("setup {setup_name}: {e}"))?;
+                }
+                if let Some(prev) = &next_setups.previous {
+                    ensure_removed_engine_absent(prev, engine)
+                        .map_err(|e| format!("previous setup: {e}"))?;
                 }
 
                 if removed.source_kind == SourceKind::Release {
@@ -768,9 +777,31 @@ fn rewrite_roles_for_removal(
             to,
         });
     }
-    let suffix = format!(" {removed}");
-    roles.models.retain(|key, _| !key.ends_with(&suffix));
+    roles
+        .models
+        .retain(|key, _| key.split_once(' ').is_none_or(|(_, on)| on != removed));
     Ok(moved)
+}
+
+/// Verify no route or model tuning in `roles` still references `removed` and
+/// every route remains structurally valid after rewriting.
+fn ensure_removed_engine_absent(roles: &Roles, removed: &str) -> Result<(), String> {
+    for (key, route) in &roles.roles {
+        if route.engines().any(|e| e == removed) {
+            return Err(format!(
+                "role {key}: still references removed engine {removed}"
+            ));
+        }
+        route.check().map_err(|e| format!("role {key}: {e}"))?;
+    }
+    for key in roles.models.keys() {
+        if key.split_once(' ').is_some_and(|(_, on)| on == removed) {
+            return Err(format!(
+                "model {key}: still references removed engine {removed}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Replace `removed` with `fallback` in `route`, keeping each engine at most

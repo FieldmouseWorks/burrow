@@ -6,18 +6,18 @@ use burrow_github::fake::{Fake, ok};
 use serde_json::{Value, json};
 use std::fs;
 
-fn words(line: &str) -> Vec<String> {
+pub(super) fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
 }
 
-fn owner() -> Author {
+pub(super) fn owner() -> Author {
     Author {
         login: "sam".into(),
         id: 42,
     }
 }
 
-fn owner_auth() -> OwnerAuth {
+pub(super) fn owner_auth() -> OwnerAuth {
     OwnerAuth {
         id: 42,
         login: "sam".into(),
@@ -68,7 +68,7 @@ exec env -i PATH="/bin:/usr/bin" "$target"
 /// `engine`, `models_json`, and `sandbox`, optionally writing a canary file
 /// whenever executed (to prove tampered artifacts never execute) and optionally
 /// rejecting conformance fixtures.
-fn write_plugin_fixture(
+pub(super) fn write_plugin_fixture(
     path: &Path,
     engine: &str,
     models_json: &str,
@@ -115,7 +115,7 @@ esac
     sha256_file(path).unwrap()
 }
 
-fn rig() -> (tempfile::TempDir, Config, PathBuf) {
+pub(super) fn rig() -> (tempfile::TempDir, Config, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let nix_store = dir.path().join("nix-store");
     fs::create_dir_all(&nix_store).unwrap();
