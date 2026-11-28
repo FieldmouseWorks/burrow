@@ -86,6 +86,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         scope: None,
         drain_at: None,
         skipped: Vec::new(),
+        closing_prs: BTreeMap::new(),
     };
     let (repo, said) = match asked {
         Asked::Done(child, pr) => (

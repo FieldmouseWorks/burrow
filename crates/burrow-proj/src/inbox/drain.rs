@@ -240,6 +240,15 @@ impl Pass<'_> {
             if self.cfg.paused(&repo) {
                 continue;
             }
+            match self.check_open_closing_pr(&repo, &n) {
+                super::closing_pr::OpenClosingPr::None => {}
+                super::closing_pr::OpenClosingPr::Open(_) => continue,
+                super::closing_pr::OpenClosingPr::Unknown => {
+                    self.miss(&repo);
+                    passed.insert(repo);
+                    continue;
+                }
+            }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
             files::mark(&d, File::Drained).put(format!("{repo}#{n}\n"))?;
@@ -415,10 +424,21 @@ impl Pass<'_> {
             }
             Ok(None) => (),
         }
-        issue["state"] == "open"
+        let open = issue["state"] == "open"
             && issue["labels"]
                 .as_array()
-                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(label)))
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(label)));
+        if !open {
+            return false;
+        }
+        match self.check_open_closing_pr(repo, n) {
+            super::closing_pr::OpenClosingPr::None => true,
+            super::closing_pr::OpenClosingPr::Open(_) => false,
+            super::closing_pr::OpenClosingPr::Unknown => {
+                self.miss(repo);
+                true
+            }
+        }
     }
 
     /// The repo a pass is booked on for the drain's own sake (any pass ends

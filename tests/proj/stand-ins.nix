@@ -193,6 +193,13 @@
       owner=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.owner)
       name=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.name)
       n=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.n)
+      if printf '%s' "$body" | ${pkgs.jq}/bin/jq -e '.query | contains("closedByPullRequestsReferences")' >/dev/null; then
+        f="/tmp/gh/merged-''${owner}_''${name}-''${n}"
+        [ -e "$f" ] || f="/tmp/gh/merged-''${n}"
+        printf 'HTTP/2.0 200 OK\n\n'
+        cat "$f" 2>/dev/null || printf '{"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}}'
+        exit 0
+      fi
       issue="/tmp/gh/repos_''${owner}_''${name}_issues_''${n}"
       comments="''${issue}_comments"
       [ -e "$issue" ] || issue="/tmp/gh/repos_''${owner}_''${name}_issues"

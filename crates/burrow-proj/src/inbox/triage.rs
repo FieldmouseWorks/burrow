@@ -279,6 +279,17 @@ impl Pass<'_> {
                 self.planner_wait(repo, &n, why);
                 continue;
             }
+            match self.check_open_closing_pr(repo, &n) {
+                super::closing_pr::OpenClosingPr::None => {}
+                super::closing_pr::OpenClosingPr::Open(_) => {
+                    self.planner_wait(repo, &n, None);
+                    continue;
+                }
+                super::closing_pr::OpenClosingPr::Unknown => {
+                    self.miss(repo);
+                    continue;
+                }
+            }
             if room == 0 && !self.lane(issue) {
                 self.planner_wait(
                     repo,
@@ -502,17 +513,33 @@ impl Pass<'_> {
                 };
                 match answer {
                     Ok(answer) => {
-                        let Some(plan) = self.plan(&d, t, &id, &answer) else {
-                            self.retry(repo);
-                            continue;
-                        };
-                        if !self.carry_out(repo, n, &d, &plan, &job) {
-                            self.miss(repo);
-                            continue;
+                        let mut skip_split = false;
+                        if verdict(&answer) == Some(Verdict::Split) && !files::has_plan(&d) {
+                            match self.check_open_closing_pr(repo, n) {
+                                super::closing_pr::OpenClosingPr::None => {}
+                                super::closing_pr::OpenClosingPr::Open(_) => {
+                                    handled.insert(n.to_owned());
+                                    skip_split = true;
+                                }
+                                super::closing_pr::OpenClosingPr::Unknown => {
+                                    self.miss(repo);
+                                    continue;
+                                }
+                            }
                         }
-                        handled.insert(n.to_owned());
-                        if verdict(&answer).is_some() {
-                            self.sorting_works();
+                        if !skip_split {
+                            let Some(plan) = self.plan(&d, t, &id, &answer) else {
+                                self.retry(repo);
+                                continue;
+                            };
+                            if !self.carry_out(repo, n, &d, &plan, &job) {
+                                self.miss(repo);
+                                continue;
+                            }
+                            handled.insert(n.to_owned());
+                            if verdict(&answer).is_some() {
+                                self.sorting_works();
+                            }
                         }
                     }
                     // No answer at all (the engine refused it, say): nothing

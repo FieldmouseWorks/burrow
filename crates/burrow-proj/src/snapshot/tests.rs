@@ -136,6 +136,10 @@ fn full() -> Snapshot {
                 }))
                 .unwrap(),
             ),
+            carried: vec![
+                "sam/box#1386: carried by open closing PR https://github.com/sam/box/pull/1494"
+                    .into(),
+            ],
         },
         jobs: vec![JobRow {
             id: "j1".into(),

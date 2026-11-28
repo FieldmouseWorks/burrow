@@ -82,13 +82,15 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
             }
         }
     }
-    for (name, path) in names(&files::sorting_waits(state)) {
-        if name
-            .to_lowercase()
-            .rsplit_once('-')
-            .is_some_and(|(k, _)| k == want)
-        {
-            fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
+    for root in [files::sorting_waits(state), files::carried_root(state)] {
+        for (name, path) in names(&root) {
+            if name
+                .to_lowercase()
+                .rsplit_once('-')
+                .is_some_and(|(k, _)| k == want)
+            {
+                fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
+            }
         }
     }
     for root in [files::retired_root(state), files::parked_root(state)] {
