@@ -170,7 +170,7 @@ fn eval_outputs_start_work_and_end_kicks_repo() {
         args.contains("--unit=autoland-proof-eval-sam-r-7.service"),
         "{args}"
     );
-    assert!(args.contains("--property=RuntimeMaxSec=900s"), "{args}");
+    assert!(!args.contains("RuntimeMaxSec"), "{args}");
     assert!(args.contains("eval-end"), "{args}");
     assert!(args.contains("eval-run"), "{args}");
 
@@ -354,4 +354,83 @@ fn resumed_eval_clears_policy_restoring_and_finishes_done() {
     let said = end(&dir, &ended("success", "exited", "0")).unwrap();
     assert_eq!(said["state"], "done", "{said}");
     assert_eq!(said["paths"], json!([out_path]));
+}
+
+#[test]
+fn eval_work_times_out_after_timeout_and_end_records_timed_out() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let nix = tmp.path().join("slow-nix");
+    fs::create_dir_all(&nix).unwrap();
+    write_exec(&nix.join("nix"), "#!/bin/sh\nsleep 5\n");
+    write_exec(&nix.join("nix-store"), "#!/bin/sh\nexit 0\n");
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let dir = tmp.path().join("eval-work-timeout");
+    fs::create_dir_all(&dir).unwrap();
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-timeout.service".into(),
+        timeout: 1,
+        nix,
+        git: which("git"),
+        heavy: None,
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+    let err = work(&dir).unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+    let said = end(&dir, &ended("failed", "exited", "1")).unwrap();
+    assert_eq!(said["state"], "timed out", "{said}");
+    assert_eq!(said["failed"], true, "{said}");
+}
+
+#[test]
+fn eval_run_heavy_wait_does_not_eat_eval_timeout() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let out_path = "/nix/store/hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh-proof-h";
+    let nix = make_fake_nix(tmp.path(), out_path);
+    let heavy = tmp.path().join("slow-heavy");
+    // Simulate waiting 2s for a heavy slot when timeout is 1s, then running eval-work.
+    write_exec(&heavy, "#!/bin/sh\nshift\nsleep 2\nexec \"$@\"\n");
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+    let dir = tmp.path().join("eval-heavy-wait");
+    fs::create_dir_all(&dir).unwrap();
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-heavy-wait.service".into(),
+        timeout: 1,
+        nix,
+        git: which("git"),
+        heavy: Some(heavy),
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+    // Use the real test binary? No, simulate eval-work via a small script calling work:
+    // Actually `heavy` runs `$exe eval-work $dir`; here we verify `run()` invokes it and
+    // `work(&dir)` succeeds within its own 1s budget even after the 2s heavy wait.
+    let fake_exe = tmp.path().join("burrow-proof");
+    write_exec(&fake_exe, "#!/bin/sh\nexit 0\n");
+    run(&dir, &fake_exe).unwrap();
+    work(&dir).unwrap();
+    let said = end(&dir, &ended("success", "exited", "0")).unwrap();
+    assert_eq!(said["state"], "done", "{said}");
 }

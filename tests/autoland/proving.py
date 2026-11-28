@@ -580,7 +580,7 @@ assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": 
 print("proof builds' verdicts: ok")
 
 # An eval of a check takes minutes on a loaded machine, so the steward gives
-# its eval unit a deadline past that: build.json's timeout is what's asserted.
+# its eval unit a work-level timeout in build.json without bounding heavy's wait.
 assert P.EVAL_TIMEOUT >= 900, P.EVAL_TIMEOUT
 srun_log = f"{tmp}/proving-srun.log"
 with open(f"{bin_dir}/systemd-run", "w") as f:
@@ -590,7 +590,8 @@ fresh_pr_state()
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}, "proofSlots": 1}
 jid_eval = P.start_eval("sam/r", {"number": 1, "headRefOid": "a" * 40}, ["vm"], "outputs", f"{tmp}/mirror")
 assert jid_eval and json.load(open(f"{tmp}/state/builds/{jid_eval}/build.json"))["timeout"] >= 900, jid_eval
-assert f"--property=RuntimeMaxSec={P.EVAL_TIMEOUT}s" in open(srun_log).read(), open(srun_log).read()
+srun_args = open(srun_log).read()
+assert "RuntimeMaxSec" not in srun_args and "eval-run" in srun_args, srun_args
 print("proof eval deadline: ok")
 
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
