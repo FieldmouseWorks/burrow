@@ -375,6 +375,10 @@ pkgs.testers.runNixOSTest {
             ["dev", "dev-moved"],
         ], ops(on)
         keeps_nothing(old)
+        # A run with the new controller after its lock was made, as the
+        # key's own unit may start one after the switch: so the lock below
+        # has been through one either way.
+        rerun_access(on)
         on.succeed("/run/booted-system/specialisation/retired/bin/switch-to-configuration test")
         on.succeed("systemctl start burrow-ledger@sam-r.service")
         on.succeed(f"runuser -u dev -- {env} cn train retired-repo dev-retired")
@@ -384,7 +388,11 @@ pkgs.testers.runNixOSTest {
         assert on.succeed(f"getfacl -Rcps {ledger}") == ""
         assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
         assert on.succeed(f"stat -c '%U %a' {ledger}/train").strip() == "dev 755"
-        assert on.succeed(f"stat -c '%U %a' {ledger}/train/retired-repo.lock").strip() == "dev 644"
+        # Made under train's default entries, it keeps the owning group's x
+        # they gave it once a run with a controller set it, as a WRITABLE
+        # file the flow made does; no write but its owner's.
+        lock = on.succeed(f"stat -c '%U %a' {ledger}/train/retired-repo.lock").strip()
+        assert lock == "dev 654", lock
         # Its ACL gone, etags is no wider than it was.
         assert on.succeed(f"stat -c '%U %a' {ledger}/etags").strip() == "dev 700"
         on.fail(f"runuser -u other -- ls {ledger}/etags")
