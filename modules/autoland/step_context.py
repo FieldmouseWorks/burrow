@@ -109,10 +109,17 @@ class Context:
         self.ends = {}  # how this head's job of each kind ended, as proj says (running)
         self.looked = {}  # what running said of each job this pass, by its id
         self.awaits = {}  # what each kind's fix job, its turn over, awaits elsewhere (running)
+        self.revisit = False  # an immediate re-read was booked; keep the PR due across yields
 
     def after(self, t, minutes):
         """A wait that ends `minutes` after t: this repo gets a pass then."""
         C.wake(self.repo, t + minutes * MIN + 1)  # ends: as each call says
+
+    def reread(self):
+        """What this pass read of the PR is stale: book an immediate re-read
+        and keep the PR due in the current round across yielded slices."""
+        self.revisit = True
+        self.after(C.NOW, 0)  # ends: the pass that reads what went up
 
     def strike(self, kind, said=None):
         """The step (STRIKES) failed, GitHub saying why when it said: tried

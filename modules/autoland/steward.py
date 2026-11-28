@@ -406,8 +406,9 @@ def run_pass(kick, continuing=False):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
+                    revisit = False
                     try:
-                        step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
+                        revisit = bool(step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"])))
                     except C.Unavailable as e:
                         log(f"{repo}#{pr['number']}: {e}")
                         now = time.monotonic()
@@ -433,7 +434,7 @@ def run_pass(kick, continuing=False):
                         if T.seat(repo, pr["number"]) is not None:
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
-                    batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
+                    batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo), revisit=revisit)
                 # A slice left part done goes on in the next batch, and its
                 # train steps only once every open PR was seen to.
                 if partial or batch.expired():

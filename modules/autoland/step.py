@@ -52,6 +52,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         if C.held(repo, pr):
             raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
+        return p.revisit
     except C.JobPaused as e:
         if C.handed(repo, pr):
             why = str(e).split(": ", 1)[-1]
@@ -119,7 +120,7 @@ class Pass(Context, Jobs, Actions):
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
 
         # What its fix jobs left, posted once it's so (or they're stopped).
-        if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
+        if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.reread):
             self.settle("pending", said, stage=S.FIX)
             save(self.key, self.st)
             return

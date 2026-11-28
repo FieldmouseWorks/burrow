@@ -546,6 +546,51 @@ with tempfile.TemporaryDirectory() as tmp:
             assert attempts == ['sam/r'], attempts
     print('rate limits gate both event lines and startup until reset: passed')
 
+    # A PR whose step posted answers must stay due across a yielded slice even
+    # when another job/turn sets a pending/refused/unanswered status, or when
+    # claims.stand_down() posts answers while retiring an earlier job.
+    real_handle, due, later = S.step.handle, [1, 2, 1, 3, 2], [1, 2, 3, 1, 2]
+    for retire, outcomes, want in (
+        (False, ('posted',), due), (False, ('pending', 'posted'), due),
+        (False, ('refused', 'posted'), due), (False, ('unanswered', 'posted'), due),
+        (False, ('posted', 'refused'), due), (False, ('posted', 'unanswered'), due),
+        (False, ('pending',), later), (False, ('refused',), later), (True, ('posted',), due),
+    ):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            prs[:] = [{**pr(1), 'body': '', 'labels': {'nodes': [{'name': 'first'}]}}, pr(2), pr(3)]
+            C.save('pr-sam_r-1.json', {'head': 'head-1', 'seen': 1000, 'answering': {
+                f'j{i}': {'kind': 'handed', 'head': 'head-1', 'body': '', 'at': 900} for i in range(len(outcomes))}})
+            seen, calls = [], [0]
+
+            def fake_upkeep(cmd, repo, *a, **kw):
+                req = json.loads(kw['input'])
+                fire = bool(req.get('retire')) if retire else calls[0] == 0
+                calls[0] += 1
+                ans = [{'jid': f'j{i}', 'kind': 'handed', 'outcome': o, 'why': None if o == 'posted' else o}
+                       for i, o in enumerate(outcomes)] if fire else []
+                return {'answering': {} if fire else req['answering'], 'pushedBy': None, 'stop': [], 'wake': None, 'clear': True, 'answered': ans}
+
+            def dispatch(repo, p, *a):
+                seen.append(p['number'])
+                if p['number'] == 1 and seen.count(1) == 1:
+                    if retire:
+                        with patch.object(S.step.Pass, 'run', lambda self: self.started('handed', 'fix')):
+                            return real_handle(repo, p, *a)
+                    return real_handle(repo, p, *a)
+                if p['number'] == 2 and seen.count(2) == 1:
+                    clock[0] += 9 * 60
+                return False
+
+            with (patch.dict(C.CFG, {'jobsDir': str(state)}), patch.object(C, 'held', lambda *a: False),
+                  patch.object(C, 'upkeep', fake_upkeep), patch.object(S.step.Pass, 'settle', lambda self, *a, **k: True),
+                  patch.object(S.step, 'handle', dispatch)):
+                S.run_pass(['sam/r'])
+                assert seen == [1, 2], (retire, outcomes, seen)
+                C.NOW += 9 * 60
+                S.run_pass(['sam/r'], continuing=True)
+                assert seen == want, (retire, outcomes, seen, want)
+    print('immediate re-reads stay due across yielded slices: passed')
+
     # Yielding mid-repo or failing an earlier operation must preserve
     # previously published notices for unvisited PRs and deferred repo-wide
     # steps (branches, upkeep, taken) instead of flapping them off the stuck
