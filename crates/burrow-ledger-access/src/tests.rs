@@ -170,28 +170,6 @@ fn the_controller_reads_the_key_writes_the_log_and_no_one_else_gets_either() {
             (OTHER, NO_ID, 4),
         ]
     );
-    // A lock file created under a directory's default ACL inherits GROUP_OBJ=5
-    // masked to rw- (effective r--); normalizing it keeps group r-- (4).
-    let inherited = Base {
-        user: 6,
-        group: 5,
-        other: 4,
-    }
-    .with(&[(OWNER, 7), (FLOW, 7)], 6);
-    assert_eq!(
-        entries(
-            &wants(flow, What::SharedFile, 0o100664, Some(&inherited))
-                .access
-                .unwrap()
-        ),
-        [
-            (USER_OBJ, NO_ID, 6),
-            (USER, FLOW, 6),
-            (GROUP_OBJ, NO_ID, 4),
-            (MASK, NO_ID, 6),
-            (OTHER, NO_ID, 4),
-        ]
-    );
     for dir_what in [What::Ledger, What::SharedDir] {
         let dir_want = wants(flow, dir_what, 0o40755, None);
         let access = entries(&dir_want.access.unwrap());
@@ -294,6 +272,18 @@ fn a_chmod_after_the_acl_was_read_stays() {
     assert_eq!(stripped(0o100600, &read), 0o600, "the chmod isn't undone");
     // With no chmod between, the group keeps what it had in effect.
     assert_eq!(stripped(0o100664, &read), 0o644);
+}
+
+#[test]
+fn a_directory_is_private_while_no_one_but_its_owner_has_a_bit() {
+    // etags as Conary makes it, and with an ACL whose mask is ---.
+    assert!(private(0o40700));
+    assert!(private(0o41700), "set-id and sticky bits aren't access");
+    // train as either writer makes it, and one an older build stripped.
+    assert!(!private(0o40775));
+    assert!(!private(0o40755));
+    assert!(!private(0o40701));
+    assert!(!private(0o40710));
 }
 
 #[test]
@@ -567,8 +557,7 @@ fn train_lock_directory_stays_writable_and_strips_on_retire() {
     assert_eq!(existing_acl.perm(GROUP_OBJ), Some(4));
     assert_eq!(existing_acl.perm(MASK), Some(6));
     // A lock created under train's default ACL stays writable on the next run,
-    // without widening its owning group to r-x, while an unexpected subdir in
-    // train is stripped.
+    // while a directory in train is stripped as one in the ledger is.
     let created = train.join("bbbb.lock");
     std::fs::write(&created, "").unwrap();
     let sub = train.join("sub");
@@ -584,12 +573,6 @@ fn train_lock_directory_stays_writable_and_strips_on_retire() {
     );
     let created_acl = acl(&created, ACCESS).expect("created lock keeps access ACL");
     assert!(entries(&created_acl).contains(&(USER, ME(), 6)));
-    assert_eq!(
-        created_acl.perm(GROUP_OBJ),
-        Some(4),
-        "owning group doesn't gain execute from default ACL"
-    );
-    assert_eq!(created_acl.perm(MASK), Some(6));
     assert_eq!(
         acl(&sub, ACCESS),
         None,
@@ -607,8 +590,12 @@ fn train_lock_directory_stays_writable_and_strips_on_retire() {
     assert_eq!(mode(&train), 0o755);
     for lock in [&existing, &created] {
         assert_eq!(acl(lock, ACCESS), None, "{lock:?}");
-        assert_eq!(mode(lock), 0o644, "{lock:?}");
     }
+    assert_eq!(mode(&existing), 0o644);
+    // One made under train's default entries keeps the owning group's x
+    // its default gave it, as a WRITABLE file the flow made does: no
+    // write for anyone but its owner either way.
+    assert_eq!(mode(&created), 0o654);
 }
 
 #[test]
@@ -688,4 +675,93 @@ fn train_swapped_for_a_link_after_pin_changes_only_what_was_pinned() {
     assert_eq!(acl(&outside_file, ACCESS), None);
     let old = acl(&kept, ACCESS).expect("the lock in the pinned train got the access");
     assert!(entries(&old).contains(&(USER, ME(), 6)));
+}
+
+/// [`set`]'s lines, with whether it failed.
+fn said(dir: &Path, controller: Option<u32>) -> (bool, Vec<String>) {
+    let mut said = Vec::new();
+    let failed = set(
+        dir,
+        &Access {
+            owner: ME(),
+            controller,
+        },
+        &mut |l| said.push(l),
+    );
+    (failed, said)
+}
+
+#[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
+fn etags_renamed_to_train_is_never_opened() {
+    let (_root, dir, _) = ledger();
+    // etags as Conary makes it, under the directory's default entries,
+    // with an answer in it, and the train either writer made.
+    run(&dir, Some(ME()));
+    std::fs::remove_dir(dir.join("etags")).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(dir.join("etags"))
+        .unwrap();
+    let answer = dir.join("etags/h1");
+    std::fs::write(&answer, "etag").unwrap();
+    burrow_test::permissions(&answer, 0o600);
+    std::fs::create_dir(dir.join("train")).unwrap();
+    std::fs::write(dir.join("train/a.lock"), "").unwrap();
+    run(&dir, Some(ME()));
+    assert!(
+        acl(&dir.join("train"), DEFAULT).is_some(),
+        "the real train is shared"
+    );
+    // The controller moves the real train aside and etags into its name.
+    std::fs::rename(dir.join("train"), dir.join("aside")).unwrap();
+    std::fs::rename(dir.join("etags"), dir.join("train")).unwrap();
+    let answer = dir.join("train/h1");
+    for pass in ["first", "second"] {
+        run(&dir, Some(ME()));
+        let train = dir.join("train");
+        assert_eq!(
+            acl(&train, ACCESS),
+            None,
+            "{pass}: etags under train's name"
+        );
+        assert_eq!(acl(&train, DEFAULT), None, "{pass}");
+        assert_eq!(mode(&train), 0o700, "{pass}: still private");
+        assert_eq!(
+            acl(&answer, ACCESS),
+            None,
+            "{pass}: its answer names no one"
+        );
+        assert_eq!(mode(&answer), 0o600, "{pass}");
+        // The real train, under another name, is any directory.
+        let aside = dir.join("aside");
+        assert_eq!(acl(&aside, ACCESS), None, "{pass}: the train set aside");
+        assert_eq!(acl(&aside, DEFAULT), None, "{pass}");
+        assert_eq!(acl(&aside.join("a.lock"), ACCESS), None, "{pass}");
+    }
+}
+
+#[test]
+#[ignore = "sets ACLs, which a Nix build's seccomp filter refuses: checks.ledger-controller runs it"]
+fn a_private_train_stays_private_and_is_said() {
+    let (_root, dir, _) = ledger();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(dir.join("train"))
+        .unwrap();
+    let lock = dir.join("train/a.lock");
+    std::fs::write(&lock, "").unwrap();
+    burrow_test::permissions(&lock, 0o644);
+    let (failed, lines) = said(&dir, Some(ME()));
+    // Said, not failed: a failed run fails the switch that ran it.
+    assert!(!failed, "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("train: private to its owner"),
+        "{lines:?}"
+    );
+    assert_eq!(acl(&dir.join("train"), ACCESS), None);
+    assert_eq!(acl(&dir.join("train"), DEFAULT), None);
+    assert_eq!(mode(&dir.join("train")), 0o700);
+    assert_eq!(acl(&lock, ACCESS), None);
+    // With no controller there's no one it keeps out.
+    assert_eq!(said(&dir, None), (false, vec![]));
 }

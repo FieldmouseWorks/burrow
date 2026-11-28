@@ -152,6 +152,12 @@ pkgs.testers.runNixOSTest {
     def ops(m):
         return [l.split(" ", 1) for l in m.succeed(f"cat {ledger}/ops.jsonl").splitlines()]
 
+    def rerun_access(m):
+        # As the next boot or switch runs it: more often here than
+        # systemd's start limit lets a unit start in a row.
+        m.succeed("systemctl reset-failed burrow-ledger-access.service")
+        m.succeed("systemctl restart burrow-ledger-access.service")
+
     def nobody_else_reads_the_key():
         # Not burrow.user's group, not anyone, and not a producer, which
         # is in the controller's group.
@@ -203,7 +209,7 @@ pkgs.testers.runNixOSTest {
         on.wait_for_unit("burrow-ledger-access.service")
         # Its next run, as the next boot or switch: the etags cache the
         # first sync made under the directory's default entries.
-        on.succeed("systemctl restart burrow-ledger-access.service")
+        rerun_access(on)
         # So the flow makes the merge bases, and burrow.user appends to them.
         on.succeed(f"rm {ledger}/merge-bases")
         for op in ["train-join", "train-step", "evidence", "train-leave"]:
@@ -227,12 +233,14 @@ pkgs.testers.runNixOSTest {
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a flow-train-a")
         on.succeed(f"runuser -u dev -- {env} cn train repo-a dev-train-a")
         on.succeed(f"runuser -u dev -- {env} cn train repo-b dev-train-b")
-        on.succeed("systemctl restart burrow-ledger-access.service")
+        rerun_access(on)
         assert on.succeed(f"stat -c %U {ledger}/train {ledger}/train/repo-a.lock {ledger}/train/repo-b.lock") == "dev\n" * 3
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a flow-train-a2")
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-b flow-train-b2")
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-c flow-train-c")
         on.succeed(f"runuser -u dev -- {env} cn train repo-c dev-train-c")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-e dev-train-e")
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-e flow-train-e")
         on.fail(f"runuser -u other -- sh -c 'echo x >>{ledger}/train/repo-a.lock'")
         on.fail(f"runuser -u other -- touch {ledger}/train/x")
         on.fail(f"runuser -u nobody -- touch {ledger}/train/x")
@@ -241,10 +249,13 @@ pkgs.testers.runNixOSTest {
     with subtest("on a ledger burrow.user had alone before, a switch lets the flow sign"):
         before = len(ops(on))
         on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock {ledger}/train/*.lock && chmod 700 {ledger}/etags && chmod 755 {ledger}/train")
+        # And a lock the flow made, still its own, as an earlier build left it.
+        on.succeed(f"chown conary-flow {ledger}/train/repo-c.lock")
         on.fail("systemctl start flow@before.service")
         on.fail(f"runuser -u conary-flow -- {env} cn train repo-a before-train")
+        on.fail(f"runuser -u dev -- {env} cn train repo-c before-train")
         # As the first switch to it does.
-        on.succeed("systemctl restart burrow-ledger-access.service")
+        rerun_access(on)
         on.succeed("systemctl start flow@after.service")
         on.succeed("systemctl start burrow-ledger@sam-r.service")
         on.succeed("systemctl start flow@again.service")
@@ -252,11 +263,13 @@ pkgs.testers.runNixOSTest {
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a after-train-a")
         on.succeed(f"runuser -u conary-flow -- {env} cn train repo-d after-train-d")
         on.succeed(f"runuser -u dev -- {env} cn train repo-d by-hand-train-d")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-c by-hand-train-c")
+        assert on.succeed(f"stat -c %U {ledger}/train/repo-c.lock").strip() == "dev"
         assert ops(on)[before:] == [
             ["conary-flow", "after"], ["dev", "sam/r"],
             ["conary-flow", "again"], ["dev", "by-hand"],
             ["conary-flow", "after-train-a"], ["conary-flow", "after-train-d"],
-            ["dev", "by-hand-train-d"],
+            ["dev", "by-hand-train-d"], ["dev", "by-hand-train-c"],
         ], ops(on)[before:]
         nobody_else_reads_the_key()
 
@@ -272,7 +285,7 @@ pkgs.testers.runNixOSTest {
         on.succeed(f"{as_flow} 'ln -s /var/lib/dev-secret {ledger}/.k && mv -fT {ledger}/.k {ledger}/key'")
         on.succeed(f"{as_flow} 'ln -sfn /var/lib/root-secret {ledger}/train/evil.lock'")
         on.succeed(f"{as_flow} 'ln -sfn {ledger}/key {ledger}/train/key.lock'")
-        on.succeed("systemctl restart burrow-ledger-access.service")
+        rerun_access(on)
         for f, owner in [("/var/lib/root-secret", "root"), ("/var/lib/dev-secret", "dev")]:
             assert on.succeed(f"stat -c '%U %a' {f}").strip() == f"{owner} 600", f
             assert on.succeed(f"getfacl -cps {f}") == "", f
@@ -283,11 +296,51 @@ pkgs.testers.runNixOSTest {
         # files the writers open in place made again.
         on.succeed(f"rm {ledger}/merge-bases {ledger}/lock {ledger}/key {ledger}/train/evil.lock {ledger}/train/key.lock")
         on.succeed(f"runuser -u dev -- sh -c 'head -c 32 /dev/urandom >{ledger}/key && chmod 600 {ledger}/key && touch {ledger}/lock {ledger}/merge-bases'")
-        on.succeed("systemctl restart burrow-ledger-access.service")
+        rerun_access(on)
         on.succeed("systemctl start flow@relinked.service")
         on.succeed(f"runuser -u dev -- {env} cn sign by-hand")
         assert ops(on)[-2:] == [["conary-flow", "relinked"], ["dev", "by-hand"]], ops(on)
         nobody_else_reads_the_key()
+
+    def access_said(m):
+        # What the access unit's last run said, and only that.
+        m.succeed("journalctl --sync")
+        run = m.succeed("systemctl show -p InvocationID --value burrow-ledger-access.service").strip()
+        return m.succeed(f"journalctl -q -o cat _SYSTEMD_INVOCATION_ID={run}")
+
+    with subtest("etags under train's name is never opened, and the train set aside is any directory"):
+        as_flow = "runuser -u conary-flow -- sh -c"
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a before-swap")
+        on.succeed(f"{as_flow} 'mv {ledger}/train {ledger}/aside && mv {ledger}/etags {ledger}/train'")
+        # As the next boot or switch, and the one after.
+        for _ in range(2):
+            rerun_access(on)
+            assert on.succeed(f"stat -c '%U %a' {ledger}/train {ledger}/train/h1") == "dev 700\ndev 600\n"
+            assert on.succeed(f"getfacl -cps {ledger}/train {ledger}/train/h1") == ""
+            on.fail(f"runuser -u conary-flow -- ls {ledger}/train")
+            on.fail(f"runuser -u conary-flow -- cat {ledger}/train/h1")
+            # Nor can it move an answer out to a name it may write: it never gets in.
+            on.fail(f"{as_flow} 'mv {ledger}/train/h1 {ledger}/merge-bases'")
+            assert on.succeed(f"getfacl -cps {ledger}/aside {ledger}/aside/*") == ""
+        # Put back, the real train is shared again on the next run.
+        on.succeed(f"mv {ledger}/train {ledger}/etags && mv {ledger}/aside {ledger}/train")
+        rerun_access(on)
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a after-swap")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-a after-swap-dev")
+        assert ops(on)[-3:] == [["conary-flow", "before-swap"], ["conary-flow", "after-swap"], ["dev", "after-swap-dev"]], ops(on)
+
+    with subtest("a train its owner kept private stays private, and the run says so"):
+        on.succeed(f"setfacl -b {ledger}/train && chmod 700 {ledger}/train")
+        rerun_access(on)
+        assert "train: private to its owner" in access_said(on), access_said(on)
+        assert on.succeed(f"stat -c '%U %a' {ledger}/train").strip() == "dev 700"
+        assert on.succeed(f"getfacl -cps {ledger}/train") == ""
+        on.fail(f"runuser -u conary-flow -- {env} cn train repo-a while-private")
+        # Opened by its owner, it's shared on the next run.
+        on.succeed(f"chmod 755 {ledger}/train")
+        rerun_access(on)
+        assert "private" not in access_said(on), access_said(on)
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a opened")
 
     def keeps_nothing(uid):
         # Nothing names it, it owns nothing, and it can neither read the
@@ -346,6 +399,9 @@ pkgs.testers.runNixOSTest {
         off.fail("test -e /var/lib/burrow/flow")
         assert off.succeed(f"getfacl -cps {ledger} {ledger}/key") == ""
         assert off.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
+        off.succeed(f"runuser -u dev -- mkdir -m 700 {ledger}/train")
+        rerun_access(off)
+        assert access_said(off) == "", access_said(off)
 
     # The access unit's own tests that set ACLs on files, which a Nix
     # build's seccomp filter refuses (crates/burrow-ledger-access's

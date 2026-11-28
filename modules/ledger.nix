@@ -40,9 +40,10 @@ let
   # its ops (train join and leave, evidence) as burrow.user's writers do:
   # POSIX ACLs naming the controller user, never its group, which every
   # producer joins (flow.producer). crates/burrow-ledger-access says which
-  # (the key read, the files Conary's writer opens in place written,
-  # etags no one's) and sets them whole, so a controller changed or turned
-  # off keeps nothing. It runs as root in a directory the controller may
+  # (the key read, the files Conary's writer opens in place written, the
+  # train locks' directory shared unless its owner kept it private, etags
+  # no one's) and sets them whole, so a controller changed or turned off
+  # keeps nothing. It runs as root in a directory the controller may
   # write, so it pins each entry without following a link and sets it
   # through that alone. Run on each boot and switch (burrow-ledger-access),
   # and once the first sync has made the key (burrow-ledger-access-key),
