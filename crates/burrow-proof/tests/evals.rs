@@ -355,3 +355,83 @@ fn resumed_eval_clears_policy_restoring_and_finishes_done() {
     assert_eq!(said["state"], "done", "{said}");
     assert_eq!(said["paths"], json!([out_path]));
 }
+
+#[test]
+fn heavy_queue_wait_does_not_eat_eval_timeout_and_work_enforces_it() {
+    let tmp = TempDir::new().unwrap();
+    let (mirror, _tip, pr7, _pr8) = make_mirror(tmp.path());
+    let out_path = "/nix/store/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq-proof-q";
+    let nix = make_fake_nix(tmp.path(), out_path);
+    let mut attrs = BTreeMap::new();
+    attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
+
+    // 1. With heavy configured, systemd-run's RuntimeMaxSec is not set to the
+    // short eval timeout (which would kill the unit while waiting in heavy's queue).
+    let dir = tmp.path().join("eval-queue");
+    fs::create_dir_all(&dir).unwrap();
+    let heavy = tmp.path().join("heavy");
+    write_exec(
+        &heavy,
+        "#!/bin/sh\nsleep 1.5\n[ \"$1\" = -- ] && shift\nexec \"$@\"\n",
+    );
+    let rec = EvalRecord {
+        repo: "sam/r".into(),
+        number: 7,
+        head: pr7,
+        kind: EvalKind::Outputs,
+        mirror,
+        attrs,
+        base: None,
+        tip: None,
+        unit: "autoland-proof-eval-queue.service".into(),
+        timeout: 1,
+        nix: nix.clone(),
+        git: which("git"),
+        heavy: Some(heavy),
+        kick: None,
+        eval: true,
+    };
+    fs::write(dir.join("build.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+
+    let srun = tmp.path().join("systemd-run");
+    let captured = tmp.path().join("srun.args");
+    write_exec(
+        &srun,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+            captured.display()
+        ),
+    );
+    let fake_exe = tmp.path().join("burrow-proof");
+    write_exec(&fake_exe, "#!/bin/sh\nexit 0\n");
+    start(&dir, &fake_exe, &srun).unwrap();
+    let args = fs::read_to_string(&captured).unwrap();
+    assert!(
+        !args.contains("--property=RuntimeMaxSec=1s"),
+        "heavy queue wait must not be bounded by eval timeout: {args}"
+    );
+
+    // 2. When nix itself hangs past rec.timeout inside work(), work() enforces
+    // the deadline and end() reports "timed out".
+    let slow_nix = tmp.path().join("slow-nix");
+    fs::create_dir_all(&slow_nix).unwrap();
+    write_exec(&slow_nix.join("nix"), "#!/bin/sh\nsleep 5\n");
+    write_exec(&slow_nix.join("nix-store"), "#!/bin/sh\nexit 0\n");
+    let dir_to = tmp.path().join("eval-work-timeout");
+    fs::create_dir_all(&dir_to).unwrap();
+    let rec_to = EvalRecord {
+        nix: slow_nix,
+        heavy: None,
+        unit: "autoland-proof-eval-work-to.service".into(),
+        ..rec
+    };
+    fs::write(
+        dir_to.join("build.json"),
+        serde_json::to_vec(&rec_to).unwrap(),
+    )
+    .unwrap();
+    assert!(work(&dir_to).is_err());
+    let said_to = end(&dir_to, &ended("exit-code", "exited", "1")).unwrap();
+    assert_eq!(said_to["state"], "timed out", "{said_to}");
+    assert_eq!(said_to["failed"], true, "{said_to}");
+}
