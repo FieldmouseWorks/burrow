@@ -121,11 +121,46 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
         "plugin install third release {} 1.0.0 {v1_hash}",
         v1_bin.display()
     );
+    let install_v1_alt = format!(
+        "plugin install third release {} 1.0.1 {v1_hash}",
+        v1_bin.display()
+    );
     let update_v2 = format!(
         "plugin update third release {} 2.0.0 {v2_hash}",
         v2_bin.display()
     );
 
+    assert_door_rejects_delegate_install_attempts(
+        &cfg,
+        &door_cfg,
+        &owner_author,
+        &delegate,
+        &install_v1,
+    );
+    assert_door_allows_delegate_read_and_owner_install(
+        &cfg,
+        &door_cfg,
+        &owner_author,
+        &delegate,
+        &install_v1,
+        &install_v1_alt,
+    );
+    assert_door_rejects_delegate_mutations_and_empty_owners(
+        &cfg,
+        door_cfg,
+        &owner_author,
+        &delegate,
+        &update_v2,
+    );
+}
+
+fn assert_door_rejects_delegate_install_attempts(
+    cfg: &crate::Config,
+    door_cfg: &DoorConfig,
+    owner_author: &Author,
+    delegate: &Author,
+    install_v1: &str,
+) {
     // 1. Delegate (in door.authors, outside settings.owners) edits owner's issue body.
     let mut gh = fake_door_gh(
         10,
@@ -134,12 +169,12 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
             10,
             ("sam", owner_author.id),
             "settings",
-            &install_v1,
+            install_v1,
             vec![json!({"editor": actor_json("delegate", delegate.id), "deletedBy": null})],
             vec![],
         )],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(cfg.installed_plugin("third").unwrap().is_none());
     assert!(
         posted_comment(&gh).contains("Nothing changed:"),
@@ -155,13 +190,13 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
         vec![issue_graphql(
             11,
             ("sam", owner_author.id),
-            &install_v1,
+            install_v1,
             "",
             vec![],
             vec![json!({"actor": actor_json("delegate", delegate.id)})],
         )],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(cfg.installed_plugin("third").unwrap().is_none());
     assert_eq!(close_reason(&gh), "not_planned");
 
@@ -173,7 +208,7 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
             12,
             ("sam", owner_author.id),
             "settings",
-            &install_v1,
+            install_v1,
             vec![json!({
                 "editor": actor_json("sam", owner_author.id),
                 "deletedBy": actor_json("delegate", delegate.id)
@@ -181,7 +216,7 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
             vec![],
         )],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(cfg.installed_plugin("third").unwrap().is_none());
     assert_eq!(close_reason(&gh), "not_planned");
 
@@ -193,18 +228,27 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
             13,
             ("delegate", delegate.id),
             "settings",
-            &install_v1,
+            install_v1,
             vec![],
             vec![],
         )],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(cfg.installed_plugin("third").unwrap().is_none());
     assert_eq!(close_reason(&gh), "not_planned");
 
     // No unauthorized plugin mutation may leave an audit entry in overlay.log.
     assert!(!cfg.overlay.with_extension("log").exists());
+}
 
+fn assert_door_allows_delegate_read_and_owner_install(
+    cfg: &crate::Config,
+    door_cfg: &DoorConfig,
+    owner_author: &Author,
+    delegate: &Author,
+    install_v1: &str,
+    install_v1_alt: &str,
+) {
     // 5. Delegate can still ask read-only `plugin list`.
     let mut gh = fake_door_gh(
         14,
@@ -218,7 +262,7 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
             vec![],
         )],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(
         posted_comment(&gh).contains("No installed engine plugins"),
         "{}",
@@ -235,7 +279,7 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
                 15,
                 ("sam", owner_author.id),
                 "settings",
-                &install_v1,
+                install_v1,
                 vec![],
                 vec![],
             ),
@@ -243,21 +287,17 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
                 15,
                 ("sam", owner_author.id),
                 "settings",
-                &install_v1,
+                install_v1,
                 vec![json!({"editor": actor_json("delegate", delegate.id), "deletedBy": null})],
                 vec![],
             ),
         ],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     assert!(cfg.installed_plugin("third").unwrap().is_none());
     assert_eq!(close_reason(&gh), "not_planned");
 
     // 7. Authentic owner issue installs v1 cleanly (and parses from the owner-vetted snapshot).
-    let install_v1_alt = format!(
-        "plugin install third release {} 1.0.1 {v1_hash}",
-        v1_bin.display()
-    );
     let mut gh = fake_door_gh(
         16,
         ("sam", owner_author.id),
@@ -266,7 +306,7 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
                 16,
                 ("sam", owner_author.id),
                 "settings",
-                &install_v1,
+                install_v1,
                 vec![],
                 vec![],
             ),
@@ -274,20 +314,28 @@ fn door_rejects_non_owner_door_author_edits_renames_deletions_and_direct_mutatio
                 16,
                 ("sam", owner_author.id),
                 "settings",
-                &install_v1_alt,
+                install_v1_alt,
                 vec![json!({"editor": actor_json("sam", owner_author.id), "deletedBy": null})],
                 vec![],
             ),
         ],
     );
-    pass(&mut gh, &door_cfg).unwrap();
+    pass(&mut gh, door_cfg).unwrap();
     let installed = cfg.installed_plugin("third").unwrap().unwrap();
     assert_eq!(installed.version, "1.0.1");
     assert_eq!(close_reason(&gh), "completed");
+}
 
+fn assert_door_rejects_delegate_mutations_and_empty_owners(
+    cfg: &crate::Config,
+    door_cfg: DoorConfig,
+    owner_author: &Author,
+    delegate: &Author,
+    update_v2: &str,
+) {
     // 8. Delegate editing owner's issue to `plugin update` or `plugin remove` is rejected.
     for (num, cmd) in [
-        (17, update_v2.as_str()),
+        (17, update_v2),
         (18, "plugin remove third --fallback claude"),
     ] {
         let mut gh = fake_door_gh(

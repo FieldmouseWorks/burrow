@@ -240,6 +240,10 @@ fn installed_plugin_with_sandbox_brings_runs_on_host_while_needs_is_refused() {
     // 3. Defense in depth: even if an overlay record were edited to carry
     //    `sandbox: "needs"`, `burrow-proj` still refuses to launch it on BOTH
     //    host and VM turns before executing the plugin binary.
+    assert_needs_sandbox_refused_in_depth(&cfg, &project, &needs_canary);
+}
+
+fn assert_needs_sandbox_refused_in_depth(cfg: &Config, project: &Path, needs_canary: &Path) {
     let roles_file = cfg.settings.as_ref().unwrap().roles_file();
     let mut doc: Value = serde_json::from_str(&fs::read_to_string(&roles_file).unwrap()).unwrap();
     let brings_entry = doc["plugins"]["brings-eng"].clone();
@@ -247,14 +251,14 @@ fn installed_plugin_with_sandbox_brings_runs_on_host_while_needs_is_refused() {
     needs_entry["capabilities"]["sandbox"] = serde_json::json!("needs");
     doc["plugins"]["needs-eng"] = needs_entry;
     fs::write(&roles_file, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
-    let _ = fs::remove_file(&needs_canary);
+    let _ = fs::remove_file(needs_canary);
 
     let (_, approved) = cfg.resolve_plugin("needs-eng", None).unwrap();
     assert_eq!(approved, Some(Vec::new()));
     let (_, vm_approved) = cfg.resolve_plugin("needs-eng", Some("vm-1")).unwrap();
     assert_eq!(vm_approved, Some(Vec::new()));
 
-    let job_needs = make_job(&cfg, &project, "job-needs");
+    let job_needs = make_job(cfg, project, "job-needs");
     crate::job::Request {
         project: project.to_string_lossy().into_owned(),
         engine: Some("needs-eng".into()),
@@ -263,14 +267,14 @@ fn installed_plugin_with_sandbox_brings_runs_on_host_while_needs_is_refused() {
     }
     .save(&job_needs)
     .unwrap();
-    let needs_choice = crate::engine::choice(&cfg, &job_needs).unwrap();
+    let needs_choice = crate::engine::choice(cfg, &job_needs).unwrap();
     let waitdir2 = job_needs.turn_file("1", TurnFile::Waits);
     fs::create_dir_all(&waitdir2).unwrap();
     let prompt2 = job_needs.prompt("1");
     fs::write(&prompt2, "Should refuse on host and VM\n").unwrap();
     for agent in [None, Some("vm-1")] {
         let refused = match spawn(
-            &cfg,
+            cfg,
             &job_needs,
             "1",
             &prompt2,
@@ -397,6 +401,15 @@ fn removing_installed_plugin_routes_pinned_queued_and_later_turns_to_fallback() 
         )
         .unwrap();
 
+    assert_jobs_route_to_fallback(&cfg, &job_pinned, &job_queued, &job_role);
+}
+
+fn assert_jobs_route_to_fallback(
+    cfg: &Config,
+    job_pinned: &Job<'_>,
+    job_queued: &Job<'_>,
+    job_role: &Job<'_>,
+) {
     let expected_fallback = Choice {
         engine: "claude".into(),
         model: Some("claude-m1".into()),
@@ -405,21 +418,21 @@ fn removing_installed_plugin_routes_pinned_queued_and_later_turns_to_fallback() 
 
     // Job 1 (later turn on pinned job) reaches fallback `claude` and drops `third-m1`.
     assert_eq!(
-        crate::engine::choice(&cfg, &job_pinned).unwrap(),
+        crate::engine::choice(cfg, job_pinned).unwrap(),
         expected_fallback
     );
 
     // Job 2 (queued turn with captured Identity on removed plugin) reroutes to `claude`.
     assert_eq!(
-        crate::engine::choice(&cfg, &job_queued).unwrap(),
+        crate::engine::choice(cfg, job_queued).unwrap(),
         expected_fallback
     );
-    let refreshed = crate::engine::refresh_queued(&cfg, &job_queued, "1")
+    let refreshed = crate::engine::refresh_queued(cfg, job_queued, "1")
         .unwrap()
         .expect("refreshed queued turn");
     assert_eq!(refreshed, expected_fallback);
     assert_eq!(
-        crate::retry::Identity::load(&job_queued, "1")
+        crate::retry::Identity::load(job_queued, "1")
             .unwrap()
             .unwrap()
             .choice,
@@ -428,7 +441,7 @@ fn removing_installed_plugin_routes_pinned_queued_and_later_turns_to_fallback() 
 
     // Job 3 (role job with model override for removed plugin) reaches `claude` cleanly.
     assert_eq!(
-        crate::engine::choice(&cfg, &job_role).unwrap(),
+        crate::engine::choice(cfg, job_role).unwrap(),
         expected_fallback
     );
 }
@@ -469,120 +482,7 @@ fn updating_installed_plugin_to_withdraw_job_override_fails_instead_of_falling_b
         )
         .unwrap();
 
-    // Job 1: pinned `--engine third --model m1 --effort high`.
-    let job_pinned = make_job(&cfg, &project, "job-update-pinned");
-    crate::job::Request {
-        project: project.to_string_lossy().into_owned(),
-        engine: Some("third".into()),
-        model: Some("m1".into()),
-        effort: Some("high".into()),
-        override_engine: Some("third".into()),
-        ..Default::default()
-    }
-    .save(&job_pinned)
-    .unwrap();
-
-    // Job 2: unpinned `--role work --model m1 --effort high`.
-    let job_role = make_job(&cfg, &project, "job-update-role");
-    crate::job::Request {
-        project: project.to_string_lossy().into_owned(),
-        role: Some("work".into()),
-        model: Some("m1".into()),
-        effort: Some("high".into()),
-        override_engine: Some("third".into()),
-        ..Default::default()
-    }
-    .save(&job_role)
-    .unwrap();
-    crate::policy::bind(
-        &job_role,
-        crate::policy::Identity::Local,
-        crate::policy::Kind::Automated,
-    )
-    .unwrap();
-
-    // Job 3: queued turn with captured Identity for pinned job.
-    let job_queued = make_job(&cfg, &project, "job-update-queued");
-    crate::job::Request {
-        project: project.to_string_lossy().into_owned(),
-        engine: Some("third".into()),
-        model: Some("m1".into()),
-        effort: Some("high".into()),
-        override_engine: Some("third".into()),
-        ..Default::default()
-    }
-    .save(&job_queued)
-    .unwrap();
-    crate::retry::Identity::capture_choice(
-        &job_queued,
-        "1",
-        &Choice {
-            engine: "third".into(),
-            model: Some("m1".into()),
-            effort: Some("high".into()),
-        },
-    )
-    .unwrap();
-
-    // Job 4: sandboxed (`--vm`) job with per-job model/effort override.
-    let job_vm = make_job(&cfg, &project, "job-update-vm");
-    crate::job::Request {
-        project: project.to_string_lossy().into_owned(),
-        agent: Some("vm-1".into()),
-        agent_engine: Some("third".into()),
-        model: Some("m1".into()),
-        effort: Some("high".into()),
-        override_engine: Some("third".into()),
-        ..Default::default()
-    }
-    .save(&job_vm)
-    .unwrap();
-
-    // Job 5: effort-only override on single-model plugin `solo`.
-    let job_effort_only = make_job(&cfg, &project, "job-update-effort-only");
-    crate::job::Request {
-        project: project.to_string_lossy().into_owned(),
-        engine: Some("solo".into()),
-        effort: Some("high".into()),
-        override_engine: Some("solo".into()),
-        ..Default::default()
-    }
-    .save(&job_effort_only)
-    .unwrap();
-
-    // All five resolve cleanly on v1 before the update.
-    assert_eq!(
-        crate::engine::choice(&cfg, &job_pinned).unwrap(),
-        Choice {
-            engine: "third".into(),
-            model: Some("m1".into()),
-            effort: Some("high".into()),
-        }
-    );
-    assert_eq!(
-        crate::engine::choice(&cfg, &job_role).unwrap(),
-        Choice {
-            engine: "third".into(),
-            model: Some("m1".into()),
-            effort: Some("high".into()),
-        }
-    );
-    assert_eq!(
-        crate::engine::choice(&cfg, &job_vm).unwrap(),
-        Choice {
-            engine: "third".into(),
-            model: Some("m1".into()),
-            effort: Some("high".into()),
-        }
-    );
-    assert_eq!(
-        crate::engine::choice(&cfg, &job_effort_only).unwrap(),
-        Choice {
-            engine: "solo".into(),
-            model: None,
-            effort: Some("high".into()),
-        }
-    );
+    let jobs = setup_override_jobs(&cfg, &project);
 
     // Update `third` to v2 dropping effort `high` from `m1` (role `work` uses
     // `m2/medium`, so the update succeeds). Persisted overrides must fail
@@ -597,9 +497,9 @@ fn updating_installed_plugin_to_withdraw_job_override_fails_instead_of_falling_b
         r#"[{"id":"m1","efforts":["low"]},{"id":"m2","efforts":["medium"]}]"#,
     );
     for (label, job) in [
-        ("pinned", &job_pinned),
-        ("role", &job_role),
-        ("vm", &job_vm),
+        ("pinned", &jobs.pinned),
+        ("role", &jobs.role),
+        ("vm", &jobs.vm),
     ] {
         let err = crate::engine::choice(&cfg, job).unwrap_err();
         assert!(
@@ -607,7 +507,7 @@ fn updating_installed_plugin_to_withdraw_job_override_fails_instead_of_falling_b
             "{label} job should fail on withdrawn effort: {err}"
         );
     }
-    let err = crate::engine::refresh_queued(&cfg, &job_queued, "1").unwrap_err();
+    let err = crate::engine::refresh_queued(&cfg, &jobs.queued, "1").unwrap_err();
     assert!(
         err.contains("m1") && err.contains("high"),
         "queued turn should fail on withdrawn effort: {err}"
@@ -624,9 +524,9 @@ fn updating_installed_plugin_to_withdraw_job_override_fails_instead_of_falling_b
         r#"[{"id":"m2","efforts":["medium"]}]"#,
     );
     for (label, job) in [
-        ("pinned", &job_pinned),
-        ("role", &job_role),
-        ("vm", &job_vm),
+        ("pinned", &jobs.pinned),
+        ("role", &jobs.role),
+        ("vm", &jobs.vm),
     ] {
         let err = crate::engine::choice(&cfg, job).unwrap_err();
         assert!(
@@ -646,9 +546,256 @@ fn updating_installed_plugin_to_withdraw_job_override_fails_instead_of_falling_b
         "none",
         r#"[{"id":"only","efforts":["high"]},{"id":"other","efforts":["low"]}]"#,
     );
-    let err = crate::engine::choice(&cfg, &job_effort_only).unwrap_err();
+    let err = crate::engine::choice(&cfg, &jobs.effort_only).unwrap_err();
     assert!(
         err.contains("requires a model"),
         "effort-only job should fail when plugin gains a second model: {err}"
+    );
+}
+
+struct OverrideJobs<'a> {
+    pinned: Job<'a>,
+    role: Job<'a>,
+    queued: Job<'a>,
+    vm: Job<'a>,
+    effort_only: Job<'a>,
+}
+
+fn setup_override_jobs<'a>(cfg: &'a Config, project: &Path) -> OverrideJobs<'a> {
+    let project_str = project.to_string_lossy().into_owned();
+    let expected_third = Choice {
+        engine: "third".into(),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+    };
+
+    // Job 1: pinned `--engine third --model m1 --effort high`.
+    let pinned = make_job(cfg, project, "job-update-pinned");
+    crate::job::Request {
+        project: project_str.clone(),
+        engine: Some("third".into()),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+        override_engine: Some("third".into()),
+        ..Default::default()
+    }
+    .save(&pinned)
+    .unwrap();
+
+    // Job 2: unpinned `--role work --model m1 --effort high`.
+    let role = make_job(cfg, project, "job-update-role");
+    crate::job::Request {
+        project: project_str.clone(),
+        role: Some("work".into()),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+        override_engine: Some("third".into()),
+        ..Default::default()
+    }
+    .save(&role)
+    .unwrap();
+    crate::policy::bind(
+        &role,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+
+    // Job 3: queued turn with captured Identity for pinned job.
+    let queued = make_job(cfg, project, "job-update-queued");
+    crate::job::Request {
+        project: project_str.clone(),
+        engine: Some("third".into()),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+        override_engine: Some("third".into()),
+        ..Default::default()
+    }
+    .save(&queued)
+    .unwrap();
+    crate::retry::Identity::capture_choice(&queued, "1", &expected_third).unwrap();
+
+    // Job 4: sandboxed (`--vm`) job with per-job model/effort override.
+    let vm = make_job(cfg, project, "job-update-vm");
+    crate::job::Request {
+        project: project_str.clone(),
+        agent: Some("vm-1".into()),
+        agent_engine: Some("third".into()),
+        model: Some("m1".into()),
+        effort: Some("high".into()),
+        override_engine: Some("third".into()),
+        ..Default::default()
+    }
+    .save(&vm)
+    .unwrap();
+
+    // Job 5: effort-only override on single-model plugin `solo`.
+    let effort_only = make_job(cfg, project, "job-update-effort-only");
+    crate::job::Request {
+        project: project_str,
+        engine: Some("solo".into()),
+        effort: Some("high".into()),
+        override_engine: Some("solo".into()),
+        ..Default::default()
+    }
+    .save(&effort_only)
+    .unwrap();
+
+    // All five resolve cleanly on v1 before the update.
+    for job in [&pinned, &role, &vm] {
+        assert_eq!(crate::engine::choice(cfg, job).unwrap(), expected_third);
+    }
+    assert_eq!(
+        crate::engine::choice(cfg, &effort_only).unwrap(),
+        Choice {
+            engine: "solo".into(),
+            model: None,
+            effort: Some("high".into()),
+        }
+    );
+
+    OverrideJobs {
+        pinned,
+        role,
+        queued,
+        vm,
+        effort_only,
+    }
+}
+
+#[test]
+fn live_installed_plugin_runs_with_declared_model_and_rejects_tampering_at_start() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, project) = setup(&tmp);
+    let bwrap = fake_bwrap(&tmp);
+    enable_plugin_settings(&mut cfg, &tmp, bwrap);
+
+    let canary = tmp.path().join("ran.canary");
+    let src_plugin = tmp.path().join("third-plugin");
+    burrow_test::executable(
+        &src_plugin,
+        format!(
+            r#"#!/bin/sh
+set -eu
+: > '{}'
+IFS= read -r req || true
+case "$req" in
+  *'"kind":"describe"'*)
+    printf '%s\n' '{{"contract":"conary-plugin v1","by":{{"engine":"third","session":null}},"kind":"describe","versions":["conary-plugin v1","conary-plugin v2","conary-plugin v3","conary-plugin v4","conary-plugin v5"],"kinds":[],"v2_kinds":["job"],"v4_kinds":[],"models":[{{"id":"third-m1","efforts":["low","high"]}}],"capabilities":{{"sandbox":"none","network":false,"devices":[],"mcp":false}},"meters":[]}}'
+    ;;
+  *)
+    case "$req" in
+      *'"model":"third-m1"'*)
+        printf '%s\n' '{{"contract":"conary-plugin v5","by":{{"engine":"third","session":"s-third-1"}},"execution":{{"model":"third-m1","effort":"high","context":{{"kind":"fresh"}}}},"kind":"job","summary":"ran on third-m1","next":{{"step":"done"}}}}'
+        ;;
+      *)
+        printf '%s\n' '{{"contract":"conary-plugin v5","by":{{"engine":"third","session":null}},"execution":{{"model":"third-m1","effort":null,"context":{{"kind":"fresh"}}}},"kind":"job","summary":"conformance ok","next":{{"step":"done"}}}}'
+        ;;
+    esac
+    ;;
+esac
+"#,
+            canary.display()
+        ),
+    );
+    let hash = sha256_file(&src_plugin).unwrap();
+
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command_as(
+            &owner_auth(),
+            &[
+                "plugin",
+                "install",
+                "third",
+                "release",
+                src_plugin.to_str().unwrap(),
+                "1.0.0",
+                &hash,
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+
+    let job = make_job(&cfg, &project, "job-third");
+    crate::job::Request {
+        project: project.to_string_lossy().into_owned(),
+        engine: Some("third".into()),
+        model: Some("third-m1".into()),
+        effort: Some("high".into()),
+        ..Default::default()
+    }
+    .save(&job)
+    .unwrap();
+    let choice = crate::engine::choice(&cfg, &job).unwrap();
+    assert_eq!(choice.engine, "third");
+    assert_eq!(choice.model.as_deref(), Some("third-m1"));
+    assert_eq!(choice.effort.as_deref(), Some("high"));
+
+    let waitdir = job.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir).unwrap();
+    let prompt = job.prompt("1");
+    fs::write(&prompt, "Run on third-m1\n").unwrap();
+
+    let mut running = spawn(&cfg, &job, "1", &prompt, &waitdir, None, true, "", &choice).unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    let res = running.finish(status, false, &cfg, &job, "1", 0);
+    assert_eq!(res.rc, 0);
+    assert_eq!(
+        res.last.as_ref().and_then(|v| v["result"].as_str()),
+        Some("ran on third-m1")
+    );
+
+    assert_tampered_installed_plugin_rejected(&cfg, &project, &canary, &choice);
+}
+
+fn assert_tampered_installed_plugin_rejected(
+    cfg: &Config,
+    project: &Path,
+    canary: &Path,
+    choice: &Choice,
+) {
+    // Tamper with the installed release artifact on disk; subsequent start must fail
+    // BEFORE executing the tampered binary.
+    let _ = fs::remove_file(canary);
+    let installed = cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .installed_plugin("third")
+        .unwrap()
+        .unwrap();
+    fs::remove_file(&installed.path).unwrap();
+    burrow_test::executable(
+        &installed.path,
+        format!("#!/bin/sh\n: > '{}'\n", canary.display()),
+    );
+
+    let job2 = make_job(cfg, project, "job-third-tampered");
+    crate::job::Request {
+        project: project.to_string_lossy().into_owned(),
+        engine: Some("third".into()),
+        model: Some("third-m1".into()),
+        effort: Some("high".into()),
+        ..Default::default()
+    }
+    .save(&job2)
+    .unwrap();
+    let waitdir2 = job2.turn_file("1", TurnFile::Waits);
+    fs::create_dir_all(&waitdir2).unwrap();
+    let prompt2 = job2.prompt("1");
+    fs::write(&prompt2, "Should not run\n").unwrap();
+    let err = match spawn(cfg, &job2, "1", &prompt2, &waitdir2, None, true, "", choice) {
+        Ok(_) => panic!("tampered plugin should have failed before spawn"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("verification failed"),
+        "expected verification failure, got: {err}"
+    );
+    assert!(
+        !canary.exists(),
+        "tampered installed plugin must not execute on start"
     );
 }

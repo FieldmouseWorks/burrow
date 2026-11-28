@@ -808,6 +808,55 @@ fn is_etxtbsy(err: &impl std::fmt::Display) -> bool {
     text.contains("Text file busy") || text.contains("os error 26")
 }
 
+fn format_install_answer(is_update: bool, engine: &str, record: &InstalledPlugin) -> String {
+    let verb = if is_update { "Updated" } else { "Installed" };
+    let models: Vec<&str> = record.models.iter().map(|m| m.id.as_str()).collect();
+    format!(
+        "{verb} engine plugin {engine} {} ({}, {}).\nModels: {}\nCapabilities: {} (sandbox: {})\n",
+        record.version,
+        record.source_kind.name(),
+        record.sha256,
+        if models.is_empty() {
+            "(none)".to_owned()
+        } else {
+            models.join(", ")
+        },
+        if record.capabilities.declared.is_empty() {
+            "(none)".to_owned()
+        } else {
+            record.capabilities.declared.join(", ")
+        },
+        record.capabilities.sandbox,
+    )
+}
+
+fn format_removal_answer(
+    engine: &str,
+    fallback: &str,
+    removed: &InstalledPlugin,
+    moved_roles: &[MovedRole],
+    moved_setups: &[String],
+) -> String {
+    let mut answer = format!(
+        "Removed engine plugin {engine} {} ({}, {}).\nFallback engine: {fallback}.\n",
+        removed.version,
+        removed.source_kind.name(),
+        removed.sha256
+    );
+    if moved_roles.is_empty() {
+        answer.push_str("Moved roles: none.\n");
+    } else {
+        answer.push_str("Moved roles:\n");
+        for mv in moved_roles {
+            answer.push_str(&format!("- {}: {} -> {}\n", mv.role, mv.from, mv.to));
+        }
+    }
+    if !moved_setups.is_empty() {
+        answer.push_str(&format!("Updated setups: {}.\n", moved_setups.join(", ")));
+    }
+    answer
+}
+
 #[cfg(test)]
 mod regression_tests;
 #[cfg(test)]
