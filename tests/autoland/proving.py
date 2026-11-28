@@ -46,16 +46,28 @@ elif {tool!r} == "nix-store" and a[:1] == ["--check-validity"]:
 elif {tool!r} == "nix-store":
     if do.get("kill"):
         os.kill(os.getpid(), 9)
-    print("building", *a[2:], file=sys.stderr)
-    print("\\n".join(do.get("log", [])))
-    time.sleep(do.get("sleep", 0))
-    # Each derivation's own end (rcs), else a pass for what it makes valid
-    # and rc for the rest; a pass's outputs rooted where it's asked to.
-    drv = a[-1]
-    rc = do.get("rcs", {{}}).get(drv, 0 if drv.removesuffix(".drv") in do.get("valid", []) else do.get("rc", 0))
-    if rc == 0 and "--add-root" in a:
-        os.symlink(drv.removesuffix(".drv"), a[a.index("--add-root") + 1])
-    sys.exit(rc)
+    lock = f"{tmp}/realising"
+    if do.get("serial") and a[:1] == ["--realise"]:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            print("concurrent --realise in one heavy slot", file=sys.stderr)
+            sys.exit(1)
+    try:
+        print("building", *a[2:], file=sys.stderr)
+        print("\\n".join(do.get("log", [])))
+        time.sleep(do.get("sleep", 0))
+        # Each derivation's own end (rcs), else a pass for what it makes valid
+        # and rc for the rest; a pass's outputs rooted where it's asked to.
+        drv = a[-1]
+        rc = do.get("rcs", {{}}).get(drv, 0 if drv.removesuffix(".drv") in do.get("valid", []) else do.get("rc", 0))
+        if rc == 0 and "--add-root" in a:
+            os.symlink(drv.removesuffix(".drv"), a[a.index("--add-root") + 1])
+        sys.exit(rc)
+    finally:
+        if do.get("serial") and a[:1] == ["--realise"] and os.path.exists(lock):
+            os.unlink(lock)
 elif {tool!r} == "systemctl" and a[:2] == ["--user", "show"]:
     if do.get("rc"):
         sys.exit(do["rc"])
@@ -115,13 +127,20 @@ for rc, state in ((0, "done"), (100, "done"), (101, "done"), (104, "done"), (107
     assert KICKS == ["/kick/autoland/sam/r"], KICKS
     realised = sorted(x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"])
     here = f"{tmp}/state/builds/{jid}"
-    assert realised == [["--realise", "--add-root", f"{here}/out-0", "--indirect", X + ".drv"],
-                        ["--realise", "--add-root", f"{here}/out-1", "--indirect", Y + ".drv"]], ran("nix-store")
+    assert realised == [["--realise", "--max-jobs", "1", "--add-root", f"{here}/out-0", "--indirect", X + ".drv"],
+                        ["--realise", "--max-jobs", "1", "--add-root", f"{here}/out-1", "--indirect", Y + ".drv"]], ran("nix-store")
     assert ("verdicts" in end(jid)) == (state == "done"), end(jid)
     if rc != "kill":
         log = open(f"{tmp}/state/builds/{jid}/log").read()
         assert "subtest: it boots" in log and f"{X}.drv" in log, log
     assert C.build_state(jid) == state, jid
+# Derivations in a single heavy slot are realised one at a time with --max-jobs 1.
+tools(**{"nix-store": {"valid": [X, Y], "sleep": 0.05, "serial": True}})
+jid = made({"vm": X + ".drv", "other": Y + ".drv"})
+P.run(jid)
+assert end(jid)["state"] == "done", end(jid)
+assert all("--max-jobs" in x["args"] and x["args"][x["args"].index("--max-jobs") + 1] == "1"
+           for x in ran("nix-store") if x["args"][:1] == ["--realise"]), ran("nix-store")
 # In a heavy slot, where the machine has heavy.
 with open(f"{bin_dir}/heavy", "w") as f:
     f.write(f"#!/bin/sh\necho heavy \"$@\" >>{tmp}/heavy-log\n[ \"$1\" = -- ] && shift\nexec \"$@\"\n")
