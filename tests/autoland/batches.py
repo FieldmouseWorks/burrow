@@ -147,4 +147,67 @@ with tempfile.TemporaryDirectory() as tmp:
     assert batch.pending('sam/b', [updated], [], info) == []
     updated['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'].append({'context': 'ci', 'state': 'FAILURE'})
     assert batch.pending('sam/b', [updated], [], info) == [updated]
+
+    # Urgent proof transitions (verdict posted, finished build, or proofTurn on
+    # a free slot) must not be starved behind unvisited PRs in a slow round.
+    urgent_tmp = Path(tmp) / 'urgent'
+    urgent_tmp.mkdir()
+    with (
+        patch.object(C, 'STATE', str(urgent_tmp)),
+        patch.object(S, 'STATE', str(urgent_tmp)),
+        patch.object(S.P, 'STATE', str(urgent_tmp)),
+        patch.object(C, 'DRY', False),
+        patch.object(C, 'mine', lambda who: True),
+        patch.dict(C.CFG['repos'], {'sam/r': {'proofSlots': 1}}),
+    ):
+        r_repos = [{'repo': 'sam/r', 'default': 'main'}]
+        r_prs = [pr(n) for n in (1, 2, 3, 4)]
+        r_prs[0]['commits'] = {'nodes': [{'commit': {'statusCheckRollup': {'contexts': {'nodes': [
+            {'__typename': 'StatusContext', 'context': C.CONTEXT, 'state': 'PENDING',
+             'description': 'Settled; agents built here, its verdict posted', 'creator': {'login': 'bot'}},
+        ]}}}}]}
+        C.save('pr-sam_r-2.json', {'proved': 'head-2', 'provedJob': 'proof-sam-r-2-head2-1'})
+        C.save('pr-sam_r-3.json', {'proofTurn': True})
+        C.save('pr-sam_r-5.json', {
+            'proofsLive': ['proof-sam-r-5-head5-1'],
+            'proofPaths': {'proof-sam-r-5-head5-1': {'at': 1, 'paths': ['/nix/store/built-5']}},
+        })
+        r_prs.append(pr(5))
+        # A PR whose proof finished and already posted its verdict (e.g. behind
+        # its base) must not stay urgent ahead of unvisited PRs in the round.
+        C.save('pr-sam_r-6.json', {
+            'proved': 'head-6', 'provedJob': 'proof-sam-r-6-head6-1',
+            'provedPosted': 'proof-sam-r-6-head6-1',
+        })
+        r_prs.append(pr(6))
+        C.save('pass-progress.json', {'repos': {'sam/r': {
+            'done': {'1': None, '2': None, '3': None, '4': None, '5': None, '6': None},
+            'visits': {'1': 11, '2': 12, '3': 13, '4': 5, '5': 14, '6': 15},
+            'round': 10,
+            'sequence': 15,
+        }}})
+        u_clock, u_handled = [0], []
+
+        def u_handle(repo, p, info, *args):
+            u_handled.append(p['number'])
+            u_clock[0] += 200  # 3 steps reach the 8m soft budget
+
+        with ExitStack() as stack:
+            for obj, name, value in (
+                (S.R, 'discover', lambda: r_repos), (S.R, 'restart', lambda *a: None),
+                (S.R, 'settle_repo', lambda *a: False), (S.R, 'watch_default', lambda *a: {}),
+                (S.R, 'publish', lambda *a: None), (S.R, 'hooks', lambda *a: None),
+                (S, 'open_prs', lambda owner, name: (info, copy.deepcopy(r_prs))),
+                (S.T, 'begin', lambda *a: None), (S.T, 'on', lambda *a: False),
+                (S.step, 'handle', u_handle), (S.L, 'lands', lambda repo: True),
+                (S, 'branches', lambda *a, **k: None), (S, 'upkeep', lambda *a: None),
+                (C, 'follow_renames', lambda *a: None), (C, 'taken', lambda *a: None),
+                (C, 'coverage', lambda rs, done: {}), (C, 'poke', lambda *a: None),
+                (C, 'build_state', lambda jid: 'done' if jid in ('proof-sam-r-2-head2-1', 'proof-sam-r-6-head6-1') else ('running' if jid == 'proof-sam-r-5-head5-1' else None)),
+                (S.P, 'unbuilt', lambda paths: set()),
+            ):
+                stack.enter_context(patch.object(obj, name, value))
+            stack.enter_context(patch('time.monotonic', side_effect=lambda: u_clock[0]))
+            S.run_pass(['sam/r'])
+        assert u_handled == [1, 2, 3], u_handled
 print('bounded steward batches: passed')

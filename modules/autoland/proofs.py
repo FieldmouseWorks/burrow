@@ -456,17 +456,30 @@ def unbuilt(paths):
         return set(paths)
 
 
+def _held(state, js):
+    return [(rec.get("at", 0), j, rec.get("paths")) for j in js
+            for rec in [state.get("proofPaths", {}).get(j) or {}]]
+
+
+def _builds(jobs_now, extra_paths=()):
+    todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(extra_paths))
+    # In the order they started: a job is a build when it has paths still
+    # to build that those before it aren't building, or when they're unknown.
+    builds, building = 0, set()
+    for _, _, ps in sorted(jobs_now, key=lambda x: x[:2]):
+        rest = todo.intersection(ps) if ps is not None else None
+        builds += rest is None or not rest <= building
+        building |= rest or set()
+    return builds, building, todo
+
+
 def ahead(repo, n, st, slots, outs=None):
     """How many proofs are ahead of PR n's: the builds every open PR's live
     jobs, its own included, are running, and the PRs ahead of it in line
     waiting their turn this pass. None when its job may start now; FREE
     when it may whatever the line, since all it builds (outs, None when
     unknown) is built or being built already."""
-    def held(state, js):
-        return [(rec.get("at", 0), j, rec.get("paths")) for j in js
-                for rec in [state.get("proofPaths", {}).get(j) or {}]]
-
-    jobs_now = held(st, live(st))
+    jobs_now = _held(st, live(st))
     # This pass's look at the PRs it has taken, whether or not their state
     # was saved; the kept one at those it hasn't.
     turns = {k for k in WAITING.get(repo, ()) if repo not in OPEN or k in OPEN[repo]}
@@ -475,18 +488,10 @@ def ahead(repo, n, st, slots, outs=None):
         m = re.fullmatch(mine, f)
         if m and (k := int(m[1])) != n and (repo not in OPEN or k in OPEN[repo]):
             other = load(f, {})
-            jobs_now += held(other, [j for j in jobs(other) if running(j)])
+            jobs_now += _held(other, [j for j in jobs(other) if running(j)])
             if k not in LOOKED.get(repo, ()) and other.get("proofTurn"):
                 turns.add(k)
-    todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(outs or ()))
-    # In the order they started: a job is a build when it has paths still
-    # to build that those before it aren't building, or when they're
-    # unknown.
-    builds, building = 0, set()
-    for _, _, ps in sorted(jobs_now, key=lambda x: x[:2]):
-        rest = todo.intersection(ps) if ps is not None else None
-        builds += rest is None or not rest <= building
-        building |= rest or set()
+    builds, building, todo = _builds(jobs_now, outs or ())
     waiting = sum(place(repo, k) < place(repo, n) for k in turns - {n})
     if builds + waiting < slots:
         return None
@@ -912,3 +917,54 @@ def started(st, outs=None):
     if outs is not None:
         # The clock, not the pass's: jobs one pass starts come in order.
         st.setdefault("proofPaths", {})[st["provedJob"]] = {"paths": outs, "at": time.time()}
+
+
+def slot_free(repo, slots):
+    """Whether repo's proofSlots currently have room for another proof job."""
+    if not slots:
+        return False
+    jobs_now = []
+    mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
+    for f in os.listdir(STATE):
+        m = re.fullmatch(mine, f)
+        if m and (repo not in OPEN or int(m[1]) in OPEN[repo]):
+            other = load(f, {})
+            jobs_now += _held(other, [j for j in jobs(other) if running(j)])
+    builds, _, _ = _builds(jobs_now)
+    return builds < slots
+
+
+def _verdict_settled(pr, st, jid):
+    if st.get("provedPosted") == jid:
+        return True
+    checks = (st.get("provedFor") or [None, ()])[1]
+    if not checks:
+        return False
+    nodes = (pr.get("commits") or {}).get("nodes") or []
+    rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
+    settled = {
+        c["context"].lower()
+        for c in (rollup.get("contexts") or {}).get("nodes", [])
+        if c.get("__typename") == "StatusContext" and c.get("state") != "PENDING" and c.get("context")
+    }
+    return all(c.lower() in settled for c in checks)
+
+
+def urgent(repo, pr, status_state, status_desc, free_slot):
+    """Whether PR has a proof transition that should not wait behind the rest
+    of a slow round: a verdict just posted waiting to land, a finished build or
+    run waiting to post its verdict and free its slot, or a proofTurn PR when
+    a slot is free."""
+    if status_state == "pending" and status_desc.endswith("its verdict posted"):
+        return True
+    st = load(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", {})
+    if (
+        st.get("proved") == pr.get("headRefOid")
+        and (jid := st.get("provedJob"))
+        and jid.startswith(C.BUILD)
+        and not st.get("strikes", {}).get("status")
+        and not _verdict_settled(pr, st, jid)
+        and C.build_state(jid) == "done"
+    ):
+        return True
+    return bool(free_slot and st.get("proofTurn"))
