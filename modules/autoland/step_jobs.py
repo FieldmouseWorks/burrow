@@ -4,9 +4,8 @@ import claims
 import common as C
 import proofs as P
 import stages as S
-import waits
 from common import CFG, MIN, log, ts
-from step_context import STRIKES, STRIKE_LIMIT, ON, VERB, clock, _HEAD
+from step_context import ON, VERB, clock, _HEAD
 
 # What a fix job between turns on its own PR awaits, as its status says it.
 OWN = "this PR's next change"
