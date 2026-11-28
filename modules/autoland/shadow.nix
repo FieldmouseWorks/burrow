@@ -44,6 +44,8 @@ let
   settingsSource = config.burrow.settings;
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
+  # A camelCase name in snake_case, as Conary's keys are: proofSlot, proof_slot.
+  snake = s: lib.concatMapStrings (c: if c != lib.toLower c then "_${lib.toLower c}" else c) (lib.stringToCharacters s);
   stewardLogin = "${cfg.app.slug}[bot]";
   # The plugins turned on, by the kind the flow knows each by.
   enabled = lib.filterAttrs (_: p: p.enable) { inherit (cfg.plugins) fix job judge proof; };
@@ -178,6 +180,10 @@ let
         # left out, and an unlabelled PR is at Conary's default (medium).
         priority_labels = { ${cfg.labels.first} = "high"; };
         owner_label = cfg.labels.owner;
+        # Each stage's label is the steward's own (autoland/labels.nix), by
+        # Conary's name for the stage (proofSlot as proof_slot), so the flow
+        # puts on what the steward and proj read, never Conary's default.
+        stage_labels = lib.mapAttrs' (stage: l: lib.nameValuePair (snake stage) l.name) cfg.labels.waiting;
         inherit people;
         require_ci = rc.requireCi;
         inherit proofs;
