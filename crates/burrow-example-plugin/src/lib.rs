@@ -34,6 +34,19 @@ pub const DECLARES: &str = "EXAMPLE_PLUGIN_DECLARES";
 /// The variable that puts it around the plugin at that path ([`around`]).
 pub const AROUND: &str = "EXAMPLE_PLUGIN_AROUND";
 
+/// Optional engine identity override (defaults to `"example"`).
+pub const ENGINE: &str = "EXAMPLE_PLUGIN_ENGINE";
+
+/// Optional JSON array of `conary_core::plugin::Model` declared by `describe`.
+pub const MODELS: &str = "EXAMPLE_PLUGIN_MODELS";
+
+/// Optional sandbox requirement override (`"none"`, `"needs"`, or `"brings"`).
+pub const SANDBOX: &str = "EXAMPLE_PLUGIN_SANDBOX";
+
+/// When non-empty, non-conformance `Task::Job` requests echo engine, model,
+/// effort, and prompt as a completed job instead of parsing a `Look` JSON.
+pub const ECHO_JOB: &str = "EXAMPLE_PLUGIN_ECHO_JOB";
+
 /// What a job asks it to try.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -84,24 +97,42 @@ pub struct Report {
     pub asked: Vec<String>,
 }
 
-fn describe() -> Answer {
-    let sandbox = if std::env::var_os(BRINGS).is_some() {
-        Sandbox::Brings
-    } else {
-        Sandbox::Needs
+fn engine_name() -> String {
+    std::env::var(ENGINE)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "example".to_owned())
+}
+
+fn declared_models() -> Result<Vec<conary_core::plugin::Model>, String> {
+    match std::env::var(MODELS).ok().filter(|s| !s.trim().is_empty()) {
+        Some(raw) => serde_json::from_str(&raw).map_err(|e| format!("invalid {MODELS} JSON: {e}")),
+        None => Ok(vec![]),
+    }
+}
+
+fn describe() -> Result<Answer, String> {
+    let sandbox = match std::env::var(SANDBOX).ok().as_deref() {
+        Some("none") => Sandbox::None,
+        Some("needs") => Sandbox::Needs,
+        Some("brings") => Sandbox::Brings,
+        Some(other) => return Err(format!("invalid {SANDBOX} value {other:?}")),
+        None if std::env::var_os(BRINGS).is_some() => Sandbox::Brings,
+        None => Sandbox::Needs,
     };
+    let models = declared_models()?;
     let declares = std::env::var(DECLARES).ok();
     let declares = |field: &str| {
         declares
             .as_deref()
             .is_none_or(|names| names.split_whitespace().any(|n| n == field))
     };
-    Answer::Describe {
+    Ok(Answer::Describe {
         versions: CONTRACTS.map(str::to_owned).to_vec(),
         kinds: vec![],
         v2_kinds: vec![Kind::Job],
         v4_kinds: vec![],
-        models: vec![],
+        models,
         capabilities: Some(Capabilities {
             sandbox,
             network: declares("network"),
@@ -113,16 +144,33 @@ fn describe() -> Answer {
             mcp: declares("mcp"),
         }),
         meters: vec![],
-    }
+    })
 }
 
 /// The plugin's answer to `request`.
 pub fn answer(request: &Request) -> Result<Response, String> {
+    let engine = engine_name();
+    let default_model = declared_models()?.into_iter().next().map(|m| m.id);
+    let mut executed_model = None;
+    let mut executed_effort = None;
     let answer = match &request.task {
-        Task::Describe => describe(),
-        Task::Job { prompt, .. } => {
+        Task::Describe => describe()?,
+        Task::Job {
+            prompt,
+            model,
+            effort,
+            ..
+        } => {
+            executed_model = model.clone().or(default_model);
+            executed_effort = effort.clone();
             let summary = if conformance(&request.task) {
                 "the fixture's job is finished".to_owned()
+            } else if std::env::var_os(ECHO_JOB).is_some_and(|v| !v.is_empty()) {
+                format!(
+                    "engine={engine} model={} effort={} prompt={prompt}",
+                    model.as_deref().unwrap_or("-"),
+                    effort.as_deref().unwrap_or("-"),
+                )
             } else {
                 let look: Look = serde_json::from_str(prompt)
                     .map_err(|e| format!("the prompt isn't a look: {e}"))?;
@@ -138,12 +186,13 @@ pub fn answer(request: &Request) -> Result<Response, String> {
     Ok(Response {
         contract: request.contract.clone(),
         by: Identity {
-            engine: "example".to_owned(),
+            engine,
             session: None,
         },
         execution: request.execution.as_ref().map(|asked| Executed {
-            model: None,
-            effort: None,
+            model: executed_model.or_else(|| asked.choice.as_ref().and_then(|c| c.model.clone())),
+            effort: executed_effort
+                .or_else(|| asked.choice.as_ref().and_then(|c| c.effort.clone())),
             context: asked.context.clone(),
         }),
         answer,

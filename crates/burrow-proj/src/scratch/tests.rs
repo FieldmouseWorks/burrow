@@ -1,9 +1,11 @@
 // When a job is over, so its scratch goes (said `proj done`, or stopped, or an
 // --owned job's turn that awaits nothing; never one that awaits or asks, and
-// only as its latest turn left it), and that clearing it takes its worktrees,
-// however deep, off their repos too, so their branches check out again, leaves
-// every other job's alone, gets past what a build left read-only, and lets two
-// clears at once both succeed.
+// only as its latest turn left it), and that clearing it sets it aside for
+// burrow-scratch and takes its worktrees, however deep, off their repos on the
+// rename alone, so their branches check out again, leaves every other job's
+// alone, and lets two clears at once both succeed. What a build left
+// read-only, or another user's files, are the root-side remover's:
+// tests/proj-scratch.nix.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,14 +104,24 @@ fn trees(repo: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What's been left aside in the scratch's jobs dir.
+/// What's been set aside in the scratch's jobs dir.
 fn left(cfg: &Config) -> Vec<PathBuf> {
     fs::read_dir(cfg.scratch.join("jobs"))
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".gone-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(burrow_scratch::GONE)
+        })
         .map(|e| e.path())
         .collect()
+}
+
+/// What the root-side unit does once something is set aside.
+fn sweep(cfg: &Config) {
+    let done = burrow_scratch::sweep(&cfg.scratch.join("jobs")).unwrap();
+    assert!(done.stuck.is_empty() && done.held.is_empty(), "{done:?}");
 }
 
 #[test]
@@ -154,16 +166,18 @@ fn clearing_takes_its_worktrees_off_their_repos() {
     // And, deep in a's scratch, the only worktree of a second repo.
     let api = b.repo("api");
     b.worktree(&api, "fix-deep", &a.join("x/y/z/w/api"));
-    // What a build leaves, some of it read-only.
-    let ro = a.join("web/target/debug/ro");
-    fs::create_dir_all(&ro).unwrap();
-    fs::write(ro.join("lib.rlib"), vec![0; 1024]).unwrap();
-    burrow_test::permissions(&ro, 0o555);
+    // What a build leaves.
+    fs::create_dir_all(a.join("web/target/debug")).unwrap();
+    fs::write(a.join("web/target/debug/lib.rlib"), vec![0; 1024]).unwrap();
 
     clear(cfg, "a");
     assert!(!a.exists(), "job a's scratch is still there");
-    assert_eq!(left(cfg), Vec::<PathBuf>::new());
-    // Its worktree is off the repo, so its branch checks out again; b's is kept.
+    // Set aside, whole, for the remover: proj removes none of it.
+    let aside = left(cfg);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert!(aside[0].join("web/target/debug/lib.rlib").exists());
+    // Its worktree is off the repo on the rename alone, so its branch checks
+    // out again; b's is kept.
     assert_eq!(trees(&web), [web.clone(), other.join("web")]);
     git(
         &web,
@@ -180,6 +194,8 @@ fn clearing_takes_its_worktrees_off_their_repos() {
         "b's worktree went with a's"
     );
     assert_eq!(trees(&api), from_ref(&api));
+    sweep(cfg);
+    assert_eq!(left(cfg), Vec::<PathBuf>::new());
 
     // A job with no scratch (a sandbox's, or one cleared already): nothing to do.
     clear(cfg, "a");
@@ -220,12 +236,14 @@ fn two_clears_at_once() {
             clear(cfg, "c");
         });
         assert!(!c.exists(), "c's scratch survived two clears");
+        assert_eq!(left(cfg).len(), i + 1, "set aside more than once");
         assert_eq!(
             trees(&web),
             from_ref(&web),
             "a raced worktree is still listed"
         );
     }
+    sweep(cfg);
     assert_eq!(left(cfg), Vec::<PathBuf>::new());
 }
 

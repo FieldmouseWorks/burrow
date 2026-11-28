@@ -71,6 +71,14 @@ fn sync(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// What a document mutation produced: the human-readable answer (None to leave
+/// the document untouched) and optional extra audit fields merged into the
+/// change-log JSON line.
+pub(crate) struct Outcome {
+    pub answer: Option<String>,
+    pub audit: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 /// One change to the document at PATH, under LOCK, logged to LOG. CHANGE
 /// returns None to leave it as it is, or the change's answer. A receipt
 /// already in the document answers again with what it said, changing
@@ -84,6 +92,25 @@ pub(crate) fn write<D: Document>(
     receipt: Option<&str>,
     args: &[String],
     change: impl FnOnce(&mut D) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    write_audited(path, lock, log, actor, receipt, args, |doc| {
+        Ok(Outcome {
+            answer: change(doc)?,
+            audit: None,
+        })
+    })
+}
+
+/// [`write`], with structured audit metadata merged into the synced change-log
+/// entry alongside `at`, `actor` and `change`.
+pub(crate) fn write_audited<D: Document>(
+    path: &Path,
+    lock: &Path,
+    log: &Path,
+    actor: &str,
+    receipt: Option<&str>,
+    args: &[String],
+    change: impl FnOnce(&mut D) -> Result<Outcome, String>,
 ) -> Result<Option<String>, String> {
     let parent = path.parent().ok_or("overlay needs a parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -101,11 +128,14 @@ pub(crate) fn write<D: Document>(
     }
     // A document can recognize a historical spelling too. Publish the supplied
     // key alongside that answer so retained consumers and rollback still find it.
-    let answer = match receipt.map(|r| state.answer(r)).transpose()?.flatten() {
-        Some(answer) => Some(answer),
+    let outcome = match receipt.map(|r| state.answer(r)).transpose()?.flatten() {
+        Some(answer) => Outcome {
+            answer: Some(answer),
+            audit: None,
+        },
         None => change(&mut state)?,
     };
-    let Some(answer) = answer else {
+    let Some(answer) = outcome.answer else {
         if path_exists(path)? {
             sync(path)?;
         }
@@ -124,12 +154,16 @@ pub(crate) fn write<D: Document>(
         .create(true)
         .open(log)
         .map_err(|e| e.to_string())?;
-    writeln!(
-        log,
-        "{}",
-        serde_json::json!({"at": crate::now(), "actor": actor, "change": args})
-    )
-    .map_err(|e| e.to_string())?;
+    let mut record = serde_json::Map::new();
+    record.insert("at".into(), serde_json::json!(crate::now()));
+    record.insert("actor".into(), serde_json::json!(actor));
+    record.insert("change".into(), serde_json::json!(args));
+    if let Some(extra) = outcome.audit {
+        for (k, v) in extra {
+            record.insert(k, v);
+        }
+    }
+    writeln!(log, "{}", serde_json::Value::Object(record)).map_err(|e| e.to_string())?;
     log.sync_all().map_err(|e| e.to_string())?;
     publish(
         path,

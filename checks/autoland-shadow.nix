@@ -2,7 +2,7 @@
 # `autoland-shadow@` on it, a unit of its own, so its errors and timeout
 # never touch the pass; the hourly pass starts none, and a machine with no
 # shadowed repo has no such unit. It runs `cn flow compare` on the ledger's
-# env and the steward's own token, only for a repo with a config, which is
+# env and the App's token (burrow-upkeep's), only for a repo with a config, which is
 # at its lowercased name, as burrow-events names a pass's instance. Each
 # config holds exactly the keys Conary's flow::Config takes
 # (crates/conary-github/src/flow/pass.rs, types.rs, evidence.rs), which
@@ -90,7 +90,10 @@ let
     controller = controlledShadow.serviceConfig.User == "conary-flow"
       && controlledShadow.environment.CONARY_DATA == "${controlled.burrow.stateDir}/flow";
     ledger = shadow.environment.CONARY_LEDGER == machine.burrow.ledger.dir;
-    token = lib.hasSuffix "/bin/autoland-steward token" shadow.environment.CONARY_TOKEN_COMMAND;
+    # Conary's token command, the shadow's and conaryd's alike: burrow-upkeep's.
+    token = let t = shadow.environment.CONARY_TOKEN_COMMAND; in
+      t == machine.burrow.autoland.flow.token
+      && builtins.match "/nix/store/[^ ]+/bin/burrow-upkeep /nix/store/[^ ]+-burrow-upkeep[.]json token --bare" t != null;
     packageCarriesGit = !(lib.elem machine.programs.git.package shadow.path);
     key = lib.any (lib.hasPrefix "app-key:") shadow.serviceConfig.LoadCredential;
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];

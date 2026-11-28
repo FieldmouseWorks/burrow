@@ -75,6 +75,9 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.maxJobs"]' '{"value":6,"origin":"flake"}'
   want '.options["autoland.jobIdleMinutes"]' '{"value":20,"origin":"default"}'
   want '.options["settings.allowed"].value' '["sam/kept"]'
+  want '.options["settings.plugins.fallback"]' '{"value":"claude","origin":"flake"}'
+  want '.options["proj.enginePlugins"].value' '{}'
+  want '.options["proj.enginePlugins"].origin' '"default"'
   want '.options["proj.roles"].value' '{"*":{"engine":"claude"},"triage":{"engine":"claude"},"fix@sam/homelab":{"engine":"claude"}}'
   want '.options["proj.models"].value' '{"* claude":{"model":null,"effort":null},"* claude-api":{"model":null,"effort":null},"triage claude":{"model":null,"effort":"low"}}'
   want '.options["proj.roles"].file' "\"$live/settings/overlay.roles.json\""

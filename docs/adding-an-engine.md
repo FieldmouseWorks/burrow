@@ -114,11 +114,14 @@ In your machine flake (for example `remi`):
    secret file's presence so secretless builds stay green.
 3. Set `burrow.engines.<name>` (`enable`, `package`, `credentialFile`,
    `hosts`) without hard-coding model names in tracked files.
-4. Once `proj settings` accepts the new engine name (see the current routing
-   support status in [README.md](../README.md#bringing-your-own-engine)), configure
-   per-engine model/effort offers and per-role routing live through
-   `proj settings` and save a named setup (`proj engines save NAME`,
-   `proj engines use NAME`; see [docs/settings.md](settings.md) and
+4. Configure per-engine model/effort offers and per-role routing live through
+   `proj settings` — or install a pinned Nix-built package or verified release
+   artifact directly through the owner-authenticated settings write door
+   (`settings plugin install` / `update` / `remove`, publishing validated
+   `describe` models, efforts, and capabilities into role and per-job schema
+   choices after sandboxed `cn plugin check`) — and save a named setup
+   (`proj engines save NAME`, `proj engines use NAME`; see
+   [docs/settings.md](settings.md#pinned-engine-plugins) and
    [docs/settings-reference.md](settings-reference.md)).
 
 ## 5. Verify before opening a PR
@@ -149,7 +152,8 @@ nix build --no-link .#checks.x86_64-linux.guidance
   parsing, and refusal heuristics inside `crates/burrow-engine-<name>`, never
   in `burrow-proj`, `burrow-settings`, or Conary.
 - **Current rollout status.** See
-  [README.md](../README.md#bringing-your-own-engine) for which engines `proj`
-  routes today; moving `burrow-judge`, live plugin installation (`#668`), and
-  PR review (currently Codex) onto the same swappable plugin contract is in
-  progress.
+  [README.md](../README.md#bringing-your-own-engine) for current engine
+  rollout status; live pinned plugin installation and removal live in the
+  settings authority ([docs/settings.md](settings.md#pinned-engine-plugins),
+  [docs/settings-reference.md](settings-reference.md)), while dashboard
+  presentation (`#669`) and swappable PR review plugins remain in progress.

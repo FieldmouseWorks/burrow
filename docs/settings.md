@@ -313,3 +313,55 @@ Legacy files stay for rollback. Before migration, turns and check-config
 refuse existing legacy inputs. Read errors, invalid path components and dangling
 links in either source paths or the live role document fail closed; only genuine
 absence permits defaults.
+
+## Pinned engine plugins
+
+Authorized owners can install, update, and remove pinned Conary
+`conary-plugin v5` (`job`) engine plugins through the settings write door
+(either `settings` / `proj settings` on the host or `burrow-settings-door` on
+GitHub issues):
+
+```
+settings plugin list
+settings plugin show ENGINE
+settings plugin picker
+settings plugin verify [ENGINE]
+settings plugin install ENGINE nix|release SOURCE VERSION SHA256
+settings plugin update ENGINE nix|release SOURCE VERSION SHA256
+settings plugin remove ENGINE [--fallback ENGINE]
+```
+
+- **Owner authentication:** plugin mutations authenticate the caller by
+  immutable GitHub account ID against `burrow.settings.owners` (which inherits
+  `burrow.settings.door.authors`), using the same account-ID identity check as
+  the issue doors ([front-door.md](front-door.md)). An empty owner list fails
+  closed. Host CLI mutations reject any job, sandbox, agent/model, or App-token
+  caller environment and authenticate the operator through `GET /user`; jobs
+  and models acting alone can never install, update, or remove plugins.
+- **Artifact verification and sandboxed conformance:** every plugin is pinned
+  to an exact source (`nix` executable inside the Nix store, or `release`
+  local/HTTPS artifact), version, and SHA-256 digest. Its hash is verified
+  before execution during staging and re-verified on every `proj` turn start
+  and `proj check-config`. Before activation, `burrow-settings` runs Conary's
+  `cn plugin check` inside an isolated `bubblewrap` sandbox (`--unshare-all`,
+  `--clearenv`, read-only plugin mount, no network or host state) and rejects
+  plugins declaring `sandbox: needs` (which have no live VM capability approval
+  path and belong under `burrow.agents.engines.<name>` instead).
+- **Immediate schema choices and picker data:** once conformance passes, the
+  plugin's validated `describe` models, efforts, and capabilities are published
+  atomically into `proj.enginePlugins` and `proj.engineOffers` (see the
+  [settings reference](settings-reference.md) for schema types and storage),
+  and immediately appear in `proj settings schema` (role routing enums and
+  per-job `$defs.jobChoice`), `proj settings picker` (supplying picker data for
+  the dashboard), and `proj run --engine/--model/--effort`.
+- **Audit records:** every install, update, and removal appends and fsyncs a
+  change-log record naming the authenticated actor, numeric account ID, source,
+  version, and SHA-256 (plus prior pin on update and fallback/moved roles on
+  removal) before atomic publication.
+- **Safe updates and removal fallback:** a failed update (hash mismatch,
+  sandboxed conformance failure, or incompatible model withdrawal) leaves the
+  prior active installation untouched. Removal requires a valid remaining
+  fallback engine (from `burrow.settings.plugins.fallback` or `--fallback`),
+  refuses removal without one, and otherwise atomically rewrites every affected
+  role route and saved setup to that fallback and reports each move.
+

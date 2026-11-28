@@ -14,6 +14,11 @@ use serde_json::Value;
 use crate::config::OutputFormat;
 use crate::schema::Schema;
 
+mod scrub;
+mod stream;
+pub use scrub::{scrub, scrub_stream_line};
+pub use stream::{StreamForwarder, StreamStep};
+
 /// Normalized token and cost usage extracted from an Antigravity turn.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
@@ -363,7 +368,8 @@ fn normalize_records(
         }
     }
 
-    let usage_opt = (!usage.is_empty()).then_some(usage);
+    let session = session.map(|s| scrub(&s, secrets));
+    let usage_opt = (!usage.is_empty()).then(|| scrub_usage(usage, secrets));
 
     if saw_error_flag || !succeeded {
         let joined = join_nonempty(&record_error_texts, stderr_str);
@@ -419,25 +425,36 @@ fn normalize_records(
 
     if let Some(schema) = schema {
         match finalize_structured(schema, structured_output.take(), result.as_deref()) {
-            Ok((value, rendered)) => {
+            Ok((mut value, mut rendered)) => {
+                if scrub::scrub_value(&mut value, secrets)
+                    && let Ok(clean) = serde_json::to_string(&value)
+                {
+                    rendered = clean;
+                }
                 structured_output = Some(value);
-                result = Some(rendered);
+                result = Some(scrub(&rendered, secrets));
             }
             Err(why) => {
                 return TurnOutput {
                     session,
-                    result,
+                    result: result.map(|r| scrub(&r, secrets)),
                     structured_output: None,
                     error: Some(RunError::InvalidSchemaOutput(scrub(&why, secrets))),
                     usage: usage_opt,
                 };
             }
         }
-    } else if result.is_none()
-        && let Some(value) = &structured_output
-        && let Ok(rendered) = serde_json::to_string(value)
-    {
-        result = Some(rendered);
+    } else {
+        if let Some(val) = structured_output.as_mut() {
+            scrub::scrub_value(val, secrets);
+        }
+        result = result.map(|r| scrub(&r, secrets));
+        if result.is_none()
+            && let Some(value) = &structured_output
+            && let Ok(rendered) = serde_json::to_string(value)
+        {
+            result = Some(scrub(&rendered, secrets));
+        }
     }
 
     if result.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -500,20 +517,27 @@ fn normalize_text(
 
     if let Some(schema) = schema {
         match finalize_structured(schema, None, Some(trimmed)) {
-            Ok((value, rendered)) => TurnOutput {
-                result: Some(rendered),
-                structured_output: Some(value),
-                ..TurnOutput::default()
-            },
+            Ok((mut value, mut rendered)) => {
+                if scrub::scrub_value(&mut value, secrets)
+                    && let Ok(clean) = serde_json::to_string(&value)
+                {
+                    rendered = clean;
+                }
+                TurnOutput {
+                    result: Some(scrub(&rendered, secrets)),
+                    structured_output: Some(value),
+                    ..TurnOutput::default()
+                }
+            }
             Err(why) => TurnOutput {
-                result: Some(trimmed.to_owned()),
+                result: Some(scrub(trimmed, secrets)),
                 error: Some(RunError::InvalidSchemaOutput(scrub(&why, secrets))),
                 ..TurnOutput::default()
             },
         }
     } else {
         TurnOutput {
-            result: Some(trimmed.to_owned()),
+            result: Some(scrub(trimmed, secrets)),
             ..TurnOutput::default()
         }
     }
@@ -566,6 +590,40 @@ fn extract_session(v: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract any session ID and usage already emitted on partial `stdout` when a
+/// turn is stopped or exceeds its deadline.
+pub fn partial_turn_output(stdout: &[u8], error: RunError, secrets: &[&str]) -> TurnOutput {
+    let mut session: Option<String> = None;
+    let mut usage = Usage::default();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let (_, payload) = unwrap_event(&record);
+        if session.is_none() {
+            session = extract_session(&record).or_else(|| extract_session(payload));
+        }
+        if let Some(u) = extract_usage(&record) {
+            usage.merge(u);
+        }
+        if !std::ptr::eq(payload, &record)
+            && let Some(u) = extract_usage(payload)
+        {
+            usage.merge(u);
+        }
+    }
+    TurnOutput {
+        session: session.map(|s| scrub(&s, secrets)),
+        usage: (!usage.is_empty()).then(|| scrub_usage(usage, secrets)),
+        error: Some(error),
+        ..TurnOutput::default()
+    }
 }
 
 fn extract_structured_output(v: &Value) -> Option<Value> {
@@ -919,14 +977,9 @@ fn combined_or(text: &str, fallback: &str) -> String {
     }
 }
 
-/// Remove any loaded secret material from diagnostic strings before emitting them.
-pub fn scrub(text: &str, secrets: &[&str]) -> String {
-    let mut clean = text.to_owned();
-    for secret in secrets {
-        let trimmed = secret.trim();
-        if trimmed.len() >= 8 {
-            clean = clean.replace(trimmed, "[redacted]");
-        }
+fn scrub_usage(mut usage: Usage, secrets: &[&str]) -> Usage {
+    if let Some(model) = usage.model {
+        usage.model = Some(scrub(&model, secrets));
     }
-    clean
+    usage
 }

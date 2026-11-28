@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
     cfg.write_text(json.dumps(dict(brief=[BRIEF], owner='Sam',
         context='test', stateDir=str(state), snapDir=str(Path(tmp) / 'trees'),
-        conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
+        conary={'cn': 'cn', 'token': 'upkeep token --bare', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {}}, kick='http://events/kick/autoland',
         continuationKick='http://events/kick/autoland-continue',
         watch={'kick': 'watchdog', 'escalated': f'{tmp}/escalated.json'},
@@ -683,3 +683,53 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'])
         assert C.load('digest-repos.json', {})['sam/r'] == [], C.load('digest-repos.json', {})
     print('yielded passes and failed reads preserve deferred digest notices: passed')
+
+    # Deadline or transient C.Unavailable on a PR step leaves it pending with its
+    # watch.json wait and digest notice intact, without marking it failed.
+    for mode, target, exp_calls in (('remote_deadline', 1, [1]), ('slice_expired', 2, [1, 2]), ('transient', 1, [1, 2])):
+        for digest_mode in (False, True):
+            with fixture() as (clock, handled, facts, repos, prs, info):
+                old = {f'sam/r#{n}': dict(repo='sam/r', what=f'sam/r#{n}', link=f'https://github.com/sam/r/pull/{n}', phase='Settled; waiting its turn to build agents', since=100, due=7300, kick='autoland/sam/r', claude=False, rev=f'head-{n} main') for n in (1, 2)}
+                notices = {n: ('Open over a day', f'[sam/r#{n}](https://github.com/sam/r/pull/{n}) {n}', 'waiting') for n in (1, 2)}
+                C.save('digest-repos.json', {'sam/r': [list(notices[1]), list(notices[2])]}) if digest_mode else C.save('watch.json', {'at': 100, 'items': old})
+                calls, failed = [], [False]
+                def flaky_handle(repo, p, info, mine, held, under):
+                    calls.append(p['number'])
+                    if p['number'] == target and not failed[0]:
+                        failed[0] = True
+                        clock[0] += 10 if mode == 'remote_deadline' else (4 * 60 if mode == 'slice_expired' else 0)
+                        raise C.Unavailable("pass remote-call deadline reached" if mode == 'remote_deadline' else "gh api: HTTP 502")
+                    clock[0] += 5 * 60 if mode == 'slice_expired' else 1
+                with patch.object(S.step, 'handle', flaky_handle), (C.pass_deadline(10) if mode == 'remote_deadline' else ExitStack()):
+                    S.run_pass(['sam/r'])
+                progress = C.load('pass-progress.json', {})
+                repo_prog = progress['repos'].get('sam/r', {})
+                assert calls == exp_calls and str(target) not in repo_prog.get('done', {}) and str(target) not in repo_prog.get('unseen', []), (mode, digest_mode, calls, repo_prog)
+                assert ('sam/r' in progress.get('retry', {})) == (mode == 'transient'), (mode, progress)
+                if digest_mode:
+                    assert {tuple(x) for x in C.load('digest-repos.json', {})['sam/r']} == ({notices[1], notices[2]} if mode == 'remote_deadline' else {notices[target]}), mode
+                else:
+                    items = C.load('watch.json', {})['items']
+                    assert items.get(f'sam/r#{target}') == old[f'sam/r#{target}'] and all(v.get('phase') != W.FAILS for v in items.values()), (mode, items)
+                C.NOW = 1300
+                with patch.object(S.step, 'handle', flaky_handle):
+                    S.run_pass(['sam/r'], continuing=True)
+                assert target in calls[len(exp_calls):] and C.load('pass-progress.json', {})['repos'] == {}, (mode, calls)
+                assert not digest_mode or C.load('digest-repos.json', {})['sam/r'] == [], mode
+    # Train stops from an unavailable PR survive later PRs and clear on retry.
+    for seated, pre_stop, expected_stop in ((True, None, "#1 wasn't seen to"), (False, 'withdrawal failed', 'withdrawal failed'), (False, None, None)):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            steps, seen = [], []
+            def step_unavail(repo, p, *args):
+                seen.append(p['number'])
+                if p['number'] == 1 and len(seen) == 1:
+                    if pre_stop:
+                        S.T.stop(repo, pre_stop)
+                    raise C.Unavailable('gh api: HTTP 502')
+            with patch.object(S.T, 'seat', side_effect=lambda r, n: 'seated' if seated and n == 1 else None), patch.object(S.T, 'step', lambda r: steps.append(S.T.STOPPED.get(r))), patch.object(S.step, 'handle', step_unavail):
+                S.run_pass(['sam/r'])
+                assert seen == [1, 2] and steps == [expected_stop], (seated, pre_stop, seen, steps)
+                C.NOW = 1300
+                S.run_pass(['sam/r'], continuing=True)
+            assert 1 in seen[2:] and steps == [expected_stop, None] and C.load('pass-progress.json', {})['repos'] == {}, (seated, pre_stop, seen, steps)
+    print('deadline and transient Unavailable on a PR step yield without failing the PR: passed')
