@@ -9,7 +9,9 @@
 //! renovate-sweep), and one whose PR was closed was closed on purpose, so
 //! neither counts. The rest is stuck once it has been there `waitDays` (one
 //! waiting on something) or `errorDays` (an error or a problem), counted
-//! from when a pass first saw it. An error is stuck sooner, once it's still
+//! from when a pass first saw it, or from the close of a PR Renovate has
+//! opened from its branch since (`moved`); one whose PR is still open isn't
+//! stuck. An error is stuck sooner, once it's still
 //! there after two of Renovate's runs on the repo have ended since
 //! (`renovateRuns`, which Renovate's unit keeps): it was tried twice more.
 //!
@@ -19,7 +21,7 @@
 //! edits start the repo's pass (burrow-events, `issueTitles`), and each
 //! deadline books one, so nothing waits on a timer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 
 use burrow_github::{call, call_allowing, encode};
@@ -250,9 +252,115 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
     }
     st.ask = ask;
     if let Some(number) = n {
-        act(p, cfg, number, &mut st);
+        let ended = runs(p.repo, cfg);
+        let open = moved(p, cfg, &ended, &mut st.items)?;
+        act(p, cfg, number, &ended, &open, &mut st);
     }
     p.save(&name, &st)
+}
+
+/// When an item that hasn't gone to a job is stuck: `waitDays` after a
+/// pass first saw it, or `errorDays` for an error or a problem, or for
+/// those, once two of Renovate's runs on the repo have ended since.
+fn due(cfg: &Dashboard, ended: &[f64], it: &Item) -> f64 {
+    let days = if it.failing {
+        cfg.error_days
+    } else {
+        cfg.wait_days
+    };
+    let due = it.since + days as f64 * DAY;
+    let mut since = ended.iter().copied().filter(|t| *t > it.since);
+    match (it.failing, since.nth(1)) {
+        (true, Some(second)) => due.min(second),
+        _ => due,
+    }
+}
+
+/// A branch that's due, to a job or to the stuck issue, but whose PR
+/// Renovate has open or closed since a pass first saw it: what's on the
+/// dashboard now is the next update to come to that branch (a group's
+/// branch is reused night after night), and it waits from that PR's close.
+/// A pass that didn't read the dashboard in the minutes the PR was there
+/// would otherwise count the branch from the update that already landed.
+/// While that PR is open the branch is the PR pipeline's: it's left as it
+/// was, and its key comes back here, so the PR's close, once it comes,
+/// still moves it.
+fn moved(
+    p: &mut Pass,
+    cfg: &Dashboard,
+    ended: &[f64],
+    items: &mut BTreeMap<String, Item>,
+) -> Result<BTreeSet<String>, String> {
+    let mut open = BTreeSet::new();
+    for (k, it) in items.iter_mut() {
+        let Some(branch) = k.strip_prefix("branch ") else {
+            continue;
+        };
+        let at = it.handed.map_or_else(|| due(cfg, ended, it), |h| h + DAY);
+        if p.now < at {
+            continue;
+        }
+        match newest_pr(p, branch, it.since)? {
+            Pr::None => {}
+            Pr::Open => {
+                open.insert(k.clone());
+            }
+            Pr::Closed(from) => {
+                *it = Item {
+                    since: from,
+                    section: std::mem::take(&mut it.section),
+                    what: std::mem::take(&mut it.what),
+                    failing: it.failing,
+                    ..Item::default()
+                };
+            }
+        }
+    }
+    Ok(open)
+}
+
+/// The newest PR Renovate opened from a branch that is still open or closed
+/// after `since`.
+#[derive(Debug, PartialEq)]
+enum Pr {
+    /// None: the branch hasn't moved since.
+    None,
+    /// Still open.
+    Open,
+    /// Closed then.
+    Closed(f64),
+}
+
+/// The newest PR Renovate opened from `branch`, if it is still open or
+/// closed after `since`. Only Renovate's: anyone can open a PR from a
+/// branch of the repo.
+fn newest_pr(p: &mut Pass, branch: &str, since: f64) -> Result<Pr, String> {
+    let owner = p.repo.split('/').next().unwrap_or_default();
+    let path = format!(
+        "repos/{}/pulls?state=all&sort=created&direction=desc&per_page=100&head={owner}:{}",
+        p.repo,
+        encode(branch)
+    );
+    let prs = p.get(&path).map_err(|e| p.github(e))?;
+    let newest = prs
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|pr| renovates(p, pr["user"]["login"].as_str()));
+    let Some(pr) = newest else {
+        return Ok(Pr::None);
+    };
+    match pr["closed_at"].as_str() {
+        None => Ok(Pr::Open),
+        Some(at) => {
+            let closed = crate::ts(at)?;
+            if closed > since {
+                Ok(Pr::Closed(closed))
+            } else {
+                Ok(Pr::None)
+            }
+        }
+    }
 }
 
 /// When Renovate's runs on the repo ended, its own and those over every
@@ -286,8 +394,14 @@ pub fn day(t: f64) -> String {
         .unwrap_or_default()
 }
 
-fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
-    let ended = runs(p.repo, cfg);
+fn act(
+    p: &mut Pass,
+    cfg: &Dashboard,
+    n: u64,
+    ended: &[f64],
+    open: &BTreeSet<String>,
+    st: &mut State,
+) {
     let mut states: HashMap<String, bool> = HashMap::new();
     // Whether the job is still at work (Jobs::at_work).
     let mut working = |p: &mut Pass, jid: &str| {
@@ -310,6 +424,13 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
     let at = format!("{}#{n}", p.repo);
     let mut todo = vec![];
     for (k, it) in &st.items {
+        if open.contains(k) {
+            // Renovate's PR from the branch is open (`moved`): looked at
+            // again in an hour, or sooner as the dashboard changes.
+            // ends: the PR's close, then it waits from that
+            p.wake(p.now + HOUR);
+            continue;
+        }
         if let Some(handed) = it.handed {
             // A day after the job it went to, once that job has ended.
             if p.now >= handed + DAY && !working(p, it.job.as_deref().unwrap_or_default()) {
@@ -323,16 +444,7 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
             }
             continue;
         }
-        let days = if it.failing {
-            cfg.error_days
-        } else {
-            cfg.wait_days
-        };
-        let mut due = it.since + days as f64 * DAY;
-        let since: Vec<f64> = ended.iter().copied().filter(|t| *t > it.since).collect();
-        if it.failing && since.len() >= 2 {
-            due = due.min(since[1]);
-        }
+        let due = due(cfg, ended, it);
         if p.now >= due {
             todo.push(k.clone());
         } else {

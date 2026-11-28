@@ -101,13 +101,15 @@ def flaky(n, test, who, kind="User"):
 
 
 def github(*first):
-    """What GitHub has: sam/r's dashboard, #7, by sam, with one error on it;
-    and two flaky tests, the CI's #4 and #8 by eve, who can push. `first`
+    """What GitHub has: sam/r's dashboard, #7, by sam, with one error on it,
+    whose branch has had no PR; and two flaky tests, the CI's #4 and #8 by eve, who can push. `first`
     answers ahead of those."""
     with open(GH, "w") as f:
         json.dump({"answers": [*first,
                                ["GET", "search/issues", 200, {"items": [{"number": 7, "title": "Dependency Dashboard", "user": {"login": "sam"}}]}, None],
                                ["GET", "repos/sam/r/issues/7", 200, {"state": "open", "title": "Dependency Dashboard", "user": {"login": "sam"}, "body": DASHBOARD}, 'W/"d"'],
+                               # Renovate has opened no PR from the dashboard's branch.
+                               ["GET", "repos/sam/r/pulls?state=all", 200, [], None],
                                ["GET", "repos/sam/r/issues?labels=flaky", 200, [flaky(4, "browser/stream", "github-actions[bot]", "Bot"), flaky(8, "unit/disk", "eve")], None],
                                ["GET", "repos/sam/r/issues/4/events", 200, [], None],
                                ["GET", "repos/sam/r/issues/8/events", 200, [], None],
@@ -200,6 +202,9 @@ assert state("flaky")["issues"]["4"] == {"test": "browser/stream", "handed": T, 
 assert [(j["pipeline"], j["timeout"], j["role"]) for j in JOBS] == [(True, 60, "dependency-dashboard")], JOBS
 assert "Errored: chore(deps): update npm packages (branch renovate/npm-packages)" in JOBS[0]["task"], JOBS
 assert S.SEARCHED == [0] and ["repos/sam/r/issues/7", 'W/"d"'] in [[c["path"], c["etag"]] for c in called()], called()
+# Before handing the branch on, it asked whether Renovate has opened a PR
+# from it since it was first seen: one that had would have moved it.
+assert "repos/sam/r/pulls?state=all&sort=created&direction=desc&per_page=100&head=sam:renovate%2Fnpm-packages" in [c["path"] for c in called()], called()
 assert C.WAKE == {"sam/r": T + DAY + 15 * 60}, C.WAKE
 # Still queued hours on, the dashboard's job is found, and none other
 # starts beside it.
