@@ -462,3 +462,48 @@ fn forget_and_reconcile_clean_up_carried_records() {
     assert!(!carried_dir.join("sam_box-8").exists());
     assert!(carried_dir.join("sam_boxx-7").exists());
 }
+
+#[test]
+fn stale_drained_enrollment_with_open_closing_pr_releases_drain_capacity() {
+    let mut b = Box::new();
+    runnable(&mut b);
+
+    // #7 was previously handed on by the drain (enrolled with engine label, no
+    // job started yet), filling drain_jobs = 1, before PR #1494 opened.
+    let mut enrolling = issue(7, "sam", &["claude"]);
+    enrolling["state"] = json!("open");
+    fs::write(b.path("repos_sam_box_issues_7"), enrolling.to_string()).unwrap();
+    let worker = files::worker(&b.cfg.inbox.as_ref().unwrap().state, "sam_box", "7");
+    fs::create_dir_all(&worker).unwrap();
+    fs::write(worker.join(files::File::Drained), "sam/box#7\n").unwrap();
+
+    let pr = "https://github.com/sam/box/pull/1494";
+    open_closing_pr(&b, 7, pr);
+
+    // #8 is ready in the queue and should not be blocked by #7's stale slot.
+    let mut next_ready = issue(8, "sam", &["ready"]);
+    next_ready["state"] = json!("open");
+    next_ready["created_at"] = json!("2026-11-02T00:00:00Z");
+    next_ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    fs::write(b.path("repos_sam_box_issues_8"), next_ready.to_string()).unwrap();
+    b.pass()
+        .note_ready("sam/box", std::slice::from_ref(&next_ready))
+        .unwrap();
+
+    b.pass().drain().unwrap();
+
+    assert!(
+        !worker.exists(),
+        "stale drained enrollment for carried issue #7 should be cleared"
+    );
+    assert_eq!(
+        files::carried(&b.cfg.inbox.as_ref().unwrap().state, "sam_box", "7").as_deref(),
+        Some(pr)
+    );
+    assert!(
+        b.log()
+            .contains("POST repos/sam/box/issues/8/labels -f labels[]=claude"),
+        "releasing #7's stale drain slot should let #8 be handed on: {}",
+        b.log()
+    );
+}
