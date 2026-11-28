@@ -520,26 +520,6 @@ fn an_uncommitted_checkout_is_evaluated_as_it_is() {
     assert!(meta, "{b}");
 }
 
-/// Rustup consults the working directory's toolchain file. A caller must
-/// not choose the compiler of the source-pinned runner that judges it.
-#[test]
-fn the_runner_compiles_outside_the_callers_checkout() {
-    let g = Gate::new();
-    let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
-    // Keep the real compiler Gate::new selected, but reject invocation in
-    // the caller tree, where rustup could read its rust-toolchain.toml.
-    let compiler = read(&g.s.join("compiler/bin/rustc"));
-    crate::harness::executable(
-        &g.s.join("compiler/bin/rustc"),
-        &format!(
-            "[ ! -e flake.nix ] || {{ echo 'compiler ran in caller checkout' >&2; exit 1; }}\n{compiler}"
-        ),
-    );
-    let r = g.apart(&d);
-    assert_eq!(r.code, 0, "{}", r.out);
-    assert!(r.build().contains("-a.drv^*"), "{}", r.out);
-}
-
 /// Only Git's output terminator may be removed: trimming the caller path
 /// can silently select a different repository, for root and nested flakes.
 #[test]
@@ -573,8 +553,8 @@ fn checkout_path_whitespace_never_selects_a_sibling() {
     }
 }
 
-/// Self-hosted CI can expose rustup's proxy without a default toolchain.
-/// Provision the compiler with Nix instead of depending on that user state.
+/// The bootstrap delivers burrow-flake-check from the Nix store, never via
+/// compiler.nix or an ambient rustc/rustup proxy.
 #[test]
 fn a_rustup_proxy_with_no_default_is_not_used() {
     let g = Gate::new();
@@ -589,21 +569,17 @@ fn a_rustup_proxy_with_no_default_is_not_used() {
     assert!(r.build().contains("-a.drv^*"), "{}", r.out);
 }
 
-/// The bootstrap compiles the runner with rustc directly, so it must name the
-/// workspace's edition: Cargo and Clippy check the source under that one, and
-/// syntax only it accepts would otherwise break every gate before it starts.
+/// compiler.nix and the rustc bootstrap are gone; run.sh builds the workflow's
+/// pinned burrow-flake-check package with Nix.
 #[test]
-fn the_runner_compiles_under_the_workspaces_edition() {
-    let cargo = read(&crate::harness::repo_file("crates/Cargo.toml"));
-    let edition = cargo
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("edition = "))
-        .expect("crates/Cargo.toml names an edition")
-        .trim_matches('"');
+fn run_sh_delivers_burrow_flake_check_from_nix_without_compiler_nix() {
+    assert!(
+        !crate::harness::repo_file(".github/flake-check/compiler.nix").exists(),
+        "compiler.nix must be deleted"
+    );
     let run = read(&crate::harness::repo_file(".github/flake-check/run.sh"));
-    let named: Vec<_> = run
-        .split_whitespace()
-        .filter_map(|w| w.strip_prefix("--edition="))
-        .collect();
-    assert_eq!(named, [edition], "run.sh's rustc editions");
+    assert!(run.contains("#burrow-flake-check"), "{run}");
+    assert!(run.contains("--no-update-lock-file"), "{run}");
+    assert!(!run.contains("compiler.nix"), "{run}");
+    assert!(!run.contains("rustc"), "{run}");
 }

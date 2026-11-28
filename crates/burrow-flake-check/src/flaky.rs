@@ -137,13 +137,18 @@ pub fn build(flaky: Option<&Flaky>, checks: &[Check], nix: &mut dyn Nix) -> Resu
 /// One line of the report, appended: a report that can't be written is the
 /// gate's own error, since an unrecorded flake is one nobody fixes.
 fn report(path: &Path, test: &str, detail: Option<&str>) -> Result<()> {
-    let mut line = format!("{{\"test\":{}", quote(test));
-    if let Some(d) = detail {
-        let lines: Vec<&str> = d.lines().collect();
-        let tail = lines[lines.len().saturating_sub(DETAIL_LINES)..].join("\n");
-        line.push_str(&format!(",\"detail\":{}", quote(&tail)));
+    #[derive(serde::Serialize)]
+    struct Report<'a> {
+        test: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     }
-    line.push_str("}\n");
+    let detail = detail.map(|d| {
+        let lines: Vec<&str> = d.lines().collect();
+        lines[lines.len().saturating_sub(DETAIL_LINES)..].join("\n")
+    });
+    let mut line = serde_json::to_string(&Report { test, detail })?;
+    line.push('\n');
     fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -259,7 +264,7 @@ mod tests {
             line,
             format!(
                 "{{\"test\":\"browser\",\"detail\":{}}}\n",
-                quote(&format!("building {}\nboom", target("browser")))
+                serde_json::to_string(&format!("building {}\nboom", target("browser"))).unwrap()
             )
         );
     }

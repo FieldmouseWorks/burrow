@@ -45,10 +45,7 @@ case $uses in
     git init -q "$tmp/workflow-repo"
     git -C "$tmp/workflow-repo" fetch -q --depth=1 "https://github.com/$repo" "${uses##*@}"
     git -C "$tmp/workflow-repo" show "FETCH_HEAD:$path" > "$workflow"
-    git -C "$tmp/workflow-repo" checkout -q FETCH_HEAD -- .github/flake-check 2> /dev/null || true
-    git -C "$tmp/workflow-repo" checkout -q FETCH_HEAD -- crates/burrow-flake-check 2> /dev/null || true
-    git -C "$tmp/workflow-repo" checkout -q FETCH_HEAD -- flake.lock 2> /dev/null || true
-    git -C "$tmp/workflow-repo" checkout -q FETCH_HEAD -- crates/rust-toolchain.toml 2> /dev/null || true
+    git -C "$tmp/workflow-repo" checkout -q --detach FETCH_HEAD
     tools=$tmp/workflow-repo/.github/flake-check ;;
   *) echo "flake-gate: can't fetch $uses" >&2; exit 1 ;;
 esac

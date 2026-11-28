@@ -1,7 +1,5 @@
-//! The shared gate and negative runner, and gate-reuse's lookup. No Rust
-//! dependencies: callers compile these pinned sources directly with rustc,
-//! without a registry or cargo build.
-//! jq is the JSON codec (already required by the workflow), not the scheduler.
+//! The shared gate and negative runner, and gate-reuse's lookup. Delivered
+//! from the Nix store at the workflow's pinned commit.
 mod build;
 mod builds;
 mod flaky;
@@ -187,38 +185,24 @@ fn show(o: &Output) -> Result<()> {
 fn s(p: &Path) -> &str {
     p.to_str().expect("UTF-8 path")
 }
-fn jq(input: &[u8], filter: &str) -> Result<String> {
-    let mut child = cmd("jq", &["-cr", filter])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().unwrap().write_all(input)?;
-    let o = child.wait_with_output()?;
-    if !o.status.success() {
-        return Err(err(String::from_utf8_lossy(&o.stderr).into_owned()));
-    }
-    text_output(o.stdout)
-}
-fn quote(v: &str) -> String {
-    // JSON is a Nix string too, after escaping interpolation's dollar.
-    let mut out = String::from("\"");
-    for c in v.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// Extracts the derivation map from `nix derivation show`'s JSON output,
+/// supporting both the newer `{ derivations: { ... } }` envelope and the older
+/// flat `{ "<drv>": { ... } }` form.
+fn derivations_map(json: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let root: serde_json::Value = serde_json::from_slice(json)?;
+    let map = root
+        .get("derivations")
+        .filter(|v| !v.is_null() && v.as_bool() != Some(false))
+        .unwrap_or(&root)
+        .as_object()
+        .ok_or_else(|| err("derivations is not a JSON object"))?;
+    Ok(map.clone())
 }
 fn nix_string(v: &str) -> String {
-    quote(v).replace('$', "\\$")
+    // JSON is a Nix string too, after escaping interpolation's dollar.
+    serde_json::to_string(v)
+        .expect("string serializes to JSON")
+        .replace('$', "\\$")
 }
 /// A build that prints nothing for this long has stopped making progress:
 /// nix kills it (its `max-silent-time`) and the gate fails, rather than hold

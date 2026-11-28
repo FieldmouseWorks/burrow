@@ -89,6 +89,36 @@ pub fn workspace_bin(name: &str) -> PathBuf {
         })
 }
 
+/// Bash snippet for a `nix` stub that intercepts `.github/flake-check/run.sh`'s
+/// `nix build ... "$repo#burrow-flake-check"` call and links the workspace's
+/// compiled `burrow-flake-check` package, so workflow tests run the real runner
+/// without rebuilding the repo flake inside the test sandbox.
+pub fn runner_build_hook(s: &Scratch) -> String {
+    let runner = s.join("runner");
+    let bin = runner.join("bin");
+    if !bin.join("burrow-flake-check").exists() {
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(
+            workspace_bin("burrow-flake-check"),
+            bin.join("burrow-flake-check"),
+        )
+        .unwrap();
+    }
+    let repo = repo_file(".").canonicalize().unwrap();
+    format!(
+        r#"if [ "$1" = build ] && [ "$#" = 7 ] && [ "$2" = --extra-experimental-features ] && [ "$3" = 'nix-command flakes' ] \
+   && [ "$4" = --no-update-lock-file ] && [ "$5" = --out-link ] \
+   && [ "$7" = '{repo}#burrow-flake-check' ]; then
+  [ -d "${{6%/*}}" ] || exit 90
+  ln -s '{runner}' "$6"
+  exit 0
+fi
+"#,
+        repo = repo.display(),
+        runner = runner.display(),
+    )
+}
+
 /// What a step did.
 pub struct Ran {
     pub code: i32,

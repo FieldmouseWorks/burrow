@@ -1,8 +1,7 @@
-//! The lookup's step, with the real runner (compiled by run.sh as on a
+//! The lookup's step, with the real runner (delivered by run.sh as on a
 //! runner) asking, through the machine's curl, a lookup that keeps the
 //! contract: a server of the test's own, on this machine.
 
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -13,10 +12,10 @@ use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
 use super::{CONTRACT, RUN, identity_env, wf, workflow_repo};
-use crate::harness::{Scratch, repo_file, script, step, which};
+use crate::harness::{Scratch, repo_file, script, step};
 
-/// The runner's machine, with a compiler that stands in for compiler.nix's
-/// (the gate's tests do the same), so run.sh compiles the real runner.
+/// The runner's machine, with `nix build ...#burrow-flake-check` linking the
+/// workspace's runner binary so run.sh invokes the real runner.
 struct Lookup {
     s: Scratch,
 }
@@ -158,31 +157,8 @@ fn unreachable() -> String {
 impl Lookup {
     fn new() -> Lookup {
         let s = Scratch::default();
-        let sysroot = String::from_utf8(
-            std::process::Command::new("rustc")
-                .args(["--print", "sysroot"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        fs::create_dir_all(s.join("compiler/bin")).unwrap();
-        crate::harness::executable(
-            &s.join("compiler/bin/rustc"),
-            &format!("exec {}/bin/rustc \"$@\"\n", sysroot.trim()),
-        );
-        std::os::unix::fs::symlink(which("cc"), s.join("compiler/bin/cc")).unwrap();
-        let expression = repo_file(".github/flake-check/compiler.nix")
-            .canonicalize()
-            .unwrap();
-        s.stub(
-            "nix-build",
-            &format!(
-                "[ \"$3\" = '{}' ] || exit 90\nprintf '%s\\n' '{}'\n",
-                expression.display(),
-                s.join("compiler").display()
-            ),
-        );
+        let hook = crate::harness::runner_build_hook(&s);
+        s.stub("nix", &format!("{hook}exit 90\n"));
         Lookup { s }
     }
 

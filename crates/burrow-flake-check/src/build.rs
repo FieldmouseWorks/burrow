@@ -19,6 +19,68 @@ fn in_slot(args: &[String]) -> Result<bool> {
 pub fn slot(args: &[&str]) -> Result<bool> {
     in_slot(&args.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>())
 }
+fn vm_derivations(json: &[u8]) -> Result<Vec<String>> {
+    let map = derivations_map(json)?;
+    let mut names = Vec::new();
+    for (key, val) in &map {
+        let env = val
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| err("a derivation with no env"))?;
+        let mut features: Vec<String> = Vec::new();
+        if let Some(v) = env.get("requiredSystemFeatures")
+            && !v.is_null()
+        {
+            let text = v
+                .as_str()
+                .ok_or_else(|| err("requiredSystemFeatures in env is not a string"))?;
+            features.extend(
+                text.split([' ', '\t', '\n', '\r'])
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(v) = val
+            .get("structuredAttrs")
+            .and_then(|s| s.get("requiredSystemFeatures"))
+            && !v.is_null()
+        {
+            let arr = v
+                .as_array()
+                .ok_or_else(|| err("structuredAttrs.requiredSystemFeatures is not an array"))?;
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    features.push(s.to_owned());
+                }
+            }
+        }
+        if let Some(v) = env.get("__json")
+            && !v.is_null()
+        {
+            let raw = v
+                .as_str()
+                .ok_or_else(|| err("env.__json is not a string"))?;
+            let parsed: serde_json::Value = serde_json::from_str(raw)?;
+            if let Some(arr) = parsed
+                .get("requiredSystemFeatures")
+                .filter(|v| !v.is_null())
+            {
+                let arr = arr
+                    .as_array()
+                    .ok_or_else(|| err("env.__json.requiredSystemFeatures is not an array"))?;
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        features.push(s.to_owned());
+                    }
+                }
+            }
+        }
+        if features.iter().any(|f| f == "kvm" || f == "nixos-test") {
+            names.push(key.rsplit('/').next().unwrap_or(key).to_owned());
+        }
+    }
+    Ok(names)
+}
 fn unbuilt_vms(targets: &[String], roots: &Path) -> Result<Vec<String>> {
     let mut c = cmd("nix", &["derivation", "show", "-r"]);
     c.args(
@@ -27,21 +89,13 @@ fn unbuilt_vms(targets: &[String], roots: &Path) -> Result<Vec<String>> {
             .map(|t| format!("{}^*", t.trim_end_matches("^*"))),
     );
     let json = checked(c)?;
-    let names = jq(
-        &json,
-        r#"(.derivations // .) | to_entries[]
-      | (.value.env | if type != "object" then error("a derivation with no env") else . end) as $env
-      | select(($env.requiredSystemFeatures // "" | [splits("[ \t\n\r]+")])
-        + (.value.structuredAttrs.requiredSystemFeatures // [])
-        + ($env.__json // "{}" | fromjson | .requiredSystemFeatures // [])
-        | any(. == "kvm" or . == "nixos-test")) | .key | sub(".*/"; "")"#,
-    )?;
+    let names = vm_derivations(&json)?;
     let store = Path::new(&targets[0])
         .parent()
         .ok_or_else(|| err("no derivation directory"))?;
     let mut pending = Vec::new();
     let mut i = 0;
-    for name in names.lines() {
+    for name in &names {
         let outs = output(cmd("nix-store", &["-q", "--outputs", s(&store.join(name))]))?;
         let paths = String::from_utf8(outs.stdout)?;
         let mut missing = !outs.status.success() || paths.trim().is_empty();
@@ -263,5 +317,27 @@ mod tests {
         let custom = "this derivation will be built:\n  /tmp/alt-store/aaa-cold.drv\nthis path will be fetched:\n  /tmp/alt-store/bbb-cached\n";
         assert_eq!(super::cold_drvs(custom), ["/tmp/alt-store/aaa-cold.drv"]);
         assert_eq!(super::cold_names(custom), ["cold"]);
+    }
+
+    #[test]
+    fn vm_derivations_reads_env_structured_attrs_and_json_in_both_formats() {
+        let newer = br#"{
+            "version": 4,
+            "derivations": {
+                "aaa-env.drv": {"env": {"requiredSystemFeatures": "big-parallel\tkvm"}},
+                "bbb-struct.drv": {"env": {}, "structuredAttrs": {"requiredSystemFeatures": ["nixos-test"]}},
+                "ccc-plain.drv": {"env": {"requiredSystemFeatures": "big-parallel"}}
+            }
+        }"#;
+        assert_eq!(
+            super::vm_derivations(newer).unwrap(),
+            ["aaa-env.drv", "bbb-struct.drv"]
+        );
+        let older = br#"{
+            "/nix/store/ddd-json.drv": {"env": {"__json": "{\"requiredSystemFeatures\":[\"kvm\"]}"}},
+            "/nix/store/eee-plain.drv": {"env": {}}
+        }"#;
+        assert_eq!(super::vm_derivations(older).unwrap(), ["ddd-json.drv"]);
+        assert!(super::vm_derivations(br#"{"aaa.drv": {}}"#).is_err());
     }
 }

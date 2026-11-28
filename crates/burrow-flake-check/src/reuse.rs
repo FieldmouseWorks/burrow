@@ -212,29 +212,44 @@ fn object_id(v: &str) -> bool {
 /// The request's body: one line of JSON, its keys sorted, so its digest is
 /// the request's.
 fn request(repository: &str, commit: &str, tree: &str, gate: &[u8]) -> Result<String> {
-    let filter = format!(
-        "if type != \"object\" then error(\"the gate identity isn't an object\") else . end \
-         | {{contract: {}, repository: {}, commit: {}, tree: {}, gate: .}}",
-        quote(CONTRACT),
-        quote(repository),
-        quote(commit),
-        quote(tree)
-    );
-    let mut child = cmd("jq", &["-cS", &filter])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().unwrap().write_all(gate)?;
-    let o = child.wait_with_output()?;
-    if !o.status.success() {
-        return Err(err(String::from_utf8_lossy(&o.stderr).into_owned()));
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum Sorted<'a> {
+        Value(&'a serde_json::Value),
+        Array(Vec<Sorted<'a>>),
+        Object(std::collections::BTreeMap<&'a str, Sorted<'a>>),
     }
-    let body = text_output(o.stdout)?;
-    if body.lines().count() != 1 {
-        return Err(err("the gate identity isn't one JSON value"));
+    impl<'a> Sorted<'a> {
+        fn new(v: &'a serde_json::Value) -> Self {
+            match v {
+                serde_json::Value::Array(a) => Self::Array(a.iter().map(Self::new).collect()),
+                serde_json::Value::Object(m) => {
+                    Self::Object(m.iter().map(|(k, v)| (k.as_str(), Self::new(v))).collect())
+                }
+                other => Self::Value(other),
+            }
+        }
     }
-    Ok(body)
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        commit: &'a str,
+        contract: &'a str,
+        gate: Sorted<'a>,
+        repository: &'a str,
+        tree: &'a str,
+    }
+    let gate_val: serde_json::Value = serde_json::from_slice(gate)
+        .map_err(|e| err(format!("the gate identity isn't one JSON value: {e}")))?;
+    if !gate_val.is_object() {
+        return Err(err("the gate identity isn't an object"));
+    }
+    Ok(serde_json::to_string(&Request {
+        commit,
+        contract: CONTRACT,
+        gate: Sorted::new(&gate_val),
+        repository,
+        tree,
+    })?)
 }
 
 fn sha256(bytes: &[u8]) -> Result<String> {
@@ -281,10 +296,13 @@ fn token(work: &Path, query: &str) -> Result<String> {
         ],
     ))
     .map_err(|e| err(format!("no OIDC token for the request: {e}")))?;
-    let token = jq(
-        &reply,
-        ".value | if type == \"string\" then . else error(\"no token\") end",
-    )?;
+    #[derive(serde::Deserialize)]
+    struct TokenReply {
+        value: String,
+    }
+    let token = serde_json::from_slice::<TokenReply>(&reply)
+        .map_err(|_| err("no token"))?
+        .value;
     if token.is_empty() || token.contains(char::is_whitespace) {
         return Err(err("the OIDC token isn't one"));
     }
@@ -296,40 +314,25 @@ fn token(work: &Path, query: &str) -> Result<String> {
 /// under this contract, answering this request, whose `evidence` is `hit`
 /// and whose `run` is one of the repository's runs, is a hit.
 pub fn answer(query: &str, server: &str, repository: &str, reply: &[u8]) -> Answer {
-    let filter = r#"if length != 1 then error("not one JSON value") else .[0] end
-        | if type != "object" then error("not a JSON object") else . end
-        | [(.contract, .query, .evidence, .run)
-           | if type == "string" then . elif . == null then "" else error("a field that isn't a string") end]
-        | @tsv"#;
-    let mut child = match cmd("jq", &["-sr", filter])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return Answer::Unknown(format!("can't read the answer: {e}")),
-    };
-    let fed = child.stdin.take().unwrap().write_all(reply);
-    let o = match (fed, child.wait_with_output()) {
-        (Ok(()), Ok(o)) => o,
-        (Err(e), _) | (_, Err(e)) => return Answer::Unknown(format!("can't read the answer: {e}")),
-    };
-    let line = String::from_utf8_lossy(&o.stdout);
-    let fields: Vec<&str> = line
-        .strip_suffix('\n')
-        .unwrap_or(&line)
-        .split('\t')
-        .collect();
-    let [contract, answered, evidence, run] = fields[..] else {
-        return Answer::Unknown(format!(
-            "its answer isn't one: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ));
-    };
-    if !o.status.success() {
-        return Answer::Unknown("its answer isn't one".into());
+    #[derive(serde::Deserialize)]
+    struct LookupAnswer {
+        #[serde(default)]
+        contract: Option<String>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        evidence: Option<String>,
+        #[serde(default)]
+        run: Option<String>,
     }
+    let parsed: LookupAnswer = match serde_json::from_slice(reply) {
+        Ok(v) => v,
+        Err(e) => return Answer::Unknown(format!("its answer isn't one: {e}")),
+    };
+    let contract = parsed.contract.as_deref().unwrap_or("");
+    let answered = parsed.query.as_deref().unwrap_or("");
+    let evidence = parsed.evidence.as_deref().unwrap_or("");
+    let run = parsed.run.as_deref().unwrap_or("");
     if contract != CONTRACT {
         return Answer::Unknown(format!("it answers under {contract:?}, not {CONTRACT}"));
     }
