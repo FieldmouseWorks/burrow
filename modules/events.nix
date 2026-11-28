@@ -396,7 +396,10 @@ in
       # switch only restarts the service.
       stopIfChanged = lib.mkIf hooked false;
       requires = lib.optional hooked "${socket}.socket";
-      after = [ "network.target" ] ++ lib.optional hooked "${socket}.socket";
+      # burrow-events starts every handler's pass via polkit as soon as it
+      # starts; ordering after polkit avoids boot-time D-Bus timeouts under load.
+      wants = [ "polkit.service" ];
+      after = [ "network.target" "polkit.service" ] ++ lib.optional hooked "${socket}.socket";
       wantedBy = [ "multi-user.target" ];
       path = [ config.systemd.package ];
       environment.EVENTS_CONFIG = "${configFile}";
