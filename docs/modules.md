@@ -271,9 +271,10 @@ see [README.md](../README.md).
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no agent:
-  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `why OWNER/REPO#N`, `deployed`,
-  `oom [SINCE]`, one a line, above any `---` rule (a signature under it is
-  left be). No shell, journals only of the units on its allowlist, every
+  `memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `queue`,
+  `why OWNER/REPO#N`, `deployed`, `contains REPO COMMIT`,
+  `hotspots OWNER/REPO [SINCE]`, `usage [SINCE] [--totals]`, `oom [SINCE]`, one
+  a line, above any `---` rule (a signature under it is left be). No shell, journals only of the units on its allowlist, every
   answer through a secret scrubber before it's posted, and only `authors` get
   answers. `burrow-probe ask QUESTION` answers one on the box itself.
 - **`dashboard`** (`burrow.dashboard`): The machine's own web app, for your

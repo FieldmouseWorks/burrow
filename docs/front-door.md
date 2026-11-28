@@ -65,6 +65,11 @@ own, say), in seconds and without starting a Claude.
   - `contains REPO COMMIT`: whether a commit is an ancestor of the running
     input revision, using its repository identity and local history; unavailable
     or ambiguous history is reported as unknown
+  - `hotspots OWNER/REPO [SINCE]`: top 30 non-test code files on the
+    repository's default branch ranked by commits touching the file since
+    `SINCE` (`-60d` by default, up to `-366d`) times its current non-test line
+    count, using `burrow-house`'s file classification and line counter. Read-only
+    and on demand only, from local git history.
   - `usage [SINCE] [--totals]`: engine turns, tokens and cost; defaults to
     `-5h`. It leads with a table of totals by engine, by engine and role, by
     engine and project (the job's checkout) and by all three. The leading

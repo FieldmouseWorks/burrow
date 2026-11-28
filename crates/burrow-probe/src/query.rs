@@ -44,6 +44,12 @@ pub enum Query {
         repo: String,
         commit: String,
     },
+    /// Non-test code files on the repo's default branch ranked by commits
+    /// touching them since a time times their current non-test line count.
+    Hotspots {
+        repo: String,
+        since: When,
+    },
     /// The kernel's and systemd-oomd's kills since a time (a day back
     /// unless one is given).
     Oom {
@@ -52,10 +58,16 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | queue | why OWNER/REPO#N | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | queue | why OWNER/REPO#N | deployed | contains REPO COMMIT | hotspots OWNER/REPO [SINCE] | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
-/// The longest a time can reach back.
+/// The longest a relative time can reach back for journal/system questions.
 const MAX_BACK: i64 = 31 * 24 * 3600;
+
+/// Default history window for `hotspots` (60 days).
+const HOTSPOTS_DEFAULT_SINCE: i64 = 60 * 86400;
+
+/// Longest relative history window for `hotspots` (366 days).
+const HOTSPOTS_MAX_BACK: i64 = 366 * 86400;
 
 /// A systemd unit's name: letters, digits and `:_.@-`, `\xNN` escapes (what
 /// systemd-escape writes), a known suffix, and no glob.
@@ -121,6 +133,10 @@ pub enum When {
 
 impl When {
     pub fn parse(word: &str) -> Result<When, String> {
+        Self::parse_bounded(word, MAX_BACK)
+    }
+
+    pub fn parse_bounded(word: &str, max_back: i64) -> Result<When, String> {
         let bad = || format!("{word:?} isn't a time ({VOCABULARY})");
         if word == "now" {
             return Ok(When::Now);
@@ -141,10 +157,10 @@ impl When {
                 _ => return Err(bad()),
             };
             return match n.checked_mul(per) {
-                Some(secs) if secs <= MAX_BACK => Ok(When::Ago(secs)),
+                Some(secs) if secs <= max_back => Ok(When::Ago(secs)),
                 _ => Err(format!(
                     "{word:?} reaches back past {} days",
-                    MAX_BACK / 86400
+                    max_back / 86400
                 )),
             };
         }
@@ -239,6 +255,19 @@ impl Query {
                     "contains expects OWNER/REPO and a 7–40 digit commit ({VOCABULARY})"
                 )),
             },
+            "hotspots" => match args {
+                [repo] if repository(repo) => Ok(Query::Hotspots {
+                    repo: repo.to_string(),
+                    since: When::Ago(HOTSPOTS_DEFAULT_SINCE),
+                }),
+                [repo, since] if repository(repo) => Ok(Query::Hotspots {
+                    repo: repo.to_string(),
+                    since: When::parse_bounded(since, HOTSPOTS_MAX_BACK)?,
+                }),
+                _ => Err(format!(
+                    "`hotspots` takes OWNER/REPO and an optional time ({VOCABULARY})"
+                )),
+            },
             "usage" => {
                 let totals = args.iter().filter(|a| **a == "--totals").count();
                 let times: Vec<&&str> = args.iter().filter(|a| **a != "--totals").collect();
@@ -294,6 +323,7 @@ impl fmt::Display for Query {
             Query::Queue => f.write_str("queue"),
             Query::Why { issue } => write!(f, "why {issue}"),
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
+            Query::Hotspots { repo, since } => write!(f, "hotspots {repo} {}", show(*since)),
             Query::Deployed => f.write_str("deployed"),
             Query::Oom { since } => write!(f, "oom {}", show(*since)),
             Query::Journal { unit, since, until } => {
@@ -377,6 +407,27 @@ mod tests {
                 until: When::Now,
             })
         );
+        assert_eq!(
+            Query::parse("hotspots sam/tool"),
+            Ok(Query::Hotspots {
+                repo: "sam/tool".into(),
+                since: When::Ago(60 * 86400),
+            })
+        );
+        assert_eq!(
+            Query::parse("hotspots sam/tool -90d"),
+            Ok(Query::Hotspots {
+                repo: "sam/tool".into(),
+                since: When::Ago(90 * 86400),
+            })
+        );
+        assert_eq!(
+            Query::parse("hotspots sam/tool 2026-09-01"),
+            Ok(Query::Hotspots {
+                repo: "sam/tool".into(),
+                since: When::parse("2026-09-01").unwrap(),
+            })
+        );
     }
 
     #[test]
@@ -414,6 +465,12 @@ mod tests {
             "why --json#7",
             "why sam/box#-7",
             "why j1",
+            "hotspots",
+            "hotspots ../bad",
+            "hotspots sam/tool -400d",
+            "hotspots sam/tool -30d extra",
+            "hotspots sam/tool --all",
+            "hotspots --help",
         ] {
             assert!(Query::parse(line).is_err(), "{line:?} parsed");
         }
@@ -470,6 +527,8 @@ mod tests {
             "usage -7d --totals",
             "usage -5h",
             "why sam/box#7",
+            "hotspots sam/tool -60d",
+            "hotspots sam/tool -90d",
             "journal remi-update.service -2h now",
             "journal a.timer 2026-11-01T13:05:00Z now",
         ] {

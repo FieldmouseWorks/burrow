@@ -6,13 +6,14 @@
 
 mod contains;
 mod crashes;
+mod hotspots;
 mod memory;
 mod system;
 #[cfg(test)]
 mod tests;
 pub(crate) mod usage;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -48,6 +49,14 @@ pub struct Ran {
     pub stderr: String,
 }
 
+/// A command run to its end, keeping raw stdout bytes.
+#[derive(Debug, Default)]
+pub struct RanBytes {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
 /// Runs a command: the real one, or a test's stand-in.
 pub trait Run {
     /// `program args`, with the user manager's XDG_RUNTIME_DIR when `user`.
@@ -55,6 +64,23 @@ pub trait Run {
     /// Read local commit objects with no inherited Git overrides.
     fn history(&self, program: &Path, args: &[&str], uid: u32) -> Result<Ran, String> {
         self.run(program, args, false, uid)
+    }
+    /// Read local git objects with stdin and raw stdout bytes, with no
+    /// inherited Git overrides.
+    fn history_bytes(
+        &self,
+        program: &Path,
+        args: &[&str],
+        stdin: &[u8],
+        uid: u32,
+    ) -> Result<RanBytes, String> {
+        let _ = stdin;
+        let r = self.history(program, args, uid)?;
+        Ok(RanBytes {
+            code: r.code,
+            stdout: r.stdout.into_bytes(),
+            stderr: r.stderr,
+        })
     }
 }
 
@@ -68,6 +94,15 @@ impl Run for Commands {
     fn history(&self, program: &Path, args: &[&str], uid: u32) -> Result<Ran, String> {
         command(program, args, false, uid, true)
     }
+    fn history_bytes(
+        &self,
+        program: &Path,
+        args: &[&str],
+        stdin: &[u8],
+        uid: u32,
+    ) -> Result<RanBytes, String> {
+        command_bytes(program, args, false, uid, true, Some(stdin))
+    }
 }
 fn command(
     program: &Path,
@@ -76,9 +111,29 @@ fn command(
     uid: u32,
     history: bool,
 ) -> Result<Ran, String> {
+    let ran = command_bytes(program, args, user, uid, history, None)?;
+    Ok(Ran {
+        code: ran.code,
+        stdout: String::from_utf8_lossy(&ran.stdout).into_owned(),
+        stderr: ran.stderr,
+    })
+}
+
+fn command_bytes(
+    program: &Path,
+    args: &[&str],
+    user: bool,
+    uid: u32,
+    history: bool,
+    stdin: Option<&[u8]>,
+) -> Result<RanBytes, String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("SYSTEMD_COLORS", "0")
@@ -99,27 +154,35 @@ fn command(
     }
     let name = program.display();
     let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
-    let pipe = |p: Option<Box<dyn Read + Send>>| {
+    let writer = stdin.map(|input| {
+        let data = input.to_vec();
+        let mut pipe = child.stdin.take();
+        thread::spawn(move || {
+            if let Some(mut p) = pipe.take() {
+                let _ = p.write_all(&data);
+            }
+        })
+    });
+    let out = {
+        let mut p = child.stdout.take();
         thread::spawn(move || {
             let mut s = Vec::new();
-            if let Some(mut p) = p {
+            if let Some(ref mut p) = p {
+                let _ = p.read_to_end(&mut s);
+            }
+            s
+        })
+    };
+    let err = {
+        let mut p = child.stderr.take();
+        thread::spawn(move || {
+            let mut s = Vec::new();
+            if let Some(ref mut p) = p {
                 let _ = p.read_to_end(&mut s);
             }
             String::from_utf8_lossy(&s).into_owned()
         })
     };
-    let out = pipe(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = pipe(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -130,6 +193,9 @@ fn command(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(w) = writer {
+                    let _ = w.join();
+                }
                 return Err(format!(
                     "{name} took over {}s, and was stopped",
                     COMMAND_TIMEOUT.as_secs()
@@ -138,7 +204,10 @@ fn command(
             Err(e) => return Err(format!("{name}: {e}")),
         }
     };
-    Ok(Ran {
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    Ok(RanBytes {
         code: status.code(),
         stdout: out.join().unwrap_or_default(),
         stderr: err.join().unwrap_or_default(),
@@ -158,6 +227,7 @@ impl Machine<'_> {
             Query::Queue => system::queue(self),
             Query::Why { issue } => system::why(self, issue),
             Query::Contains { repo, commit } => contains::answer(self, repo, commit),
+            Query::Hotspots { repo, since } => hotspots::answer(self, repo, since.at(self.now)),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
             Query::Crashes { exe, since } => crashes::answer(self, exe, since.at(self.now)),
