@@ -520,19 +520,7 @@ fn no_actions_cache_or_kept_builds_in_workflows() {
     }
 }
 
-/// When `soft/builds` passed so Nix configured `fallback = true`, a mid-run
-/// substituter failure recorded in the job's log fails `soft/builds-fallback`
-/// and runs `degraded/builds-fallback`.
-#[test]
-fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
-    let wf = wf();
-    let check = &wf["jobs"]["check"];
-    let fallback = step(check, "builds-fallback");
-    assert_eq!(fallback["continue-on-error"], true);
-    assert_eq!(fallback["name"], "soft/builds-fallback");
-
-    let s = Scratch::default();
-    let log = s.join("flake.log");
+fn assert_builds_fallback_passes(s: &Scratch, fallback: &Value, log: &std::path::Path) {
     for (case, line) in [
         (
             "clean-build",
@@ -567,7 +555,7 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
             ),
         ),
     ] {
-        write(&log, &line);
+        write(log, &line);
         let ok = s.bash(
             script(fallback),
             s.path(),
@@ -575,7 +563,9 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
         );
         assert_eq!(ok.code, 0, "{case} failed builds-fallback: {}", ok.said());
     }
+}
 
+fn assert_builds_fallback_fails(s: &Scratch, fallback: &Value, log: &std::path::Path) {
     for (case, line) in [
         (
             "disabled-cache",
@@ -614,7 +604,7 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
             ),
         ),
     ] {
-        write(&log, &line);
+        write(log, &line);
         let failed = s.bash(
             script(fallback),
             s.path(),
@@ -625,7 +615,7 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
 
     // Trailing slash on BURROW_BUILDS_URL still matches Nix's normalized URL.
     write(
-        &log,
+        log,
         &format!("disabling binary cache '{URL}' for 60 seconds\n"),
     );
     let trailing = s.bash(
@@ -640,6 +630,23 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
         trailing.code, 0,
         "trailing-slash BUILDS passed builds-fallback"
     );
+}
+
+/// When `soft/builds` passed so Nix configured `fallback = true`, a mid-run
+/// substituter failure recorded in the job's log fails `soft/builds-fallback`
+/// and runs `degraded/builds-fallback`.
+#[test]
+fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
+    let wf = wf();
+    let check = &wf["jobs"]["check"];
+    let fallback = step(check, "builds-fallback");
+    assert_eq!(fallback["continue-on-error"], true);
+    assert_eq!(fallback["name"], "soft/builds-fallback");
+
+    let s = Scratch::default();
+    let log = s.join("flake.log");
+    assert_builds_fallback_passes(&s, fallback, &log);
+    assert_builds_fallback_fails(&s, fallback, &log);
 
     // Runs in check, docs, and negative only when soft/builds succeeded and
     // the build step ran; degraded/builds-fallback runs on failure.

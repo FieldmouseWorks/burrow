@@ -269,27 +269,16 @@ fn make_writable(p: &Path) {
     }
 }
 
-/// Both a leg (`check`) and the negative (`negative`) substitute signed
-/// outputs from the HTTP build store using their job's `install-nix-action`
-/// `extra_nix_config`, with no restore step: the pre-populated derivation's
-/// builder exits 42 if ever executed, so passing proves substitution.
-#[test]
-fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
-    let rs = RealStore::new();
-    rs.stub_compiler();
+/// A leg (`check`'s gate step) substitutes `from-store` from the HTTP store
+/// and builds `cold` locally, with no restore step.
+fn assert_leg_substitutes_from_store(
+    rs: &RealStore,
+    wf: &yaml_serde::Value,
+    url: &str,
+    cached_expr: &str,
+    cached_out: &str,
+) {
     let system = &rs.system;
-
-    // A derivation whose builder fails if executed: only substitution from
-    // the signed build store can realise it.
-    let cached_expr = format!(
-        r#"derivation {{ name = "from-store"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "exit 42" ]; }}"#
-    );
-    let cached_drv = rs.instantiate(&cached_expr);
-    let cached_out = rs.populate_signed(&cached_drv, "substituted from build store\n");
-    let url = burrow_test::build_store(&rs.cache);
-
-    // 1. A leg (`check`'s gate step) substitutes `from-store` from the HTTP
-    //    store and builds `cold` locally, with no restore step.
     let leg_flake = rs.s.join("leg-flake");
     fs::create_dir_all(&leg_flake).unwrap();
     write(
@@ -314,9 +303,8 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     let leg_cfg = format!(
         "{}\n{}",
         rs.base_config(&rs.s.join("leg-state"), &rs.s.join("leg-log")),
-        extra_nix_config("check", &url, &rs.pk, "success")
+        extra_nix_config("check", url, &rs.pk, "success")
     );
-    let wf = workflow(".github/workflows/flake-check.yml");
     let leg_temp = rs.s.mkdtemp();
     let ran = rs.s.bash(
         script(step(&wf["jobs"]["check"], "gate")),
@@ -337,14 +325,16 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
     );
     assert_eq!(ran.code, 0, "leg failed to substitute:\n{}", ran.said());
     assert!(
-        Path::new(&cached_out).is_file(),
+        Path::new(cached_out).is_file(),
         "cached output wasn't substituted into leg store:\n{}",
         ran.said()
     );
+}
 
-    // 2. The negative job substitutes `from-store` as a check dependency
-    //    from the HTTP build store, with no restore step, while failing the
-    //    PR's new test on the base's code.
+/// Prepare a base+PR checkout where `checks.<system>.t` depends on
+/// `cached_expr` and fails on the base's code when run with the PR's test.
+fn prepare_negative_repo(rs: &RealStore, cached_expr: &str) -> (PathBuf, String) {
+    let system = &rs.system;
     let origin = rs.s.join("neg-origin");
     fs::create_dir_all(&origin).unwrap();
     write(
@@ -398,12 +388,25 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         ],
     );
     rs.s.git(&co, &["checkout", "-q", "--detach", &head]);
+    (co, head)
+}
 
+/// The negative job substitutes `from-store` as a check dependency from the
+/// HTTP build store, with no restore step, while failing the PR's new test on
+/// the base's code.
+fn assert_negative_substitutes_from_store(
+    rs: &RealStore,
+    wf: &yaml_serde::Value,
+    url: &str,
+    cached_expr: &str,
+    cached_out: &str,
+) {
+    let (co, head) = prepare_negative_repo(rs, cached_expr);
     rs.clear_store();
     let neg_cfg = format!(
         "{}\n{}",
         rs.base_config(&rs.s.join("neg-state"), &rs.s.join("neg-log")),
-        extra_nix_config("negative", &url, &rs.pk, "success")
+        extra_nix_config("negative", url, &rs.pk, "success")
     );
     let neg_temp = rs.s.mkdtemp();
     let neg_job = &wf["jobs"]["negative"];
@@ -449,10 +452,34 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
         serde_json::from_str(&read(&neg_temp.join("negative.json"))).unwrap();
     assert_eq!(found["result"], "fail", "{found}");
     assert!(
-        Path::new(&cached_out).is_file(),
+        Path::new(cached_out).is_file(),
         "dep wasn't substituted into negative store:\n{}",
         neg.said()
     );
+}
+
+/// Both a leg (`check`) and the negative (`negative`) substitute signed
+/// outputs from the HTTP build store using their job's `install-nix-action`
+/// `extra_nix_config`, with no restore step: the pre-populated derivation's
+/// builder exits 42 if ever executed, so passing proves substitution.
+#[test]
+fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
+    let rs = RealStore::new();
+    rs.stub_compiler();
+    let system = &rs.system;
+
+    // A derivation whose builder fails if executed: only substitution from
+    // the signed build store can realise it.
+    let cached_expr = format!(
+        r#"derivation {{ name = "from-store"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "exit 42" ]; }}"#
+    );
+    let cached_drv = rs.instantiate(&cached_expr);
+    let cached_out = rs.populate_signed(&cached_drv, "substituted from build store\n");
+    let url = burrow_test::build_store(&rs.cache);
+    let wf = workflow(".github/workflows/flake-check.yml");
+
+    assert_leg_substitutes_from_store(&rs, &wf, &url, &cached_expr, &cached_out);
+    assert_negative_substitutes_from_store(&rs, &wf, &url, &cached_expr, &cached_out);
 }
 
 /// When the build store is unreachable—both when `soft/builds` fails and
