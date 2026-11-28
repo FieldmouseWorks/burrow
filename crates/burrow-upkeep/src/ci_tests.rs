@@ -769,10 +769,11 @@ fn a_leg_is_any_k_of_n() {
     }
 }
 
-/// A cancelled leg of burrow's own twelve is the gate's work: a later run's
-/// whole gate, its legs skipped on a reuse hit, does it, and nothing is run
-/// again. A failed one likewise follows the later run's verdict, under the
-/// one replacement relation every check has.
+/// A cancelled leg of burrow's own twelve is the gate's work: a later run of
+/// the same call whose whole gate ran, with no leg of that name that ran
+/// (one with another leg count, say), does it, and nothing is run again. A
+/// failed one likewise follows the later run's verdict, under the one
+/// replacement relation every check has.
 #[test]
 fn a_later_whole_gate_does_a_twelve_leg_runs_work() {
     for old in ["CANCELLED", "FAILURE"] {
