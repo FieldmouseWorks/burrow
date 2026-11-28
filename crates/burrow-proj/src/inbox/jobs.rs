@@ -191,9 +191,10 @@ impl Pass<'_> {
                             .max()
                             .unwrap_or(0);
                         files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
-                        Self::hand(
+                        Self::hand_written(
                             &d,
                             &self.issue_text(repo, &written.issue, &written.comments),
+                            &written,
                         )?;
                         let _ = new_id;
                         continue 'jobs;
@@ -485,7 +486,13 @@ impl Pass<'_> {
                 self.tell_stopped(repo, n, &job, &d)?;
                 continue;
             }
-            let listed_changed = !Self::handed(&d, &self.issue_text(repo, listed_now, &had));
+            if written.machine_body_edits.is_some()
+                && !files::has_body_edits(&d)
+                && Self::handed(&d, &self.issue_text(repo, listed_now, &had))
+            {
+                Self::put_body_edits(&d, &written)?;
+            }
+            let listed_changed = !self.same_handed(&d, repo, listed_now, &had, &written);
             if closable
                 || !msg.is_empty()
                 || listed_changed
@@ -518,8 +525,9 @@ impl Pass<'_> {
                 // text edited, a comment it had edited or deleted, or a
                 // record from before what it was handed was kept): changed,
                 // and the job is handed the issue as it stands, replies and
-                // all, rather than the issue closed.
-                let changed = !Self::handed(&d, &self.issue_text(repo, &now_issue, &had))
+                // all, rather than the issue closed. A machine author's own
+                // body edits to its own issue don't count as changed.
+                let changed = !self.same_handed(&d, repo, &now_issue, &had, &written)
                     || job
                         .turn_file(&turns.to_string(), TurnFile::SplitInvalid)
                         .exists();
@@ -628,7 +636,7 @@ impl Pass<'_> {
                     }
                 }
                 if !msg.is_empty() {
-                    Self::hand(&d, &whole)?;
+                    Self::hand_written(&d, &whole, &written)?;
                 }
             }
             files::mark(&d, File::Seen).put(format!("{newest}\n"))?;
@@ -638,6 +646,66 @@ impl Pass<'_> {
 }
 
 impl Pass<'_> {
+    /// Kept in the job's record (`d`): what it's been handed of its issue now,
+    /// together with the body-edit watermark for machine-authored issues.
+    pub(super) fn hand_written(
+        d: &Path,
+        input: &str,
+        written: &super::written::Written,
+    ) -> Result<(), Fail> {
+        Self::hand(d, input)?;
+        Self::put_body_edits(d, written)
+    }
+
+    fn put_body_edits(d: &Path, written: &super::written::Written) -> Result<(), Fail> {
+        let mark = files::mark(d, File::BodyEdits);
+        let Some(edits) = written.machine_body_edits else {
+            match mark.remove() {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(mark.fail(e)),
+            }
+        };
+        let text = serde_json::to_string(&files::BodyEdits {
+            body: super::issue_body(&written.issue),
+            total: edits.total,
+            by_others: edits.by_others,
+            deleted: edits.deleted,
+        })
+        .expect("body edits json");
+        mark.swap(&format!("{text}\n")).map_err(|e| mark.fail(e))
+    }
+
+    /// Whether the issue still matches what its job was handed: exact match,
+    /// or body-only edits by the opener itself when the opener is one of
+    /// `inbox.authors`'s machine accounts and `written.rs` verified the full
+    /// edit history.
+    fn same_handed(
+        &self,
+        d: &Path,
+        repo: &str,
+        issue: &Value,
+        had: &[Value],
+        written: &super::written::Written,
+    ) -> bool {
+        let Ok(kept) = files::input(d) else {
+            return false;
+        };
+        if kept == self.issue_text(repo, issue, had) {
+            return true;
+        }
+        let Some(now_edits) = written.machine_body_edits else {
+            return false;
+        };
+        let Some(had_edits) = files::body_edits(d) else {
+            return false;
+        };
+        now_edits.total > had_edits.total
+            && now_edits.by_others == had_edits.by_others
+            && now_edits.deleted == had_edits.deleted
+            && self.issue_text_with_body(repo, issue, &had_edits.body, had) == kept
+    }
+
     /// Retire a job whose first turn never recorded a session and start over
     /// from the issue as it stands. Returns `None` when the old job couldn't
     /// be stopped or the new one couldn't start (and schedules a retry).
