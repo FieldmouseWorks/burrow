@@ -5,16 +5,8 @@ fn has_slots() -> bool {
     env::split_paths(&env::var_os("PATH").unwrap_or_default()).any(|p| p.join("heavy").is_file())
 }
 fn in_slot(args: &[String]) -> Result<bool> {
-    if has_slots() {
-        // Heavy owns the Nix defaults; a CLI max-jobs would override them.
-        let mut c = cmd("heavy", &["--", "nix"]);
-        c.args(args);
-        run(c)
-    } else {
-        let mut c = cmd("nix", &[]);
-        c.args(args);
-        run(c)
-    }
+    // Heavy owns the Nix defaults; a CLI max-jobs would override them.
+    super::builds::run_nix(has_slots(), args)
 }
 pub fn slot(args: &[&str]) -> Result<bool> {
     in_slot(&args.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>())
@@ -165,10 +157,15 @@ pub fn gated(
             built(link.as_deref(), targets, self.roots)
         }
         fn pending(&mut self, target: &str) -> Result<Vec<String>> {
-            let o = output(cmd(
+            let mut c = cmd(
                 "nix-store",
                 &["--realise", "--dry-run", target.trim_end_matches("^*")],
-            ))?;
+            );
+            let cfg = super::builds::nix_config();
+            if !cfg.is_empty() {
+                c.env("NIX_CONFIG", cfg);
+            }
+            let o = output(c)?;
             if !o.status.success() {
                 return Err(err(String::from_utf8_lossy(&o.stderr).trim().to_owned()));
             }
@@ -212,9 +209,7 @@ fn built(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> 
         a
     };
     if !has_slots() {
-        let mut c = cmd("nix", &[]);
-        c.args(args(targets, false));
-        return run(c);
+        return super::builds::run_nix(false, &args(targets, false));
     }
     let mut plain = Vec::new();
     let mut vms = Vec::new();
@@ -240,9 +235,7 @@ fn built(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> 
     }
     let mut ok = true;
     if !plain.is_empty() {
-        let mut c = cmd("nix", &[]);
-        c.args(args(&plain, false));
-        ok = run(c)?;
+        ok = super::builds::run_nix(false, &args(&plain, false))?;
     }
     if !vms.is_empty() {
         println!(

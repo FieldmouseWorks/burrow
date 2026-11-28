@@ -316,8 +316,11 @@ jobs:
     steps:
       # The build store (docs/gate-design.md, stage 1): probe it before Nix
       # starts so an unreachable store raises degraded/builds and the job
-      # builds cold without stalling on dead retries; fallback = true covers
-      # one that drops mid-run.
+      # builds cold without stalling on dead retries. Never set global
+      # fallback = true: a transient cache.nixos.org timeout would otherwise
+      # bootstrap nixpkgs from stage0-posix (#1650). Mid-run build-store
+      # failures are handled per substituter by dropping BURROW_BUILDS_URL
+      # and retrying cold while keeping cache.nixos.org.
       - id: builds
         name: soft/builds
         if: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' }}
@@ -340,7 +343,6 @@ jobs:
           extra_nix_config: |
             ${{ vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' && steps.builds.outcome != 'failure' && format('extra-substituters = {0}', vars.BURROW_BUILDS_URL) || '' }}
             ${{ vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' && steps.builds.outcome != 'failure' && format('extra-trusted-public-keys = {0}', vars.BURROW_BUILDS_PUBLIC_KEY) || '' }}
-            ${{ vars.BURROW_BUILDS_URL != '' && vars.BURROW_BUILDS_PUBLIC_KEY != '' && steps.builds.outcome != 'failure' && 'fallback = true' || '' }}
       - id: tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -400,6 +402,7 @@ jobs:
           HEAD_ID: ${{ github.event.head_commit.id }}
           TREE: ${{ github.event.head_commit.tree_id }}
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+          BUILDS_SUBSTITUTER: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
         run: bash "$TOOLS/run.sh" reuse
       - name: degraded/gate-reuse
         if: ${{ always() && steps.lookup.outcome == 'failure' }}
@@ -552,6 +555,7 @@ jobs:
           LEG: ${{ matrix.leg }}
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
           BUILDS: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
+          BUILDS_SUBSTITUTER: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
         run: bash "$TOOLS/gate.sh"
       # With legs, a leg's log goes to the gate job, which attests the legs
       # together: as an artifact named for the leg, with the log's digest, the
@@ -726,9 +730,8 @@ jobs:
         if: ${{ always() && steps.builds-write.outcome == 'failure' }}
         shell: bash
         run: echo 'degraded/builds-write' >> "$GITHUB_STEP_SUMMARY"
-      # If soft/builds passed, Nix configured fallback = true on the build
-      # store; record a degradation if Nix fell back to building cold
-      # mid-run because the store failed during substitution.
+      # If soft/builds passed, record a degradation if the build store failed
+      # during substitution and the job fell back to building cold.
       - id: builds-fallback
         name: soft/builds-fallback
         if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') }}
@@ -739,7 +742,8 @@ jobs:
           LOG: ${{ runner.temp }}/flake.log
         run: &builds-fallback |
           [ -f "$LOG" ] || exit 0
-          url=${BUILDS%/}
+          url=${BUILDS%%\?*}
+          url=${url%/}
           [ -n "$url" ] || exit 0
           URL="$url" awk '
             BEGIN {
@@ -748,10 +752,23 @@ jobs:
               u1 = q u q
               u2 = q u "/" q
             }
+            index($0, "copying path " q) == 1 && (index($0, " from " u1) || index($0, " from " u2)) {
+              if (split($0, parts, q) >= 4) copying[parts[2]] = 1
+            }
+            index($0, "error: path " q) == 1 && index($0, " is required, but there is no substituter that can build it") {
+              if (split($0, parts, q) >= 2 && copying[parts[2]]) {
+                print "substituter " u " failed during the build; Nix fell back to building cold"
+                exit 1
+              }
+            }
             index($0, "disabling binary cache " u1) ||
               index($0, "disabling binary cache " u2) ||
               index($0, "substituter " u1 " is disabled") ||
               index($0, "substituter " u2 " is disabled") ||
+              index($0, "substituter " u1 " is temporarily disabled") ||
+              index($0, "substituter " u2 " is temporarily disabled") ||
+              index($0, "substituter " u1 " failed during substitution") ||
+              index($0, "substituter " u2 " failed during substitution") ||
               index($0, u1 " does not appear to be a binary cache") ||
               index($0, u2 " does not appear to be a binary cache") ||
               index($0, "unable to download " q u "/") ||
@@ -919,6 +936,7 @@ jobs:
         shell: bash
         env:
           CHECKS: ${{ inputs.docs-checks }}
+          BUILDS_SUBSTITUTER: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
         run: |
           set -eo pipefail
           if [ -z "$CHECKS" ]; then
@@ -928,11 +946,48 @@ jobs:
           system=$(nix config show system)
           targets=()
           for c in $CHECKS; do targets+=(".#checks.$system.$c"); done
-          if [ -n "${RUNNER_TEMP:-}" ]; then
-            nix build -L --no-link --keep-going "${targets[@]}" 2>&1 | tee "$RUNNER_TEMP/docs.log"
-          else
-            nix build -L --no-link --keep-going "${targets[@]}"
-          fi
+          log=${RUNNER_TEMP:+$RUNNER_TEMP/docs.log}
+          drop_args=()
+          dropped=0
+          delays=(3 10 25)
+          upstream_try=0
+          try_log=$(mktemp)
+          trap 'rm -f -- "$try_log"' EXIT
+          [ -z "$log" ] || : > "$log"
+          while true; do
+            if nix "${drop_args[@]}" build -L --no-link --keep-going "${targets[@]}" 2>&1 | tee "$try_log"; then
+              [ -z "$log" ] || cat "$try_log" >> "$log"
+              exit 0
+            fi
+            [ -z "$log" ] || cat "$try_log" >> "$log"
+            grep -qE 'is required, but there is no substituter that can build it|some substitutes for the outputs of derivation .* failed|disabling binary cache ' "$try_log" || exit 1
+            url=${BUILDS_SUBSTITUTER:-}; url=${url%%\?*}; url=${url%/}
+            if [ "$dropped" = 0 ] && [ -n "$url" ] && URL="$url" awk '
+              BEGIN { u = ENVIRON["URL"]; q = sprintf("%c", 39); u1 = q u q; u2 = q u "/" q }
+              index($0, "copying path " q) == 1 && (index($0, " from " u1) || index($0, " from " u2)) && split($0, p, q) >= 4 { c[p[2]] = 1 }
+              index($0, "error: path " q) == 1 && index($0, " is required, but there is no substituter that can build it") && split($0, p, q) >= 2 && c[p[2]] { f = 1; exit 0 }
+              index($0, "disabling binary cache " u1) || index($0, "disabling binary cache " u2) ||
+                index($0, "substituter " u1 " is ") || index($0, "substituter " u2 " is ") ||
+                index($0, "unable to download " q u "/") || index($0, "unable to download " u1) ||
+                (index($0, "NAR for ") && (index($0, "fetched from " u1 " is incomplete") || index($0, "fetched from " u2 " is incomplete"))) { f = 1; exit 0 }
+              END { exit !f }
+            ' "$try_log"; then
+              rest=()
+              for s in $(nix config show substituters 2>/dev/null || true); do
+                u=${s%%\?*}; u=${u%/}
+                [ "$u" = "$url" ] || rest+=("$s")
+              done
+              msg="substituter '$url' failed during substitution; dropping it and retrying without it"
+              echo "$msg"
+              [ -z "$log" ] || echo "$msg" >> "$log"
+              drop_args=(--option substituters "${rest[*]}" --option extra-substituters "")
+              dropped=1
+              continue
+            fi
+            [ "$upstream_try" -lt "${#delays[@]}" ] || exit 1
+            sleep "${delays[$upstream_try]}"
+            upstream_try=$((upstream_try + 1))
+          done
       - id: builds-fallback
         name: soft/builds-fallback
         if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
@@ -1004,6 +1059,7 @@ jobs:
           SKIP: ${{ inputs.build-skip }}
           PATHS_ONLY: 'true'
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+          BUILDS_SUBSTITUTER: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
         run: bash "$TOOLS/negative.sh"
       - id: negative
         if: steps.paths.outputs.needs == 'true'
@@ -1014,6 +1070,7 @@ jobs:
           SKIP: ${{ inputs.build-skip }}
           PATHS_ONLY: 'false'
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+          BUILDS_SUBSTITUTER: ${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}
         run: bash "$TOOLS/negative.sh"
       - id: builds-fallback
         name: soft/builds-fallback

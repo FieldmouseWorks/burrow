@@ -176,7 +176,10 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
     );
     assert_eq!(
         docs_steps[5]["env"],
-        yaml(r#"CHECKS: "${{ inputs.docs-checks }}""#)
+        yaml(
+            "{CHECKS: '${{ inputs.docs-checks }}', \
+              BUILDS_SUBSTITUTER: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\"}"
+        )
     );
 }
 

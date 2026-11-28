@@ -348,7 +348,8 @@ fn every_pr_gets_one_from_the_workflows_own_files() {
                 "{{BASE: '${{{{ github.event.pull_request.base.ref }}}}', \
                  HEAD_SHA: '${{{{ github.event.pull_request.head.sha }}}}', \
                  SKIP: '${{{{ inputs.build-skip }}}}', PATHS_ONLY: '{paths_only}', \
-                 TOOLS: '${{{{ github.workspace }}}}/.flake-check/.github/flake-check'}}"
+                 TOOLS: '${{{{ github.workspace }}}}/.flake-check/.github/flake-check', \
+                 BUILDS_SUBSTITUTER: \"${{{{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}}}\"}}"
             )),
             "{id}"
         );

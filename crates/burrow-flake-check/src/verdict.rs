@@ -7,7 +7,7 @@ use super::*;
 pub const BROKEN: i32 = 3;
 /// From here up an exit says a command was killed or never ran (126, 127,
 /// 128 and a signal), so nothing of what it was checking.
-const STOPPED: i32 = 126;
+pub const STOPPED: i32 = 126;
 /// The flake's own failure, or what the gate refuses of it or of how it was
 /// called: the same on a second try. Every other error is the gate's.
 #[derive(Debug)]

@@ -67,8 +67,16 @@ With a build store named by the caller's Actions variables
 (`BURROW_BUILDS_URL` and `BURROW_BUILDS_PUBLIC_KEY`), every job that
 installs Nix probes it (`soft/builds`, raising `degraded/builds` and
 building cold if unreachable) and configures it as an `extra-substituters`
-with its public key and `fallback = true` from its first step. Fork PRs
-substitute from it too (the store is public) and skip uploading.
+with its public key from its first step, without global `fallback = true`.
+Global `fallback = true` would turn a transient `https://cache.nixos.org`
+timeout into a nixpkgs bootstrap from `stage0-posix` (#1650). Instead,
+`src/builds.rs` handles mid-run substitution failures per substituter: if the
+build store (`BUILDS_SUBSTITUTER`) fails mid-run, it drops only that
+substituter and retries cold (which `soft/builds-fallback` reports as
+`degraded/builds-fallback`); if an upstream substituter fails transiently, it
+retries in a fresh Nix process with short backoff and reports a gate `error`
+if the upstream cache stays down across retries. Fork PRs substitute from the
+build store too (the store is public) and skip uploading.
 
 A run whose builds may go to the store gets `BUILDS` in the gate step, and
 every nix the worker starts adds `accept-flake-config = false` and

@@ -144,3 +144,175 @@ fn a_run_with_no_store_has_the_config_it_had() {
     assert!(crate::worker_config("a = b", true).ends_with(NIX_CONFIG));
     assert_eq!(name("/nix/store/aaaa-codex-1.0.drv"), "codex-1.0");
 }
+
+#[test]
+fn scanner_distinguishes_upstream_build_store_and_builder_errors() {
+    let active = vec![
+        "https://cache.nixos.org/".to_owned(),
+        "https://builds.example/builds?priority=40".to_owned(),
+    ];
+    let builds = "https://builds.example/builds";
+
+    // 1. Transient cache.nixos.org timeout -> fatal, attributes cache.nixos.org only.
+    let mut s = FailureScan::new(&active);
+    for line in [
+        "disabling binary cache 'https://cache.nixos.org' for 60 seconds",
+        "error: unable to download 'https://cache.nixos.org/nar/abc.nar.zst': Timeout was reached (28) Connection timed out after 15000 milliseconds",
+        "       … substituter 'https://cache.nixos.org' is temporarily disabled because of this error we received before",
+        "error: path '/nix/store/aaa-file' is required, but there is no substituter that can build it",
+    ] {
+        s.feed_line(line);
+    }
+    assert!(s.fatal);
+    assert_eq!(s.failed, ["https://cache.nixos.org"]);
+
+    // 2. Corrupt/truncated NAR from build store (no URL on error line) -> attributed via copying path.
+    let mut s = FailureScan::new(&active);
+    for line in [
+        "copying path '/nix/store/bbb-cold' from 'https://builds.example/builds'...",
+        "\u{1b}[31;1merror:\u{1b}[0m input compression not recognized",
+        "error: path '/nix/store/bbb-cold' is required, but there is no substituter that can build it",
+        "error: some substitutes for the outputs of derivation '/nix/store/bbb-cold.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source",
+    ] {
+        s.feed_line(line);
+    }
+    assert!(s.fatal);
+    assert_eq!(s.failed, [builds]);
+
+    // 3. Harmless narinfo warning on dead build store + genuine check failure -> NOT fatal.
+    let mut s = FailureScan::new(&active);
+    for line in [
+        "warning: unable to download 'https://builds.example/builds/nix-cache-info': Could not connect to server",
+        "building '/nix/store/ccc-check.drv'...",
+        "check> error: unable to download 'https://cache.nixos.org/fake'",
+        "       >        error: unable to download 'https://git.savannah.gnu.org/cgit/config.git/plain/config.sub': Timeout was reached (28)",
+        "error: Cannot build '/nix/store/ccc-check.drv'.",
+    ] {
+        s.feed_line(line);
+    }
+    assert!(!s.fatal);
+
+    // 4. Lookalike host prefix is never attributed to configured substituters.
+    let mut s = FailureScan::new(&active);
+    s.feed_line("error: unable to download 'https://builds.example/builds.other/abc.narinfo': HTTP error 503");
+    assert!(!s.fatal);
+    assert!(s.failed.is_empty());
+}
+
+#[test]
+fn retry_policy_drops_build_store_retries_upstream_and_breaks_on_outage() {
+    let active = vec![
+        "https://cache.nixos.org/".to_owned(),
+        "https://builds.example/builds".to_owned(),
+    ];
+    let builds = "https://builds.example/builds";
+
+    // A. Build store fails -> dropped immediately (no sleep), upstream kept, retry succeeds.
+    let mut attempts = 0usize;
+    let mut dropped = Vec::new();
+    let mut sleeps = Vec::new();
+    let ok = run_nix_with(
+        "nix",
+        builds,
+        &[3, 10, 25],
+        |d| sleeps.push(d),
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                let mut scan = FailureScan::new(&active);
+                scan.feed_line("copying path '/nix/store/x' from 'https://builds.example/builds'...");
+                scan.feed_line("error: path '/nix/store/x' is required, but there is no substituter that can build it");
+                Ok((1, active.clone(), scan))
+            } else {
+                Ok((0, vec!["https://cache.nixos.org/".to_owned()], FailureScan::default()))
+            }
+        },
+        |u, a| {
+            if !dropped.is_empty() {
+                return false;
+            }
+            dropped.push(drop_override(u, a));
+            true
+        },
+    )
+    .unwrap();
+    assert!(ok);
+    assert_eq!(attempts, 2);
+    assert!(sleeps.is_empty());
+    assert_eq!(
+        dropped,
+        ["substituters = https://cache.nixos.org/\nextra-substituters ="]
+    );
+
+    // B. Upstream cache fails transiently once -> NOT dropped, sleeps 3s, retry succeeds.
+    let mut attempts = 0usize;
+    let mut dropped = false;
+    let mut sleeps = Vec::new();
+    let ok = run_nix_with(
+        "nix",
+        builds,
+        &[3, 10, 25],
+        |d| sleeps.push(d),
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                let mut scan = FailureScan::new(&active);
+                scan.feed_line("disabling binary cache 'https://cache.nixos.org' for 60 seconds");
+                scan.feed_line("error: unable to download 'https://cache.nixos.org/nar/x.nar.zst': Timeout was reached (28)");
+                Ok((1, active.clone(), scan))
+            } else {
+                Ok((0, active.clone(), FailureScan::default()))
+            }
+        },
+        |_, _| {
+            dropped = true;
+            true
+        },
+    )
+    .unwrap();
+    assert!(ok);
+    assert_eq!(attempts, 2);
+    assert!(!dropped);
+    assert_eq!(sleeps, [3]);
+
+    // C. Upstream cache stays down across all retries -> returns Err (gate error, not check fail).
+    let mut attempts = 0usize;
+    let mut sleeps = Vec::new();
+    let err = run_nix_with(
+        "nix",
+        builds,
+        &[3, 10, 25],
+        |d| sleeps.push(d),
+        || {
+            attempts += 1;
+            let mut scan = FailureScan::new(&active);
+            scan.feed_line(
+                "error: unable to download 'https://cache.nixos.org/nar/x.nar.zst': HTTP error 503",
+            );
+            Ok((1, active.clone(), scan))
+        },
+        |_, _| panic!("must not drop upstream cache"),
+    )
+    .unwrap_err();
+    assert_eq!(attempts, 4);
+    assert_eq!(sleeps, [3, 10, 25]);
+    assert!(err.to_string().contains("https://cache.nixos.org"), "{err}");
+    assert_eq!(crate::verdict::worker(Err(err)), crate::verdict::BROKEN);
+
+    // D. Normal build failure -> returns Ok(false) immediately with no retry.
+    let mut attempts = 0usize;
+    let ok = run_nix_with(
+        "nix",
+        builds,
+        &[3, 10, 25],
+        |_| panic!("must not sleep on normal failure"),
+        || {
+            attempts += 1;
+            Ok((1, active.clone(), FailureScan::new(&active)))
+        },
+        |_, _| panic!("must not drop on normal failure"),
+    )
+    .unwrap();
+    assert!(!ok);
+    assert_eq!(attempts, 1);
+}

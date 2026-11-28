@@ -140,8 +140,10 @@ fn nix_config_lines(job: &Value, c: &Ctx) -> Vec<String> {
 
 /// Every job that installs Nix (`reuse`, `check`, `docs`, `negative`)
 /// probes the store before Nix starts and configures it as a substituter
-/// with its public key and `fallback = true`, with no restore step; and
-/// with either variable unset (or `install-nix` off), none of it runs.
+/// with its public key (never global `fallback = true`, which would turn a
+/// transient `cache.nixos.org` timeout into a nixpkgs bootstrap from
+/// `stage0-posix`), with no restore step; and with either variable unset
+/// (or `install-nix` off), none of it runs.
 #[test]
 fn every_job_that_installs_nix_substitutes_from_the_store_with_no_restore_step() {
     let wf = wf();
@@ -192,7 +194,6 @@ fn every_job_that_installs_nix_substitutes_from_the_store_with_no_restore_step()
             [
                 format!("extra-substituters = {URL}"),
                 format!("extra-trusted-public-keys = {KEY}"),
-                "fallback = true".to_owned(),
             ],
             "{name}"
         );
@@ -243,7 +244,6 @@ fn a_pr_from_a_fork_substitutes_too_and_writes_nothing() {
                 [
                     format!("extra-substituters = {URL}"),
                     format!("extra-trusted-public-keys = {KEY}"),
-                    "fallback = true".to_owned(),
                 ],
                 "{name} {head:?}"
             );
@@ -590,6 +590,24 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
             format!("substituter '{URL}' is disabled\n"),
         ),
         (
+            "substituter-temporarily-disabled",
+            format!("       … substituter '{URL}' is temporarily disabled because of this error\n"),
+        ),
+        (
+            "runner-dropped-build-store",
+            format!(
+                "substituter '{URL}' failed during substitution; dropping it and retrying without it\n"
+            ),
+        ),
+        (
+            "corrupt-nar-paired-path",
+            format!(
+                "copying path '/nix/store/abc-foo' from '{URL}'...\n\
+                 error: input compression not recognized\n\
+                 error: path '/nix/store/abc-foo' is required, but there is no substituter that can build it\n"
+            ),
+        ),
+        (
             "not-a-binary-cache",
             format!("warning: '{URL}' does not appear to be a binary cache\n"),
         ),
@@ -678,4 +696,202 @@ fn mid_run_substituter_fallback_raises_degraded_builds_fallback() {
     );
     assert_eq!(reported.code, 0, "{}", reported.said());
     assert_eq!(read(&summary), "degraded/builds-fallback\n");
+}
+
+/// The `docs` job's `build` step drops `BUILDS_SUBSTITUTER` and retries cold
+/// (while preserving `cache.nixos.org`) if the build store fails mid-run,
+/// and its `soft/builds-fallback` step flags the degradation.
+#[test]
+fn docs_build_drops_broken_build_store_and_retries_without_it() {
+    let wf = wf();
+    let docs = &wf["jobs"]["docs"];
+    let s = Scratch::default();
+    let calls = s.join("nix-calls");
+    let temp = s.mkdtemp();
+    s.stub(
+        "nix",
+        &format!(
+            r#"echo "$*" >> {}
+if [ "$1 $2 $3" = "config show system" ]; then
+  echo x86_64-linux
+  exit 0
+fi
+if [ "$1 $2 $3" = "config show substituters" ]; then
+  echo "https://cache.nixos.org/ {URL}"
+  exit 0
+fi
+case "$*" in
+  *"--option extra-substituters"*)
+    echo "built-cold"
+    exit 0
+    ;;
+  *)
+    echo "copying path '/nix/store/aaa-doc' from '{URL}'..." >&2
+    echo "error: input compression not recognized" >&2
+    echo "error: path '/nix/store/aaa-doc' is required, but there is no substituter that can build it" >&2
+    exit 1
+    ;;
+esac
+"#,
+            calls.display()
+        ),
+    );
+    let ran = s.bash(
+        script(step(docs, "build")),
+        s.path(),
+        &[
+            ("CHECKS", "guidance"),
+            ("BUILDS_SUBSTITUTER", URL),
+            ("RUNNER_TEMP", temp.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    let log = read(&temp.join("docs.log"));
+    assert!(log.contains("built-cold"), "{log}");
+    let called = read(&calls);
+    assert!(
+        called
+            .contains("--option substituters https://cache.nixos.org/ --option extra-substituters"),
+        "{called}"
+    );
+    let fb = s.bash(
+        script(step(docs, "builds-fallback")),
+        s.path(),
+        &[
+            ("BUILDS", URL),
+            ("LOG", temp.join("docs.log").to_str().unwrap()),
+        ],
+    );
+    assert_ne!(fb.code, 0, "docs builds-fallback missed drop:\n{log}");
+}
+
+/// Both `.github/flake-check/run.sh` (compiler bootstrap) and the `docs` job's
+/// `build` step retry transient upstream substituter failures across the full
+/// `3 10 25` second backoff window before failing, and stop immediately on a
+/// non-substituter failure.
+#[test]
+fn bootstrap_and_docs_retry_upstream_through_full_backoff_window() {
+    let wf = wf();
+    let docs = &wf["jobs"]["docs"];
+
+    // 1. run.sh compiler bootstrap: fails twice on upstream 503, succeeds on
+    //    attempt 3 (sleeps 3s, 10s); then fails all 4 attempts (sleeps 3s, 10s, 25s).
+    for (fail_count, expect_ok, want_sleeps) in [
+        (2usize, true, vec!["3", "10"]),
+        (10usize, false, vec!["3", "10", "25"]),
+    ] {
+        let s = Scratch::default();
+        let compiler = s.join("fake-compiler");
+        fs::create_dir_all(compiler.join("bin")).unwrap();
+        crate::harness::executable(
+            &compiler.join("bin/rustc"),
+            "while [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then out=$2; shift 2; else shift; fi\ndone\nprintf '#!/bin/sh\\nexit 0\\n' > \"$out\"\nchmod +x \"$out\"\n",
+        );
+        let attempts = s.join("attempts");
+        let sleeps = s.join("sleeps");
+        write(&attempts, "0");
+        write(&sleeps, "");
+        s.stub("sleep", &format!("echo \"$1\" >> {}\n", sleeps.display()));
+        s.stub(
+            "nix-build",
+            &format!(
+                r#"n=$(cat {a})
+n=$((n + 1))
+echo "$n" > {a}
+if [ "$n" -le {fail_count} ]; then
+  echo "disabling binary cache 'https://cache.nixos.org' for 60 seconds" >&2
+  echo "error: unable to download 'https://cache.nixos.org/nar/x.nar.zst': HTTP error 503" >&2
+  exit 1
+fi
+echo {c}
+"#,
+                a = attempts.display(),
+                c = compiler.display(),
+            ),
+        );
+        let temp = s.mkdtemp();
+        let run_sh = repo_file(".github/flake-check/run.sh");
+        let ran = s.bash(
+            &format!("bash {} gate", run_sh.display()),
+            s.path(),
+            &[
+                ("RUNNER_TEMP", temp.to_str().unwrap()),
+                ("BUILDS_SUBSTITUTER", URL),
+            ],
+        );
+        assert_eq!(
+            ran.code == 0,
+            expect_ok,
+            "run.sh fail_count={fail_count}: {}",
+            ran.said()
+        );
+        let got_sleeps: Vec<String> = read(&sleeps).lines().map(str::to_owned).collect();
+        assert_eq!(got_sleeps, want_sleeps, "run.sh fail_count={fail_count}");
+    }
+
+    // 2. docs build step: fails twice on upstream timeout, succeeds on attempt 3
+    //    (sleeps 3s, 10s, builds-fallback stays green); fails all 4 attempts
+    //    (sleeps 3s, 10s, 25s); and stops immediately if attempt 2 fails on a
+    //    non-substituter error.
+    for (mode, expect_ok, want_sleeps) in [
+        ("recover-on-3", true, vec!["3", "10"]),
+        ("always-503", false, vec!["3", "10", "25"]),
+        ("check-fails-on-2", false, vec!["3"]),
+    ] {
+        let s = Scratch::default();
+        let attempts = s.join("attempts");
+        let sleeps = s.join("sleeps");
+        write(&attempts, "0");
+        write(&sleeps, "");
+        s.stub("sleep", &format!("echo \"$1\" >> {}\n", sleeps.display()));
+        s.stub(
+            "nix",
+            &format!(
+                r#"if [ "$1 $2 $3" = "config show system" ]; then echo x86_64-linux; exit 0; fi
+n=$(cat {a})
+n=$((n + 1))
+echo "$n" > {a}
+if [ "{mode}" = "recover-on-3" ] && [ "$n" -ge 3 ]; then
+  echo "docs-ok"
+  exit 0
+fi
+if [ "{mode}" = "check-fails-on-2" ] && [ "$n" -eq 2 ]; then
+  echo "error: builder for '/nix/store/x-guidance.drv' failed with exit code 1" >&2
+  exit 1
+fi
+echo "disabling binary cache 'https://cache.nixos.org' for 60 seconds" >&2
+echo "error: unable to download 'https://cache.nixos.org/nar/x.nar.zst': Timeout was reached (28)" >&2
+exit 1
+"#,
+                a = attempts.display(),
+            ),
+        );
+        let temp = s.mkdtemp();
+        let ran = s.bash(
+            script(step(docs, "build")),
+            s.path(),
+            &[
+                ("CHECKS", "guidance"),
+                ("BUILDS_SUBSTITUTER", URL),
+                ("RUNNER_TEMP", temp.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(ran.code == 0, expect_ok, "docs mode={mode}: {}", ran.said());
+        let got_sleeps: Vec<String> = read(&sleeps).lines().map(str::to_owned).collect();
+        assert_eq!(got_sleeps, want_sleeps, "docs mode={mode}");
+        let fb = s.bash(
+            script(step(docs, "builds-fallback")),
+            s.path(),
+            &[
+                ("BUILDS", URL),
+                ("LOG", temp.join("docs.log").to_str().unwrap()),
+            ],
+        );
+        assert_eq!(
+            fb.code,
+            0,
+            "docs mode={mode} falsely triggered builds-fallback: {}",
+            fb.said()
+        );
+    }
 }
