@@ -130,3 +130,51 @@ fn a_result_is_seen_whatever_its_json_spacing() {
     said.look(true);
     assert!(said.answered);
 }
+
+#[test]
+fn clear_session_removes_matching_alias_and_preserves_other_conversations() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = dir.path().into();
+    let job = Job::new(&cfg, "job");
+    fs::create_dir(&job.dir).unwrap();
+
+    // Record claude first, then antigravity so the shared alias points to antigravity.
+    record_session(&job, "claude", "sess-claude");
+    record_session(&job, "antigravity", "sess-ag");
+    assert_eq!(
+        crate::read(&job.file(crate::record::JobFile::Session)).as_deref(),
+        Some("sess-ag")
+    );
+    assert_eq!(
+        crate::read(&job.file(crate::record::JobFile::SessionEngine)).as_deref(),
+        Some("antigravity")
+    );
+
+    // Clearing claude preserves antigravity's shared alias.
+    clear_session(&job, "claude");
+    assert_eq!(resume_for(&job, "claude"), None);
+    assert_eq!(resume_for(&job, "antigravity").as_deref(), Some("sess-ag"));
+    assert_eq!(
+        crate::read(&job.file(crate::record::JobFile::Session)).as_deref(),
+        Some("sess-ag")
+    );
+    assert_eq!(
+        crate::read(&job.file(crate::record::JobFile::SessionEngine)).as_deref(),
+        Some("antigravity")
+    );
+
+    // Clearing antigravity removes both session.antigravity and the shared alias.
+    clear_session(&job, "antigravity");
+    assert_eq!(resume_for(&job, "antigravity"), None);
+    assert!(!job.file(crate::record::JobFile::Session).exists());
+    assert!(!job.file(crate::record::JobFile::SessionEngine).exists());
+
+    // Legacy unlabelled `session` is cleared only for DEFAULT_ENGINE.
+    fs::write(job.file(crate::record::JobFile::Session), "legacy-claude\n").unwrap();
+    clear_session(&job, "antigravity");
+    assert_eq!(resume_for(&job, "claude").as_deref(), Some("legacy-claude"));
+    clear_session(&job, "claude");
+    assert_eq!(resume_for(&job, "claude"), None);
+    assert!(!job.file(crate::record::JobFile::Session).exists());
+}

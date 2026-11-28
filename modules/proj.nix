@@ -2,7 +2,8 @@
 # background job (crates/burrow-proj). Jobs run as burrow.user, in
 # burrow.projectsDir/PROJECT, and keep everything they said in jobsDir. Each
 # makes its worktrees in a scratch dir of its own under burrow.scratchDir,
-# cleared once the job is over (its scratch.rs).
+# set aside once the job is over (its scratch.rs) and removed by a root-side
+# unit (proj/scratch.nix).
 # With proj.inbox, issues labelled for an engine in the projects' GitHub repos
 # become jobs too (proj-inbox, in the same crate). A job waiting on a PR
 # doesn't hold a slot: proj-watch resumes it when the PR changes. Both are
@@ -298,6 +299,7 @@ in
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
     { key = "burrow/probe"; imports = [ (import ./probe.nix inputs) ]; }
+    (import ./proj/scratch.nix inputs)
     # Who Renovate is: its App (updates.renovate.app) is one of the settings
     # this module renders for `proj settings show` (settings/tracked.nix),
     # and its default is derived, so it has to be here with proj alone too.
@@ -762,8 +764,8 @@ in
       # The change stream's subscriber sockets: the user's own readers bind here.
       "d ${stateDir}/proj-stream 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
-      # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
-      # job is over: no age here.
+      # Each job's scratch (burrow-proj's scratch.rs), set aside once the job is
+      # over and removed then (proj/scratch.nix): no age here.
       "d ${config.burrow.scratchDir}/jobs 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 

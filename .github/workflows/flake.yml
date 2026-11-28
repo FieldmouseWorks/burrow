@@ -37,16 +37,14 @@ jobs:
     # comparison decides, not an expression's `==`, which ignores case.
     needs: train-route
     uses: ./.github/workflows/flake-check.yml
-    # What the shared workflow needs to attest its result, issues: write to
-    # file a flaky check (flaky, below), and actions: write for a push to main's legs to delete the kept builds their own
-    # supersedes (flake-check.yml's keep-newer and keep-prune, #1011). A
+    # What the shared workflow needs to attest its result, and issues: write to
+    # file a flaky check (flaky, below). A
     # permission can't depend on the event, so a PR's run has it too, and
     # `train` and flake-retarget.yml's calls grant the same as this one: it
     # gives nothing a branch of this repo couldn't take by editing this
     # file, and a PR from a fork gets a read-only token whatever this says.
     permissions:
       contents: read
-      actions: write
       id-token: write
       attestations: write
       issues: write
@@ -65,15 +63,9 @@ jobs:
       eval-apart: true
       # One runner took 55 minutes over burrow's gate (10-31): its outputs
       # evaluated one after another for 10, then its builds and fifteen VM
-      # tests sharing four cores for 45. Four legs share them out over four
+      # tests sharing four cores for 45. Twelve legs share them out over twelve
       # runners, which public repos get free.
-      legs: 4
-      # And on an empty store each leg built what no public cache has: the
-      # patched git (modules/common.nix), about 16 of a leg's 22-29 minutes,
-      # and every check, changed or not. main's gate keeps those builds for
-      # every later run to take (flake-check.yml says what's kept and why
-      # that's safe).
-      keep-builds: true
+      legs: 12
       # The docs lane, for a PR that changes only these: nothing burrow
       # builds or tests reads them but the guidance check, which reads
       # every Markdown file and holds AGENTS.md's house blocks to house/
@@ -115,7 +107,7 @@ jobs:
           echo "train=$train" >> "$GITHUB_OUTPUT"
   # The train's candidates, on GitHub's hosted runners (a VM of its own for
   # each job, which Conary counts as started fresh for it), and a PR to main's
-  # negative run. The same gate as `check`, its four legs and all; main's
+  # negative run. The same gate as `check`, its twelve legs and all; main's
   # copy, which Renovate leaves at main (renovate.json): a pin would need a
   # PR after every merge.
   train:
@@ -124,15 +116,13 @@ jobs:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
     permissions:
       contents: read
-      actions: write
       id-token: write
       attestations: write
       issues: write
     with:
       build-skip: agents
       eval-apart: true
-      legs: 4
-      keep-builds: true
+      legs: 12
       docs-paths: >-
         README.md AGENTS.md CLAUDE.md docs/**
         !docs/repo-baseline.md !docs/house-style.md !docs/settings.md

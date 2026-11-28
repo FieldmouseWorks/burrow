@@ -35,8 +35,33 @@ fn subject(job: &yaml_serde::Value) -> (usize, &yaml_serde::Value) {
 fn every_push_and_pr_attests_and_uploads() {
     let job = job();
     // The leg inherits the caller's OIDC and attestations grants, checked
-    // for every shipped caller by keep_builds' permission-chain test.
+    // for every shipped caller below.
     assert!(job.get("permissions").is_none());
+    for path in [
+        ".github/workflows/flake.yml",
+        ".github/workflows/flake-retarget.yml",
+        "templates/project/.github/workflows/flake.yml",
+        "templates/project/.github/workflows/flake-retarget.yml",
+    ] {
+        let wf = workflow(path);
+        for (name, call) in wf["jobs"].as_mapping().unwrap() {
+            if call["uses"]
+                .as_str()
+                .is_some_and(|u| u.contains("/flake-check.yml"))
+            {
+                for (scope, level) in [
+                    ("contents", "read"),
+                    ("id-token", "write"),
+                    ("attestations", "write"),
+                ] {
+                    assert_eq!(
+                        call["permissions"][scope], level,
+                        "{path} {name:?}: {scope}"
+                    );
+                }
+            }
+        }
+    }
     let (at, step) = subject(&job);
     assert_eq!(step["shell"], "bash");
     // Every repo's push and PR, a private one's included; with legs, the
@@ -520,7 +545,7 @@ fn with_legs_the_gate_job_attests_for_them() {
         leg_up["with"],
         yaml("{name: '${{ steps.leg.outputs.name }}', path: '${{ runner.temp }}/flake.log'}")
     );
-    let outputs: String = (1..=8)
+    let outputs: String = (1..=12)
         .map(|k| format!("leg-{k}: '${{{{ steps.leg.outputs.leg-{k} }}}}'\n"))
         .collect();
     assert_eq!(job["outputs"], yaml(&outputs));
@@ -575,8 +600,8 @@ fn with_legs_the_gate_job_attests_for_them() {
         g[6]["if"],
         "${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
     );
-    // The log, the token and the bundle, as a leg attests them; the kept
-    // builds (keep-builds) that follow them in a leg are the leg's alone.
+    // The log, the token and the bundle, as a leg attests them; the build
+    // store's upload that follows them in a leg is the leg's alone.
     assert_eq!(g[7..10], all[at + 1..at + 4]);
     // Then what reports a hit, as a leg's own job does with one leg.
     assert_eq!(g[10..], [step(job, "reused").clone()]);

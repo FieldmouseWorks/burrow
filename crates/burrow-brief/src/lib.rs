@@ -30,9 +30,11 @@ pub const FINDINGS: &str = concat!(
     ": all of what its finding says a complete fix covers, with a ",
     "regression test for each of those cases that fails without the fix, not only the line the thread is on. ",
     "Answer the rest with your reasons and change nothing for them: an edge no input or state can reach (say why ",
-    "not), a style preference no rule asks for, or a hypothetical the finding gives no concrete failure scenario ",
-    "for. A finding labelled P1 that names no rule on that P1 list, no reason in the PR's description that doesn't hold ",
-    "(settled as below) and no concrete failure scenario counts as P2 here: its label alone doesn't make it one to fix. ",
+    "not), a non-P1 Code Review Rules finding (a design or split note isn't required mid-PR; answer with your ",
+    "reason rather than calling it unasked-for), a style preference no rule asks for, or a hypothetical the finding ",
+    "gives no concrete failure scenario for. A finding labelled P1 that names no rule on that P1 list, no reason in ",
+    "the PR's description that doesn't hold (settled as below) and no concrete failure scenario counts as P2 here: ",
+    "its label alone doesn't make it one to fix. ",
 );
 
 /// What cleared a PR a judge is asked about, in the usual case.

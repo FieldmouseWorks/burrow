@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::diff::{self, Diff};
 use crate::github::{GitHub, Status};
-use crate::rules::{self, Rule, Said};
+use crate::rules::{self, AllowList, Rule, Said};
 
 /// What the run is for, from the event that started it.
 #[derive(Clone, Debug)]
@@ -22,11 +22,15 @@ pub struct Event {
     /// How many lines a PR may add to Python and shell, net, before it needs
     /// the line: enough for a fix, not for a feature.
     pub growth: i64,
-    /// How long a code file may grow before it's split.
+    /// How long a non-test code file may grow before it's split.
     pub lines: usize,
     /// Whether a PR that names a model needs the line: off only for a repo
     /// whose subject is models.
     pub model_names: bool,
+    /// Standing per-path waivers for `Rule::RustFirst`.
+    pub rust_first_allow: AllowList,
+    /// Standing per-path waivers for `Rule::FileSize`.
+    pub file_size_allow: AllowList,
     /// The run's page, which each status links.
     pub run_url: String,
 }
@@ -129,18 +133,55 @@ fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
                 diff.new_python.len(),
                 diff.growth
             ),
-            "The house rules want new code in Rust, shell included, unless there's a solid reason: a coin toss goes to Rust. Port it, or add a line to the PR body starting 'Why not Rust:' with the reason (a file a tool generates, glue that only runs another program, a throwaway script, deleted once it's run)".to_owned(),
+            "The house rules want new tools, scripts and services in Rust, shell included, unless there's a solid reason: a coin toss goes to Rust. Port it, add a standing waiver in .github/workflows/house.yml, or add a line to the PR body starting 'Why not Rust:' with the reason (a file a tool generates, glue that only runs another program, a throwaway script, deleted once it's run)".to_owned(),
         ),
         Rule::Timers => (
             !diff.timers.is_empty(),
             format!("adds a timer in {} file(s)", diff.timers.len()),
             "Work starts from an event (a push, a webhook, a unit finishing), not a clock. Start it from one, or add a line to the PR body starting 'Why a timer:' with the reason (a watchdog's heartbeat, a catch-up for a delivery that never came)".to_owned(),
         ),
-        Rule::FileSize => (
-            !diff.big.is_empty(),
-            format!("grows {} code file(s) past {} lines", diff.big.len(), event.lines),
-            format!("The house rules split a code file before it passes {} lines. Split it in this PR, or add a line to the PR body starting 'Why not split:' with the reason", event.lines),
-        ),
+        Rule::FileSize => {
+            if !diff.already_over.is_empty() {
+                let over = diff.already_over.len();
+                let mut why = format!(
+                    "grows {over} code file(s) already past {} lines without a standing waiver",
+                    event.lines
+                );
+                let mut extra = String::new();
+                if !diff.crossed.is_empty() {
+                    let crossed = diff.crossed.len();
+                    why = format!(
+                        "grows {over} file(s) already past {} lines (unwaived) and pushes {crossed} past it",
+                        event.lines
+                    );
+                    extra = format!(
+                        " It also pushes {crossed} file(s) past {} lines (split by job or explain with 'Why not split:').",
+                        event.lines
+                    );
+                }
+                return Verdict {
+                    rule,
+                    passed: false,
+                    why,
+                    error: Some(format!(
+                        "::error title=File size::This PR grows {over} non-test code file(s) already past {} lines without a standing waiver.{extra} A 'Why not split:' line in the PR body only covers a file crossing the {}-line backstop; growing one already over it passes only by splitting it or adding a standing waiver in .github/workflows/house.yml (file-size-allow).",
+                        event.lines, event.lines
+                    )),
+                };
+            }
+            (
+                !diff.crossed.is_empty(),
+                format!(
+                    "pushes {} code file(s) past {} lines",
+                    diff.crossed.len(),
+                    event.lines
+                ),
+                format!(
+                    "The {}-line limit is a backstop, not the measure (test files and inline #[cfg(test)] blocks don't count). Split by job in this PR, add a standing waiver in .github/workflows/house.yml (file-size-allow), or add a line to the PR body starting 'Why not split:' with the reason",
+                    event.lines
+                ),
+            )
+        }
         Rule::GuideSize => (
             !diff.guides.is_empty(),
             format!(
@@ -208,10 +249,22 @@ fn found(out: &mut dyn Write, diff: &Diff, event: &Event) -> Result<(), String> 
             diff.growth, event.growth
         ),
     )?;
-    for (file, length) in &diff.big {
+    for (file, length) in &diff.crossed {
         say(
             out,
-            &format!("grown past {} lines: {file:?}, {length} lines", event.lines),
+            &format!(
+                "pushed past {} lines: {file:?}, {length} lines",
+                event.lines
+            ),
+        )?;
+    }
+    for (file, length) in &diff.already_over {
+        say(
+            out,
+            &format!(
+                "already past {} lines and grown (no standing waiver): {file:?}, {length} lines",
+                event.lines
+            ),
         )?;
     }
     for (file, own) in &diff.guides {
@@ -256,7 +309,7 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
         .filter(|r| *r != Rule::ModelNames || event.model_names)
         .collect();
     let status = |rule: Rule, passed: bool, description: String| Status {
-        context: format!("house/{} (#{})", rule.name(), event.number),
+        context: rules::status_context(rule, event.number),
         state: if passed { "success" } else { "failure" },
         description,
         target_url: event.run_url.clone(),
@@ -303,7 +356,14 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
         }
         let base = text(&pr["base"], "sha");
         if diff.as_ref().is_none_or(|(at, _)| at != base) {
-            let read = diff::read(gh, base, &event.head, event.lines)?;
+            let read = diff::read(
+                gh,
+                base,
+                &event.head,
+                event.lines,
+                &event.rust_first_allow,
+                &event.file_size_allow,
+            )?;
             found(out, &read, event)?;
             diff = Some((base.to_owned(), read));
         }

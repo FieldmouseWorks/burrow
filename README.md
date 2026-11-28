@@ -194,13 +194,16 @@ Every agent role is designed to sit behind Conary's `conary-plugin v5` contract
 so the machine isn't tied to one vendor or CLI:
 
 - **Today:** `anthropic` and `antigravity` provide isolated engine surfaces,
-  credentials, egress proxies, and packaged plugins; `proj settings` routes
-  roles live across the engines `proj` currently executes (`claude` and
-  `claude-api`); and `lib.engineConformance` verifies any plugin inside its
-  microVM sandbox against its declared capabilities.
-- **In progress:** completing the generic plugin runner across all `proj` roles
-  and `burrow-judge`, pinned-hash plugin installation via the settings door
-  ([#668](https://github.com/FieldmouseWorks/burrow/issues/668)), and swappable
+  credentials, egress proxies, and packaged plugins; `proj` runs every role
+  through Conary's `conary-plugin v5` contract; authorized owners can install,
+  update, and remove pinned Nix-built or verified release engine plugins
+  through the settings write door with sandboxed `cn plugin check` and atomic
+  removal fallback ([docs/settings.md](docs/settings.md#pinned-engine-plugins),
+  [docs/settings-reference.md](docs/settings-reference.md)); and
+  `lib.engineConformance` verifies any plugin inside its microVM sandbox
+  against its declared capabilities.
+- **In progress:** dashboard presentation for installed plugins and pickers
+  ([#669](https://github.com/FieldmouseWorks/burrow/issues/669)) and swappable
   PR review plugins.
 - **Add an engine:** follow [docs/adding-an-engine.md](docs/adding-an-engine.md)
   (built on [docs/engines.md](docs/engines.md),

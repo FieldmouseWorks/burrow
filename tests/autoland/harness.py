@@ -257,7 +257,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True,
                      "train": False, "trainSize": 8, "trainRequire": [], "trainNegative": None, "trainStallAfter": 240},
         "trainContext": "conary/train",
-        "conary": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab",
+        "conary": {"cn": f"{tmp}/cn", "token": f"{tmp}/upkeep-none upkeep.json token --bare", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab",
                                               "CONARY_POLICY": POLICY}},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",

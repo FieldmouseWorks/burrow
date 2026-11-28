@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 burrow-door = { path = "../burrow-door" }
 burrow-github = { path = "../burrow-github" }
+burrow-grants = { path = "../burrow-grants" }
+conary-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 jiff.workspace = true

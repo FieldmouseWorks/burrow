@@ -117,7 +117,7 @@ let
     # The owner's door, and its record (reviewers.py), or null.
     askAsOwner = cfg.askAsOwner.door;
     bash = "${pkgs.bash}/bin/bash";
-    git = "${pkgs.git}/bin/git";
+    git = lib.getExe config.programs.git.package;
     runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
     labels = { inherit (cfg.labels) hold owner first batch waiting; };
@@ -181,10 +181,11 @@ let
     trainContext = ledger.trainContext;
     # Conary's `cn` (autoland/train.py), on the ledger's own log: each PR's
     # class (burrow.ledger.policy), and the merge train, whose ops are
-    # ledger ops. Its token command is the steward's own.
+    # ledger ops. Its token command is burrow-upkeep's (tokenCommand).
     conary = {
       cn = "${ledger.package}/bin/cn";
       inherit (ledger) env;
+      token = tokenCommand;
     };
     # The ledger's writer `cn`, which undoes the merge that turned a default
     # branch red when its job, or the steward, names it (autoland/repos.py's
@@ -207,6 +208,12 @@ let
       Don't ask for a review or merge it: the steward does that.
     '';
   };
+
+  # Conary's token command, wherever it runs as the App (conaryd, the
+  # shadow, the train's `cn`): burrow-upkeep's `token --bare`, which mints
+  # the App's token for the repo Conary adds last, with the App's key
+  # (systemd's credential app-key, which each of those units is given).
+  tokenCommand = "${burrowUpkeep}/bin/burrow-upkeep ${upkeepConfig} token --bare";
 
   # burrow-upkeep's (crates/burrow-upkeep/src/config.rs): the steward's own
   # settings it shares, a repo's settings, and its branch watch and two
@@ -294,11 +301,11 @@ let
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
   # The hooks' secret and the App's key, which burrow-upkeep reads (hook.rs,
-  # token.rs), and the steward's token.
+  # token.rs), and so Conary's token command (tokenCommand).
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
   shadow = import ./autoland/shadow.nix {
-    inherit lib pkgs cfg settings ledger steward credentials config;
+    inherit lib pkgs cfg settings ledger credentials tokenCommand config;
     flowFiles = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-flow-files;
   };
 in
@@ -684,7 +691,7 @@ in
       internal = true;
       default = {
         inherit credentials;
-        token = "${steward}/bin/autoland-steward token";
+        token = tokenCommand;
         config = shadow.liveFile;
         inherit (shadow) needs judgeKey render base file;
       };

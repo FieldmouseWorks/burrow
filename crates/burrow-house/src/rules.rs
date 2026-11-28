@@ -16,8 +16,9 @@ pub enum Rule {
     RustFirst,
     /// Work starts from events: a PR that adds a timer says why.
     Timers,
-    /// A PR that grows a code file past the limit, or one already past it,
-    /// splits it or says why not.
+    /// A non-test code file's line limit is a backstop: pushing one across
+    /// it needs `Why not split:` (or a standing waiver); growing one already
+    /// over it needs a standing waiver, never a body line.
     FileSize,
     /// An AGENTS.md is a map: a PR that grows one's own part past GUIDE
     /// lines says why.
@@ -70,6 +71,33 @@ impl Rule {
             Rule::ModelNames => Some("Why a model name"),
         }
     }
+}
+
+/// The commit status context `burrow-house` posts for `rule` on PR `pr`:
+/// `house/NAME (#N)`.
+pub fn status_context(rule: Rule, pr: u64) -> String {
+    format!("house/{} (#{})", rule.name(), pr)
+}
+
+/// The PR number of a `burrow-house` commit status (`house/NAME (#N)`), or
+/// `None` if `context` is not one. Commit statuses live on the commit SHA, so
+/// when a second PR shares a commit with an earlier PR, consumers use this to
+/// ignore the other PR's house statuses.
+pub fn status_pr(context: &str) -> Option<u64> {
+    let rest = context.strip_prefix("house/")?;
+    let (rule, num) = rest.rsplit_once(" (#")?;
+    let num = num.strip_suffix(')')?;
+    if rule.is_empty()
+        || !rule
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || num.is_empty()
+        || num.starts_with('0')
+        || !num.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    num.parse::<u64>().ok()
 }
 
 fn re(pattern: &str) -> Regex {
@@ -274,6 +302,142 @@ pub fn is_code(path: &str, language: Option<Language>) -> bool {
     })
 }
 
+/// Whether a path is a test file by its name or directory: test files are
+/// exempt from `Rule::FileSize`.
+pub fn is_test(path: &str) -> bool {
+    let wrapped = format!("/{path}");
+    if wrapped.contains("/tests/") || wrapped.contains("/src/test/") {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == "tests.rs"
+        || name.ends_with("_tests.rs")
+        || (name.starts_with("test_") && name.ends_with(".py"))
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.go")
+        || name.ends_with(".test.ts")
+        || name.ends_with(".test.tsx")
+        || name.ends_with(".test.js")
+        || name.ends_with(".test.jsx")
+        || name.ends_with(".spec.ts")
+        || name.ends_with(".spec.tsx")
+        || name.ends_with(".spec.js")
+        || name.ends_with(".spec.jsx")
+}
+
+/// How many lines `content` has, a last one with no newline included.
+pub fn line_count(content: &[u8]) -> usize {
+    let ends = content.last().is_some_and(|b| *b != b'\n');
+    content.iter().filter(|b| **b == b'\n').count() + usize::from(ends)
+}
+
+/// How many non-test code lines a file has for `Rule::FileSize`. For Rust
+/// files, lines belonging solely to inline `#[cfg(test)]` items don't count.
+pub fn code_lines(path: &str, content: &[u8]) -> usize {
+    if !path.ends_with(".rs") || content.is_empty() {
+        return line_count(content);
+    }
+    crate::rust_cfg_test::code_lines(content)
+}
+
+/// Standing per-path waivers from an action input: one path or glob pattern
+/// per line (`*` and `?` within a segment, `**` for zero or more segments),
+/// `#` starting a comment, blank lines ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllowList {
+    patterns: Vec<Vec<String>>,
+}
+
+impl AllowList {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let mut patterns = Vec::new();
+        for line in raw.lines() {
+            let entry = line.split('#').next().unwrap_or("").trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if entry.starts_with('/') || entry.ends_with('/') {
+                return Err(format!(
+                    "allow pattern {entry:?} must be a relative path without leading or trailing '/'"
+                ));
+            }
+            let mut segs: Vec<String> = Vec::new();
+            for seg in entry.split('/') {
+                if seg.is_empty() || seg == "." || seg == ".." {
+                    return Err(format!(
+                        "allow pattern {entry:?} has an empty or relative segment"
+                    ));
+                }
+                if seg.contains("**") && seg != "**" {
+                    return Err(format!(
+                        "allow pattern {entry:?} can only use '**' as a whole path segment"
+                    ));
+                }
+                if seg == "**" && segs.last().map(String::as_str) == Some("**") {
+                    continue;
+                }
+                segs.push(seg.to_owned());
+            }
+            patterns.push(segs);
+        }
+        Ok(Self { patterns })
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        if self.patterns.is_empty() {
+            return false;
+        }
+        let segs: Vec<&str> = path.split('/').collect();
+        self.patterns
+            .iter()
+            .any(|pat| match_path_segments(pat, &segs))
+    }
+}
+
+fn match_path_segments(pat: &[String], segs: &[&str]) -> bool {
+    let Some((first, rest)) = pat.split_first() else {
+        return segs.is_empty();
+    };
+    if first == "**" {
+        if rest.is_empty() {
+            return true;
+        }
+        for split in 0..=segs.len() {
+            if match_path_segments(rest, &segs[split..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some((seg, seg_rest)) = segs.split_first() else {
+        return false;
+    };
+    glob_segment(first, seg) && match_path_segments(rest, seg_rest)
+}
+
+fn glob_segment(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    let mut star = None;
+    while t < text.len() {
+        if pattern.get(p) == Some(&'*') {
+            star = Some((p, t));
+            p += 1;
+        } else if pattern.get(p).is_some_and(|&c| c == '?' || c == text[t]) {
+            p += 1;
+            t += 1;
+        } else if let Some((sp, st)) = star {
+            star = Some((sp, st + 1));
+            p = sp + 1;
+            t = st + 1;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
+}
+
 /// How many lines of its own an AGENTS.md may have, outside the house
 /// blocks, before a PR that grows it says why: enough for what the repo is,
 /// its own rules and where things live, not for the detail those point to.
@@ -433,5 +597,29 @@ mod tests {
             says("Why not split: one table", "Why not Rust"),
             Said::Nothing
         );
+    }
+
+    #[test]
+    fn status_context_and_pr_round_trip() {
+        for rule in Rule::ALL {
+            let ctx = status_context(rule, 1625);
+            assert_eq!(status_pr(&ctx), Some(1625), "{ctx}");
+        }
+        assert_eq!(status_pr("house/future-rule2 (#9)"), Some(9));
+        for bad in [
+            "house/branch",
+            "house/branch (#0)",
+            "house/branch (#05)",
+            "house/branch (#abc)",
+            "house/branch (#99999999999999999999999999)",
+            "house/ (#1625)",
+            "house/Branch (#1625)",
+            "house/a/b (#1625)",
+            "house/a (#1) (#2)",
+            "other/branch (#1625)",
+            "",
+        ] {
+            assert_eq!(status_pr(bad), None, "{bad}");
+        }
     }
 }

@@ -124,13 +124,11 @@ mkdir "$tmp/bootstrap-bin"
 printf '#!%s\n' "$(command -v bash)" > "$tmp/bootstrap-bin/nix-build"
 cat >> "$tmp/bootstrap-bin/nix-build" <<'NIX_BUILD'
 set -e
+[ "$#" = 5 ]
 [ "$1" = --extra-experimental-features ]
 [ "$2" = 'nix-command flakes' ]
 [ "$4" = --out-link ]
 [ -d "${5%/*}" ]
-[ "$6" = --option ]
-[ "$7" = extra-substituters ]
-[ -z "$8" ]
 test -f "$3"
 test -f "${3%/*}/../../flake.lock"
 test -f "${3%/*}/../../crates/rust-toolchain.toml"
@@ -196,13 +194,11 @@ grep -qx "env: TOOLS=$d/.github/flake-check" "$tmp/print" || fail "burrow's gate
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"
 grep -qx 'env: SKIP=agents' "$tmp/print" || fail "burrow's gate skips $(grep SKIP "$tmp/print")"
 # CI splits it across legs; here it runs whole, every leg's share at once.
-grep -q 'legs: [2-8]$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
+grep -qE 'legs: ([2-9]|1[0-2])$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
 for leg in LEGS LEG; do
   grep -qx "env: $leg=1" "$tmp/print" || fail "flake-gate runs one leg of several: $(grep LEG "$tmp/print")"
 done
-# No build store on a desk: its variables are empty, as GitHub gives them
+# No build store on a desk: its variable is empty, as GitHub gives it
 # unset.
-for v in BUILDS BUILDS_KEY; do
-  grep -qx "env: $v=" "$tmp/print" || fail "flake-gate names a build store: $(grep BUILDS "$tmp/print")"
-done
+grep -qx "env: BUILDS=" "$tmp/print" || fail "flake-gate names a build store: $(grep BUILDS "$tmp/print")"
 echo "flake-gate: ok"

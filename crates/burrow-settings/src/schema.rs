@@ -233,6 +233,94 @@ const HOLD: Kind = Kind::Record(&[
 ]);
 const HOLDS: Kind = Kind::Map(&HOLD);
 
+const MAYBE_COUNT: Kind = Kind::Omitted(&Kind::Maybe(&STAMP));
+const PLUGIN_MODEL: Kind = Kind::Record(&[
+    Field {
+        name: "id",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "efforts",
+        kind: &WORDS,
+    },
+    Field {
+        name: "contextTokens",
+        kind: &MAYBE_COUNT,
+    },
+    Field {
+        name: "maxOutputTokens",
+        kind: &MAYBE_COUNT,
+    },
+]);
+const PLUGIN_SANDBOX: Kind = Kind::OneOf(&["none", "brings"]);
+const PLUGIN_CAPS: Kind = Kind::Record(&[
+    Field {
+        name: "sandbox",
+        kind: &PLUGIN_SANDBOX,
+    },
+    Field {
+        name: "network",
+        kind: &Kind::Bool,
+    },
+    Field {
+        name: "mcp",
+        kind: &Kind::Bool,
+    },
+    Field {
+        name: "devices",
+        kind: &WORDS,
+    },
+    Field {
+        name: "declared",
+        kind: &WORDS,
+    },
+]);
+const PLUGIN_SOURCE_KIND: Kind = Kind::OneOf(&["nix", "release"]);
+const PLUGIN_METERS: Kind = Kind::Omitted(&WORDS);
+const INSTALLED_PLUGIN: Kind = Kind::Record(&[
+    Field {
+        name: "sourceKind",
+        kind: &PLUGIN_SOURCE_KIND,
+    },
+    Field {
+        name: "source",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "path",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "version",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "sha256",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "models",
+        kind: &Kind::List(&PLUGIN_MODEL),
+    },
+    Field {
+        name: "capabilities",
+        kind: &PLUGIN_CAPS,
+    },
+    Field {
+        name: "meters",
+        kind: &PLUGIN_METERS,
+    },
+    Field {
+        name: "installedAt",
+        kind: &STAMP,
+    },
+    Field {
+        name: "actor",
+        kind: &Kind::Text,
+    },
+]);
+const INSTALLED_PLUGINS: Kind = Kind::Map(&INSTALLED_PLUGIN);
+
 const CREDIT: Kind = Kind::Maybe(&Kind::Record(&[
     Field {
         name: "budgetUsd",
@@ -394,6 +482,13 @@ pub static SETTINGS: &[Setting] = &[
         "{}",
         OVERLAY,
         "Each repo's configured landing owner where it isn't the steward (settings landing OWNER/REPO steward|conaryd). burrow-landing moves a repo once the one holding it has let go of its work there.",
+    ),
+    flake(
+        "settings.plugins.fallback",
+        &DRAIN,
+        Is("null"),
+        "proj",
+        "Declared default fallback engine for roles affected when an installed engine plugin is removed; null requires an explicit --fallback.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.
     flake(
@@ -568,6 +663,13 @@ pub static SETTINGS: &[Setting] = &[
         r#"{"active": null, "saved": {}}"#,
         ROLES_OVERLAY,
         "Saved engine setups (proj engines save/use/delete), each a named set of proj.roles and proj.models values, and the one in force.",
+    ),
+    live(
+        "proj.enginePlugins",
+        &INSTALLED_PLUGINS,
+        "{}",
+        ROLES_OVERLAY,
+        "Pinned engine plugins installed through the owner settings write door, with verified source, version, sha256, and validated describe models, efforts, and capabilities.",
     ),
     live(
         "proj.apiCredit",

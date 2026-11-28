@@ -163,7 +163,7 @@ in
       # machine finds: the system's packages, such as awk and the slots a
       # gate takes (heavy). Without them a gate here would fail, or run
       # outside the machine's slots.
-      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package curl gh jq ] ++ cfg.packages
+      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip config.programs.git.package config.nix.package curl gh jq ] ++ cfg.packages
         ++ [ "/run/current-system/sw" ];
       environment = {
         RUNNER_ROOT = root;

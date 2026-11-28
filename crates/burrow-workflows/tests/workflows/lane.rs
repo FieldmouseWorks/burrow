@@ -168,12 +168,14 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
         docs["steps"]
     );
     let docs_steps = steps(docs);
+    assert_eq!(docs_steps[2]["id"], "builds");
+    assert_eq!(docs_steps[3]["name"], "degraded/builds");
     assert_eq!(
-        docs_steps[2]["if"],
+        docs_steps[4]["if"],
         "inputs.install-nix && inputs.docs-checks != ''"
     );
     assert_eq!(
-        docs_steps[3]["env"],
+        docs_steps[5]["env"],
         yaml(r#"CHECKS: "${{ inputs.docs-checks }}""#)
     );
 }
@@ -649,7 +651,7 @@ fn the_docs_lane_builds_only_the_docs_checks() {
         ),
     );
     let wf = workflow(FLAKE_CHECK);
-    let build = script(&steps(&wf["jobs"]["docs"])[3]);
+    let build = script(step(&wf["jobs"]["docs"], "build"));
     write(&log, "");
     let ran = s.bash(build, s.path(), &[("CHECKS", "")]);
     assert!(

@@ -13,9 +13,12 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::config::{
-    Config, CredentialMode, Effort, InputFormat, Mode, OutputFormat, validate_credential_home_path,
+    Config, CredentialMode, Effort, HOST_HOME_ENV, InputFormat, Mode, OutputFormat,
+    validate_credential_home_path,
 };
-use crate::normalize::{RunError, TurnOutput, normalize_output};
+use crate::normalize::{
+    RunError, StreamForwarder, StreamStep, TurnOutput, normalize_output, partial_turn_output,
+};
 use crate::schema::Schema;
 
 /// Cross-engine credentials that must NEVER leak into the `antigravity` child,
@@ -171,6 +174,131 @@ struct PreparedCredential {
     env_var: Option<(String, OsString)>,
     secrets: Vec<String>,
     _tempdir: Option<TempDir>,
+    cleanup_home_file: Option<(PathBuf, PathBuf)>,
+}
+
+impl Drop for PreparedCredential {
+    fn drop(&mut self) {
+        if let Some((home, relative_path)) = &self.cleanup_home_file {
+            remove_materialized_home_file(home, relative_path);
+        }
+    }
+}
+
+enum IsolatedHostHome {
+    Temp(TempDir),
+    Persistent(PathBuf),
+}
+
+impl IsolatedHostHome {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temp(dir) => dir.path(),
+            Self::Persistent(dir) => dir.as_path(),
+        }
+    }
+
+    fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+}
+
+fn prepare_persistent_host_home(path: &Path, orig_home: Option<&Path>) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "{HOST_HOME_ENV} must be an absolute path: {}",
+            path.display()
+        ));
+    }
+    if let Some(real_home) = orig_home
+        && path == real_home
+    {
+        return Err(format!(
+            "{HOST_HOME_ENV} must not match HOME ({})",
+            real_home.display()
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to follow symlink at {HOST_HOME_ENV} {}",
+                    path.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "{HOST_HOME_ENV} {} is not a directory",
+                    path.display()
+                ));
+            }
+            if let Some(real_home) = orig_home
+                && let (Ok(canon_path), Ok(canon_home)) =
+                    (fs::canonicalize(path), fs::canonicalize(real_home))
+                && canon_path == canon_home
+            {
+                return Err(format!(
+                    "{HOST_HOME_ENV} must not resolve to HOME ({})",
+                    real_home.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            DirBuilder::new().mode(0o700).create(path).map_err(|e| {
+                format!(
+                    "failed to create persistent host HOME {}: {e}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to inspect persistent host HOME {}: {e}",
+                path.display()
+            ));
+        }
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
+        format!(
+            "failed to secure persistent host HOME {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(path.to_path_buf())
+}
+
+fn remove_materialized_home_file(home: &Path, relative_path: &Path) {
+    if validate_credential_home_path(relative_path).is_err() {
+        return;
+    }
+    let Ok(home_meta) = fs::symlink_metadata(home) else {
+        return;
+    };
+    if home_meta.file_type().is_symlink() || !home_meta.is_dir() {
+        return;
+    }
+    let mut dir = home.to_path_buf();
+    if let Some(parent) = relative_path.parent() {
+        for comp in parent.components() {
+            let Component::Normal(part) = comp else {
+                return;
+            };
+            dir.push(part);
+            let Ok(meta) = fs::symlink_metadata(&dir) else {
+                return;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return;
+            }
+        }
+    }
+    let Some(file_name) = relative_path.file_name() else {
+        return;
+    };
+    let target = dir.join(file_name);
+    if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_file()) {
+        let _ = fs::remove_file(&target);
+    }
 }
 
 fn collect_secrets(secret_value: Option<&str>) -> Vec<String> {
@@ -330,7 +458,11 @@ fn materialize_home_file(
     Ok(target)
 }
 
-fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCredential, String> {
+fn prepare_credential(
+    config: &Config,
+    home: Option<&Path>,
+    cleanup_home_file: bool,
+) -> Result<PreparedCredential, String> {
     let target_name = config
         .target_credential_env
         .as_deref()
@@ -371,6 +503,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                 env_var,
                 secrets,
                 _tempdir: None,
+                cleanup_home_file: None,
             })
         }
         CredentialMode::File => {
@@ -379,6 +512,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                     env_var: None,
                     secrets,
                     _tempdir: None,
+                    cleanup_home_file: None,
                 });
             };
             if let Some(path) = &config.credential_file {
@@ -386,6 +520,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                     env_var: Some((name.to_owned(), path.as_os_str().to_os_string())),
                     secrets,
                     _tempdir: None,
+                    cleanup_home_file: None,
                 });
             }
             let Some(val) = &secret_value else {
@@ -393,6 +528,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                     env_var: None,
                     secrets,
                     _tempdir: None,
+                    cleanup_home_file: None,
                 });
             };
             let dir = tempfile::Builder::new()
@@ -410,6 +546,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                 env_var: Some((name.to_owned(), file_path.into_os_string())),
                 secrets,
                 _tempdir: Some(dir),
+                cleanup_home_file: None,
             })
         }
         CredentialMode::HomeFile => {
@@ -419,6 +556,7 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                     env_var: None,
                     secrets,
                     _tempdir: None,
+                    cleanup_home_file: None,
                 });
             };
             let home = home.ok_or_else(|| {
@@ -429,6 +567,8 @@ fn prepare_credential(config: &Config, home: Option<&Path>) -> Result<PreparedCr
                 env_var: None,
                 secrets,
                 _tempdir: None,
+                cleanup_home_file: cleanup_home_file
+                    .then(|| (home.to_path_buf(), config.credential_home_path.clone())),
             })
         }
     }
@@ -442,6 +582,18 @@ pub fn run_invocation(
     config: &Config,
     invocation: &Invocation,
     stop: &dyn Fn() -> bool,
+) -> TurnOutput {
+    run_invocation_streaming(config, invocation, stop, None)
+}
+
+/// Like [`run_invocation`], scrubbing and normalizing each complete stdout line
+/// via `on_step` as it arrives and preserving any partial session/usage on
+/// timeout or cancellation.
+pub fn run_invocation_streaming(
+    config: &Config,
+    invocation: &Invocation,
+    stop: &dyn Fn() -> bool,
+    mut on_step: Option<&mut dyn FnMut(StreamStep)>,
 ) -> TurnOutput {
     // A schema that can't be held to is refused before the child runs: never
     // "any JSON will do".
@@ -466,27 +618,48 @@ pub fn run_invocation(
     let orig_home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    // In host mode, always run in a private per-turn `$HOME` (regardless of
-    // credential mode) so interactive desktop or T3 userdata in the real
-    // `$HOME` is never read or overwritten.
+    // In host mode, always run in a private `$HOME` (regardless of credential
+    // mode) so interactive desktop or T3 userdata in the real `$HOME` is never
+    // read or overwritten. When `PROJ_ENGINE_HOME` is provided by `burrow-proj`,
+    // persist that per-job directory across turns so `--conversation` resumes
+    // find prior Antigravity session state; otherwise use a per-turn tempdir.
     let isolated_host_home = if config.host_mode && invocation.home_dir.is_none() {
-        match tempfile::Builder::new()
-            .prefix("antigravity-host-home-")
-            .tempdir()
-            .and_then(|dir| {
-                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
-                Ok(dir)
-            }) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
-                return TurnOutput {
-                    error: Some(RunError::ProcessFailed {
-                        exit_code: None,
-                        signal: None,
-                        message: format!("failed to create isolated host HOME: {e}"),
-                    }),
-                    ..TurnOutput::default()
-                };
+        let persistent = std::env::var_os(HOST_HOME_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        if let Some(dir) = persistent {
+            match prepare_persistent_host_home(&dir, orig_home.as_deref()) {
+                Ok(dir) => Some(IsolatedHostHome::Persistent(dir)),
+                Err(message) => {
+                    return TurnOutput {
+                        error: Some(RunError::ProcessFailed {
+                            exit_code: None,
+                            signal: None,
+                            message,
+                        }),
+                        ..TurnOutput::default()
+                    };
+                }
+            }
+        } else {
+            match tempfile::Builder::new()
+                .prefix("antigravity-host-home-")
+                .tempdir()
+                .and_then(|dir| {
+                    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))?;
+                    Ok(dir)
+                }) {
+                Ok(dir) => Some(IsolatedHostHome::Temp(dir)),
+                Err(e) => {
+                    return TurnOutput {
+                        error: Some(RunError::ProcessFailed {
+                            exit_code: None,
+                            signal: None,
+                            message: format!("failed to create isolated host HOME: {e}"),
+                        }),
+                        ..TurnOutput::default()
+                    };
+                }
             }
         }
     } else {
@@ -497,7 +670,10 @@ pub fn run_invocation(
         .clone()
         .or_else(|| isolated_host_home.as_ref().map(|d| d.path().to_path_buf()));
     let resolved_home = effective_home.clone().or_else(|| orig_home.clone());
-    let prepared = match prepare_credential(config, resolved_home.as_deref()) {
+    let cleanup_home_file = isolated_host_home
+        .as_ref()
+        .is_some_and(IsolatedHostHome::is_persistent);
+    let prepared = match prepare_credential(config, resolved_home.as_deref(), cleanup_home_file) {
         Ok(p) => p,
         Err(why) => {
             return TurnOutput {
@@ -521,10 +697,33 @@ pub fn run_invocation(
         if isolated_host_home.is_some()
             && let Some(real_home) = &orig_home
         {
+            let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| real_home.join(".config"));
             if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
                 let gitconfig = real_home.join(".gitconfig");
+                let xdg_gitconfig = xdg_config_home.join("git").join("config");
                 if gitconfig.is_file() {
                     command.env("GIT_CONFIG_GLOBAL", gitconfig);
+                } else if xdg_gitconfig.is_file() {
+                    command.env("GIT_CONFIG_GLOBAL", xdg_gitconfig);
+                }
+            }
+            if [
+                "GH_CONFIG_DIR",
+                "GH_TOKEN_SOCKET",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ]
+            .iter()
+            .all(|key| std::env::var_os(key).filter(|v| !v.is_empty()).is_none())
+            {
+                let gh_config = xdg_config_home.join("gh");
+                if gh_config.is_dir() {
+                    command.env("GH_CONFIG_DIR", gh_config);
                 }
             }
             if std::env::var_os("CARGO_HOME").is_none() {
@@ -544,6 +743,7 @@ pub fn run_invocation(
     for var in stripped {
         command.env_remove(var);
     }
+    command.env_remove(HOST_HOME_ENV);
     match config.credential_mode {
         CredentialMode::HomeFile => {
             if let Some(src_env) = &config.credential_env {
@@ -565,10 +765,12 @@ pub fn run_invocation(
         command.env(key, val);
     }
 
-    let deadline = Instant::now() + Duration::from_secs(config.deadline_secs);
+    let deadline = config
+        .deadline_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs));
     // In `stream-json` input mode, deliver the prompt as a single NDJSON
     // `{"event":"user","message":{"content":...}}` line on stdin (which
-    // `output_unless` closes immediately on write, and binds to `/dev/null`
+    // `stream_unless` closes immediately on write, and binds to `/dev/null`
     // when empty). In single-shot `json`/`text` mode, `--print=<prompt>` carries
     // the prompt and stdin stays `/dev/null`.
     let stdin_payload: Option<Vec<u8>> =
@@ -583,15 +785,21 @@ pub fn run_invocation(
         } else {
             None
         };
-    let result = burrow_process::output_unless(
+    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
+    let mut forwarder = StreamForwarder::for_continuation(invocation.conversation.as_deref());
+    let mut on_stdout_line = |line: &str| {
+        if let Some(cb) = on_step.as_deref_mut() {
+            cb(forwarder.process_line_scrubbed(line, &secrets));
+        }
+    };
+    let result = burrow_process::stream_unless(
         &mut command,
         stdin_payload.as_deref(),
         deadline,
         config.max_output_bytes,
         stop,
+        &mut on_stdout_line,
     );
-
-    let secrets: Vec<&str> = prepared.secrets.iter().map(String::as_str).collect();
 
     match result {
         Ok(output) => normalize_output(
@@ -603,19 +811,17 @@ pub fn run_invocation(
             schema.as_ref(),
             &secrets,
         ),
-        Err(why) if why == "command was stopped" => TurnOutput {
-            error: Some(RunError::Cancelled),
-            ..TurnOutput::default()
-        },
-        Err(why) if why == "command exceeded its time limit" => TurnOutput {
-            error: Some(RunError::TimedOut),
-            ..TurnOutput::default()
-        },
-        Err(why) => TurnOutput {
+        Err(err) if err.reason == "command was stopped" => {
+            partial_turn_output(&err.stdout, RunError::Cancelled, &secrets)
+        }
+        Err(err) if err.reason == "command exceeded its time limit" => {
+            partial_turn_output(&err.stdout, RunError::TimedOut, &secrets)
+        }
+        Err(err) => TurnOutput {
             error: Some(RunError::ProcessFailed {
                 exit_code: None,
                 signal: None,
-                message: crate::normalize::scrub(&why, &secrets),
+                message: crate::normalize::scrub(&err.reason, &secrets),
             }),
             ..TurnOutput::default()
         },

@@ -59,6 +59,11 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         else:
             p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
         save(p.key, p.st)
+    except C.Unavailable:
+        # Persist expensive eval caches and head bookkeeping already done
+        # before the pass ran out of time or GitHub stopped answering.
+        save(p.key, p.st)
+        raise
 
 
 class Pass(Context, Jobs, Actions):

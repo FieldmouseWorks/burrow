@@ -23,7 +23,10 @@ fn main() -> ExitCode {
         ["changes", manifest, dir, head] => show_changes(manifest, dir, head),
         [config, "config"] => read(config).map(|cfg| {
             for m in &cfg.manifests {
-                println!("{}:{}", m.repo, m.path);
+                match cfg.first_for(&m.repo, &m.repo) {
+                    Some(label) => println!("{}:{} [{label}]", m.repo, m.path),
+                    None => println!("{}:{}", m.repo, m.path),
+                }
             }
             true
         }),

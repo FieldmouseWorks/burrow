@@ -33,6 +33,10 @@
       };
     };
     proj.enable = true;
+    settings = {
+      owners = [ { login = "sam"; id = 1; } ];
+      plugins.fallback = "claude";
+    };
     agents.enable = true;
     toolbox.enable = true;
     rustCache.enable = true;

@@ -19,6 +19,9 @@ case "$*" in
   'api -i -X GET repos/sam/r/contents/my%20dir/big.rs?ref=4ead')
     answer '200 OK'
     printf '{"type": "file", "encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
+  'api -i -X GET repos/sam/r/contents/my%20dir/big.rs?ref=3e7b')
+    answer '200 OK'
+    printf '{"type": "file", "encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big-before.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
   'api -i -X GET repos/sam/r/contents/vendor/lib?ref='*) answer '200 OK'; echo '{"type": "submodule", "sha": "5ab"}' ;;
   'api -i -X GET repos/sam/r/contents/bin/run?ref='*) answer '200 OK'; echo '{"type": "symlink", "target": "../tools/run"}' ;;
   'api -i -X POST repos/sam/r/statuses/4ead --input -') answer '201 Created'; echo '{}' ;;
@@ -50,16 +53,21 @@ fn setup(d: &Path, fork: bool) {
     let compare = json!({"merge_base_commit": {"sha": "3e7b"}, "files": files});
     fs::write(d.join("compare.json"), compare.to_string()).unwrap();
     fs::write(d.join("big.rs"), "x\n".repeat(1001)).unwrap();
+    fs::write(d.join("big-before.rs"), "x\n".repeat(986)).unwrap();
 }
 
 fn house(d: &Path, args: &[&str], model_names: &str) -> Output {
+    house_with(d, args, model_names, &[])
+}
+
+fn house_with(d: &Path, args: &[&str], model_names: &str, extra: &[(&str, &str)]) -> Output {
     let path = format!(
         "{}:{}",
         d.join("bin").display(),
         std::env::var("PATH").unwrap()
     );
-    Command::new(burrow_test::program!("burrow-house"))
-        .args(args)
+    let mut cmd = Command::new(burrow_test::program!("burrow-house"));
+    cmd.args(args)
         .env_clear()
         .env("PATH", path)
         .env("DIR", d)
@@ -70,9 +78,11 @@ fn house(d: &Path, args: &[&str], model_names: &str) -> Output {
         .env("HEAD_SHA", "4ead")
         .env("GROWTH", "50")
         .env("LINES", "1000")
-        .env("MODEL_NAMES", model_names)
-        .output()
-        .unwrap()
+        .env("MODEL_NAMES", model_names);
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
 }
 
 fn log(d: &Path) -> Vec<String> {
@@ -179,4 +189,34 @@ fn failures() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage"));
     assert!(log(d).is_empty(), "{:#?}", log(d));
+    let out = house_with(
+        d,
+        &["check"],
+        "true",
+        &[("RUST_FIRST_ALLOW", "/abs/bad.py")],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("RUST_FIRST_ALLOW"));
+    assert!(log(d).is_empty(), "{:#?}", log(d));
+}
+
+// Standing waivers come through FILE_SIZE_ALLOW / RUST_FIRST_ALLOW.
+#[test]
+fn standing_allow_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    setup(d, false);
+    let out = house_with(
+        d,
+        &["check"],
+        "true",
+        &[("FILE_SIZE_ALLOW", "my dir/big.rs # standing waiver")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!stdout.contains("::error"), "{stdout}");
 }

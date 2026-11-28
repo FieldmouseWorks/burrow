@@ -1,9 +1,11 @@
 // When a job is over, so its scratch goes (said `proj done`, or stopped, or an
 // --owned job's turn that awaits nothing; never one that awaits or asks, and
-// only as its latest turn left it), and that clearing it takes its worktrees,
-// however deep, off their repos too, so their branches check out again, leaves
-// every other job's alone, gets past what a build left read-only, and lets two
-// clears at once both succeed.
+// only as its latest turn left it), and that clearing it sets it aside for
+// burrow-scratch and takes its worktrees, however deep, off their repos on the
+// rename alone, so their branches check out again, leaves every other job's
+// alone, and lets two clears at once both succeed. What a build left
+// read-only, or another user's files, are the root-side remover's:
+// tests/proj-scratch.nix.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,6 +76,7 @@ fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -101,14 +104,24 @@ fn trees(repo: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What's been left aside in the scratch's jobs dir.
+/// What's been set aside in the scratch's jobs dir.
 fn left(cfg: &Config) -> Vec<PathBuf> {
     fs::read_dir(cfg.scratch.join("jobs"))
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".gone-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(burrow_scratch::GONE)
+        })
         .map(|e| e.path())
         .collect()
+}
+
+/// What the root-side unit does once something is set aside.
+fn sweep(cfg: &Config) {
+    let done = burrow_scratch::sweep(&cfg.scratch.join("jobs")).unwrap();
+    assert!(done.stuck.is_empty() && done.held.is_empty(), "{done:?}");
 }
 
 #[test]
@@ -153,16 +166,18 @@ fn clearing_takes_its_worktrees_off_their_repos() {
     // And, deep in a's scratch, the only worktree of a second repo.
     let api = b.repo("api");
     b.worktree(&api, "fix-deep", &a.join("x/y/z/w/api"));
-    // What a build leaves, some of it read-only.
-    let ro = a.join("web/target/debug/ro");
-    fs::create_dir_all(&ro).unwrap();
-    fs::write(ro.join("lib.rlib"), vec![0; 1024]).unwrap();
-    burrow_test::permissions(&ro, 0o555);
+    // What a build leaves.
+    fs::create_dir_all(a.join("web/target/debug")).unwrap();
+    fs::write(a.join("web/target/debug/lib.rlib"), vec![0; 1024]).unwrap();
 
     clear(cfg, "a");
     assert!(!a.exists(), "job a's scratch is still there");
-    assert_eq!(left(cfg), Vec::<PathBuf>::new());
-    // Its worktree is off the repo, so its branch checks out again; b's is kept.
+    // Set aside, whole, for the remover: proj removes none of it.
+    let aside = left(cfg);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert!(aside[0].join("web/target/debug/lib.rlib").exists());
+    // Its worktree is off the repo on the rename alone, so its branch checks
+    // out again; b's is kept.
     assert_eq!(trees(&web), [web.clone(), other.join("web")]);
     git(
         &web,
@@ -179,6 +194,8 @@ fn clearing_takes_its_worktrees_off_their_repos() {
         "b's worktree went with a's"
     );
     assert_eq!(trees(&api), from_ref(&api));
+    sweep(cfg);
+    assert_eq!(left(cfg), Vec::<PathBuf>::new());
 
     // A job with no scratch (a sandbox's, or one cleared already): nothing to do.
     clear(cfg, "a");
@@ -219,11 +236,155 @@ fn two_clears_at_once() {
             clear(cfg, "c");
         });
         assert!(!c.exists(), "c's scratch survived two clears");
+        assert_eq!(left(cfg).len(), i + 1, "set aside more than once");
         assert_eq!(
             trees(&web),
             from_ref(&web),
             "a raced worktree is still listed"
         );
     }
+    sweep(cfg);
     assert_eq!(left(cfg), Vec::<PathBuf>::new());
+}
+
+fn pack_files(repo: &Path) -> Vec<PathBuf> {
+    let mut packs: Vec<_> = fs::read_dir(repo.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "pack"))
+        .collect();
+    packs.sort();
+    packs
+}
+
+/// Seed `n` separate valid packfiles in `repo`, simulating accumulated fetches.
+fn make_packs(repo: &Path, n: usize) {
+    for i in 0..n {
+        fs::write(repo.join("f"), format!("v{i}\n")).unwrap();
+        git(repo, &["add", "f"]);
+        git(repo, &["commit", "-q", "-m", &format!("c{i}")]);
+        git(repo, &["repack", "-q"]);
+        git(repo, &["prune-packed", "-q"]);
+    }
+}
+
+fn backdate(path: &Path, secs: u64) {
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(at))
+        .unwrap();
+}
+
+#[test]
+fn clearing_repacks_excess_packs_and_recovers_stale_midx_lock() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    make_packs(&web, 36);
+    assert!(
+        pack_files(&web).len() >= 36,
+        "got {} packs",
+        pack_files(&web).len()
+    );
+    let pack_dir = web.join(".git/objects/pack");
+    let midx_lock = pack_dir.join("multi-pack-index.lock");
+    let stale_tmp = pack_dir.join("tmp_pack_stale");
+    let fresh_tmp = pack_dir.join("tmp_pack_fresh");
+    for p in [&midx_lock, &stale_tmp, &fresh_tmp] {
+        fs::write(p, b"leftover").unwrap();
+    }
+    backdate(&midx_lock, 7200);
+    backdate(&stale_tmp, 7200);
+
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-a", &a.join("web"));
+    clear(cfg, "a");
+
+    assert!(!midx_lock.exists(), "stale multi-pack-index.lock stayed");
+    assert!(!stale_tmp.exists(), "stale tmp_pack stayed");
+    assert!(fresh_tmp.exists(), "fresh tmp_pack was removed too early");
+    assert!(
+        pack_files(&web).len() <= 8,
+        "expected geometric repack to collapse packs, left {}",
+        pack_files(&web).len()
+    );
+    assert!(
+        pack_dir.join("multi-pack-index").exists(),
+        "repack should write multi-pack-index"
+    );
+}
+
+#[test]
+fn clearing_skips_repack_when_locked_and_preserves_fresh_midx_lock() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    make_packs(&web, 36);
+    let pack_dir = web.join(".git/objects/pack");
+    let midx_lock = pack_dir.join("multi-pack-index.lock");
+    fs::write(&midx_lock, b"active").unwrap();
+
+    // Holding the repo's maintenance lock skips repacking without blocking.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(web.join(".git/burrow-gc.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-a", &a.join("web"));
+    clear(cfg, "a");
+    assert!(pack_files(&web).len() >= 36);
+    assert!(midx_lock.exists());
+    drop(lock);
+
+    // Even unlocked, a fresh (<1h) multi-pack-index.lock is left alone.
+    let c = dir(cfg, "b");
+    b.worktree(&web, "fix-b", &c.join("web"));
+    clear(cfg, "b");
+    assert!(
+        midx_lock.exists(),
+        "fresh multi-pack-index.lock was deleted"
+    );
+}
+
+fn loose_objects(repo: &Path) -> usize {
+    let mut total = 0;
+    for entry in fs::read_dir(repo.join(".git/objects")).unwrap().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            total += fs::read_dir(entry.path()).unwrap().count();
+        }
+    }
+    total
+}
+
+#[test]
+fn clearing_repacks_excess_loose_objects_without_excess_packs() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    let web = b.repo("web");
+    let many = web.join("many");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..2100 {
+        fs::write(many.join(format!("f{i}")), format!("blob-{i}\n")).unwrap();
+    }
+    git(&web, &["add", "many"]);
+    git(&web, &["commit", "-q", "-m", "many loose objects"]);
+    assert!(loose_objects(&web) > 2048);
+    assert_eq!(pack_files(&web).len(), 0);
+
+    let a = dir(cfg, "a");
+    b.worktree(&web, "fix-loose", &a.join("web"));
+    clear(cfg, "a");
+
+    assert_eq!(
+        loose_objects(&web),
+        0,
+        "expected excess loose objects to be packed and pruned"
+    );
+    assert_eq!(pack_files(&web).len(), 1);
 }

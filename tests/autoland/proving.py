@@ -580,57 +580,18 @@ assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": 
 print("proof builds' verdicts: ok")
 
 # An eval of a check takes minutes on a loaded machine, so the steward gives
-# it a deadline past that: the one it passes nix is what's asserted.
-eval_deadlines, real_nix = [], P.nix
-P.nix = lambda *a, timeout=60: (eval_deadlines.append(timeout) if a[0] == "nix" else None, "/nix/store/x.drv\n")[1]
-try:
-    P.derivations("sam/r", f"{tmp}/mirror", "refs/pr/1", "a" * 40, ["vm"])
-finally:
-    P.nix = real_nix
-assert eval_deadlines and min(eval_deadlines) >= 900, eval_deadlines
+# its eval unit a deadline past that: build.json's timeout is what's asserted.
+assert P.EVAL_TIMEOUT >= 900, P.EVAL_TIMEOUT
+srun_log = f"{tmp}/proving-srun.log"
+with open(f"{bin_dir}/systemd-run", "w") as f:
+    f.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {srun_log}\nexit 0\n")
+os.chmod(f"{bin_dir}/systemd-run", 0o755)
+fresh_pr_state()
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}, "proofSlots": 1}
+jid_eval = P.start_eval("sam/r", {"number": 1, "headRefOid": "a" * 40}, ["vm"], "outputs", f"{tmp}/mirror")
+assert jid_eval and json.load(open(f"{tmp}/state/builds/{jid_eval}/build.json"))["timeout"] >= 900, jid_eval
+assert f"--property=RuntimeMaxSec={P.EVAL_TIMEOUT}s" in open(srun_log).read(), open(srun_log).read()
 print("proof eval deadline: ok")
-
-# The pass's own deadline bounds an eval, which is then counted against
-# nobody: a slow nix under a 2s pass deadline is cut at 2s, not run its 900s.
-slow_dir = f"{tmp}/slow-nix"
-os.makedirs(slow_dir)
-with open(f"{slow_dir}/nix", "w") as f:
-    f.write(f"#!{sys.executable}\nimport time\ntime.sleep(20)\n")
-os.chmod(f"{slow_dir}/nix", 0o755)
-kept_cfg_nix = S.CFG["nix"]
-S.CFG["nix"] = slow_dir
-try:
-    started = time.monotonic()
-    try:
-        with C.pass_deadline(2):
-            P.nix("nix", "eval", timeout=900)
-        raise AssertionError("the eval ran past the pass's deadline")
-    except C.Unavailable as e:
-        assert isinstance(e, P.Cut) and time.monotonic() - started < 10, (e, time.monotonic() - started)
-    # Outside a pass, the eval's own deadline still applies, and its expiry is a failure as before.
-    try:
-        P.nix("nix", timeout=2)
-        raise AssertionError("no timeout")
-    except subprocess.TimeoutExpired:
-        pass
-    # merged() is optional: with too little of the pass left, it isn't run at all.
-    real_nix_fn = P.nix
-    P.nix = lambda *a, **k: (_ for _ in ()).throw(AssertionError("merged ran its eval with too little pass left"))
-    try:
-        with C.pass_deadline(60):
-            assert P.merged("sam/r", {"number": 1, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], {}, "b" * 40) is None
-            # The deadline only stops a fresh eval: outputs already worked out
-            # for this head on this tip are served, with any time left.
-            cached = ["/nix/store/merged-out"]
-            key = ["a" * 40, "b" * 40, {"vm": C.repo_cfg("sam/r")["proofBuilds"]["vm"]}]
-            st = {"mergedOutputs": {"for": key, "paths": cached, "failed": False, "at": C.NOW}}
-            got = P.merged("sam/r", {"number": 1, "headRefOid": "a" * 40, "baseRefName": "main"}, ["vm"], st, "b" * 40)
-            assert got == cached, got
-    finally:
-        P.nix = real_nix_fn
-finally:
-    S.CFG["nix"] = kept_cfg_nix
-print("proof evals bounded by the pass: ok")
 
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
 del S.CFG["repos"]["sam/r"]

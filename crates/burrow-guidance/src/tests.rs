@@ -33,7 +33,7 @@ fn what_the_guidance_said_before_fails() {
         found("prove a mismatch fails. A project has its own share (`maxJobsPerProject`, two)"),
         ["1: `proj.maxJobsPerProject` with a value"]
     );
-    // One file keeps four options: naming it states where each is kept.
+    // One file keeps five options: naming it states where each is kept.
     assert_eq!(
         found("Role settings live in `settings/overlay.roles.json`, beside the overlay"),
         [
@@ -41,6 +41,7 @@ fn what_the_guidance_said_before_fails() {
             "1: where `proj.models` is kept (`settings/overlay.roles.json`)",
             "1: where `proj.engineOffers` is kept (`settings/overlay.roles.json`)",
             "1: where `proj.engineSetups` is kept (`settings/overlay.roles.json`)",
+            "1: where `proj.enginePlugins` is kept (`settings/overlay.roles.json`)",
         ]
     );
     assert_eq!(
@@ -303,6 +304,92 @@ fn the_house_blocks_copy_is_house_s() {
     }
     // A repo that doesn't own the blocks: its copy is house-sync's.
     assert!(got(Some("# repo\n"), false).is_empty());
+}
+
+/// Burrow's own AGENTS.md (a tree with both house/ and docs/settings-reference.md)
+/// must keep `read them with \`proj settings show\`` and never use bare
+/// `read them with \`settings show\``, including across wrapped lines.
+#[test]
+fn burrow_agents_documents_the_settings_read_door() {
+    let block = "<!-- house:rules v1 begin -->\nrules\n<!-- house:rules end -->\n";
+    let got = |agents: Option<&str>, has_house: bool, has_ref: bool| -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if has_house {
+            fs::create_dir_all(root.join("house")).unwrap();
+            fs::write(root.join("house/rules.md"), block).unwrap();
+        }
+        if has_ref {
+            let ref_path = root.join(PATH);
+            fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+            fs::write(ref_path, "# Settings reference\n").unwrap();
+        }
+        if let Some(agents) = agents {
+            fs::write(root.join("AGENTS.md"), agents).unwrap();
+        }
+        check(root, &[])
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    let good =
+        format!("# burrow\n\n{block}\nPipeline options: read them with `proj settings show`.\n");
+    assert!(got(Some(&good), true, true).is_empty());
+
+    let wrapped_good =
+        format!("# burrow\n\n{block}\nPipeline options: read them\nwith `proj settings show`.\n");
+    assert!(got(Some(&wrapped_good), true, true).is_empty());
+
+    let wrong = format!("# burrow\n\n{block}\nPipeline options: read them with `settings show`.\n");
+    assert_eq!(
+        got(Some(&wrong), true, true),
+        [
+            "AGENTS.md:7: names the wrong settings read door (`settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+            "AGENTS.md:1: omits the settings read door (`proj settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+        ]
+    );
+
+    let wrapped_wrong =
+        format!("# burrow\n\n{block}\nPipeline options: read them\nwith `settings show`.\n");
+    assert_eq!(
+        got(Some(&wrapped_wrong), true, true),
+        [
+            "AGENTS.md:7: names the wrong settings read door (`settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+            "AGENTS.md:1: omits the settings read door (`proj settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+        ]
+    );
+
+    let both = format!(
+        "# burrow\n\n{block}\nread them with `proj settings show`.\nread them with `settings show`.\n"
+    );
+    assert_eq!(
+        got(Some(&both), true, true),
+        [
+            "AGENTS.md:8: names the wrong settings read door (`settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+        ]
+    );
+
+    let omitted = format!("# burrow\n\n{block}\nNo settings mention here.\n");
+    assert_eq!(
+        got(Some(&omitted), true, true),
+        [
+            "AGENTS.md:1: omits the settings read door (`proj settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+        ]
+    );
+
+    assert_eq!(
+        got(None, true, true),
+        [
+            "AGENTS.md:1: carries the house block `rules` nowhere; copy it from house/rules.md verbatim",
+            "AGENTS.md:1: omits the settings read door (`proj settings show`); keep `proj settings show` as docs/settings-reference.md documents",
+        ]
+    );
+
+    // Repos that don't own both house/ and docs/settings-reference.md aren't
+    // held to burrow's own AGENTS.md read-door rule.
+    assert!(got(Some(&omitted), true, false).is_empty());
+    assert!(got(Some("# other\n"), false, true).is_empty());
 }
 
 /// `value` as JSON with a space between each of its tokens: `[ ]`, `{ }`,

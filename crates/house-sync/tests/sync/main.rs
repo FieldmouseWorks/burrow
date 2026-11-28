@@ -5,6 +5,7 @@
 
 mod github;
 mod limited;
+mod race;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -188,6 +189,10 @@ fn prs() -> String {
     block("prs")
 }
 
+fn review() -> String {
+    block("review")
+}
+
 fn current() -> String {
     format!(
         "# AGENTS.md\n\n{}\n## Own rules\n\n{}\nOwn PR notes.\n",
@@ -238,7 +243,7 @@ fn burrows_blocks_are_whole_and_named_as_the_bash_named_them() {
     // take it for a broken block).
     let blocks = House::read(&house()).unwrap();
     let names: Vec<&str> = blocks.blocks.iter().map(|b| b.name.as_str()).collect();
-    assert_eq!(names, ["prs", "rules"]);
+    assert_eq!(names, ["prs", "review", "rules"]);
     for b in &blocks.blocks {
         let text = String::from_utf8(b.text.clone()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -666,7 +671,7 @@ fn a_pass_for_blocks_the_system_no_longer_has_does_nothing() {
     // fewer.
     let other = |change: &dyn Fn(&Path)| {
         let d = tempfile::tempdir().unwrap();
-        for name in ["prs", "rules"] {
+        for name in ["prs", "review", "rules"] {
             fs::write(d.path().join(format!("{name}.md")), block(name)).unwrap();
         }
         change(d.path());
@@ -849,6 +854,7 @@ fn source_repo(agents: &str, rules: &str, prs: &str) -> Repo {
     r.source = vec![
         ("rules.md".into(), rules.into()),
         ("prs.md".into(), prs.into()),
+        ("review.md".into(), review()),
     ];
     r.prs = vec![(7, "house/rules-0ther".into(), false)];
     r
@@ -944,4 +950,37 @@ fn a_source_it_cant_read_fails_the_repo_rather_than_opening_a_pr() {
         );
         assert!(ran.notices().contains(&["open", "house-sync"]));
     }
+}
+
+#[test]
+fn review_block_is_placed_into_code_review_rules_and_supersedes_older_sync_pr() {
+    let before = format!(
+        "# AGENTS.md\n\n{}\n{}\n## Code Review Rules\n\n\
+         For reviewers, the review bot included. Flag as P1:\n\n\
+         - a change that makes a check pass without fixing the thing it checks\n\
+         - tests or checks weakened, skipped or deleted to get green\n\
+         - secrets, tokens or personal data in the diff or the logs it adds\n\
+         - behavior changed beyond what the PR says it does\n\
+         - repo-specific risk\n",
+        rules(),
+        prs()
+    );
+    let expected = format!(
+        "# AGENTS.md\n\n{}\n{}\n## Code Review Rules\n\n{}- repo-specific risk\n",
+        rules(),
+        prs(),
+        review()
+    );
+    let r = Repo {
+        prs: vec![(12, "house/rules-4e2a4d8f".into(), false)],
+        ..repo("sam/a", Some(&before))
+    };
+    let ran = sync(&[r], Some("sam/a"));
+    assert_eq!(ran.ok, Ok(true), "{}", ran.out);
+    assert_eq!(ran.wrote(), ["sam/a"]);
+    assert_eq!(ran.written()["sam/a"], expected);
+    assert_eq!(
+        ran.closed(),
+        [(12, "Replaced by https://github.com/sam/a/pull/9.".into())]
+    );
 }

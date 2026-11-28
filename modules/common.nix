@@ -191,12 +191,33 @@ inputs:
         # The git the machine and burrow's units run. curl 8.23 strips the
         # credentials from the URL it reports, and git 2.54 takes that for a
         # redirect and forgets them, so a clone with a token-only URL
-        # (Renovate's) fails. Drop the patch once nixpkgs' git has it (it then
-        # stops applying). Here and not an overlay: that would rebuild all
-        # that builds with git.
+        # (Renovate's) fails. git 2.54 also has a TOCTOU race in parallel
+        # submodule cloning where a nested gitdir (a/b) can pass
+        # validate_submodule_git_dir() before its sibling (a) writes HEAD,
+        # flaking t7450-bad-git-dotfiles.sh test 48 (#1568). Drop each patch
+        # once nixpkgs' git has it (it then stops applying). Here and not an
+        # overlay: that would rebuild all that builds with git.
         config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
+          patches = (old.patches or [ ]) ++ [
+            ../patches/git-curl-effective-url.patch
+            ../patches/git-submodule-parallel-gitdir.patch
+          ];
         }));
+
+        # Single owner of the machine's git packing bounds (inherited by host,
+        # services, and microVM sandboxes alike). Unbounded pack-objects uses
+        # every core and unbounded delta window memory, which can OOM-kill a
+        # shared host. Repos outside proj keep git's own automatic maintenance
+        # under these bounds; concurrent proj jobs disable auto-maintenance via
+        # their GitMetadata grant and run serialized geometric repacks when
+        # finished job worktrees are pruned (crates/burrow-proj/src/scratch.rs).
+        config.programs.git.config = {
+          pack = {
+            threads = lib.mkDefault 2;
+            windowMemory = lib.mkDefault "256m";
+            packSizeLimit = lib.mkDefault "512m";
+          };
+        };
       })
   ];
 }
