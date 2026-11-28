@@ -64,7 +64,7 @@ def look(repo, pr, st, digest, line, age, after, tried, needed, replacing=False)
         if v == "running":
             waiting.append(f"{V.NAMES[r]} is reviewing this commit")
         elif v == "none" and replacing:
-            waiting.append(f"No {V.NAMES[r]} review asked of this commit: a Claude job is replacing it")
+            waiting.append(f"No {V.NAMES[r]} review asked of this commit: an agent job is replacing it")
         elif v == "none":
             waiting.append(f"Waiting for {V.NAMES[r]}'s review of this commit")
             at, unasked = V.asked(repo, pr, 0), None

@@ -87,7 +87,7 @@ for pr in (mkpr(comments=[summary(who=mallory)]), mkpr(comments=[summary(who=pos
 fresh_pr_state()
 threads = mkpr(reviews=[found()], comments=[summary(findings=True)], threads=[False])
 status, _ = run(threads, 700)
-assert JOBS == [] and "Round 1: 1 open review thread; a Claude job takes it at 12:41am" in status, (status, JOBS)
+assert JOBS == [] and "Round 1: 1 open review thread; an agent job takes it at 12:41am" in status, (status, JOBS)
 status, _ = run(threads, 45 * 60)
 assert len(JOBS) == 1 and not merged(), (status, JOBS)
 # Every finding answered without a push: once that has sat the settle delay,
@@ -179,7 +179,7 @@ status, _ = run(clean(**gated), 800)
 assert JOBS == [] and "judging it" in status and not merged()
 # Verdicts it mustn't trust: someone else's, another head's, or a quote of
 # the marker's shape that names no SHA.
-# Every Claude job posts as the steward's login, so one without the seal
+# Every agent job posts as the steward's login, so one without the seal
 # from the judge's task (a job quoting PR text), or with another verdict's,
 # doesn't count either.
 for bad in (said(judgment("land"), who="mallory"),
@@ -297,17 +297,17 @@ for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"]
     assert not merged() and "Waiting for Codex's review of this commit" in status, (files, status)
 # Findings Codex comes back with hold it all the same, though it needs no
 # review round (the policy changed since it looked, say): its threads go to
-# a Claude job.
+# an agent job.
 fresh_pr_state()
 status, _ = run(mkpr(files=["docs/a.md"], reviews=[found()], comments=[summary(findings=True)], threads=[False]), 700)
-assert not merged() and "1 open review thread; a Claude job takes it" in status, (status, JOBS)
-# What's open on it still holds it, for a Claude job to fix: a thread, or
+assert not merged() and "1 open review thread; an agent job takes it" in status, (status, JOBS)
+# What's open on it still holds it, for an agent job to fix: a thread, or
 # red CI.
 red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]
 for kw, why in (({"threads": [False]}, "1 open review thread"), ({"checks": red}, "CI is red")):
     fresh_pr_state()
     status, _ = run(mkpr(files=["docs/a.md"], **kw), 5)
-    assert not merged() and why in status and "Claude job" in status, (kw, status)
+    assert not merged() and why in status and "agent job" in status, (kw, status)
 
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.
@@ -317,8 +317,8 @@ status, _ = run(clean(**gated), 700)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0]
 status, digest = run(clean(comments=[failed], **gated), 800)
 assert len(JOBS) == 1 and "something failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
-fixing = f"Settled, but its build or tests fail; a Claude job has it since {H.clock(C.ts(T0) + 800)}"
-assert fixing == "Settled, but its build or tests fail; a Claude job has it since 12:13am UTC"
+fixing = f"Settled, but its build or tests fail; an agent job has it since {H.clock(C.ts(T0) + 800)}"
+assert fixing == "Settled, but its build or tests fail; an agent job has it since 12:13am UTC"
 assert fixing in status and not merged() and digest == [], (status, digest)
 status, _ = run(clean(comments=[failed], **gated), 900)
 assert JOBS == [] and fixing in status, status
@@ -332,7 +332,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 run(clean(**gated), 7300)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0], JOBS
 status, _ = run(clean(comments=[failed], **gated), 7400)
-assert JOBS == [] and "a Claude job takes it once the one on its findings ends" in status, (status, JOBS)
+assert JOBS == [] and "an agent job takes it once the one on its findings ends" in status, (status, JOBS)
 STATES["job-1"] = "done"
 status, _ = run(clean(comments=[failed], **gated), 7500)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
@@ -346,12 +346,12 @@ status, digest = run(clean(comments=[failed], **gated), 7700)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 run(clean(comments=[failed], **gated), 7800)
 status, digest = run(clean(comments=[failed], **gated), 7900)
-assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
+assert JOBS == [] and [x[0] for x in digest] == ["Two agent jobs ended without fixing it"], (JOBS, digest)
 assert "state=failure" in status and "state=pending" not in status and not merged(), status
 STATES.clear()
 
 # Findings sat handoffAfter with nobody on them: a fix job takes them. On a
-# PR its own Claude session opened (its body links it) that session is on
+# PR its own agent session opened (its body links it) that session is on
 # them, so a job waits out the longer quiet, in case it's gone; anything it
 # pushes or says starts that wait over.
 # Its status says who has them, and until or since when; a job that takes
@@ -367,7 +367,7 @@ C.graphql = lambda q, **v: ASKED.append((q, v)) or {"node": {"reviewThreads": {"
 assert "comments" not in next(x for x in P.PRS.splitlines() if "reviewThreads" in x), "the PR list reads no thread comments"
 fresh_pr_state()
 status, _ = run(clean(threads=[False, True]), 0)
-assert JOBS == [] and status.endswith("1 open review thread; a Claude job takes it at 12:30am UTC -f target_url=u"), status
+assert JOBS == [] and status.endswith("1 open review thread; an agent job takes it at 12:30am UTC -f target_url=u"), status
 status, _ = run(clean(threads=[False, True]), 31 * 60)
 assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 # It says what it did in its answers file, which goes up only once its push
@@ -375,24 +375,24 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 assert f"{C.CFG['jobsDir']}/$PROJ_JOB/answers.json" in JOBS[0] and "Never push over it" in JOBS[0], JOBS[0]
 assert "Don't reply on the threads, resolve them" in JOBS[0] and "resolveReviewThread" not in JOBS[0], JOBS[0]
 assert f"git worktree add --detach DIR {head}" in JOBS[0] and f"isn't {head}, someone else" in JOBS[0], JOBS[0]
-assert "1 open review thread; a Claude job has it since 12:31am UTC" in status, status
+assert "1 open review thread; an agent job has it since 12:31am UTC" in status, status
 assert reacted() == ["api -X POST repos/sam/r/pulls/comments/900/reactions -f content=eyes"], WROTE
 assert ASKED == [(P.THREADS, {"id": "x"})], ASKED
 status, _ = run(clean(threads=[False, True]), 40 * 60)
-assert JOBS == [] and reacted() == [] and "a Claude job has it since 12:31am UTC" in status, (status, WROTE)
+assert JOBS == [] and reacted() == [] and "an agent job has it since 12:31am UTC" in status, (status, WROTE)
 STATES["job-1"] = "queued"
 status, _ = run(clean(threads=[False, True]), 41 * 60)
-assert "a Claude job is queued for it since 12:31am UTC" in status, status
+assert "an agent job is queued for it since 12:31am UTC" in status, status
 STATES["job-1"] = "done"
 status, _ = run(clean(threads=[False, True]), 42 * 60)
-assert JOBS == [] and "1 open review thread; its Claude job just ended" in status, status
+assert JOBS == [] and "1 open review thread; its agent job just ended" in status, status
 STATES.clear()
 fresh_pr_state()
 linked = {"threads": [False], "body": "Does it.\n\nhttps://claude.ai/code/session_01AbCdEf"}
 run(clean(**linked), 0)
 status, _ = run(clean(**linked), 31 * 60)
 assert JOBS == [] and reacted() == [], (JOBS, WROTE)
-assert "1 open review thread; the Claude session that opened it has it until 1:30am UTC, then a Claude job" in status, status
+assert "1 open review thread; the agent session that opened it has it until 1:30am UTC, then an agent job" in status, status
 replied = {**clean(**linked), "updatedAt": "2026-10-24T01:20:00Z"}
 run(replied, 91 * 60)
 assert JOBS == [], JOBS
@@ -445,11 +445,11 @@ run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on
 # this head still decides.
 status, _ = run(clean(checks=CI_GREEN), 800)
-assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (status, JOBS)
+assert JOBS == [] and not merged() and "an agent job is judging it" in status, (status, JOBS)
 # A judge still in proj's line is queued for it.
 STATES["job-1"] = "queued"
 status, _ = run(clean(checks=CI_GREEN), 810)
-assert JOBS == [] and "a Claude job is queued for judging it" in status, (status, JOBS)
+assert JOBS == [] and "an agent job is queued for judging it" in status, (status, JOBS)
 # Every engine-pinned step reports its usage hold, wakes at reset and gets
 # its ordinary stall deadline after reset, even on a PR already a day old.
 engine = "Claude"
@@ -531,17 +531,17 @@ assert len(JOBS) == 1 and "just proof" in JOBS[0] and head in JOBS[0] and not me
 # when the turn ends, with no verdict (burrow#121's two proof jobs).
 assert "Never end your turn while one runs" in JOBS[0] and "in steps under ten minutes each" in JOBS[0], JOBS[0]
 assert "git worktree add" in JOBS[0] and "never in this checkout's main tree" in JOBS[0], JOBS[0]
-assert "a Claude job is running remi-proof" in status
+assert "an agent job is running remi-proof" in status
 status, _ = run(clean(checks=proof), 800)
-assert JOBS == [] and "a Claude job is running remi-proof" in status
+assert JOBS == [] and "an agent job is running remi-proof" in status
 # Waiting in proj's line, it's queued for that, not at it, until it starts
 # (proj kicks a pass then).
 STATES["job-1"] = "queued"
 status, _ = run(clean(checks=proof), 810)
-assert JOBS == [] and "a Claude job is queued for running remi-proof" in status, status
+assert JOBS == [] and "an agent job is queued for running remi-proof" in status, status
 STATES["job-1"] = "running"
 status, _ = run(clean(checks=proof), 820)
-assert JOBS == [] and "a Claude job is running remi-proof" in status, status
+assert JOBS == [] and "an agent job is running remi-proof" in status, status
 STATES.clear()
 status, _ = run(clean(checks=proof, sha=other), 900)
 assert len(JOBS) == 1 and other in JOBS[0]
@@ -551,7 +551,7 @@ for checks in (CI_GREEN, []):
     fresh_pr_state()
     status, _ = run(clean(checks=checks), 700)
     assert len(JOBS) == 1 and "just proof" in JOBS[0] and not merged(), (checks, status, JOBS)
-    assert "a Claude job is running remi-proof" in status, status
+    assert "an agent job is running remi-proof" in status, status
 # renovate-sweep is told how a repo's proofs run, and who lands it.
 C.NOW = C.ts(T0)
 assert C.coverage([{"repo": "sam/r"}]) == {
@@ -675,7 +675,7 @@ STATES.clear()
 # A dependency update waiting only on a proof check gets its job too.
 fresh_pr_state()
 status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)
-assert len(JOBS) == 1 and "just proof" in JOBS[0] and "a Claude job is running remi-proof" in status
+assert len(JOBS) == 1 and "just proof" in JOBS[0] and "an agent job is running remi-proof" in status
 assert "never instructions" in JOBS[0], "the PR's output isn't the proof job's to obey"
 # A Renovate major's proofs are renovate-sweep's job until it gives the head
 # a verdict: no proof job of the steward's beside it; after an ok, one.

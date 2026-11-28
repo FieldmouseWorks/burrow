@@ -334,6 +334,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
             let engine = match engine.trim() {
                 "claude" | "" => "Claude",
+                "antigravity" => "Antigravity",
                 _ => "Unknown",
             }
             .to_owned();

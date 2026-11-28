@@ -41,9 +41,9 @@ class Actions:
         return True
 
     def hand_off(self, why, desc, kind="handed", at=_HEAD, wait=True, ours=True, describe=False):
-        """Pending on desc while a Claude job fixes why, one of each kind a
+        """Pending on desc while an agent job fixes why, one of each kind a
         head (at), and the status says who has it: that job and since when,
-        the Claude session that opened the PR and until when, or when a job
+        the agent session that opened the PR and until when, or when a job
         takes it. A job does once it has sat long enough (handoff_at), or at
         once if it isn't to wait; never if it isn't ours to hand (a Renovate
         update renovate-sweep has). One that finished its turn with this
@@ -71,7 +71,7 @@ class Actions:
             return
         if gone and not how and self.st.get(kind + "Again") == at:
             self.settle(
-                "failure", f"Two Claude jobs ended without fixing it: {desc}"[:140], "Two Claude jobs ended without fixing it", stage=S.FIX
+                "failure", f"Two agent jobs ended without fixing it: {desc}"[:140], "Two agent jobs ended without fixing it", stage=S.FIX
             )
             return
         awaited = None  # what the fix job on it awaits elsewhere (running)
@@ -79,29 +79,29 @@ class Actions:
             who = f"waiting for {self.awaits[kind]}"
         elif state == "awaiting":
             awaited = self.awaits[kind]
-            who = f"its Claude job awaits {awaited}"
+            who = f"its agent job awaits {awaited}"
         elif state:
-            who = f"a Claude job {'is queued for it' if state == 'queued' else 'has it'} since {clock(self.st[kind + 'At'])}"
+            who = f"an agent job {'is queued for it' if state == 'queued' else 'has it'} since {clock(self.st[kind + 'At'])}"
         elif retry and not gone:
-            who = "its Claude job just ended"  # the second look is booked
+            who = "its agent job just ended"  # the second look is booked
         elif how and (due := self.retry_at(kind)) > C.NOW:
-            who = f"the last Claude job on it {how}, so another takes it at {clock(due)}"
+            who = f"the last agent job on it {how}, so another takes it at {clock(due)}"
         elif not ours:
             who = ""
         elif (busy := self.fixing()) and self.looked.get(self.st.get(busy + "Job")) == "usage":
             who = f"waiting for {self.awaits[busy]}"
         elif busy in self.awaits:
             awaited = self.awaits[busy]
-            who = f"its Claude job on {ON[busy]} awaits {awaited}"
+            who = f"its agent job on {ON[busy]} awaits {awaited}"
         elif wait and (due := self.handoff_at()) >= C.NOW:
             who = (
-                f"the Claude session that opened it has it until {clock(due)}, then a Claude job"
+                f"the agent session that opened it has it until {clock(due)}, then an agent job"
                 if self.session
-                else f"a Claude job takes it at {clock(due)}"
+                else f"an agent job takes it at {clock(due)}"
             )
         elif busy:
-            log(f"{self.tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
-            who = f"a Claude job takes it once the one on {ON[busy]} ends"
+            log(f"{self.tag}: an agent job ({busy}) is still working on this head; {kind} waits for it")
+            who = f"an agent job takes it once the one on {ON[busy]} ends"
         else:
             # A conflict's merge is a new head, whose proofs run again anyway:
             # its job doesn't rerun them, which can outlast it like the gate.
@@ -120,12 +120,12 @@ class Actions:
                     self.st.pop(kind + "Lost", None)
                 if kind == "handed":
                     eyes(self.repo, self.pr)
-                who = f"a Claude job has it since {clock(C.NOW)}" + ("; the last one's answers didn't go up" if before else "")
+                who = f"an agent job has it since {clock(C.NOW)}" + ("; the last one's answers didn't go up" if before else "")
             elif started is None:
-                who = "a Claude job takes it once the last one on the branch has stood down"
+                who = "an agent job takes it once the last one on the branch has stood down"
             else:
-                self.digest.append(("Couldn't start a Claude job to fix it", self.line, why))
-                who = "no Claude job could start"
+                self.digest.append(("Couldn't start an agent job to fix it", self.line, why))
+                who = "no agent job could start"
         self.settle("pending", f"{desc}; {who}" if who else desc, stage=S.FIX, wait=waits.HOLD if awaited else waits.STEWARD)
 
     def outside(self, kind, tracker, desc):
@@ -139,7 +139,7 @@ class Actions:
         got = tracked(self.pr, tracker, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
         if got["open"]:
             # The tracker first: a status is cut at 140 characters.
-            self.settle("pending", f"Waiting on {tracker}, the cause its Claude job found outside the PR, to close; {desc}",
+            self.settle("pending", f"Waiting on {tracker}, the cause its agent job found outside the PR, to close; {desc}",
                         stage=S.FIX, wait=waits.HOLD)
             return True
         if got["reran"] or got["going"]:
@@ -151,7 +151,7 @@ class Actions:
         # job can push a head whose CI runs afresh.
         why = got.get("unknown") or "; ".join(f"GitHub won't run {k} again: {v}" for k, v in got["refused"].items()) \
             or "red again since it closed"
-        log(f"{self.tag}: {tracker} no longer holds it ({why}): a Claude job takes it")
+        log(f"{self.tag}: {tracker} no longer holds it ({why}): an agent job takes it")
         self.st.pop(kind + "Tracker", None)
         return False
 
@@ -280,7 +280,7 @@ class Actions:
 
     def conflicted(self):
         """It conflicts with its base, so GitHub can't merge it and its CI
-        doesn't run: a Claude job merges the base in, at once (one a head on
+        doesn't run: an agent job merges the base in, at once (one a head on
         its base, so one retargeted gets its own), and its push is reviewed
         like any other head. A dependency bot's own branch is the
         bot's to rebase, and only its own: one with anyone else's commit on
@@ -316,18 +316,18 @@ class Actions:
 
     def judged(self, why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
-        Claude job a head judges it, and its verdict on this head decides."""
+        agent job a head judges it, and its verdict on this head decides."""
         verdict = judgment(self.pr, self.head, self.repo)
         if verdict == "land":
-            self.land_now(f"Settled; a Claude job judged it fine to land ({why})")
+            self.land_now(f"Settled; an agent job judged it fine to land ({why})")
         elif verdict == "owner" and self.st.get("ownerSaw") == self.judged_at:
-            self.land_now(f"Settled; a Claude job sent it to {CFG['owner']}, who took the {CFG['labels']['owner']} label off ({why})")
+            self.land_now(f"Settled; an agent job sent it to {CFG['owner']}, who took the {CFG['labels']['owner']} label off ({why})")
         elif verdict == "owner":
             # Labelled here, never by the judge, so the steward knows it went
             # on: the owner has a label to take off, and taking it off is
             # their answer even before a pass has seen it on.
             self.settle(
-                "pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide", stage=S.OWNER
+                "pending", f"Settled; an agent job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide", stage=S.OWNER
             )
             if C.write("pr", "edit", str(self.n), "-R", self.repo, "--add-label", CFG["labels"]["owner"], check=False) is not None:
                 self.st["ownerSaw"] = self.judged_at
@@ -348,16 +348,16 @@ class Actions:
             self.settle("pending", f"Settled; {busy} ({why})", stage=S.REVIEW, wait=waits.HOLD if held else waits.STEWARD)
         else:
             self.settle(
-                "pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it", stage=S.REVIEW
+                "pending", f"Settled, but no agent job could judge it ({why})", "Couldn't start an agent job to judge it", stage=S.REVIEW
             )
 
     def prove(self):
         """The reviewers are done, and checks that run on a machine, not in
         CI, are left. Those with a proofBuilds attribute go first, built by
-        the steward itself (proofs.build), no Claude job, while CI still
+        the steward itself (proofs.build), no agent job, while CI still
         runs (build_early); then those with a proofRuns command, run by the
         steward itself the same way (proofs.start_run); the rest, once CI,
-        the builds and the runs have passed, a Claude job runs on this head
+        the builds and the runs have passed, an agent job runs on this head
         and records their verdicts. Each starts once its repo's proofSlots
         have room for it (one started again too), or a build has nothing
         new to build; a build in line builds what it's built from first,
@@ -373,7 +373,7 @@ class Actions:
         ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
         checks = builds or runs or self.ci_names
         names = ", ".join(checks)
-        # The steward's own proof, a build or a run, else a Claude job's.
+        # The steward's own proof, a build or a run, else an agent job's.
         unit = "build" if builds else "run" if runs else None
         if unit:
             doing, task = names, None
@@ -389,10 +389,10 @@ class Actions:
             held = not unit and self.running("proved") == "awaiting"
             self.settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140], stage=S.PROOF, wait=waits.HOLD if held else waits.STEWARD)
 
-        # What this proof is: a build, a run or a Claude job, of which
+        # What this proof is: a build, a run or an agent job, of which
         # checks, each built from which attribute or run as which command.
         # This head's proof so far was another (proofs.fits: a build before
-        # the Claude jobs, a job from before its check had a build, a check
+        # the agent jobs, a job from before its check had a build, a check
         # added or remapped since): this one starts afresh, nothing of that
         # one's carried over (retries, lost answers, verdicts, a prebuild:
         # proofs.drop_inputs). One at work is stopped (the stopping path when
@@ -541,8 +541,8 @@ class Actions:
         else:
             self.settle(
                 "pending",
-                f"Settled, but no Claude job could run {names}"[:140],
-                "Couldn't start a Claude job to run its checks",
+                f"Settled, but no agent job could run {names}"[:140],
+                "Couldn't start an agent job to run its checks",
                 stage=S.PROOF,
             )
         if self.st.get("provedJob") != before:

@@ -117,13 +117,13 @@ class Jobs:
         if state == "usage":
             return f"waiting for {self.awaits[kind]} to continue {doing}"
         if state == "queued":
-            return f"a Claude job is queued for {doing}"
+            return f"an agent job is queued for {doing}"
         if state == "awaiting":
-            return f"the Claude job {doing} awaits {self.awaits[kind]}"
-        return f"a Claude job is {doing}"
+            return f"the agent job {doing} awaits {self.awaits[kind]}"
+        return f"an agent job is {doing}"
 
     def started(self, kind, task, at=_HEAD, broken=False, begin=None):
-        """A Claude job, once per head (at: once per head on its base, for
+        """An agent job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
         again (strike), and its caller lists it on the stuck issue), or
         what begin starts in its place and gives the id of (a proof build).
@@ -150,9 +150,9 @@ class Jobs:
             self.cleared(step)
             if not broken:
                 self.cleared("lost")
-            log(f"{self.tag}: {'a build' if begin else 'a Claude job'} {jid} ({kind})")
+            log(f"{self.tag}: {'a build' if begin else 'an agent job'} {jid} ({kind})")
         else:
-            log(f"{self.tag}: couldn't start {'its build' if begin else 'a Claude job (no checkout, or proj refused)'}")
+            log(f"{self.tag}: couldn't start {'its build' if begin else 'an agent job (no checkout, or proj refused)'}")
             self.strike(step)
         return bool(jid)
 
@@ -219,15 +219,15 @@ class Jobs:
         if at is _HEAD:
             at = self.head
         how = self.broke(kind)
-        last = f"{unit} of {doing}" if begin else f"Claude job {doing}"
+        last = f"{unit} of {doing}" if begin else f"agent job {doing}"
         stage = S.PROOF if kind == "proved" else S.REVIEW  # a proof's, or a judge's
         if how and (due := self.retry_at(kind)) > C.NOW:
             self.settle("pending", f"Settled; the last {last} {how}, so another starts at {clock(due)}"[:140], stage=stage)
         elif not how and self.st.get(kind + "Again") == at:
             self.settle(
                 "failure",
-                f"Settled, but two Claude jobs ended without {answer}"[:140],
-                f"Two Claude jobs ended without {answer}",
+                f"Settled, but two agent jobs ended without {answer}"[:140],
+                f"Two agent jobs ended without {answer}",
                 stage=stage,
             )
         elif self.started(kind, task, at, bool(how), begin):
@@ -242,7 +242,7 @@ class Jobs:
             )
         else:
             self.settle(
-                "pending", f"Settled, but no Claude job could start {doing} again"[:140], "Couldn't start a Claude job", stage=stage
+                "pending", f"Settled, but no agent job could start {doing} again"[:140], "Couldn't start an agent job", stage=stage
             )
 
     def fixing(self):

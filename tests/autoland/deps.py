@@ -1,6 +1,6 @@
 """handle() on dependency updates: a Renovate major waits for
 renovate-sweep's sealed verdict on its head, a minor or a security fix
-merges itself, a Dependabot major is judged, one a Claude job fixed is
+merges itself, a Dependabot major is judged, one an agent job fixed is
 reviewed, and whose each one's threads and red CI are."""
 
 import json
@@ -17,7 +17,7 @@ fresh_pr_state()
 major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
 status, _ = run(mkpr(**major), 700)
 assert not merged() and "waiting for renovate-sweep" in status and JOBS == []
-# Every Claude job posts as our login, so one without renovate-sweep's seal (a
+# Every agent job posts as our login, so one without renovate-sweep's seal (a
 # job quoting PR text), with another verdict's, PR's or base's, or under
 # another key doesn't count either.
 okmac = swept("ok").split()[-2]
@@ -107,7 +107,7 @@ for unread in ("authors", "committers", "address"):
     status, _ = run(mkpr(**batch), 900)
     S.CFG["renovateEmail"] = email
     assert "state=success" in status and not merged() and JOBS == [], (unread, status)
-# One a Claude job wrote or committed to is reviewed like a Claude PR, not
+# One an agent job wrote or committed to is reviewed like a Claude PR, not
 # landed on CI alone.
 for who in ("author", "committer"):
     fresh_pr_state()
@@ -123,7 +123,7 @@ COMMITTERS.pop(11)
 # machinery's: the module makes its bot one of the steward's, its login
 # Renovate's and its noreply address Renovate's commits'. Its PRs are taken
 # exactly as Renovate's were: acted on, a batch landed on CI alone while its
-# commits are the bot's alone, one a Claude job wrote to reviewed. The
+# commits are the bot's alone, one an agent job wrote to reviewed. The
 # machinery's App is still a bot of the steward's, but no longer Renovate.
 apart = {"renovate": "sam-renovate[bot]", "renovateEmail": "5+sam-renovate[bot]@users.noreply.github.com",
          "bots": [*S.CFG["bots"], "sam-renovate"]}
@@ -148,7 +148,7 @@ status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
 assert "no reviewer reads" in JOBS[0] and "its reviewers found nothing" not in JOBS[0], JOBS[0]
 
-# A finding on a dependency update goes to a Claude job once it has sat, like
+# A finding on a dependency update goes to an agent job once it has sat, like
 # any PR's: nobody else settles a green Renovate PR's threads.
 fresh_pr_state()
 minor = {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 12, "threads": [False]}
@@ -309,7 +309,7 @@ fresh_pr_state()
 status, _ = run(mkpr(labels=("security",), **major), 900)
 assert "state=success" in status and not merged() and JOBS == [], status
 
-# A Renovate minor a Claude job fixed won't merge itself: it's reviewed and
+# A Renovate minor an agent job fixed won't merge itself: it's reviewed and
 # landed like a Claude PR.
 fresh_pr_state()
 COMMITS[14] = ["bot@renovateapp.com", "claude@remi"]
@@ -329,7 +329,7 @@ run(mkpr(threads=[False], **edited), 0)
 status, _ = run(mkpr(threads=[False], **edited), 7200)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 # Read while the machine had Renovate's address wrong, its own commits looked
-# like a Claude job's fix. Set right, the same head is read again, not taken
+# like an agent job's fix. Set right, the same head is read again, not taken
 # from that read.
 fresh_pr_state()
 COMMITS[14] = ["bot@renovateapp.com"]
@@ -340,7 +340,7 @@ S.CFG["renovateEmail"] = email
 status, _ = run(mkpr(checks=red_ci, **edited), 7200)
 assert "Dependency update, CI red; renovate-sweep has it" in status, status
 
-# A Claude job's rebase keeps Renovate's author and makes itself the committer.
+# An agent job's rebase keeps Renovate's author and makes itself the committer.
 # Renovate counts that as an edit and won't merge it, so left to Renovate it
 # would sit green for good: it's reviewed and landed like a Claude PR. GitHub
 # as the committer is no edit, for Renovate or here.
@@ -366,7 +366,7 @@ status, _ = run(clean(**edited), 900)
 assert not merged() and "Dependency update, CI green" in status, status
 COMMITTERS.clear()
 
-# So is a Dependabot one a Claude job fixed: the steward merges those, and
+# So is a Dependabot one an agent job fixed: the steward merges those, and
 # what the job pushed is code no reviewer has read.
 fresh_pr_state()
 COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
@@ -393,7 +393,7 @@ fresh_pr_state()
 COMMITS[15] = [DEPENDABOT_EMAIL]
 status, _ = run(mkpr(**dedited), 900)
 assert merged() and "Dependency update, CI green" in status, status
-# So it is on a machine with no Renovate (no address), and one a Claude job
+# So it is on a machine with no Renovate (no address), and one an agent job
 # fixed there is still reviewed.
 email, S.CFG["renovateEmail"] = S.CFG["renovateEmail"], None
 fresh_pr_state()

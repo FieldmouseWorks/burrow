@@ -1,4 +1,4 @@
-"""What a PR's new head stops: its Claude jobs still at work on the last
+"""What a PR's new head stops: its agent jobs still at work on the last
 head, whose answers would be for a head it no longer has. Those are its
 proofs, but for one building what the new head's proof wants
 (proofs.superseded), its judge, and the build of what its last proof is
@@ -45,7 +45,7 @@ def stop(tag, st):
         if not P.running(jid):
             continue
         if C.stop_job(jid):
-            log(f"{tag}: stopped Claude job {jid}, at work on a head it no longer has")
+            log(f"{tag}: stopped agent job {jid}, at work on a head it no longer has")
         else:
             left.append(jid)
     if left:

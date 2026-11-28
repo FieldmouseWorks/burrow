@@ -35,9 +35,9 @@ use crate::pass::{Ask, DAY, Job, Lifecycle, MIN, Pass};
 /// A look that keeps failing this long goes to the stuck issue: once is
 /// GitHub, often; every pass for an hour is a bug.
 const FAILING_FOR: f64 = 3600.0;
-pub const STUCK: &str = "Still quarantined a day after a Claude job";
-pub const UNFINISHED: &str = "A Claude job for it didn't finish";
-pub const NO_JOB: &str = "Couldn't start a Claude job";
+pub const STUCK: &str = "Still quarantined a day after an agent job";
+pub const UNFINISHED: &str = "An agent job for it didn't finish";
+pub const NO_JOB: &str = "Couldn't start an agent job";
 pub const FAILING: &str = "Couldn't read its flaky tests";
 pub const OTHERS: &str = "Flaky tests someone else quarantined";
 /// What a job is handed of each issue: its body and its last few comments
@@ -286,7 +286,7 @@ fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
         }
     }
     eprintln!(
-        "{}: a Claude job {jid} for {} flaky tests",
+        "{}: an agent job {jid} for {} flaky tests",
         p.repo,
         st.asked.len()
     );

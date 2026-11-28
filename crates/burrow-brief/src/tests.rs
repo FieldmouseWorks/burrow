@@ -15,6 +15,7 @@ fn a_fix_job_weighs_findings_on_their_merits() {
     // what a judge past the limit counts as failing.
     assert!(FINDINGS.contains(&format!("Fix in full each one that is {MUST_FIX}: ")));
     assert!(PAST_LIMIT.contains(&format!("that is {MUST_FIX} counts as failing")));
+    assert!(!PAST_LIMIT.contains("Claude"), "{PAST_LIMIT}");
     for said in [
         "Weigh every finding on its merits, the same from the first round on, past the review-round limit too, whatever severity the reviewer gave it. ",
         "with a regression test for each of those cases that fails without the fix, not only the line the thread is on. ",

@@ -283,7 +283,7 @@ shutil.rmtree(jobs)
 print("remade repos: ok")
 
 
-# A red default branch gets one Claude job, and nothing more while it works
+# A red default branch gets one agent job, and nothing more while it works
 # or a fix is open; a second if it ends with the branch still red, then the
 # owner. Green again, it starts over.
 def default(state, sha="c" * 40):

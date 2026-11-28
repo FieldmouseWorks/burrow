@@ -26,7 +26,7 @@ task = JOBS[0]
 assert "Push nothing: no commit, no merge or rebase onto its base" in task, task
 assert "write the description anew to match this head" in task and '"description": TEXT' in task, task
 assert "Here pushed is null" in task and "git push origin" not in task and "If CI is red" not in task and "Merge main into the branch" not in task, task
-assert "Settled, but its judge found its description wrong; a Claude job has it since" in status, status
+assert "Settled, but its judge found its description wrong; an agent job has it since" in status, status
 assert "build or tests fail" not in status and not merged() and digest == [], (status, digest)
 # Once the edited description is up, the same head is judged again: no push needed.
 STATES["job-1"] = "done"
@@ -43,7 +43,7 @@ run(clean(**gated), 700)
 status, _ = run(clean(comments=[failed], **gated), 800)
 assert len(JOBS) == 1 and "something failing" in JOBS[0] and "If CI is red" in JOBS[0], JOBS
 assert "git push origin HEAD:refs/heads/feat" in JOBS[0] and "Push nothing" not in JOBS[0], JOBS[0]
-assert "Settled, but its build or tests fail; a Claude job has it since" in status and not merged(), status
+assert "Settled, but its build or tests fail; an agent job has it since" in status and not merged(), status
 
 # Either holds the PR whatever CI is still doing: only a land waits for CI.
 busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]

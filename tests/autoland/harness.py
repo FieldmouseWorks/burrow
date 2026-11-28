@@ -1,5 +1,5 @@
 """What the steward's checks share (check.py runs them): its config and
-state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
+state in a temp dir; stand-ins for gh, agent jobs, GitHub's git remote and
 Conary's `cn` (each records how it was run, then does what it's told) and
 burrow-events' kick port; and PRs shaped like its query's, Codex's
 connector's posts among them."""
@@ -681,7 +681,7 @@ def onto(repo, pr):
 
 
 def stand_in():
-    """gh, Claude jobs and what a merge would change (every merge changes
+    """gh, agent jobs and what a merge would change (every merge changes
     something unless ALREADY says), for handle() and the passes."""
     H.onto = onto
     C.gh = gh_stub

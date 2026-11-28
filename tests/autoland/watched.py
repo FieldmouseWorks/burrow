@@ -70,7 +70,7 @@ assert sorted(items) == ["sam/r#5", "sam/r#7", "sam/r#8"], items
 five = items["sam/r#5"]
 assert five["what"] == "sam/r#5 PR 5" and five["link"] == "https://github.com/sam/r/pull/5", five
 assert five["since"] == T + 100 and five["due"] == T + 100 + 120 * MIN and five["kick"] == "autoland/sam/r", five
-# No Claude job of its own has it: the watchdog doesn't hold it while
+# No agent job of its own has it: the watchdog doesn't hold it while
 # Claude is out of usage (lost.py has one that does).
 assert five["claude"] is False, five
 # Its wait is what its status says.
@@ -236,7 +236,7 @@ print("waits listed: ok")
 
 # What the watchdog escalated goes on the stuck issue with the rest, each
 # entry once; a broken file is none.
-entry = ["Stalled past its deadline, and a Claude job couldn't move it", "[sam/r#5](https://github.com/sam/r/pull/5)",
+entry = ["Stalled past its deadline, and an agent job couldn't move it", "[sam/r#5](https://github.com/sam/r/pull/5)",
          "Settled; waiting for CI: build, since 1:00am UTC"]
 with open(f"{tmp}/escalated.json", "w") as f:
     json.dump([entry, ["not", "an entry"], "junk"], f)

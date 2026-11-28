@@ -148,7 +148,7 @@ def evals():
 kept, kept_build, kept_start_eval = C.job, P.build, P.start_eval
 ids = itertools.count(1)
 C.job = lambda repo, task, clone=False, since=None, role=None: JOBS.append(task) or f"job-{next(ids)}"
-# A check with an attribute is built by the steward, not a Claude job: each
+# A check with an attribute is built by the steward, not an agent job: each
 # build started is in JOBS too, as "build N CHECK...".
 P.build = lambda repo, pr, checks, st: JOBS.append(f"build {pr['number']} {' '.join(checks)}") or f"{C.BUILD}{next(ids)}"
 
@@ -202,7 +202,7 @@ S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and pos
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 RUNNING, SKIPPED = "building remi-proof here", "nothing new to build, so it skipped the line"
-RUNNING_JOB = "a Claude job is running remi-proof"  # a check with no attribute
+RUNNING_JOB = "an agent job is running remi-proof"  # a check with no attribute
 CANT = "Settled, but what remi-proof builds can't be worked out here yet"
 STORE = "Settled; remi-proof taken from the store, not run again"
 
@@ -380,7 +380,7 @@ VALID[:] = [Z]
 
 # A build whose eval fails has nothing to build: no build and no slot, a
 # strike, and the eval tried again EVAL_RETRY minutes on. A check with no
-# attribute is never worked out: a Claude job's, waiting its turn.
+# attribute is never worked out: an agent job's, waiting its turn.
 fresh_pr_state()
 nix_knows()
 P.begin("sam/r", {1, 5, 6})
@@ -788,7 +788,7 @@ assert f"Settled; {RUNNING}, CI (ci) beside it" in status and JOBS == ["build 1 
 assert f"Settled; {RUNNING}, CI (ci) beside it" in line(1, 800, busy_ci + [dict(proof_state, state="PENDING")]) and JOBS == []
 status = line(1, 900, busy_ci + [dict(proof_state, state="SUCCESS")])
 assert "Settled; waiting for CI: ci" in status and JOBS == [], (status, JOBS)
-# A check only a Claude job runs still waits for CI to pass.
+# A check only an agent job runs still waits for CI to pass.
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
 fresh_pr_state()
 status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
@@ -915,7 +915,7 @@ assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPP
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 STOPPED.clear()
 # Remapped on the same head to what's built already, or turned into a check
-# a Claude job runs: neither builds anything first, and the prebuild for
+# an agent job runs: neither builds anything first, and the prebuild for
 # the proof it was is stopped all the same, on the stopping path if it
 # won't stop.
 for remap in ({"remi-proof": "checks.x86_64-linux.other"}, {}):

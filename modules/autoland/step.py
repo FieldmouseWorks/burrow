@@ -2,7 +2,7 @@
 stands (its reviewers' verdicts, CI, its threads, its labels, what GitHub
 says of its merge), and the thing to do now: queue a review, post what came
 back, hand what's open (findings, red CI, a conflict with its base) to a
-Claude job, have a job run its machine checks or judge it, post its
+agent job, have a job run its machine checks or judge it, post its
 `review-settled` status and merge it (or, in a repo with its merge train
 on, put it in the train, which lands it: train.py), or list it for the
 owner or the stuck issue. Each step it takes is in the PR's status, in
@@ -46,7 +46,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
         # A PR handed to the steward (admission.py) gets its own pass in a
-        # paused repo: whatever else it needs (a Claude job, a proof, a
+        # paused repo: whatever else it needs (an agent job, a proof, a
         # review) is still paused, and keeps it waiting here. Nothing of a
         # PR's own step goes ahead in a repo the steward doesn't land.
         if C.held(repo, pr):
@@ -72,7 +72,7 @@ class Pass(Context, Jobs, Actions):
         opened, or the last pass that set it aside (aside.py: a draft, a
         hold, a stack) if that came later, since nothing could land it
         until then. A week on hold isn't a week stuck: one listed the
-        moment its hold came off took a Claude job to find it moving
+        moment its hold came off took an agent job to find it moving
         (remi#1486)."""
         return max(ts(self.pr["createdAt"]), self.st.get("aside", 0))
 
@@ -173,11 +173,11 @@ class Pass(Context, Jobs, Actions):
 
         self.renovate = self.pr["headRefName"].startswith("renovate/")
         proof_only = self.ci == "pending" and bool(self.ci_names) and all(c in self.machine for c in self.ci_names)
-        # A check the steward builds itself costs no Claude job, so it needn't
+        # A check the steward builds itself costs no agent job, so it needn't
         # wait for CI to pass: it starts once the reviewers are done, and builds
-        # while CI runs rather than after it. A Claude job's check still waits.
+        # while CI runs rather than after it. An agent job's check still waits.
         build_early = self.ci == "pending" and any(c in self.rc["proofBuilds"] or c in self.rc["proofRuns"] for c in self.ci_names)
-        # A minor dependency PR a Claude job fixed carries Claude's code, which no
+        # A minor dependency PR an agent job fixed carries Claude's code, which no
         # reviewer has read (and Renovate won't merge); a bot's PR that changes a
         # workflow beyond repinning its actions changes the gate. Either goes
         # through the review loop below like a Claude PR. While a Renovate one's CI
@@ -209,7 +209,7 @@ class Pass(Context, Jobs, Actions):
         # Dependency bumps: CI is the review. Renovate merges its own minor
         # ones; renovate-sweep fixes the red ones and gives each major a verdict,
         # and answers none of their threads. Anything else that's open on one, a
-        # review thread or a red Dependabot update, goes to a Claude job like any
+        # review thread or a red Dependabot update, goes to an agent job like any
         # PR's.
         # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
         # is open on it, and nothing more is asked or handed off until the label
@@ -254,7 +254,7 @@ class Pass(Context, Jobs, Actions):
                 "CI is red (" + ", ".join(self.ci_names) + ")", "CI is red: " + ", ".join(self.ci_names)[:100], "redFixed", ours=not swept
             )
         elif self.held:
-            self.judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
+            self.judged("an agent job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
         elif proof_only or build_early:
             self.prove()
         elif self.ci == "pending":
@@ -265,7 +265,7 @@ class Pass(Context, Jobs, Actions):
                 if self.gate()
                 else "the repo has no CI"
                 if self.ci == "none"
-                else "a Claude job was asked to judge this head"
+                else "an agent job was asked to judge this head"
                 if asked
                 else "it was retargeted or its description edited after its push, which Codex's review can't vouch for"
                 if changed
@@ -319,7 +319,7 @@ class Pass(Context, Jobs, Actions):
         elif what and capped:
             self.hand_off(
                 f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again, "
-                "and a Claude job judges it after, without the reviewers",
+                "and an agent job judges it after, without the reviewers",
                 f"Past the review-round limit ({rounds}): " + ", ".join(what),
                 ours=not swept,
             )

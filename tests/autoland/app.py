@@ -111,7 +111,7 @@ assert [p for _, p, _ in SEEN] == ["/app/installations?per_page=100&page=1", "/a
 C._tokens["sam"] = ("ghs_minted1", time.time() + 300)
 assert REAL_TOKEN("sam") == "ghs_minted3"
 # Never written anywhere: the state dir is the machine user's, and every
-# Claude session on the machine is that user.
+# agent session on the machine is that user.
 for root, _, files in os.walk(tmp):
     for name in files:
         with open(os.path.join(root, name), "rb") as f:

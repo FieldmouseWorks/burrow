@@ -1,4 +1,4 @@
-"""A Claude job that ends without the answer it was for. One that finished
+"""An agent job that ends without the answer it was for. One that finished
 its turn and gave none (a judge with no verdict, a fix that pushed nothing)
 is started once more, and a second fails the PR's status for the owner. One
 that stopped before it finished (it timed out, went quiet, crashed or Claude
@@ -28,7 +28,7 @@ def job(repo, task, clone=False, since=None, role=None):
 
 C.job = job
 newer = "9" * 40
-gated = {"files": ["secrets/app.yaml"], "number": 6}  # a one-way path: a Claude job judges it
+gated = {"files": ["secrets/app.yaml"], "number": 6}  # a one-way path: an agent job judges it
 LOST = H.STRIKES["lost"]
 
 
@@ -90,7 +90,7 @@ ends("done")
 status, digest = run(clean(**gated), 5300)
 assert JOBS == [] and not merged() and digest == [], (status, JOBS, digest)
 status, digest = run(clean(**gated), 5400)
-assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without a verdict"], (status, digest)
+assert JOBS == [] and [x[0] for x in digest] == ["Two agent jobs ended without a verdict"], (status, digest)
 assert "state=failure" in status and not merged(), status
 # One still running, or one proj can't say about, isn't lost.
 for state in ("running", None):
@@ -120,9 +120,9 @@ for mk, kw in ((clean, {"threads": [False]}), (clean, {"checks": ci_red}),
     ends("done")
     run(mk(**kw), 7500)
     status, digest = run(mk(**kw), 7600)
-    assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (kw, digest)
+    assert JOBS == [] and [x[0] for x in digest] == ["Two agent jobs ended without fixing it"], (kw, digest)
     assert "state=failure" in status and "state=pending" not in status and not merged(), (kw, status)
-    assert "Two Claude jobs ended without fixing it: " in status, status
+    assert "Two agent jobs ended without fixing it: " in status, status
     fixed = {k: v for k, v in kw.items() if k not in ("threads", "checks")}
     status, digest = run(mk(**fixed), 7700)
     assert "state=failure" not in status and digest == [], (kw, status, digest)
@@ -151,13 +151,13 @@ ends("done")
 awaits("sam/r#5", "sam/up#3")
 for t in (7300, 7400, 7400 + 10 * 3600):
     status, digest = a_pass(clean(**threads), t)
-    assert JOBS == [] and "its Claude job awaits sam/up#3" in status and "state=pending" in status, (t, status, JOBS)
+    assert JOBS == [] and "its agent job awaits sam/up#3" in status and "state=pending" in status, (t, status, JOBS)
     assert digest == [] and overdue() is None, (t, digest, waits.FAILING)
     it = stall()
     assert it["kick"] is None and it["due"] == it["since"] + 480 * 60 and it["claude"] is False, (t, it)
 # It pushes a head of its own, then awaits again: the new head is its.
 status, digest = a_pass(clean(sha=newer, **threads), 7400 + 11 * 3600)
-assert JOBS == [] and "its Claude job on its findings awaits sam/up#3" in status and digest == [], (status, JOBS)
+assert JOBS == [] and "its agent job on its findings awaits sam/up#3" in status and digest == [], (status, JOBS)
 # Resumed, it's at work as any other is; ending with no await elsewhere, it
 # counts as one that ended without fixing it, and the second is handed.
 fresh_pr_state()
@@ -170,7 +170,7 @@ assert JOBS == [] and "awaits sam/up#3" in status, status
 STATES[ISSUED[-1]] = "running"
 HELD.pop(ISSUED[-1])
 status, _ = run(clean(**threads), 7400)
-assert JOBS == [] and "a Claude job has it since" in status, status
+assert JOBS == [] and "an agent job has it since" in status, status
 ends("done")
 awaits("SAM/R#5")  # only this PR, however GitHub's names are cased
 
@@ -213,7 +213,7 @@ C.upkeep = retiring_upkeep
 claimed(waits=True, owns=True)
 for t in (7500, 7600):
     status, digest = run(clean(**threads), t)
-    assert JOBS == [] and "its Claude job awaits this PR's next change" in status and digest == [], (t, status, JOBS)
+    assert JOBS == [] and "its agent job awaits this PR's next change" in status and digest == [], (t, status, JOBS)
 # Its turn left nothing new: it ended without fixing it, and the second is
 # handed once the first is retired, so proj never resumes it on the same
 # branch.
@@ -237,7 +237,7 @@ assert first in STOPPED, (first, STOPPED)
 # The same on the pass that does stop the first: claims keeps it until proj
 # says it's over, so the second is handed the branch on a later pass, and
 # that one pass between the two lists nothing (remi#1449: burrow#1287 was
-# on the stuck issue as a PR no Claude job could start for).
+# on the stuck issue as a PR no agent job could start for).
 STATES.clear()
 HELD.clear()
 fresh_pr_state()
@@ -279,13 +279,13 @@ for end, held, said in (("done", "ask", "an answer to its question"), ("done", "
     HELD[ISSUED[-1]] = [held]
     for t in (7300, 7400, 7400 + 10 * 3600):
         status, digest = a_pass(clean(**threads), t)
-        assert JOBS == [] and f"its Claude job awaits {said}" in status and "state=pending" in status, (end, held, t, status, JOBS)
+        assert JOBS == [] and f"its agent job awaits {said}" in status and "state=pending" in status, (end, held, t, status, JOBS)
         assert digest == [] and overdue() is None and stall()["kick"] is None, (held, t, digest, waits.FAILING)
     # Answered (or, reversible, timed out): proj resumes that same job.
     STATES[ISSUED[-1]] = "running"
     del HELD[ISSUED[-1]]
     status, _ = run(clean(**threads), 7400 + 11 * 3600)
-    assert JOBS == [] and "a Claude job has it since" in status, (held, status, JOBS)
+    assert JOBS == [] and "an agent job has it since" in status, (held, status, JOBS)
     # Its turn over, holding nothing: it ended without fixing it.
     ends("done")
     run(clean(**threads), 7400 + 12 * 3600)
@@ -302,7 +302,7 @@ ends("done")
 HELD[judge] = ["ask"]
 for t in (5000, 5100, 5100 + 10 * 3600):
     status, digest = a_pass(clean(**gated), t)
-    assert JOBS == [] and "the Claude job judging it awaits an answer to its question" in status, (t, status, JOBS)
+    assert JOBS == [] and "the agent job judging it awaits an answer to its question" in status, (t, status, JOBS)
     assert digest == [] and overdue(6) is None and stall(6)["kick"] is None, (t, digest, stall(6))
 STOPPED.clear()
 run(clean(sha=newer, **gated), 5100 + 11 * 3600)
@@ -318,11 +318,11 @@ print("jobs without their answer: ok")
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}}
 PROOF = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 proof = clean(checks=PROOF)
-RUNNING = "a Claude job is running remi-proof"
+RUNNING = "an agent job is running remi-proof"
 fresh_pr_state()
 status, _ = a_pass(proof, 700)
 assert RUNNING in status and len(JOBS) == 1, (status, JOBS)
-# Its wait is on that Claude job, which the watchdog holds while Claude is
+# Its wait is on that agent job, which the watchdog holds while Claude is
 # out of usage; once the job has ended, or its step keeps failing, it's
 # the steward's again (claude False below).
 assert stall()["claude"] is True, stall()
@@ -338,7 +338,7 @@ for i, (end, said) in enumerate(BROKE):
     one_stall(i)
     status, digest = a_pass(proof, t + 200)
     due = t + 200 + 2 ** i * 60
-    assert JOBS == [] and f"the last Claude job running remi-proof {said}, so another starts at {H.clock(due + T)}" in status, \
+    assert JOBS == [] and f"the last agent job running remi-proof {said}, so another starts at {H.clock(due + T)}" in status, \
         (i, status)
     assert "state=failure" not in status and pr_state()["strikes"] == {"lost": i + 1}, (i, status, pr_state())
     assert C.WAKE["sam/r"] == T + due + 1 and overdue() == late and digest == [], (i, C.WAKE, waits.FAILING, digest)
@@ -375,7 +375,7 @@ assert stall()["since"] != STUCK[0], stall()  # the run's stall is over
 ends("done")
 a_pass(proof, t + 400)
 status, digest = a_pass(proof, t + 500)
-assert "state=failure" in status and [x[0] for x in digest] == ["Two Claude jobs ended without its verdict"], (status, digest)
+assert "state=failure" in status and [x[0] for x in digest] == ["Two agent jobs ended without its verdict"], (status, digest)
 # A new head starts the count over.
 status, _ = a_pass(clean(sha=newer, checks=PROOF), t + 600)
 assert RUNNING in status and len(JOBS) == 1 and pr_state()["strikes"] == {}, (status, pr_state())
@@ -425,7 +425,7 @@ run(clean(**gated), 700)
 ends("went quiet for 20m")
 run(clean(**gated), 800)
 status, _ = run(clean(**gated), 900)
-assert JOBS == [] and "the last Claude job judging it went quiet for 20m, so another starts at" in status, status
+assert JOBS == [] and "the last agent job judging it went quiet for 20m, so another starts at" in status, status
 status, _ = run(clean(**gated), 930)
 assert JOBS == [] and "so another starts at" in status and C.WAKE["sam/r"] == T + 961, (status, C.WAKE)
 status, _ = run(clean(**gated), 960)
@@ -436,11 +436,11 @@ run(clean(threads=[False]), 7200)
 ends("timed out after 60m")
 run(clean(threads=[False]), 7300)
 status, _ = run(clean(threads=[False]), 7400)
-assert JOBS == [] and "the last Claude job on it timed out after 60m, so another takes it at" in status, status
+assert JOBS == [] and "the last agent job on it timed out after 60m, so another takes it at" in status, status
 status, _ = run(clean(threads=[False]), 7430)
 assert JOBS == [] and "so another takes it at" in status and C.WAKE["sam/r"] == T + 7461, (status, C.WAKE)
 status, _ = run(clean(threads=[False]), 7460)
-assert len(JOBS) == 1 and "a Claude job has it since" in status and "state=failure" not in status, status
+assert len(JOBS) == 1 and "an agent job has it since" in status and "state=failure" not in status, status
 assert pr_state().get("handedAgain") is None, pr_state()
 STATES.clear()
 
@@ -448,7 +448,7 @@ C.job = kept
 fresh_pr_state()
 print("jobs that broke: ok")
 
-# A wait is on Claude only while a Claude job it looked at is queued or at
+# A wait is on Claude only while an agent job it looked at is queued or at
 # work: not once it has ended or proj can't say, nor for a proof build.
 for jobs, claude in (({"job-1": "queued"}, True), ({"job-1": "running"}, True), ({"job-1": ""}, False),
                      ({"job-1": "unknown"}, False), ({C.BUILD + "1": "running"}, False), (None, False)):

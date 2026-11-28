@@ -123,12 +123,12 @@ assert len(JOBS) == 1 and pr_state()["answering"]["job-1"]["head"] == head, (JOB
 leaves("job-1", FIXED)
 status, _ = run(open_thread, 40 * 60)
 assert writes() == [] and any(c[1] == "graphql" for c in calls()), calls()
-assert "job-1" not in pr_state()["answering"] and "its Claude job just ended" in status, (pr_state(), status)
+assert "job-1" not in pr_state()["answering"] and "its agent job just ended" in status, (pr_state(), status)
 # It ended without its answer: the next job is told why (and its status
 # says so), and it isn't posted again.
 status, _ = run(open_thread, 41 * 60)
 assert len(JOBS) == 1 and f"its push of {pushed[:12]} never reached feat" in JOBS[0], JOBS
-assert "a Claude job has it since 12:41am UTC; the last one's answers didn't go up" in status, status
+assert "an agent job has it since 12:41am UTC; the last one's answers didn't go up" in status, status
 assert "handedUnposted" not in pr_state(), pr_state()
 # A second that does the same fails the PR for the owner, as any two jobs
 # that end without fixing it do.
@@ -137,7 +137,7 @@ run(open_thread, 50 * 60)
 run(open_thread, 51 * 60)
 status, digest = run(open_thread, 52 * 60)
 assert writes() == [] and "state=failure" in status, (writes(), status)
-assert any(x[0] == "Two Claude jobs ended without fixing it" and "1 open review thread" in x[2] for x in digest), digest
+assert any(x[0] == "Two agent jobs ended without fixing it" and "1 open review thread" in x[2] for x in digest), digest
 print("unpushed answers: ok")
 
 # Its push landed: its answers go up, on its commit, and the pass reads the
@@ -153,7 +153,7 @@ status, _ = run(moved, 40 * 60)
 said = [c[2]["variables"] for c in writes() if c[1] == "graphql"]
 assert said[0] == {"t": THREAD, "b": f"**Claude job** · fixed in {pushed}\n\nBounded the loop."} and said[1] == {"t": THREAD}, said
 assert ["PATCH", "repos/sam/r/pulls/5", {"body": "Does it, bounded."}] in writes(), writes()
-assert "A Claude job's answers went up" in status and C.WAKE["sam/r"] == T + 40 * 60 + 1, (status, C.WAKE)
+assert "An agent job's answers went up" in status and C.WAKE["sam/r"] == T + 40 * 60 + 1, (status, C.WAKE)
 assert pr_state()["answering"] == {} and JOBS == [], (pr_state(), JOBS)
 print("pushed answers: ok")
 

@@ -51,7 +51,7 @@ def step(repo, pr, st, *, dep, renovate, head, labels, refresh, open_threads, ch
     elif "review" in T.raised(repo, pr) and not (looked := reviewed()):
         pass  # the shared reviewer step posted its wait or handed off findings
     elif held:
-        judged("a Claude job was asked to judge this head", DEP_SEEN)
+        judged("an agent job was asked to judge this head", DEP_SEEN)
     elif proof_only or build_early:
         prove()
     elif ci == "pending":
@@ -60,7 +60,7 @@ def step(repo, pr, st, *, dep, renovate, head, labels, refresh, open_threads, ch
         judged("reviewed dependency update past the review-round limit", PAST_LIMIT)
     elif gate() or ci == "none" or asked:
         judged(f"a dependency update touching {gate()}" if gate() else "the repo has no CI" if ci == "none"
-               else "a Claude job was asked to judge this head",
+               else "an agent job was asked to judge this head",
                DEP_SEEN + ("; renovate-sweep cleared the major version for this head" if major_verdict == "ok" else ""))
     elif dep == "major" and not renovate:
         judged("a major dependency update", DEP_SEEN)

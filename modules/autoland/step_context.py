@@ -30,13 +30,13 @@ STRIKES = {
     "empty": "what its merge would change can't be worked out (git can't fetch it or merge it)",
     "close": "GitHub keeps refusing to close it, though its base already has everything it changes",
     "mergeable": "GitHub won't say it can be merged",
-    "job": "no Claude job can start for it",
+    "job": "no agent job can start for it",
     "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
     "ask": "the owner's door keeps failing to ask Codex for a review (GitHub refuses its comment, or its broker doesn't answer)",
-    "answer": "GitHub keeps refusing a Claude job's answers it's to post",
-    "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
-    "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
+    "answer": "GitHub keeps refusing an agent job's answers it's to post",
+    "lost": "its agent jobs keep stopping before they finish (timed out, quiet or crashed)",
+    "stop": "proj keeps refusing to stop its agent jobs on a head it no longer has",
 }
 # What a status run takes from the live passes' state of a PR (Context).
 LIVE_FACTS = ("strikes", "proofOutputs", "mergedOutputs", "proofEval", "mergedEval")
@@ -120,7 +120,7 @@ class Context:
         four... up to an hour, so a lasting failure costs little. Its
         STRIKE_LIMIT-th failure in a row on this head makes the PR's wait
         overdue whatever its deadline, so the watchdog takes it (a kick, a
-        Claude job, the stuck issue); without the watchdog, it's listed on
+        agent job, the stuck issue); without the watchdog, it's listed on
         the stuck issue. Either says what GitHub said. Once a pass: a
         step failing twice in one pass is that pass's one failure. When it's
         tried again."""
@@ -157,7 +157,7 @@ class Context:
             self.cleared(kind)
 
     def handoff_at(self):
-        """When findings or red CI will have sat long enough for a Claude job
+        """When findings or red CI will have sat long enough for an agent job
         to take them (a pass is booked for then). A PR that links the Claude
         session that opened it is that session's to settle: it hears of
         every finding and failure and is likely at work on them, so a job
@@ -165,7 +165,7 @@ class Context:
         Every push or reply starts either wait over."""
         wait = self.rc["sessionHandoffAfter"] if self.session else self.rc["handoffAfter"]
         since = max(ts(self.pr["updatedAt"]), self.st["seen"])
-        self.after(since, wait)  # ends: a Claude job takes it then
+        self.after(since, wait)  # ends: an agent job takes it then
         return since + wait * MIN
 
     def settle(self, state, desc, why=None, *, stage, wait=waits.STEWARD, turn=False):
