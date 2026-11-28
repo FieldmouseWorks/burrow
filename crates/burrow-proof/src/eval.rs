@@ -5,7 +5,7 @@
 //! - `eval-start DIR` reads `DIR/build.json` ([`EvalRecord`]) and starts
 //!   its unit via `systemd-run --user` with `RuntimeMaxSec` and
 //!   `ExecStopPost` set to `burrow-proof eval-end DIR`.
-//! - `eval-run DIR` enters `heavy --` (when configured) and invokes
+//! - `eval-run DIR` enters `heavy --wait ... --` (when configured) and invokes
 //!   `eval-work DIR`.
 //! - `eval-work DIR` evaluates each check's `.drvPath` and queries its
 //!   outputs (computing a speculative `git merge-tree` first for
@@ -70,9 +70,18 @@ pub struct EvalRan {
     pub timed_out: bool,
 }
 
-/// Outer systemd backstop when an eval unit waits in `heavy`'s queue so
-/// queue wait time doesn't eat `rec.timeout`.
+/// Maximum seconds an eval unit waits in `heavy`'s queue before giving up,
+/// kept separate from `rec.timeout` so queue wait time doesn't eat eval time.
 const QUEUE_BACKSTOP_SECS: u64 = 10800;
+
+/// Grace added on top of `QUEUE_BACKSTOP_SECS + rec.timeout` for the outer
+/// systemd `RuntimeMaxSec` backstop so `heavy` handoff and `eval-work`'s own
+/// deadline cleanup finish before systemd kills the unit.
+const BACKSTOP_GRACE_SECS: u64 = 60;
+
+/// Exit status `heavy` returns when `--wait` expires before a slot frees
+/// (`burrow_heavy::BUSY`).
+const HEAVY_BUSY: i32 = 75;
 
 /// Output cap per `git` / `nix` call in `eval-work`.
 const MAX_OUTPUT: usize = 1024 * 1024;
@@ -167,7 +176,9 @@ fn word(p: &Path) -> Result<String, String> {
 /// `systemd-run` arguments for an eval unit whose folder is `dir`.
 pub fn argv(exe: &str, dir: &str, rec: &EvalRecord) -> Vec<String> {
     let runtime_max = if rec.heavy.is_some() {
-        rec.timeout.max(QUEUE_BACKSTOP_SECS)
+        QUEUE_BACKSTOP_SECS
+            .saturating_add(rec.timeout)
+            .saturating_add(BACKSTOP_GRACE_SECS)
     } else {
         rec.timeout
     };
@@ -214,8 +225,9 @@ pub fn run(dir: &Path, exe: &Path) -> Result<(), String> {
     let Some(heavy) = &rec.heavy else {
         return work(dir);
     };
+    let wait = QUEUE_BACKSTOP_SECS.to_string();
     let status = Command::new(heavy)
-        .args(["--"])
+        .args(["--wait", &wait, "--"])
         .arg(exe)
         .arg("eval-work")
         .arg(dir)
@@ -224,6 +236,23 @@ pub fn run(dir: &Path, exe: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", heavy.display()))?;
     if status.success() {
         Ok(())
+    } else if status.code() == Some(HEAVY_BUSY) {
+        let why = format!("heavy timed out waiting for a slot after {QUEUE_BACKSTOP_SECS}s");
+        if let Ok(log) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(LOG))
+        {
+            note(&log, &why);
+        }
+        let ran = EvalRan {
+            drvs: None,
+            paths: None,
+            failed: true,
+            timed_out: true,
+        };
+        let _ = save(&dir.join(RAN), &ran);
+        Err(why)
     } else {
         Err(format!("heavy exited {status}"))
     }

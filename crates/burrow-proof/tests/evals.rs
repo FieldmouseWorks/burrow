@@ -10,7 +10,7 @@ use std::process::Command;
 use std::thread;
 
 use burrow_proof::end::Ended;
-use burrow_proof::eval::{EvalKind, EvalRecord, end, run, start, work};
+use burrow_proof::eval::{EvalKind, EvalRecord, argv, end, run, start, work};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -312,6 +312,8 @@ fn eval_run_wraps_in_heavy_when_configured() {
     assert_eq!(
         got,
         vec![
+            "--wait",
+            "10800",
             "--",
             fake_exe.to_str().unwrap(),
             "eval-work",
@@ -365,14 +367,15 @@ fn heavy_queue_wait_does_not_eat_eval_timeout_and_work_enforces_it() {
     let mut attrs = BTreeMap::new();
     attrs.insert("agents".into(), "checks.x86_64-linux.agents".into());
 
-    // 1. With heavy configured, systemd-run's RuntimeMaxSec is not set to the
-    // short eval timeout (which would kill the unit while waiting in heavy's queue).
+    // 1. With heavy configured, systemd-run's RuntimeMaxSec allows the full
+    // queue backstop (10800s) PLUS rec.timeout (plus handoff grace), even when
+    // rec.timeout is 900s or larger than the backstop.
     let dir = tmp.path().join("eval-queue");
     fs::create_dir_all(&dir).unwrap();
     let heavy = tmp.path().join("heavy");
     write_exec(
         &heavy,
-        "#!/bin/sh\nsleep 1.5\n[ \"$1\" = -- ] && shift\nexec \"$@\"\n",
+        "#!/bin/sh\nsleep 1.5\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -- ]; then shift; break; fi\n  shift\ndone\nexec \"$@\"\n",
     );
     let rec = EvalRecord {
         repo: "sam/r".into(),
@@ -402,16 +405,68 @@ fn heavy_queue_wait_does_not_eat_eval_timeout_and_work_enforces_it() {
             captured.display()
         ),
     );
-    let fake_exe = tmp.path().join("burrow-proof");
-    write_exec(&fake_exe, "#!/bin/sh\nexit 0\n");
-    start(&dir, &fake_exe, &srun).unwrap();
+    let proof_bin = Path::new(env!("CARGO_BIN_EXE_burrow-proof"));
+    start(&dir, proof_bin, &srun).unwrap();
     let args = fs::read_to_string(&captured).unwrap();
     assert!(
-        !args.contains("--property=RuntimeMaxSec=1s"),
-        "heavy queue wait must not be bounded by eval timeout: {args}"
+        args.contains("--property=RuntimeMaxSec=10861s"),
+        "expected queue backstop + timeout + grace: {args}"
     );
 
-    // 2. When nix itself hangs past rec.timeout inside work(), work() enforces
+    // Default 900s eval timeout and a timeout exceeding the 10800s backstop both
+    // keep the full queue backstop plus rec.timeout on the outer unit.
+    let rec_900 = EvalRecord {
+        timeout: 900,
+        ..rec.clone()
+    };
+    assert!(
+        argv("/bin/burrow-proof", "/tmp/d", &rec_900)
+            .iter()
+            .any(|a| a == "--property=RuntimeMaxSec=11760s"),
+        "{:?}",
+        argv("/bin/burrow-proof", "/tmp/d", &rec_900)
+    );
+    let rec_long = EvalRecord {
+        timeout: 12000,
+        ..rec.clone()
+    };
+    assert!(
+        argv("/bin/burrow-proof", "/tmp/d", &rec_long)
+            .iter()
+            .any(|a| a == "--property=RuntimeMaxSec=22860s"),
+        "{:?}",
+        argv("/bin/burrow-proof", "/tmp/d", &rec_long)
+    );
+
+    // Waiting longer than rec.timeout (1.5s > 1s) in heavy's queue still lets
+    // eval-work run with a fresh deadline and succeed.
+    run(&dir, proof_bin).unwrap();
+    let said_ok = end(&dir, &ended("success", "exited", "0")).unwrap();
+    assert_eq!(said_ok["state"], "done", "{said_ok}");
+    assert_eq!(said_ok["paths"], json!([out_path]));
+
+    // 2. When heavy's --wait expires (exit 75), eval-run records timed_out so
+    // end() reports "timed out" instead of "failed".
+    let busy_heavy = tmp.path().join("busy-heavy");
+    write_exec(&busy_heavy, "#!/bin/sh\nexit 75\n");
+    let dir_busy = tmp.path().join("eval-heavy-busy");
+    fs::create_dir_all(&dir_busy).unwrap();
+    let rec_busy = EvalRecord {
+        heavy: Some(busy_heavy),
+        unit: "autoland-proof-eval-busy.service".into(),
+        ..rec.clone()
+    };
+    fs::write(
+        dir_busy.join("build.json"),
+        serde_json::to_vec(&rec_busy).unwrap(),
+    )
+    .unwrap();
+    assert!(run(&dir_busy, proof_bin).is_err());
+    let said_busy = end(&dir_busy, &ended("exit-code", "exited", "1")).unwrap();
+    assert_eq!(said_busy["state"], "timed out", "{said_busy}");
+    assert_eq!(said_busy["failed"], true, "{said_busy}");
+
+    // 3. When nix itself hangs past rec.timeout inside work(), work() enforces
     // the deadline and end() reports "timed out".
     let slow_nix = tmp.path().join("slow-nix");
     fs::create_dir_all(&slow_nix).unwrap();
