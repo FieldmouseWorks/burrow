@@ -108,7 +108,7 @@ pub fn build_checked(cfg: &Config) -> Build {
     }
 }
 
-fn daemon_lost(log: &std::path::Path) -> bool {
+pub(crate) fn daemon_lost(log: &std::path::Path) -> bool {
     let Ok(text) = fs::read_to_string(log) else {
         return false;
     };

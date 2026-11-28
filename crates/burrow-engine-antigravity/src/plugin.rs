@@ -9,9 +9,9 @@ use conary_core::plugin::{
     Response, Task, fixtures, version,
 };
 
-use crate::cli::{Invocation, run_invocation};
+use crate::cli::{Invocation, run_invocation_streaming};
 use crate::config::{Config, ENGINE, Effort, HOST_HOME_ENV};
-use crate::normalize::{Refusal, RunError, Usage};
+use crate::normalize::{Refusal, RunError, StreamStep, Usage};
 
 /// Exit codes aligned with burrow's Conary plugin diagnostics contract.
 pub const EXIT_OK: u8 = 0;
@@ -96,7 +96,18 @@ pub fn answer(config: &Config, request: &Request) -> Result<Response, String> {
 /// Answer one Conary plugin request and return structured diagnostics + exit code
 /// for stdio callers (`burrow-proj`, `conaryd`).
 pub fn handle_request(config: &Config, request: &Request, stop: &dyn Fn() -> bool) -> PluginResult {
-    match answer_detailed(config, request, stop) {
+    handle_request_streaming(config, request, stop, None)
+}
+
+/// Like [`handle_request`], forwarding each scrubbed, normalized stdout step
+/// via `on_step` as it arrives.
+pub fn handle_request_streaming(
+    config: &Config,
+    request: &Request,
+    stop: &dyn Fn() -> bool,
+    on_step: Option<&mut dyn FnMut(StreamStep)>,
+) -> PluginResult {
+    match answer_detailed(config, request, stop, on_step) {
         Ok((response, usage)) => {
             let diagnostic = usage.map(|u| usage_event(response.by.session.as_deref(), &u));
             PluginResult {
@@ -218,7 +229,7 @@ pub fn answer_cancellable(
     request: &Request,
     stop: &dyn Fn() -> bool,
 ) -> Result<Response, String> {
-    answer_detailed(config, request, stop)
+    answer_detailed(config, request, stop, None)
         .map(|(response, _)| response)
         .map_err(|e| e.message())
 }
@@ -227,6 +238,7 @@ fn answer_detailed(
     config: &Config,
     request: &Request,
     stop: &dyn Fn() -> bool,
+    on_step: Option<&mut dyn FnMut(StreamStep)>,
 ) -> Result<(Response, Option<Usage>), Box<DetailedError>> {
     config.validate().map_err(DetailedError::other)?;
 
@@ -341,7 +353,7 @@ fn answer_detailed(
                     usage: None,
                 }));
             }
-            let turn = run_invocation(config, &invocation, stop);
+            let turn = run_invocation_streaming(config, &invocation, stop, on_step);
 
             if let Some(err) = turn.error {
                 return match err {

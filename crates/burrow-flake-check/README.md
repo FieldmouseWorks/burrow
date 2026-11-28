@@ -32,9 +32,8 @@ The compiler closure stays rooted while the bootstrap compiles the runner
 in a private directory. No Cargo dependency build, registry access, release
 download or caller-writable executable cache sits between the pinned sources
 and the runner. Caller toolchain files cannot choose its compiler. Both gate
-and paths-only runs require Nix: the negative job now installs it before its
-path filter. Kept-build restores remain conditional on needing a negative;
-compiler provisioning does not query that cache before it has been restored.
+and paths-only runs require Nix: the negative job installs it before its
+path filter, configured with the build store when set.
 
 The earlier 16–20 second hosted Cargo build remains avoided for gate and negative runs. The bootstrap
 reports toolchain provisioning and direct compilation separately. A real run
@@ -62,79 +61,24 @@ The behavioral tests live in `burrow-workflows/tests/workflows/gate`: they run t
 own steps with real git and Nix evaluation, including the private-store retry,
 base failures, fetches, signals, VM slots, memory limits and test coverage.
 
-## Waiting for kept builds
+## The build store
 
-On a same-repository PR that missed its exact base cache, `run.sh wait`
-first runs the planner (`cold`) with its own Nix cache. A PR's exact key is
-the merge step's base tip (`steps.merge.outputs.tip`), the commit whose push
-saved it, so an exact hit skips the wait. The planner writes
-`cold.txt` and returns before builds in either evaluation mode, including
-whole-flake fallback paths. A plan it cannot safely produce is left to the
-real gate; `COLD_ONLY` no longer controls the gate's build policy.
+With a build store named by the caller's Actions variables
+(`BURROW_BUILDS_URL` and `BURROW_BUILDS_PUBLIC_KEY`), every job that
+installs Nix probes it (`soft/builds`, raising `degraded/builds` and
+building cold if unreachable) and configures it as an `extra-substituters`
+with its public key and `fallback = true` from its first step. Fork PRs
+substitute from it too (the store is public) and skip uploading.
 
-The API waiter is a separate Cargo binary, `burrow-flake-wait`, using
-`burrow-github` for requests, retries, pagination and URL encoding. The wait
-bootstrap builds it with the same pinned compiler and lock file, in a fresh
-private target directory; wait steps pay this dependency build cost and
-registry access. Gate and negative runs retain the direct compilation path.
-Only an unfinished push of the same workflow at the merged base's exact SHA
-on the default branch justifies waiting, and only while that push's own leg
-(the job named as this one, `LEG_JOB`) is running on a runner. One still
-queued, or not created yet, may want the very runner this leg holds, so the
-leg builds cold rather than wait (#929). A leg on a runner isn't waited for: its deadline
-(`WAIT_DEADLINE`, in seconds, from that leg's own start) defaults to 0, so
-this leg builds cold now, and restores the base's builds only if they're
-already saved. The wait was for codex, whose cold build took 2 to 3 hours;
-since it left the machine (#1204), a waiting leg spent 12.3 minutes waiting
-to save 2.7 of building (45 PR legs, 2026-11-19). #989 retires the wait
-with the kept builds. A failed push is no reason not to wait: its legs keep their
-builds whether its gate passed or not (#812), under its own commit, which
-is the key this leg restores. A newer push's entry for the leg is: the
-base push's leg skips its save once one is listed, and deletes its own
-if one turns up after (`burrow_keep::prune`), so the waiter asks that
-same question of the leg's entries and, on a yes, stops and restores the
-newer entry, which holds every build of the base's that the newer push
-didn't change (#1164: a base leg compiling cold for three hours skipped
-its save that way, and the PR leg that had waited on it built cold into
-the job's six-hour limit). The waiter lists the push's runs once, then
-polls only their jobs (`WAIT_POLL`, 60 seconds), and reads the leg's
-entries on the first poll, every `WAIT_NEWER` (300 seconds) and once the
-leg isn't building, which keeps a long wait inside the token's hourly
-requests. A leg that ended without saving, with no newer entry, or no
-such run, ends the wait and this leg builds cold. A request
-past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
-which reports `degraded/kept-wait`. A saved entry that then fails to
-restore (evicted, or unextractable) leaves the leg building without it and
-reports `degraded/kept-rewait` (#1161); what it left half extracted,
-Nix's `fallback` builds.
-
-The job inherits the caller's token permissions. Shipped callers grant
-`actions: read` for both runs and caches, including in private repositories;
-existing callers without it still run the gate and report a soft wait
-failure when GitHub denies an API read. A saved cache is restored with its
-exact key before the gate runs.
-
-## The build store's shadow
-
-With a build store named (the gate step's `BUILDS` and `BUILDS_KEY`, from
-the caller's Actions variables `BURROW_BUILDS_URL` and
-`BURROW_BUILDS_PUBLIC_KEY`, on a runner that installs its own Nix), a leg
-says before it builds what the store would have served of the derivations
-it builds cold (`src/builds.rs`): how many and which, their bytes, how long
-fetching them would take (estimated from one NAR's first 64 MiB, timed), and
-how long the kept builds' restore took. The last line is
-`builds-shadow {JSON}`, for a reader of the job's log. It reads narinfos
-concurrently by hash with `curl` and verifies their signatures offline
-with `nix store verify --no-contents`, counts only what the store's key
-signs, and never fails or holds up the leg: each question has a deadline.
-Nothing substitutes from the store.
-
-Such a run's builds go to the store, so every nix the worker starts also
-gets `accept-flake-config = false` and `sandbox = true`, after the caller's
-config: a flake's own `nixConfig` can't add a substituter or a key, or turn
-the sandbox off, whatever the runner's config says. After the gate,
-flake-check.yml's builds-write step uploads what the leg built
-(crates/burrow-keep, `burrow-keep-upload`).
+A run whose builds may go to the store gets `BUILDS` in the gate step, and
+every nix the worker starts adds `accept-flake-config = false` and
+`sandbox = true` after the caller's config (`src/builds.rs`): a flake's own
+`nixConfig` can't add a substituter or a key, or turn the sandbox off,
+whatever the runner's config says. After the gate, `flake-check.yml`'s
+`builds-write` step uploads what the leg built (`crates/burrow-keep`,
+`burrow-keep-upload`). The gate's identity (`gate.json`) names the store
+(`builds.url` and `builds.public-key`) in every attested predicate so a
+verifier can refuse a pass built from somewhere else.
 
 ## A build that stops making progress
 
@@ -278,15 +222,17 @@ one step shared by every job that needs it, says which gate a run is.
 sorted:
 
 ```json
-{"inputs":{"build-skip":["agents"],"eval-apart":true,"flaky":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
+{"builds":{"public-key":"machine-1:K","url":"https://builds.example/builds"},
+ "inputs":{"build-skip":["agents"],"eval-apart":true,"flaky":true,"install-nix":true,"legs":4,"runner":"ubuntu-latest"},
  "source":"tree","workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
 ```
 
 `workflow` is this workflow (`job.workflow_*`), `inputs` its inputs that
-can change a result, `build-skip` as a sorted set. With `gate-reuse` on,
+can change a result, `build-skip` as a sorted set, and `builds` the build
+store when configured (`BURROW_BUILDS_URL` and `BURROW_BUILDS_PUBLIC_KEY`,
+with `install-nix` on). With `gate-reuse` or a build store configured,
 every result the workflow attests carries it as the predicate's `gate`,
-after the fields it always had, so a later push can be matched to it; off,
-the predicate is unchanged. Conary's verifier ignores fields it doesn't
+after the fields it always had; with neither, the predicate is unchanged. Conary's verifier ignores fields it doesn't
 know. burrow#728 moves attestation production into Conary's `cn attest`,
 which then takes this field as given.
 
@@ -332,26 +278,17 @@ push that asks alike; a flake reads a `revCount` and `lastModified` of 1.
 Relative submodule URLs resolve against what the checkout's would (its
 default remote's URL, or with none the checkout itself), and a checkout
 with changes it hasn't committed is refused: its tree isn't what it holds.
-Its lock file is the tree's too: a lock that needs changing fails the gate.
-The kept-build waiter plans from the same source, and the caller's checkout
-is never touched. The gate says `"source": "tree"`.
+Its lock file is the tree's too: a lock that needs changing fails the gate,
+and the caller's checkout is never touched. The gate says `"source": "tree"`.
 
 Only a hit, read whole, for this request (its `query`), naming a run of this
 repository on this server, skips the gate: the job named check (the gate
-job, with legs) reports the pass, linking that run, and builds, attests and
-keeps nothing. A miss runs the whole gate. Anything else (no answer, another
+job, with legs) reports the pass, linking that run, and builds and attests
+nothing. A miss runs the whole gate. Anything else (no answer, another
 status, `unknown`, an answer that isn't one JSON object, another contract or
 query, a run that isn't this repository's, a push the event names no tree
 for, a token the job can't get) runs the whole gate too, and the lookup step
 fails softly (`degraded/gate-reuse`).
-
-A push that reuses a pass keeps no builds: it built none. The Actions cache
-lets a run restore only entries saved on its own ref and the default
-branch, so a PR's or a train candidate's builds can't warm the default
-branch or later PRs, and the default branch's entries already fill the
-repository's cache (burrow's four were 10.3 GB on 2026-11-13), so saving more
-would evict the ones every PR restores. Only a push to the default branch
-that builds keeps its builds, as without gate-reuse.
 
 Nothing on a machine runs this, so it has no NixOS option: a caller turns
 it on with the workflow's two inputs.

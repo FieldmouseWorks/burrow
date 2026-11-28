@@ -66,6 +66,15 @@ pub fn output(
     output_unless(command, input, until, max, &|| false)
 }
 
+/// Partial output returned when [`stream_unless`] fails (for example on
+/// deadline or stop), preserving whatever bytes were already read.
+#[derive(Debug)]
+pub struct OutputError {
+    pub reason: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 /// [`output`], stopped the same way, process group and all, as soon as
 /// `stop` says so: the work it was for was abandoned.
 pub fn output_unless(
@@ -75,8 +84,39 @@ pub fn output_unless(
     max: usize,
     stop: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
-    if Instant::now() >= until {
-        return Err("command exceeded its time limit".into());
+    stream_unless(command, input, Some(until), max, stop, &mut |_| {}).map_err(|e| e.reason)
+}
+
+fn flush_stdout_lines(out: &[u8], emitted: &mut usize, on_stdout_line: &mut dyn FnMut(&str)) {
+    while let Some(rel) = out[*emitted..].iter().position(|&b| b == b'\n') {
+        let end = *emitted + rel;
+        let line_bytes = out[*emitted..end]
+            .strip_suffix(b"\r")
+            .unwrap_or(&out[*emitted..end]);
+        let line = String::from_utf8_lossy(line_bytes);
+        on_stdout_line(&line);
+        *emitted = end + 1;
+    }
+}
+
+/// Like [`output_unless`], but with an optional deadline (`None` means no
+/// internal time limit), streaming complete `\n`-terminated stdout lines via
+/// `on_stdout_line` as they arrive, and returning any partial stdout/stderr in
+/// [`OutputError`] if the run is stopped or times out.
+pub fn stream_unless(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    until: Option<Instant>,
+    max: usize,
+    stop: &dyn Fn() -> bool,
+    on_stdout_line: &mut dyn FnMut(&str),
+) -> Result<Output, OutputError> {
+    if until.is_some_and(|u| Instant::now() >= u) {
+        return Err(OutputError {
+            reason: "command exceeded its time limit".into(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
     }
     let mut child = command
         .process_group(0)
@@ -88,9 +128,14 @@ pub fn output_unless(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| OutputError {
+            reason: e.to_string(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })?;
     let pid = Pid::from_child(&child);
-    let result = (|| {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = (|| -> Result<Output, String> {
         let mut stdin = child.stdin.take();
         if let Some(pipe) = &stdin {
             nonblocking(pipe)?;
@@ -100,10 +145,10 @@ pub fn output_unless(
         let mut stderr = child.stderr.take().ok_or("missing stderr")?;
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
-        let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut out_done, mut err_done) = (false, false);
+        let mut emitted = 0usize;
         loop {
-            if Instant::now() >= until {
+            if until.is_some_and(|u| Instant::now() >= u) {
                 return Err("command exceeded its time limit".into());
             }
             if stop() {
@@ -134,6 +179,7 @@ pub fn output_unless(
             }
             if !out_done {
                 out_done = read(&mut stdout, &mut out, max)?;
+                flush_stdout_lines(&out, &mut emitted, on_stdout_line);
             }
             if !err_done {
                 err_done = read(&mut stderr, &mut err, max)?;
@@ -144,16 +190,26 @@ pub fn output_unless(
             {
                 return Ok(Output {
                     status,
-                    stdout: out,
-                    stderr: err,
+                    stdout: std::mem::take(&mut out),
+                    stderr: std::mem::take(&mut err),
                 });
             }
-            sleep(Duration::from_millis(5).min(until.saturating_duration_since(Instant::now())));
+            let wait = match until {
+                Some(u) => {
+                    Duration::from_millis(5).min(u.saturating_duration_since(Instant::now()))
+                }
+                None => Duration::from_millis(5),
+            };
+            sleep(wait);
         }
     })();
     let _ = kill_process_group(pid, Signal::KILL);
     let _ = child.wait();
-    result
+    result.map_err(|reason| OutputError {
+        reason,
+        stdout: out,
+        stderr: err,
+    })
 }
 
 #[cfg(test)]

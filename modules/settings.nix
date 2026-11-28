@@ -24,6 +24,12 @@ let
       )
       ++ lib.attrNames (config.burrow.proj.plugins or { })
     );
+    owners = cfg.owners;
+    pluginsDir = cfg.plugins.dir;
+    pluginFallback = cfg.plugins.fallback;
+    pluginSandbox = "${cfg.plugins.sandbox}/bin/bwrap";
+    pluginCurl = "${cfg.plugins.curl}/bin/curl";
+    pluginCheckTimeoutSeconds = cfg.plugins.checkTimeoutSeconds;
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);
   command = pkgs.writeShellScriptBin "settings" ''
@@ -42,6 +48,45 @@ in {
       default = [ ];
       description = "Repositories whose automated work may move. Unlisted and new repositories are off. Unlisted repositories can still be triaged; explicit runtime pauses vacate every role. Runtime changes use settings allow/pause.";
     };
+    owners = lib.mkOption {
+      type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
+      default = cfg.door.authors;
+      defaultText = lib.literalExpression "config.burrow.settings.door.authors";
+      description = "Authorized owner identities (by positive numeric GitHub account ID) allowed to install, update, or remove pinned engine plugins through the settings write door. Empty fails closed.";
+    };
+    plugins = {
+      dir = lib.mkOption {
+        type = lib.types.str;
+        default = "${stateDir}/settings/plugins";
+        defaultText = lib.literalExpression ''"''${config.burrow.stateDir}/settings/plugins"'';
+        description = "Host-owned directory storing verified release engine plugin artifacts and staging files.";
+      };
+      fallback = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "claude";
+        description = "Declared default fallback engine for roles affected when an installed engine plugin is removed; null refuses removal unless a valid --fallback engine is supplied.";
+      };
+      sandbox = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.bubblewrap;
+        defaultText = lib.literalExpression "pkgs.bubblewrap";
+        internal = true;
+        description = "Sandbox runner (bubblewrap) used to confine cn plugin check before activating a plugin.";
+      };
+      curl = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.curl;
+        defaultText = lib.literalExpression "pkgs.curl";
+        internal = true;
+        description = "HTTP client used to fetch pinned HTTPS release plugin artifacts before hash verification.";
+      };
+      checkTimeoutSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = "Per-invocation timeout in seconds for sandboxed cn plugin check before activation.";
+      };
+    };
     effective = lib.mkOption { type = lib.types.attrs; readOnly = true; internal = true; };
     file = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; };
     command = lib.mkOption { type = lib.types.str; readOnly = true; internal = true; };
@@ -56,7 +101,10 @@ in {
   config = lib.mkMerge [ {
     burrow.settings = { effective = settings; file = tracked; command = "${package}/bin/burrow-settings"; };
     environment.systemPackages = [ command ];
-    systemd.tmpfiles.rules = [ "d ${stateDir}/settings 0755 ${user} - -" ];
+    systemd.tmpfiles.rules = [
+      "d ${stateDir}/settings 0755 ${user} - -"
+      "d ${cfg.plugins.dir} 0755 ${user} - -"
+    ];
   } (lib.mkIf cfg.door.enable {
     assertions = [ { assertion = cfg.door.authors != [ ] && cfg.door.repo != ""; message = "The settings door requires a repository and authorized authors."; } ];
     systemd.tmpfiles.rules = [ "d ${stateDir}/settings-door 0700 ${user} - -" ];
@@ -67,6 +115,7 @@ in {
     };
     systemd.services.burrow-settings-door = {
       description = "Change operational settings without the pipeline";
+      restartIfChanged = false;
       # Oneshot with no Restart= and a 30s timer: don't let systemd's default
       # 5-starts-in-10s limit refuse repeated manual or test invocations.
       startLimitIntervalSec = 0;
@@ -80,7 +129,7 @@ in {
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "full";
-        TimeoutStartSec = "1min";
+        TimeoutStartSec = "3min";
       };
     };
   }) ];

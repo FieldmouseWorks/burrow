@@ -61,14 +61,14 @@ it reviews each push on its own, and a pass reads what it posted.
 
 In a repo with `train` on, a settled PR goes into its merge train instead of
 being merged, and a pass ends with a step of the train (train.py). `cn`, which
-runs the train, gets the App's tokens from `autoland-steward token
-OWNER/REPO`, printed on stdout for it alone.
+runs the train, gets the App's tokens from burrow-upkeep's `token --bare`.
 """
 
 import fcntl
 import json
 import os
 import sys
+import time
 
 import common as C
 from batch import Batch
@@ -85,24 +85,7 @@ from prs import open_prs
 
 # ---------------------------------------------------------------- main
 
-def token(repo):
-    """The App's token for repo's owner, for cn (train.py), which runs it
-    inside a pass: so it takes no lock. Exits 75 when GitHub can't be asked
-    just now, as cn does."""
-    try:
-        print(C.token(repo.split("/")[0].lower()))
-    except C.Unavailable as e:
-        print(f"no token for {repo}: {e}", file=sys.stderr)
-        sys.exit(75)
-    except (RuntimeError, OSError) as e:
-        print(f"no token for {repo}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
-    if sys.argv[1:2] == ["token"] and len(sys.argv) == 3:
-        token(sys.argv[2])
-        return
     if sys.argv[1:2] == ["build"] and len(sys.argv) == 3:
         # A proof build's unit (proofs.build): no pass, so no lock.
         P.run(sys.argv[2])
@@ -314,6 +297,7 @@ def run_pass(kick, continuing=False):
         seen_all = True  # its PRs: False once its look fails short of them
         previous = [tuple(x) for x in was_digest.get(repo, ())]
         left = None
+        skipped = []
         ran_default = False
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
@@ -424,6 +408,24 @@ def run_pass(kick, continuing=False):
                     seen_to = True
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
+                    except C.Unavailable as e:
+                        log(f"{repo}#{pr['number']}: {e}")
+                        now = time.monotonic()
+                        if batch.expired() or now >= batch.hard_until or (C.REMOTE_DEADLINE is not None and now >= C.REMOTE_DEADLINE):
+                            if why := T.STOPPED.get(repo):
+                                batch.stop(repo, pr, why)
+                            left.append(pr)
+                            partial = True
+                            batch.left = True
+                            break
+                        skipped.append(pr)
+                        operations_complete = False
+                        batch.retry(repo, max(C.NOW + 5 * MIN, C.LIMITED[0] + 1 if C.LIMITED else 0))
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass retries the PR
+                        if T.seat(repo, pr["number"]) is not None:
+                            T.stop(repo, f"#{pr['number']} wasn't seen to")
+                        batch.stop(repo, pr, T.STOPPED.get(repo))
+                        continue
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
@@ -437,7 +439,7 @@ def run_pass(kick, continuing=False):
                 if partial or batch.expired():
                     complete = False
                     batch.left = True
-                    digest[repo] = [*mine, *carry_digest(repo, previous, left=left, ran_default=True)]
+                    digest[repo] = [*mine, *carry_digest(repo, previous, left=[*left, *skipped], ran_default=True)]
                     continue
                 op = "train"
                 # Complete: the branches of the PRs seen to in earlier
@@ -481,7 +483,7 @@ def run_pass(kick, continuing=False):
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             digest[repo] = [*mine, *carry_digest(
-                repo, previous, left=left, ran_default=ran_default,
+                repo, previous, left=None if left is None else [*left, *skipped], ran_default=ran_default,
                 ran_branches=waits.ran(repo, "branches"),
                 ran_upkeep=waits.ran(repo, "upkeep"), ran_taken=True)]
             if operations_complete:
