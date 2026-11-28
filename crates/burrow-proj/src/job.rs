@@ -479,12 +479,15 @@ mod tests {
         set_mtime(&old.turn("1", "jsonl"), 2000);
         old.mark_ended();
         let (since, due) = times(&old);
-        assert!(since >= before && due == since + 120, "{since} {due}");
+        assert!(
+            since >= before && due == since + crate::RESUME_GRACE,
+            "{since} {due}"
+        );
         assert!(wait(&old).unwrap().phase.contains("ended (failed)"));
         set_mtime(&old.turn("1", "ended"), 5000);
         old.mark_ended();
-        assert_eq!(times(&old), (5000, 5120));
-        assert_eq!(times(&old), (5000, 5120));
+        assert_eq!(times(&old), (5000, 5000 + crate::RESUME_GRACE));
+        assert_eq!(times(&old), (5000, 5000 + crate::RESUME_GRACE));
 
         // Killed before any stream, and before it even had a slot.
         let nostream = new("nostream");
@@ -518,8 +521,8 @@ mod tests {
         // often it's looked at.
         let unseen = new("unseen");
         set_mtime(&unseen.turn("1", "jsonl"), 2000);
-        assert_eq!(times(&unseen), (2000, 2120));
-        assert_eq!(times(&unseen), (2000, 2120));
+        assert_eq!(times(&unseen), (2000, 2000 + crate::RESUME_GRACE));
+        assert_eq!(times(&unseen), (2000, 2000 + crate::RESUME_GRACE));
 
         // One that said how it ended ended then, whatever its log says: an error
         // or a timeout has its grace from there, and no stamp.
@@ -533,7 +536,7 @@ mod tests {
             fs::write(said.turn("1", "outcome"), format!("{how}\n")).unwrap();
             set_mtime(&said.turn("1", "outcome"), 3000);
             said.mark_ended();
-            assert_eq!(times(&said), (3000, 3120), "{how}");
+            assert_eq!(times(&said), (3000, 3000 + crate::RESUME_GRACE), "{how}");
             assert!(!said.turn("1", "ended").exists(), "{how}");
         }
 
@@ -553,6 +556,55 @@ mod tests {
         fs::write(owned.path("owned"), "").unwrap();
         owned.mark_ended();
         assert!(wait(&owned).is_none());
+
+        // Inbox-managed jobs (marked by inbox-issue, host-side inbox-issue, or
+        // an active legacy inbox record) get INBOX_RESUME_GRACE; regular
+        // non-inbox jobs keep RESUME_GRACE (120s).
+        let mut inbox_v = example();
+        inbox_v["jobs"] = tmp.path().to_str().unwrap().into();
+        let inbox_state = tmp.path().join("inbox-state");
+        fs::create_dir_all(&inbox_state).unwrap();
+        inbox_v["inbox"]["state"] = inbox_state.to_str().unwrap().into();
+        let inbox_cfg: Config = serde_json::from_value(inbox_v).unwrap();
+        let new_in = |id: &'static str| {
+            let job = Job::new(&inbox_cfg, id);
+            fs::create_dir(&job.dir).unwrap();
+            job.set_turns(1).unwrap();
+            set_mtime(&job.path("prompt.1"), 1000);
+            set_mtime(&job.turn("1", "ended"), 5000);
+            job
+        };
+        let times_in = |job: &Job| {
+            let w = job_wait(&inbox_cfg, &job.facts().unwrap()).unwrap();
+            (w.since as i64, w.due as i64)
+        };
+        let inbox_marked = new_in("inbox-marked");
+        fs::write(inbox_marked.path("inbox-issue"), "true\n").unwrap();
+        assert_eq!(
+            times_in(&inbox_marked),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let inbox_host = new_in("inbox-host");
+        crate::ask::ensure(&inbox_host).unwrap();
+        fs::write(
+            crate::ask::host_path(&inbox_host, "inbox-issue"),
+            "sam/web#1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            times_in(&inbox_host),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let inbox_legacy = new_in("inbox-legacy");
+        let rec = inbox_state.join("sam_web-7");
+        fs::create_dir_all(&rec).unwrap();
+        fs::write(rec.join("job"), "inbox-legacy\n").unwrap();
+        assert_eq!(
+            times_in(&inbox_legacy),
+            (5000, 5000 + crate::INBOX_RESUME_GRACE)
+        );
+        let non_inbox = new_in("non-inbox");
+        assert_eq!(times_in(&non_inbox), (5000, 5120));
 
         // Still going: no end to record.
         let going = new("going");

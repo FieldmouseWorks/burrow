@@ -627,11 +627,20 @@ fn facts(job: &Job, state: &str, awaited: &[Await]) -> Option<Facts> {
     let n = job.turns()?;
     let prompt = job.prompt(&n);
     let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
+    let owned = Request::peek(job).is_ok_and(|r| r.owned);
+    let stopped = job.turn_marker(&n, TurnMarker::Stopped).exists();
+    let inbox = job.file(JobFile::InboxIssue).exists()
+        || crate::ask::host_path(job, "inbox-issue").exists()
+        || (!matches!(state, "parked" | "queued" | "running" | "done")
+            && !owned
+            && !stopped
+            && crate::inbox::enrollment::has_active_record(job));
     Some(Facts {
         id: job.id.to_owned(),
-        owned: Request::peek(job).is_ok_and(|r| r.owned),
+        owned,
+        inbox,
         unstick: job.marker(Marker::Unstick).exists(),
-        stopped: job.turn_marker(&n, TurnMarker::Stopped).exists(),
+        stopped,
         end: opt(job.turn_marker(&n, TurnMarker::End)),
         link: opt(job.file(JobFile::Link)),
         queued: mtime(&prompt).unwrap_or(0),

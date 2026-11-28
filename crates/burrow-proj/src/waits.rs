@@ -7,8 +7,9 @@
 //! out of usage, for that long after it resets; one running, until its
 //! deadline and GRACE (proj stops it before then); one that ended without
 //! saying what comes next even when asked again, at once, since nothing resumes
-//! it; one that ended in a failure, for RESUME_GRACE from its end, since
-//! proj-inbox resumes an issue's job seconds later when a reply waits; one
+//! it; one that ended in a failure, for RESUME_GRACE from its end
+//! (INBOX_RESUME_GRACE for inbox-managed jobs, since proj-inbox resumes an
+//! issue's job once its pass runs); one
 //! awaiting GitHub, for awaitHours and GRACE (proj-watch resumes it by then,
 //! told nothing changed). Not watched:
 //! a turn that asks a person (their reply resumes it) or is done, one proj
@@ -26,7 +27,7 @@ use serde_json::{Map, Value, json};
 use crate::config::Config;
 use crate::job::Job;
 use crate::slot::successor;
-use crate::{GRACE, RESUME_GRACE, mtime, now, read, swap, usage};
+use crate::{GRACE, INBOX_RESUME_GRACE, RESUME_GRACE, mtime, now, read, swap, usage};
 
 /// What [`job_wait`] reads of a job's latest turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,6 +38,8 @@ pub struct Facts {
     pub state: String,
     /// Its starter acts on each turn's end itself (proj run --owned).
     pub owned: bool,
+    /// Managed by proj-inbox, which resumes failed turns on its next pass.
+    pub inbox: bool,
     /// It's the job that takes the stuck issue (proj run --unstick).
     pub unstick: bool,
     /// proj stop ended it.
@@ -145,9 +148,14 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                 return None;
             }
             if state != "done" {
+                let grace = if f.inbox {
+                    INBOX_RESUME_GRACE
+                } else {
+                    RESUME_GRACE
+                };
                 (
                     f.ended,
-                    f.ended + RESUME_GRACE,
+                    f.ended + grace,
                     format!("turn {turn} ended ({state}), and nothing resumed it"),
                 )
             } else {

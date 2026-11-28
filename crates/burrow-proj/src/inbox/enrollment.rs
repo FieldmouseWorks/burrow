@@ -128,6 +128,17 @@ pub(super) fn worker_records(state: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// Whether `job` has an active inbox record (covers legacy inbox workers that
+/// predate the `inbox-issue` marker). Read-only: never writes.
+pub(crate) fn has_active_record(job: &Job) -> bool {
+    let Some(inbox) = &job.cfg.inbox else {
+        return false;
+    };
+    dirs(&inbox.state, "")
+        .into_iter()
+        .any(|d| files::job(&d).as_deref() == Some(job.id))
+}
+
 /// Preserve legacy association after the inbox record is retired.
 pub(super) fn remember(job: &Job, repo: &str, n: &str) -> Result<(), String> {
     crate::ask::ensure(job)?;

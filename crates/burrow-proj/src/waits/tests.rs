@@ -33,6 +33,7 @@ fn facts(lines: &[&str]) -> Facts {
             "turn" => f.turn = v.into(),
             "state" => f.state = v.into(),
             "owned" => f.owned = true,
+            "inbox" => f.inbox = true,
             "unstick" => f.unstick = true,
             "stopped" => f.stopped = true,
             "end" => f.end = Some(v.into()),
@@ -212,14 +213,35 @@ fn waits() {
             && w.kick.is_none()
             && w.phase.contains("without saying what comes next")
     });
-    // Ended in a failure, or an error: due at once too, and says which.
+    // Ended in a failure, or an error: non-inbox jobs keep RESUME_GRACE (120s),
+    // while inbox-managed jobs get INBOX_RESUME_GRACE (900s) for proj-inbox's pass.
     case(&["state timed out after 4h"], |w| {
-        w.since == 3000.0 && w.due == 3120.0 && w.phase.contains("ended (timed out after 4h)")
+        w.since == 3000.0
+            && w.due == 3120.0
+            && w.due == (3000 + crate::RESUME_GRACE) as f64
+            && w.phase.contains("ended (timed out after 4h)")
     });
     case(&["state error", "end done"], |w| {
-        w.due == 3120.0 && w.phase.contains("ended (error)")
+        w.due == 3120.0
+            && w.due == (3000 + crate::RESUME_GRACE) as f64
+            && w.phase.contains("ended (error)")
     });
-    case(&["state failed"], |w| w.due == 3120.0);
+    case(&["state failed"], |w| {
+        w.due == 3120.0 && w.due == (3000 + crate::RESUME_GRACE) as f64
+    });
+    case(&["state timed out after 4h", "inbox 1"], |w| {
+        w.since == 3000.0
+            && w.due == (3000 + crate::INBOX_RESUME_GRACE) as f64
+            && w.phase.contains("ended (timed out after 4h)")
+    });
+    case(&["state error", "end done", "inbox 1"], |w| {
+        w.due == (3000 + crate::INBOX_RESUME_GRACE) as f64 && w.phase.contains("ended (error)")
+    });
+    case(&["state failed", "inbox 1"], |w| {
+        // Long enough for a proj-inbox full pass (~9.5m) plus listing gap
+        // before the watchdog treats a failed inbox turn as stalled.
+        w.due >= 3000.0 + 600.0 && w.due == (3000 + crate::INBOX_RESUME_GRACE) as f64
+    });
     // A question for a person, a finished job, and a turn that didn't have
     // to say (a sandbox's, or one from before turns said) aren't watched.
     none_more(&["state done", "end ask"]);
@@ -228,8 +250,10 @@ fn waits() {
     // Nor is a turn proj stop ended, or how an --owned job's ended: its
     // starter acts on that.
     none_more(&["state failed", "stopped 1"]);
+    none_more(&["state failed", "inbox 1", "stopped 1"]);
     none_more(&["state done", "end undeclared", "stopped 1"]);
     none_more(&["state timed out after 1h", "owned 1"]);
+    none_more(&["state failed", "inbox 1", "owned 1"]);
     none_more(&["state done", "end undeclared", "owned 1"]);
 
     // Awaiting GitHub: the longest wait sets the deadline, past
