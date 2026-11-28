@@ -24,7 +24,7 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,12 +54,20 @@ impl Api for Shared {
 struct Scripted(Arc<Mutex<Script>>);
 
 #[derive(Default)]
+struct Gate {
+    state: Mutex<(usize, usize, bool)>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
 struct Script {
     runs: PathBuf,
     ends: VecDeque<Ended>,
     printed: String,
     /// Whether a run waits until its work is abandoned.
     hang: bool,
+    /// Optional barrier tracking concurrent active/peak unit runs.
+    gate: Option<Arc<Gate>>,
     started: Vec<Spec>,
     stopped: Vec<String>,
     loaded: Vec<String>,
@@ -67,7 +75,7 @@ struct Script {
 
 impl Units for Scripted {
     fn run(&self, id: &str, work: &Work, until: Instant) -> Result<Ended, String> {
-        let hang = {
+        let (hang, gate) = {
             let mut s = self.0.lock().unwrap();
             let spec: Spec =
                 serde_json::from_slice(&std::fs::read(s.runs.join(id).join(SPEC)).unwrap())
@@ -79,8 +87,28 @@ impl Units for Scripted {
                 .open(s.runs.join(id).join("log"))
                 .unwrap();
             log.write_all(s.printed.as_bytes()).unwrap();
-            s.hang
+            (s.hang, s.gate.clone())
         };
+        if let Some(gate) = gate {
+            {
+                let mut g = gate.state.lock().unwrap();
+                g.0 += 1;
+                g.1 = g.1.max(g.0);
+                gate.changed.notify_all();
+                while !g.2 && !work.abandoned() && Instant::now() < until {
+                    let (guard, _) = gate
+                        .changed
+                        .wait_timeout(g, Duration::from_millis(10))
+                        .unwrap();
+                    g = guard;
+                }
+                g.0 -= 1;
+                gate.changed.notify_all();
+            }
+            if work.abandoned() {
+                return Err("the request was abandoned".into());
+            }
+        }
         if hang {
             while !work.abandoned() && Instant::now() < until {
                 thread::sleep(Duration::from_millis(10));
@@ -808,4 +836,213 @@ fn a_build_fails_when_nix_says_a_builder_in_it_did() {
     assert_eq!(work::failed(&full, read), Ok(false));
     // A derivation nix names that can't be read is no verdict.
     assert!(work::failed(&said("/nix/store/g-gone.drv", builder), read).is_err());
+}
+
+#[test]
+fn build_derivation_eval_runs_in_heavy_slot() {
+    let r = rig();
+    r.ask(&request("prepare", &r.head, &r.tree, &["gate"]))
+        .unwrap();
+    let bin = r.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let seen = r.dir.path().join("heavy.log");
+    let script = |name: &str, body: &str| {
+        let p = bin.join(name);
+        burrow_test::executable(&p, format!("#!/bin/sh\n{body}\n"));
+        p
+    };
+    let heavy = script(
+        "heavy",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nshift\nexec \"$@\"",
+            seen.display()
+        ),
+    );
+    script("nix", "echo /nix/store/fake-agents.drv");
+    script(
+        "nix-store",
+        "case \"$1\" in --query) echo /nix/store/fake-out ;; --check-validity) ;; esac",
+    );
+    let mut cfg = r.cfg.clone();
+    cfg.nix = bin;
+    cfg.heavy = Some(vec![heavy.to_string_lossy().into_owned(), "--".into()]);
+    let id = format!("{:x}", rand_ish());
+    let spec = Spec {
+        mode: Mode::Prepare,
+        repo: REPO.into(),
+        head: r.head.clone(),
+        tree: r.tree.clone(),
+        check: "agents".into(),
+        recipe: Recipe::Build("checks.x86_64-linux.agents".into()),
+    };
+    lay(cfg.bench(), &cfg.mirror(REPO), &id, &spec).unwrap();
+    let code = work::work(cfg.bench(), &id, &mut Bare);
+    let log = std::fs::read_to_string(cfg.log(&id)).unwrap();
+    assert_eq!(code, PASSED, "{log}");
+    let ran = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(
+        ran.contains("eval") && ran.contains("checks.x86_64-linux.agents.drvPath"),
+        "expected nix eval to run through heavy, got: {ran:?}"
+    );
+}
+
+#[test]
+fn concurrent_build_prepares_for_one_repo_serialize_and_abandon_cleanly() {
+    let r = rig();
+    {
+        let mut fake = r.github.0.lock().unwrap();
+        for commit in [&r.head, &r.twin] {
+            fake.on(
+                "GET",
+                &format!("repos/{REPO}/git/commits/{commit}"),
+                (0..4)
+                    .map(|_| ok(200, json!({"tree": {"sha": r.tree}}), &[]))
+                    .collect(),
+            );
+        }
+    }
+    let gate = Arc::new(Gate::default());
+    {
+        let mut s = r.units.0.lock().unwrap();
+        s.gate = Some(gate.clone());
+        s.ends = [Ended::Exited(PASSED), Ended::Exited(PASSED)].into();
+    }
+    let me = Controller(rustix::process::getuid().as_raw());
+    let server = Server::bind(&r.cfg.socket, me).unwrap();
+    let producer = r.producer.clone();
+    thread::spawn(move || {
+        let _ = server.serve(move |req: Request, w: &Work| producer.handle(req, w));
+    });
+    let call = |cfg: Config, req: Value| {
+        thread::spawn(move || {
+            let mut out = Vec::new();
+            plugin(&cfg)
+                .answer(&mut req.to_string().as_bytes(), &mut out)
+                .map(|()| serde_json::from_slice::<Value>(&out).unwrap())
+        })
+    };
+    let c1 = call(
+        r.cfg.clone(),
+        request("prepare", &r.head, &r.tree, &["agents"]),
+    );
+    // Wait until the first prepare enters its unit.
+    {
+        let mut g = gate.state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while g.0 == 0 && Instant::now() < deadline {
+            let (guard, _) = gate
+                .changed
+                .wait_timeout(g, Duration::from_millis(20))
+                .unwrap();
+            g = guard;
+        }
+        assert_eq!(g.0, 1, "first prepare should be active");
+    }
+    let c2 = call(
+        r.cfg.clone(),
+        request("prepare", &r.twin, &r.tree, &["agents"]),
+    );
+    // A third prepare arrives and abandons while waiting behind the first.
+    let mut c3 = UnixStream::connect(&r.cfg.socket).unwrap();
+    let mut line = request("prepare", &r.head, &r.tree, &["agents"]).to_string();
+    line.push('\n');
+    c3.write_all(line.as_bytes()).unwrap();
+    thread::sleep(Duration::from_millis(80));
+    drop(c3);
+    thread::sleep(Duration::from_millis(80));
+    {
+        let mut g = gate.state.lock().unwrap();
+        assert_eq!(g.1, 1, "at most one build prepare unit per repo at a time");
+        g.2 = true;
+        gate.changed.notify_all();
+    }
+    let r1 = c1.join().unwrap().unwrap();
+    let r2 = c2.join().unwrap().unwrap();
+    assert_eq!(
+        (r1["ready"].clone(), r1["slot"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        (r2["ready"].clone(), r2["slot"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(gate.state.lock().unwrap().1, 1);
+    assert_eq!(
+        r.started().len(),
+        2,
+        "abandoned prepare never started a unit"
+    );
+}
+
+#[test]
+fn concurrent_fetches_for_same_repo_serialize_mirror_init() {
+    let r = rig();
+    // Wrap git to detect any two processes touching the repo's mirror at once.
+    let bin = r.dir.path().join("git-wrap");
+    std::fs::create_dir_all(&bin).unwrap();
+    let guard = r.dir.path().join("mirror.busy");
+    let git_wrap = bin.join("git");
+    burrow_test::executable(
+        &git_wrap,
+        format!(
+            "#!/bin/sh\n\
+             if ! mkdir '{g}' 2>/dev/null; then\n\
+               echo 'concurrent git on mirror' >&2\n\
+               exit 99\n\
+             fi\n\
+             trap \"rmdir '{g}'\" EXIT\n\
+             sleep 0.05\n\
+             git \"$@\"\n",
+            g = guard.display()
+        ),
+    );
+    let mut cfg = r.cfg.clone();
+    cfg.git = git_wrap;
+    {
+        let mut fake = r.github.0.lock().unwrap();
+        fake.on(
+            "GET",
+            &format!("repos/{REPO}/git/commits/{}", r.head),
+            (0..8)
+                .map(|_| ok(200, json!({"tree": {"sha": r.tree}}), &[]))
+                .collect(),
+        );
+    }
+    let shared = r.github.clone();
+    let github: GitHub = Box::new(move || Box::new(shared.clone()));
+    let producer = Arc::new(
+        Producer::new(
+            cfg.clone(),
+            github,
+            Box::new(r.units.clone()),
+            Signer::for_tests(PRODUCER, SECRET),
+        )
+        .unwrap(),
+    );
+    let me = Controller(rustix::process::getuid().as_raw());
+    let server = Server::bind(&cfg.socket, me).unwrap();
+    let served = producer.clone();
+    thread::spawn(move || {
+        let _ = server.serve(move |req: Request, w: &Work| served.handle(req, w));
+    });
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let cfg = cfg.clone();
+            let req = request("prepare", &r.head, &r.tree, &["gate"]);
+            thread::spawn(move || {
+                let mut out = Vec::new();
+                plugin(&cfg)
+                    .answer(&mut req.to_string().as_bytes(), &mut out)
+                    .map(|()| serde_json::from_slice::<Value>(&out).unwrap())
+            })
+        })
+        .collect();
+    for h in handles {
+        let got = h.join().unwrap().unwrap();
+        assert_eq!(
+            (got["ready"].clone(), got["slot"].clone()),
+            (json!(true), json!(true)),
+            "{got}"
+        );
+    }
 }

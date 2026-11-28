@@ -16,7 +16,7 @@
 //!
 //! A `Build` recipe is its flake attribute's derivation at the commit, as
 //! the steward works it out (no import from derivation, no flake config),
-//! realised in a heavy slot. A `Run` recipe is its command line (a program and its
+//! evaluated and realised in a heavy slot. A `Run` recipe is its command line (a program and its
 //! arguments, as the flow's settings give it), in a fresh clone of the
 //! commit, in a fence of its own.
 use crate::fence::Fence;
@@ -218,25 +218,25 @@ fn derivation(
         "git+file://{at}?ref=refs/proof/{head}&rev={head}#{attr}.drvPath",
         head = spec.head
     );
-    let mut c = nix(cfg, "nix");
-    c.args([
-        "--extra-experimental-features",
-        "nix-command flakes",
-        "eval",
-        "--raw",
-        "--option",
-        "allow-import-from-derivation",
-        "false",
-        "--option",
-        "accept-flake-config",
-        "false",
-        "--option",
-        "pure-eval",
-        "true",
-        "--no-update-lock-file",
-        &url,
-    ]);
-    let drv = read(c, log)?;
+    let argv = [
+        nix_program(cfg, "nix").to_string_lossy().into_owned(),
+        "--extra-experimental-features".into(),
+        "nix-command flakes".into(),
+        "eval".into(),
+        "--raw".into(),
+        "--option".into(),
+        "allow-import-from-derivation".into(),
+        "false".into(),
+        "--option".into(),
+        "accept-flake-config".into(),
+        "false".into(),
+        "--option".into(),
+        "pure-eval".into(),
+        "true".into(),
+        "--no-update-lock-file".into(),
+        url,
+    ];
+    let drv = read(heavy(cfg, &argv), log)?;
     if !drv.starts_with('/') || !drv.ends_with(".drv") {
         return Err(format!("{attr} evaluated to {drv:?}, not a derivation"));
     }

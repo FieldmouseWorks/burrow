@@ -34,11 +34,13 @@ use conary_core::plugin::{
 };
 use conary_github::flow::{self, Recipe};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// A GitHub to ask, new for each request.
@@ -50,6 +52,25 @@ pub struct Producer {
     pub units: Box<dyn Units>,
     signer: Signer,
     records: Records,
+    /// Per-repository lock serializing bare-mirror access (`fetch` and `lay`).
+    mirrors: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Repositories currently running a `Build` preparation unit (at most one
+    /// per repository so concurrent prepares never flood heavy slots or units).
+    prepares: (Mutex<HashSet<String>>, Condvar),
+}
+
+struct PrepareSlot<'a> {
+    producer: &'a Producer,
+    repo: String,
+}
+
+impl Drop for PrepareSlot<'_> {
+    fn drop(&mut self) {
+        let (lock, ready) = &self.producer.prepares;
+        let mut busy = lock.lock().unwrap_or_else(|e| e.into_inner());
+        busy.remove(&self.repo);
+        ready.notify_all();
+    }
 }
 
 impl Producer {
@@ -75,6 +96,39 @@ impl Producer {
             units,
             signer,
             records,
+            mirrors: Mutex::new(HashMap::new()),
+            prepares: (Mutex::new(HashSet::new()), Condvar::new()),
+        })
+    }
+
+    fn mirror_lock(&self, repo: &str) -> Arc<Mutex<()>> {
+        let mut mirrors = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
+        mirrors
+            .entry(repo.to_lowercase())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn prepare_slot(&self, repo: &str, work: &Work) -> Result<PrepareSlot<'_>, String> {
+        let key = repo.to_lowercase();
+        let (lock, ready) = &self.prepares;
+        let mut busy = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while busy.contains(&key) {
+            if work.abandoned() {
+                return Err("the request was abandoned".into());
+            }
+            let (guard, _) = ready
+                .wait_timeout(busy, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner());
+            busy = guard;
+        }
+        if work.abandoned() {
+            return Err("the request was abandoned".into());
+        }
+        busy.insert(key.clone());
+        Ok(PrepareSlot {
+            producer: self,
+            repo: key,
         })
     }
 
@@ -191,7 +245,16 @@ impl Producer {
     /// with `tree` its tree there too: as the App, whose environment the
     /// producer runs in names git's only credential helper (github.nix).
     fn fetch(&self, repo: &str, head: &str, tree: &str) -> Result<(), String> {
+        let lock = self.mirror_lock(repo);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let mirror = self.cfg.mirror(repo);
+        if let Some(parent) = mirror.parent() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o750)
+                .create(parent)
+                .map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
         let git = |args: &[&str]| -> Result<String, String> {
             let out = Command::new(&self.cfg.git)
                 .args(args)
@@ -239,7 +302,12 @@ impl Producer {
     /// the digest of what it printed, read once nothing of it is left
     /// running. Its folder goes either way.
     fn run(&self, id: &str, spec: &Spec, work: &Work) -> Result<(Ended, String), String> {
-        let ran = lay(self.cfg.bench(), &self.cfg.mirror(&spec.repo), id, spec).and_then(|()| {
+        let laid = {
+            let lock = self.mirror_lock(&spec.repo);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            lay(self.cfg.bench(), &self.cfg.mirror(&spec.repo), id, spec)
+        };
+        let ran = laid.and_then(|()| {
             let until = Instant::now() + Duration::from_secs(self.cfg.timeout + 60);
             self.units.run(id, work, until)
         });
@@ -333,6 +401,11 @@ impl Producer {
         recipes: &[(String, Recipe)],
         work: &Work,
     ) -> Result<Answer, String> {
+        let _slot = if recipes.iter().any(|(_, r)| matches!(r, Recipe::Build(_))) {
+            Some(self.prepare_slot(repo, work)?)
+        } else {
+            None
+        };
         let mut slot = false;
         let mut why = Vec::new();
         for (name, recipe) in recipes {
