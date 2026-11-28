@@ -13,8 +13,8 @@
 # keeps nothing. With the option off nothing changes.
 #
 # cn here is a stand-in that touches the ledger's files as Conary's writer
-# does (conary-core's log.rs, conary-github's bases.rs and etags.rs): it
-# proves the permissions, not a real conaryd's train.
+# does (conary-core's log.rs, conary-github's bases.rs, etags.rs and
+# train/held.rs): it proves the permissions, not a real conaryd's train.
 #
 #   nix build .#checks.x86_64-linux.ledger-controller -L
 { self, pkgs, accessTests }:
@@ -34,6 +34,14 @@ let
         echo "$1 base" >>"$d/merge-bases"
         echo "$(wc -l <"$d/ops.jsonl") $(id -un)" >"$d/.anchor.$$.new"
         mv -f "$d/.anchor.$$.new" "$d/anchor"
+      }
+      # One train op, as Conary's train/held.rs locks it: the repo's train lock
+      # under train/ first, then the ledger's writer lock.
+      train() {
+        mkdir -p "$d/train"
+        exec 8>>"$d/train/$1.lock"
+        flock 8
+        sign "$2"
       }
       case $1 in
         # As Conary sets a ledger up: its key made readable by its owner
@@ -60,6 +68,7 @@ let
           echo "{\"repo\":\"$2\",\"outcome\":\"done\",\"prs\":[],\"refused\":[]}"
           ;;
         sign) sign "$2" ;;
+        train) train "$2" "$3" ;;
       esac
     '';
   };
@@ -212,21 +221,43 @@ pkgs.testers.runNixOSTest {
         # Everyone still reads the log; the key stays as it was made.
         on.succeed(f"runuser -u nobody -- cat {ledger}/ops.jsonl {ledger}/anchor")
         assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 640", "the key's group bits are its ACL's mask"
+        # Per-repository train locks under train/: created by either user,
+        # shared by both, and still writable by both after burrow-ledger-access
+        # runs again on boot or switch.
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a flow-train-a")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-a dev-train-a")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-b dev-train-b")
+        on.succeed("systemctl restart burrow-ledger-access.service")
+        assert on.succeed(f"stat -c %U {ledger}/train {ledger}/train/repo-a.lock {ledger}/train/repo-b.lock") == "dev\n" * 3
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a flow-train-a2")
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-b flow-train-b2")
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-c flow-train-c")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-c dev-train-c")
+        on.fail(f"runuser -u other -- sh -c 'echo x >>{ledger}/train/repo-a.lock'")
+        on.fail(f"runuser -u other -- touch {ledger}/train/x")
+        on.fail(f"runuser -u nobody -- touch {ledger}/train/x")
         nobody_else_reads_the_key()
 
     with subtest("on a ledger burrow.user had alone before, a switch lets the flow sign"):
-        on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock && chmod 700 {ledger}/etags")
+        before = len(ops(on))
+        on.succeed(f"setfacl -R -b {ledger} && chown -R dev {ledger} && chmod 600 {ledger}/key && chmod 644 {ledger}/ops.jsonl {ledger}/anchor {ledger}/merge-bases {ledger}/lock {ledger}/train/*.lock && chmod 700 {ledger}/etags && chmod 755 {ledger}/train")
         on.fail("systemctl start flow@before.service")
+        on.fail(f"runuser -u conary-flow -- {env} cn train repo-a before-train")
         # As the first switch to it does.
         on.succeed("systemctl restart burrow-ledger-access.service")
         on.succeed("systemctl start flow@after.service")
         on.succeed("systemctl start burrow-ledger@sam-r.service")
         on.succeed("systemctl start flow@again.service")
         on.succeed(f"runuser -u dev -- {env} cn sign by-hand")
-        assert [o for o in ops(on)[7:]] == [
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-a after-train-a")
+        on.succeed(f"runuser -u conary-flow -- {env} cn train repo-d after-train-d")
+        on.succeed(f"runuser -u dev -- {env} cn train repo-d by-hand-train-d")
+        assert ops(on)[before:] == [
             ["conary-flow", "after"], ["dev", "sam/r"],
             ["conary-flow", "again"], ["dev", "by-hand"],
-        ], ops(on)
+            ["conary-flow", "after-train-a"], ["conary-flow", "after-train-d"],
+            ["dev", "by-hand-train-d"],
+        ], ops(on)[before:]
         nobody_else_reads_the_key()
 
     with subtest("a link the controller puts in the ledger leads its access nowhere"):
@@ -239,16 +270,18 @@ pkgs.testers.runNixOSTest {
         on.succeed(f"{as_flow} 'ln -sfn /var/lib/root-secret {ledger}/merge-bases'")
         on.succeed(f"{as_flow} 'ln -sfn {ledger}/key {ledger}/lock'")
         on.succeed(f"{as_flow} 'ln -s /var/lib/dev-secret {ledger}/.k && mv -fT {ledger}/.k {ledger}/key'")
+        on.succeed(f"{as_flow} 'ln -sfn /var/lib/root-secret {ledger}/train/evil.lock'")
+        on.succeed(f"{as_flow} 'ln -sfn {ledger}/key {ledger}/train/key.lock'")
         on.succeed("systemctl restart burrow-ledger-access.service")
         for f, owner in [("/var/lib/root-secret", "root"), ("/var/lib/dev-secret", "dev")]:
             assert on.succeed(f"stat -c '%U %a' {f}").strip() == f"{owner} 600", f
             assert on.succeed(f"getfacl -cps {f}") == "", f
             on.fail(f"runuser -u conary-flow -- cat {f}")
         # The links are burrow.user's now, and still links.
-        assert on.succeed(f"stat -c '%U %F' {ledger}/merge-bases {ledger}/lock {ledger}/key") == "dev symbolic link\n" * 3
+        assert on.succeed(f"stat -c '%U %F' {ledger}/merge-bases {ledger}/lock {ledger}/key {ledger}/train/evil.lock {ledger}/train/key.lock") == "dev symbolic link\n" * 5
         # The ledger as it was: the key back from the last sync's, and the
         # files the writers open in place made again.
-        on.succeed(f"rm {ledger}/merge-bases {ledger}/lock {ledger}/key")
+        on.succeed(f"rm {ledger}/merge-bases {ledger}/lock {ledger}/key {ledger}/train/evil.lock {ledger}/train/key.lock")
         on.succeed(f"runuser -u dev -- sh -c 'head -c 32 /dev/urandom >{ledger}/key && chmod 600 {ledger}/key && touch {ledger}/lock {ledger}/merge-bases'")
         on.succeed("systemctl restart burrow-ledger-access.service")
         on.succeed("systemctl start flow@relinked.service")
@@ -259,31 +292,46 @@ pkgs.testers.runNixOSTest {
     def keeps_nothing(uid):
         # Nothing names it, it owns nothing, and it can neither read the
         # key nor write the ledger, by number, since its user may be gone.
-        for f in [ledger] + [f"{ledger}/{f}" for f in on.succeed(f"ls -A {ledger}").split()]:
-            assert f":{uid}:" not in on.succeed(f"getfacl -cpn {f}"), f
-        assert on.succeed(f"find {ledger} -maxdepth 1 -uid {uid}") == ""
+        assert f":{uid}:" not in on.succeed(f"getfacl -Rcpn {ledger}"), uid
+        assert on.succeed(f"find {ledger} -uid {uid}") == ""
         as_it = f"setpriv --reuid={uid} --regid={uid} --clear-groups"
         on.fail(f"{as_it} cat {ledger}/key")
         on.fail(f"{as_it} sh -c 'echo x >>{ledger}/ops.jsonl'")
         on.fail(f"{as_it} touch {ledger}/x")
+        on.fail(f"{as_it} sh -c 'echo x >>{ledger}/train/repo-a.lock'")
+        on.fail(f"{as_it} touch {ledger}/train/x")
 
     with subtest("a controller changed or turned off keeps nothing"):
         old = on.succeed("id -u conary-flow").strip()
-        # The flow renames the anchor in, so it's the flow's own.
+        # The flow renames the anchor in and creates a train lock, so both are
+        # the flow's own.
         on.succeed("systemctl start flow@last.service")
+        on.succeed(f"runuser -u conary-flow -- {env} cn train moved-repo last-train")
         assert on.succeed(f"stat -c %U {ledger}/anchor").strip() == "conary-flow"
+        assert on.succeed(f"stat -c %U {ledger}/train/moved-repo.lock").strip() == "conary-flow"
         on.succeed("/run/booted-system/specialisation/moved/bin/switch-to-configuration test")
         new = on.succeed("id -u conary-flow2").strip()
         on.succeed("systemctl start flow@moved.service")
-        assert ops(on)[-1] == ["conary-flow2", "moved"], ops(on)
+        on.succeed(f"runuser -u conary-flow2 -- {env} cn train moved-repo moved-train")
+        on.succeed(f"runuser -u conary-flow2 -- {env} cn train retired-repo flow2-train")
+        on.succeed(f"runuser -u dev -- {env} cn train retired-repo dev-moved")
+        assert ops(on)[-4:] == [
+            ["conary-flow2", "moved"],
+            ["conary-flow2", "moved-train"],
+            ["conary-flow2", "flow2-train"],
+            ["dev", "dev-moved"],
+        ], ops(on)
         keeps_nothing(old)
         on.succeed("/run/booted-system/specialisation/retired/bin/switch-to-configuration test")
         on.succeed("systemctl start burrow-ledger@sam-r.service")
-        assert ops(on)[-1] == ["dev", "sam/r"], ops(on)
+        on.succeed(f"runuser -u dev -- {env} cn train retired-repo dev-retired")
+        assert ops(on)[-2:] == [["dev", "sam/r"], ["dev", "dev-retired"]], ops(on)
         keeps_nothing(old)
         keeps_nothing(new)
-        assert on.succeed(f"getfacl -cps {ledger} {ledger}/*") == ""
+        assert on.succeed(f"getfacl -Rcps {ledger}") == ""
         assert on.succeed(f"stat -c '%U %a' {ledger}/key").strip() == "dev 600"
+        assert on.succeed(f"stat -c '%U %a' {ledger}/train").strip() == "dev 755"
+        assert on.succeed(f"stat -c '%U %a' {ledger}/train/retired-repo.lock").strip() == "dev 644"
         # Its ACL gone, etags is no wider than it was.
         assert on.succeed(f"stat -c '%U %a' {ledger}/etags").strip() == "dev 700"
         on.fail(f"runuser -u other -- ls {ledger}/etags")
