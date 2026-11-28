@@ -94,6 +94,8 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(options["proj.usageHolds"]["value"], json!({}));
     assert_eq!(options["proj.apiCredit"]["value"], Value::Null);
     assert_eq!(options["proj.apiCredit"]["origin"], "default");
+    assert_eq!(options["proj.enginePlugins"]["value"], json!({}));
+    assert_eq!(options["proj.enginePlugins"]["origin"], "default");
 
     // Each live value, set through the door and read as its turns read it.
     crate::config::tests::set(
@@ -200,9 +202,13 @@ fn every_option_shown_comes_from_the_schema() {
 
 #[test]
 fn the_schema_is_burrow_settings_own() {
-    let (_d, cfg) = crate::usage::tests::rig();
+    let (_d, mut cfg) = crate::usage::tests::rig();
     let got: Value = serde_json::from_str(&command(&cfg, &["schema".into()]).unwrap()).unwrap();
-    assert_eq!(got, burrow_settings::schema::json_schema());
+    assert_eq!(got, cfg.settings.as_ref().unwrap().live_schema().unwrap());
+    cfg.settings = None;
+    let static_got: Value =
+        serde_json::from_str(&command(&cfg, &["schema".into()]).unwrap()).unwrap();
+    assert_eq!(static_got, burrow_settings::schema::json_schema());
     assert!(command(&cfg, &["set".into()]).is_err());
 }
 

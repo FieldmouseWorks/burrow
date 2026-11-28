@@ -982,7 +982,9 @@ version = "0.0.0"
 dependencies = [
  "burrow-door",
  "burrow-github",
+ "burrow-grants",
  "burrow-test",
+ "conary-core",
  "jiff 1.0.3",
  "serde",
  "serde_json",

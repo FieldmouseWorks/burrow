@@ -6,6 +6,7 @@ pub mod door;
 pub mod landing;
 mod live;
 pub use live::{path_exists, publish, receipt_key};
+pub mod plugins;
 pub mod roles;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -36,9 +37,38 @@ pub struct Config {
     pub conaryd: Vec<String>,
     /// Configured engine plugin names on this machine (from Nix engine plugin
     /// definitions). Empty falls back to the schema's declared defaults plus
-    /// any engine registered via `offer`.
+    /// any engine registered via `offer` or `plugin install`.
     #[serde(default)]
     pub engines: Vec<String>,
+    /// Authorized owner identities (by immutable positive GitHub account ID,
+    /// #660) allowed to install, update, or remove pinned engine plugins.
+    /// Empty fails closed.
+    #[serde(default)]
+    pub owners: Vec<burrow_github::Author>,
+    /// Host-owned directory for verified release plugin artifacts and staging.
+    #[serde(default)]
+    pub plugins_dir: Option<PathBuf>,
+    /// Declared default fallback engine for roles affected when an installed
+    /// plugin is removed (`burrow.settings.plugins.fallback`).
+    #[serde(default)]
+    pub plugin_fallback: Option<String>,
+    /// Sandbox runner (`bwrap`) used to confine `cn plugin check` before
+    /// activating an installed or updated plugin.
+    #[serde(default)]
+    pub plugin_sandbox: Option<PathBuf>,
+    /// HTTP client (`curl`) used to fetch pinned HTTPS release artifacts.
+    #[serde(default)]
+    pub plugin_curl: Option<PathBuf>,
+    /// Per-invocation timeout in seconds for sandboxed `cn plugin check`.
+    #[serde(default)]
+    pub plugin_check_timeout_seconds: Option<u64>,
+    /// Nix store root directory (defaults to `/nix/store`).
+    #[serde(default)]
+    pub nix_store: Option<PathBuf>,
+    /// Optional `gh` executable used to authenticate CLI owner identity via
+    /// `GET /user` (defaults to `gh` on `PATH`).
+    #[serde(default)]
+    pub auth_gh: Option<PathBuf>,
 }
 
 /// A scheduling decision and its next change without another external event.
@@ -192,6 +222,10 @@ pub fn valid_command(args: &[String]) -> bool {
         }
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         ["credit", rest @ ..] => credit::valid(rest),
+        ["plugin", ..] => {
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            plugins::valid_command(&words)
+        }
         _ => false,
     }
 }
@@ -383,6 +417,15 @@ impl Config {
         match words.as_slice() {
             ["show"] => return self.show(),
             ["engines"] | ["engines", "list"] => return self.engines(),
+            ["plugin", "list" | "show" | "picker" | "verify", ..] => {
+                return self.plugin_read_command(&words);
+            }
+            ["plugin", ..] => {
+                return Err(
+                    "plugin install, update, and remove require an authenticated owner identity"
+                        .into(),
+                );
+            }
             _ => {}
         }
         if let ["credit", ..] = words.as_slice() {
@@ -509,9 +552,11 @@ impl Config {
                 return Err(format!(
                     "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | land OWNER/REPO#N HEAD | landing OWNER/REPO steward|conaryd | pipeline UNTIL | back
 {}
+{}
 {}",
                     roles::USAGE,
-                    credit::USAGE
+                    credit::USAGE,
+                    plugins::USAGE
                 ));
             }
         }

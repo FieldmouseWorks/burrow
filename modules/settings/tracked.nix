@@ -26,6 +26,7 @@ lib.genAttrs [
   "proj.usageTrickle"
   "proj.usage.paid"
   "settings.allowed"
+  "settings.plugins.fallback"
   "proj.inbox.triage.drain"
   "proj.inbox.triage.drainJobs"
   "proj.inbox.triage.atOnce"

@@ -173,11 +173,7 @@ fn a_queued_turn_moves_off_a_held_engine_when_its_role_reroutes() {
     let req = crate::job::Request {
         project: project.to_string_lossy().into_owned(),
         role: Some("inbox".into()),
-        engine: None,
-        app: None,
-        agent: None,
-        agent_engine: None,
-        owned: false,
+        ..Default::default()
     };
     req.save(&job).unwrap();
     job.set_turns(1).unwrap();
