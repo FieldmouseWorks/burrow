@@ -187,6 +187,64 @@ fn changed_continuation_session_emits_session_lost_refusal_with_null_session() {
 }
 
 #[test]
+fn streaming_changed_continuation_session_suppresses_replacement_session_event() {
+    let dir = TempDir::new().unwrap();
+    let fixture = write_executable(
+        dir.path(),
+        "ag-stream-new-session",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"event\":\"init\",\"conversation_id\":\"ag-new-2\",\"init\":{\"model\":\"test-model\"}}\\n'\nprintf '{\"event\":\"result\",\"result\":{\"conversation_id\":\"ag-new-2\",\"status\":\"SUCCESS\",\"response\":\"started fresh\"}}\\n'\n",
+    );
+    let populated_home = dir.path().join("populated-home");
+    fs::create_dir_all(&populated_home).unwrap();
+    fs::write(populated_home.join("marker"), "prior-state").unwrap();
+
+    let cfg = Config {
+        binary: fixture,
+        models: sample_models(),
+        default_model: Some("test-model".to_owned()),
+        credential_mode: CredentialMode::Env,
+        credential_env: None,
+        target_credential_env: None,
+        host_mode: true,
+        ..Config::default()
+    };
+    let cfg_path = dir.path().join("config.json");
+    fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let output = run_continue(&cfg_path, &cfg, dir.path(), "ag-old-1", |cmd| {
+        cmd.env("PROJ_ENGINE_HOME", &populated_home)
+            .env("PROJ_STREAM_EVENTS", "1");
+    });
+    assert!(!output.status.success(), "expected session_lost failure");
+
+    let events: Vec<Value> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|v| v.get("event").and_then(Value::as_str) == Some("session")),
+        "streaming continuation mismatch must not emit a replacement session event: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|v| {
+            v.get("event").and_then(Value::as_str) == Some("stream")
+                && v.get("line")
+                    .and_then(Value::as_str)
+                    .and_then(|l| serde_json::from_str::<Value>(l).ok())
+                    .is_some_and(|inner| {
+                        inner.get("type").and_then(Value::as_str) == Some("result")
+                    })
+        }),
+        "streaming continuation mismatch must not emit a normalized result record: {events:?}"
+    );
+    let refusal = refusal_event(&output.stderr).expect("expected session_lost refusal event");
+    assert_eq!(refusal["refusal"]["kind"], "session_lost");
+    assert!(refusal["session"].is_null());
+}
+
+#[test]
 fn host_mode_continue_uses_populated_proj_engine_home_as_child_home() {
     let dir = TempDir::new().unwrap();
     let seen_home_file = dir.path().join("seen-home");

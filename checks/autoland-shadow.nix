@@ -2,7 +2,7 @@
 # `autoland-shadow@` on it, a unit of its own, so its errors and timeout
 # never touch the pass; the hourly pass starts none, and a machine with no
 # shadowed repo has no such unit. It runs `cn flow compare` on the ledger's
-# env and the steward's own token, only for a repo with a config, which is
+# env and the App's token (burrow-upkeep's), only for a repo with a config, which is
 # at its lowercased name, as burrow-events names a pass's instance. Each
 # config holds exactly the keys Conary's flow::Config takes
 # (crates/conary-github/src/flow/pass.rs, types.rs, evidence.rs), which
@@ -26,6 +26,8 @@ let
         proofRuns.gate = "make check"; proofBuilds.vm = "checks.x86_64-linux.vm";
       };
       burrow.github.machinery = lib.mkIf (!machinery) (lib.mkForce null);
+      # A stage label renamed: the flow's must follow it, not Conary's default.
+      burrow.autoland.labels.waiting.ci.name = "waiting: checks";
     }];
   }).config;
   machine = base true;
@@ -82,8 +84,9 @@ let
     }];
   }).config;
   customPlain = "${customLabels.burrow.autoland.flow.base}/sam/plain.json";
-  # Expected settings.stage_labels directly from labels.nix (camelCase ->
-  # Conary's snake_case StageLabels fields).
+  # The flow's label for each of its stages (Conary's StageLabels, by its
+  # keys) is burrow's own for that stage (autoland/labels.nix), so the flow
+  # puts on the labels the steward and proj read.
   expectedStageLabels = m: let
     w = m.burrow.autoland.labels.waiting;
   in {
@@ -131,7 +134,10 @@ let
     controller = controlledShadow.serviceConfig.User == "conary-flow"
       && controlledShadow.environment.CONARY_DATA == "${controlled.burrow.stateDir}/flow";
     ledger = shadow.environment.CONARY_LEDGER == machine.burrow.ledger.dir;
-    token = lib.hasSuffix "/bin/autoland-steward token" shadow.environment.CONARY_TOKEN_COMMAND;
+    # Conary's token command, the shadow's and conaryd's alike: burrow-upkeep's.
+    token = let t = shadow.environment.CONARY_TOKEN_COMMAND; in
+      t == machine.burrow.autoland.flow.token
+      && builtins.match "/nix/store/[^ ]+/bin/burrow-upkeep /nix/store/[^ ]+-burrow-upkeep[.]json token --bare" t != null;
     packageCarriesGit = !(lib.elem machine.programs.git.package shadow.path);
     key = lib.any (lib.hasPrefix "app-key:") shadow.serviceConfig.LoadCredential;
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];
@@ -177,7 +183,7 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   done
   for f in ${withApp.homelab} ${withApp.plain} ${noApp.plain}; do
     jq -e --argjson want '${builtins.toJSON (expectedStageLabels machine)}' \
-      '.settings.stage_labels == $want and .settings.stage_labels.owner == "waiting: Sam"' $f >/dev/null \
+      '.settings.stage_labels == $want and .settings.stage_labels.ci == "waiting: checks" and .settings.stage_labels.owner == "waiting: Sam"' $f >/dev/null \
       || fail "$f stage_labels differ from labels.nix: $(jq -c .settings.stage_labels $f)"
   done
   jq -e --argjson want '${builtins.toJSON (expectedStageLabels customLabels)}' \
