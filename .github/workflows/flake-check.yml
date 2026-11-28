@@ -947,50 +947,47 @@ jobs:
           targets=()
           for c in $CHECKS; do targets+=(".#checks.$system.$c"); done
           log=${RUNNER_TEMP:+$RUNNER_TEMP/docs.log}
-          run_build() {
-            if [ -n "$log" ]; then
-              nix "$@" build -L --no-link --keep-going "${targets[@]}" 2>&1 | tee -a "$log"
-            else
-              nix "$@" build -L --no-link --keep-going "${targets[@]}"
-            fi
-          }
+          drop_args=()
+          dropped=0
+          delays=(3 10 25)
+          upstream_try=0
+          try_log=$(mktemp)
+          trap 'rm -f -- "$try_log"' EXIT
           [ -z "$log" ] || : > "$log"
-          if run_build; then exit 0; fi
-          if [ -n "$log" ] && grep -qE 'is required, but there is no substituter that can build it|some substitutes for the outputs of derivation .* failed|disabling binary cache ' "$log"; then
-            if [ -n "${BUILDS_SUBSTITUTER:-}" ]; then
-              url=${BUILDS_SUBSTITUTER%%\?*}
-              url=${url%/}
-              if URL="$url" awk '
-                BEGIN { u = ENVIRON["URL"]; q = sprintf("%c", 39); u1 = q u q; u2 = q u "/" q }
-                index($0, "copying path " q) == 1 && (index($0, " from " u1) || index($0, " from " u2)) {
-                  if (split($0, p, q) >= 4) c[p[2]] = 1
-                }
-                index($0, "error: path " q) == 1 && index($0, " is required, but there is no substituter that can build it") {
-                  if (split($0, p, q) >= 2 && c[p[2]]) { f = 1; exit 0 }
-                }
-                index($0, "disabling binary cache " u1) || index($0, "disabling binary cache " u2) ||
-                  index($0, "substituter " u1 " is ") || index($0, "substituter " u2 " is ") ||
-                  index($0, "unable to download " q u "/") || index($0, "unable to download " u1) ||
-                  (index($0, "NAR for ") && (index($0, "fetched from " u1 " is incomplete") || index($0, "fetched from " u2 " is incomplete"))) {
-                  f = 1; exit 0
-                }
-                END { exit !f }
-              ' "$log"; then
-                rest=()
-                for s in $(nix config show substituters 2>/dev/null || true); do
-                  u=${s%%\?*}; u=${u%/}
-                  [ "$u" = "$url" ] || rest+=("$s")
-                done
-                echo "substituter '$url' failed during substitution; dropping it and retrying without it" | tee -a "$log"
-                run_build --option substituters "${rest[*]}" --option extra-substituters ""
-                exit $?
-              fi
+          while true; do
+            if nix "${drop_args[@]}" build -L --no-link --keep-going "${targets[@]}" 2>&1 | tee "$try_log"; then
+              [ -z "$log" ] || cat "$try_log" >> "$log"
+              exit 0
             fi
-            sleep 3
-            run_build
-          else
-            exit 1
-          fi
+            [ -z "$log" ] || cat "$try_log" >> "$log"
+            grep -qE 'is required, but there is no substituter that can build it|some substitutes for the outputs of derivation .* failed|disabling binary cache ' "$try_log" || exit 1
+            url=${BUILDS_SUBSTITUTER:-}; url=${url%%\?*}; url=${url%/}
+            if [ "$dropped" = 0 ] && [ -n "$url" ] && URL="$url" awk '
+              BEGIN { u = ENVIRON["URL"]; q = sprintf("%c", 39); u1 = q u q; u2 = q u "/" q }
+              index($0, "copying path " q) == 1 && (index($0, " from " u1) || index($0, " from " u2)) && split($0, p, q) >= 4 { c[p[2]] = 1 }
+              index($0, "error: path " q) == 1 && index($0, " is required, but there is no substituter that can build it") && split($0, p, q) >= 2 && c[p[2]] { f = 1; exit 0 }
+              index($0, "disabling binary cache " u1) || index($0, "disabling binary cache " u2) ||
+                index($0, "substituter " u1 " is ") || index($0, "substituter " u2 " is ") ||
+                index($0, "unable to download " q u "/") || index($0, "unable to download " u1) ||
+                (index($0, "NAR for ") && (index($0, "fetched from " u1 " is incomplete") || index($0, "fetched from " u2 " is incomplete"))) { f = 1; exit 0 }
+              END { exit !f }
+            ' "$try_log"; then
+              rest=()
+              for s in $(nix config show substituters 2>/dev/null || true); do
+                u=${s%%\?*}; u=${u%/}
+                [ "$u" = "$url" ] || rest+=("$s")
+              done
+              msg="substituter '$url' failed during substitution; dropping it and retrying without it"
+              echo "$msg"
+              [ -z "$log" ] || echo "$msg" >> "$log"
+              drop_args=(--option substituters "${rest[*]}" --option extra-substituters "")
+              dropped=1
+              continue
+            fi
+            [ "$upstream_try" -lt "${#delays[@]}" ] || exit 1
+            sleep "${delays[$upstream_try]}"
+            upstream_try=$((upstream_try + 1))
+          done
       - id: builds-fallback
         name: soft/builds-fallback
         if: ${{ always() && !cancelled() && steps.builds.outcome == 'success' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
