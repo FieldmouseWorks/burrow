@@ -333,6 +333,7 @@ fn main() {
         }
     }
     if mode == "--worker" {
+        builds::announce_bootstrap_drop();
         let result = match env::args().nth(2).as_deref() {
             Some("gate") => std::process::exit(verdict::worker(gate::gate())),
             Some("negative") => negative::negative(),

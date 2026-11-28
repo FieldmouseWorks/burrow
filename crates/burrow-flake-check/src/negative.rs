@@ -1,7 +1,7 @@
 //! Old code with new tests. No uncertain failure becomes negative evidence.
 use super::*;
 #[path = "classify.rs"]
-mod classify;
+pub(crate) mod classify;
 #[path = "removal.rs"]
 mod removal;
 use removal::{Change, Names};
@@ -271,7 +271,7 @@ impl Negative {
         );
         c.env(
             "NIX_CONFIG",
-            format!("{}\ntimeout = {CHECK_SECONDS}", var("NIX_CONFIG")),
+            format!("{}\ntimeout = {CHECK_SECONDS}", builds::nix_config()),
         );
         let mut log = Vec::new();
         Ok(if tee(c, &mut log, &mut io::stdout())?.code == 0 {

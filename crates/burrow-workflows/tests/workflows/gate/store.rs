@@ -7,7 +7,11 @@
 //!   using `negative`'s `install-nix-action` `extra_nix_config`, without
 //!   running its failing builder and with no restore step;
 //! - when the store is down (either skipped after `soft/builds` fails, or
-//!   unreachable mid-run with `fallback = true`), a run builds cold;
+//!   unreachable / serving a corrupt NAR mid-run without global `fallback = true`),
+//!   a run drops only the build store and builds cold;
+//! - when an upstream cache (like `cache.nixos.org`) fails transiently, Nix
+//!   never falls back to building from source (`stage0-posix`); the runner
+//!   retries in a fresh Nix process and passes once the cache recovers;
 //! - a leg with `BUILDS` set still refuses a flake's own `nixConfig` and
 //!   enforces `sandbox = true`.
 
@@ -457,8 +461,8 @@ fn a_leg_and_the_negative_substitute_from_the_store_with_no_restore_step() {
 
 /// When the build store is unreachable—both when `soft/builds` fails and
 /// omits it from `extra_nix_config`, when the store drops mid-run, and when
-/// a narinfo is served but its NAR fails to download (`fallback = true`)—a
-/// leg builds cold and passes.
+/// a narinfo is served but its NAR fails to download—a leg drops only the
+/// build store, builds cold without global `fallback = true`, and passes.
 #[test]
 fn the_store_down_builds_cold() {
     let rs = RealStore::new();
@@ -485,8 +489,9 @@ fn the_store_down_builds_cold() {
     rs.s.git(&flake, &["commit", "-qm", "flake"]);
 
     // Populate a signed narinfo for `cold` in the cache, then truncate its
-    // NAR so the store serves a corrupt download: only `fallback = true`
-    // builds cold instead of failing the leg.
+    // NAR so the store serves a corrupt download: without global
+    // `fallback = true`, the runner must drop only the build store and retry
+    // cold instead of failing the leg.
     let cold_drv = rs.instantiate(&cold_expr);
     rs.populate_signed(&cold_drv, "from-cache\n");
     for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
@@ -500,7 +505,8 @@ fn the_store_down_builds_cold() {
 
     // Case A: probe failed -> extra_nix_config omits the dead store;
     // Case B: probe succeeded earlier, store died mid-run -> builds cold;
-    // Case C: narinfo served, NAR download fails -> fallback = true builds cold.
+    // Case C: narinfo served, NAR download fails -> runner drops build store
+    //         and retries cold; soft/builds-fallback flags the degradation.
     for (case, url, probe_outcome, expect_cold_msg) in [
         ("probe-failed", down_url.as_str(), "failure", true),
         ("mid-run-drop", down_url.as_str(), "success", true),
@@ -515,6 +521,7 @@ fn the_store_down_builds_cold() {
             ),
             extra_nix_config("check", url, &rs.pk, probe_outcome)
         );
+        let builds_sub = if probe_outcome == "success" { url } else { "" };
         let temp = rs.s.mkdtemp();
         let ran = rs.s.bash(
             script(step(&wf["jobs"]["check"], "gate")),
@@ -532,6 +539,7 @@ fn the_store_down_builds_cold() {
                 ("LEGS", "1"),
                 ("TREE_SOURCE", "false"),
                 ("BUILDS", ""),
+                ("BUILDS_SUBSTITUTER", builds_sub),
                 ("RUNNER_TEMP", temp.to_str().unwrap()),
                 ("TOOLS", repo_file(".github/flake-check").to_str().unwrap()),
             ],
@@ -544,7 +552,335 @@ fn the_store_down_builds_cold() {
                 ran.said()
             );
         }
+        if case == "nar-fails" {
+            let fb = rs.s.bash(
+                script(step(&wf["jobs"]["check"], "builds-fallback")),
+                &flake,
+                &[
+                    ("BUILDS", url),
+                    ("LOG", temp.join("flake.log").to_str().unwrap()),
+                ],
+            );
+            assert_ne!(
+                fb.code,
+                0,
+                "nar-fails did not trigger builds-fallback:\n{}",
+                read(&temp.join("flake.log"))
+            );
+        }
     }
+}
+
+/// Serve a binary cache directory over HTTP where the first `fail_nars`
+/// `/nar/*` requests return HTTP 503 and subsequent requests succeed.
+fn flaky_upstream_store(cache: &Path, fail_nars: usize) -> String {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let root = cache.to_path_buf();
+    let remaining = Arc::new(AtomicUsize::new(fail_nars));
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut req = String::new();
+            if reader.read_line(&mut req).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            let raw_path = req.split_whitespace().nth(1).unwrap_or("/");
+            let rel = raw_path
+                .split('?')
+                .next()
+                .unwrap_or("/")
+                .trim_start_matches('/');
+            if rel.starts_with("nar/")
+                && remaining
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            {
+                let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            }
+            let file = root.join(rel);
+            match fs::read(&file) {
+                Ok(body) => {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(hdr.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+                Err(_) => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Regression test for #1650: with a healthy build store configured, a
+/// transient upstream cache (`cache.nixos.org`-like) NAR failure must NOT
+/// fall back to building an unbuildable bootstrap derivation from source
+/// (like `stage0-posix`). Instead, the runner retries substitution in a fresh
+/// Nix process, passes once the upstream cache recovers, and does NOT raise
+/// `degraded/builds-fallback` against the healthy build store.
+#[test]
+fn transient_upstream_cache_failure_retries_without_bootstrapping_from_source() {
+    let rs = RealStore::new();
+    rs.stub_compiler();
+    let system = &rs.system;
+
+    // A bootstrap derivation whose builder always fails (standing in for
+    // `stage0-posix`, which cannot be built cold without cache.nixos.org).
+    let stage0_expr = format!(
+        r#"derivation {{ name = "stage0-posix"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo stage0-bootstrap-attempted >&2; exit 42" ]; }}"#
+    );
+    let stage0_drv = rs.instantiate(&stage0_expr);
+    let stage0_out = rs.populate_signed(&stage0_drv, "stage0-from-upstream\n");
+
+    // Copy the signed stage0 output into a separate upstream cache directory,
+    // leaving the build store cache empty (healthy, just a miss).
+    let upstream_cache = rs.s.join("upstream-cache");
+    fs::create_dir_all(upstream_cache.join("nar")).unwrap();
+    for entry in fs::read_dir(&rs.cache).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_file() {
+            fs::copy(&p, upstream_cache.join(p.file_name().unwrap())).unwrap();
+            if p.file_name().unwrap() != "nix-cache-info" {
+                fs::remove_file(&p).unwrap();
+            }
+        }
+    }
+    for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
+        let p = entry.unwrap().path();
+        fs::copy(&p, upstream_cache.join("nar").join(p.file_name().unwrap())).unwrap();
+        fs::remove_file(&p).unwrap();
+    }
+
+    // Upstream fails its first NAR download (503), then succeeds on retry.
+    let upstream_url = flaky_upstream_store(&upstream_cache, 1);
+    let builds_url = burrow_test::build_store(&rs.cache);
+
+    let flake = rs.s.join("upstream-flake");
+    fs::create_dir_all(&flake).unwrap();
+    write(
+        &flake.join("flake.nix"),
+        &format!(
+            r#"{{
+  outputs = {{ self }}: let
+    stage0 = {stage0_expr};
+  in {{
+    checks.{system}.ok = derivation {{
+      name = "uses-stage0";
+      system = "{system}";
+      builder = "/bin/sh";
+      args = [ "-c" "read -r x < ${{stage0}} && echo \"$x\" > $out" ];
+    }};
+  }};
+}}
+"#
+        ),
+    );
+    rs.s.git(&flake, &["init", "-q"]);
+    rs.s.git(&flake, &["add", "flake.nix"]);
+    rs.s.git(&flake, &["commit", "-qm", "flake"]);
+
+    rs.clear_store();
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let cfg = format!(
+        "experimental-features = nix-command flakes\nstore = local?store={}&state={}&log={}\nsubstituters = {upstream_url}\ntrusted-public-keys = {}\nsubstitute = true\nflake-registry =\nsandbox = false\nconnect-timeout = 2\ndownload-attempts = 1\n{}",
+        rs.store.display(),
+        rs.s.join("state-up").display(),
+        rs.s.join("log-up").display(),
+        rs.pk,
+        extra_nix_config("check", &builds_url, &rs.pk, "success")
+    );
+    let temp = rs.s.mkdtemp();
+    let ran = rs.s.bash(
+        script(step(&wf["jobs"]["check"], "gate")),
+        &flake,
+        &[
+            ("NIX_CONFIG", &cfg),
+            ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
+            ("XDG_CACHE_HOME", rs.s.join("xdg-up").to_str().unwrap()),
+            ("APART", "true"),
+            ("SKIP", ""),
+            ("LEG", "1"),
+            ("LEGS", "1"),
+            ("TREE_SOURCE", "false"),
+            ("BUILDS", ""),
+            ("BUILDS_SUBSTITUTER", &builds_url),
+            ("RUNNER_TEMP", temp.to_str().unwrap()),
+            ("TOOLS", repo_file(".github/flake-check").to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        ran.code,
+        0,
+        "transient upstream cache failure failed the leg:\n{}",
+        ran.said()
+    );
+    assert!(
+        !ran.said().contains("stage0-bootstrap-attempted"),
+        "Nix fell back to building stage0 from source:\n{}",
+        ran.said()
+    );
+    assert!(
+        ran.said()
+            .contains("failed transiently during substitution; retrying"),
+        "expected transient upstream retry log:\n{}",
+        ran.said()
+    );
+    assert!(
+        Path::new(&stage0_out).is_file(),
+        "stage0 was not substituted from upstream:\n{}",
+        ran.said()
+    );
+    // Healthy build store must NOT trigger degraded/builds-fallback.
+    let fb = rs.s.bash(
+        script(step(&wf["jobs"]["check"], "builds-fallback")),
+        &flake,
+        &[
+            ("BUILDS", &builds_url),
+            ("LOG", temp.join("flake.log").to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        fb.code,
+        0,
+        "healthy build store falsely triggered builds-fallback:\n{}",
+        fb.said()
+    );
+}
+
+/// When the build store serves a corrupt NAR while an upstream cache holds an
+/// unbuildable dependency (`stage0-posix`-like), the runner drops ONLY the
+/// build store, keeps substituting from the upstream cache, builds the check
+/// cold, and triggers `degraded/builds-fallback`.
+#[test]
+fn build_store_nar_failure_drops_only_build_store_and_keeps_upstream_cache() {
+    let rs = RealStore::new();
+    rs.stub_compiler();
+    let system = &rs.system;
+
+    let stage0_expr = format!(
+        r#"derivation {{ name = "stage0-posix"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo stage0-bootstrap-attempted >&2; exit 42" ]; }}"#
+    );
+    let stage0_drv = rs.instantiate(&stage0_expr);
+    rs.populate_signed(&stage0_drv, "stage0-ok\n");
+
+    let upstream_cache = rs.s.join("upstream-cache");
+    fs::create_dir_all(upstream_cache.join("nar")).unwrap();
+    for entry in fs::read_dir(&rs.cache).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_file() {
+            fs::copy(&p, upstream_cache.join(p.file_name().unwrap())).unwrap();
+            if p.file_name().unwrap() != "nix-cache-info" {
+                fs::remove_file(&p).unwrap();
+            }
+        }
+    }
+    for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
+        let p = entry.unwrap().path();
+        fs::copy(&p, upstream_cache.join("nar").join(p.file_name().unwrap())).unwrap();
+        fs::remove_file(&p).unwrap();
+    }
+
+    // Build store has a signed narinfo for the check, with a truncated NAR.
+    let check_expr = format!(
+        r#"derivation {{ name = "uses-stage0"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "read -r x < ${{({stage0_expr})}} && echo \"$x\" > $out" ]; }}"#
+    );
+    let check_drv = rs.instantiate(&check_expr);
+    rs.populate_signed(&check_drv, "stale-cache\n");
+    for entry in fs::read_dir(rs.cache.join("nar")).unwrap() {
+        write(&entry.unwrap().path(), "truncated");
+    }
+
+    let upstream_url = flaky_upstream_store(&upstream_cache, 0);
+    let broken_builds_url = burrow_test::build_store(&rs.cache);
+
+    let flake = rs.s.join("mixed-flake");
+    fs::create_dir_all(&flake).unwrap();
+    write(
+        &flake.join("flake.nix"),
+        &format!(
+            r#"{{
+  outputs = {{ self }}: {{
+    checks.{system}.ok = {check_expr};
+  }};
+}}
+"#
+        ),
+    );
+    rs.s.git(&flake, &["init", "-q"]);
+    rs.s.git(&flake, &["add", "flake.nix"]);
+    rs.s.git(&flake, &["commit", "-qm", "flake"]);
+
+    rs.clear_store();
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let cfg = format!(
+        "experimental-features = nix-command flakes\nstore = local?store={}&state={}&log={}\nsubstituters = {upstream_url}\ntrusted-public-keys = {}\nsubstitute = true\nflake-registry =\nsandbox = false\nconnect-timeout = 2\ndownload-attempts = 1\n{}",
+        rs.store.display(),
+        rs.s.join("state-mix").display(),
+        rs.s.join("log-mix").display(),
+        rs.pk,
+        extra_nix_config("check", &broken_builds_url, &rs.pk, "success")
+    );
+    let temp = rs.s.mkdtemp();
+    let ran = rs.s.bash(
+        script(step(&wf["jobs"]["check"], "gate")),
+        &flake,
+        &[
+            ("NIX_CONFIG", &cfg),
+            ("NIX_STORE_DIR", rs.store.to_str().unwrap()),
+            ("XDG_CACHE_HOME", rs.s.join("xdg-mix").to_str().unwrap()),
+            ("APART", "true"),
+            ("SKIP", ""),
+            ("LEG", "1"),
+            ("LEGS", "1"),
+            ("TREE_SOURCE", "false"),
+            ("BUILDS", ""),
+            ("BUILDS_SUBSTITUTER", &broken_builds_url),
+            ("RUNNER_TEMP", temp.to_str().unwrap()),
+            ("TOOLS", repo_file(".github/flake-check").to_str().unwrap()),
+        ],
+    );
+    assert_eq!(ran.code, 0, "mixed store recovery failed:\n{}", ran.said());
+    assert!(
+        !ran.said().contains("stage0-bootstrap-attempted"),
+        "upstream cache was dropped along with build store:\n{}",
+        ran.said()
+    );
+    assert!(
+        ran.said().contains("dropping it and retrying without it"),
+        "expected build-store drop message:\n{}",
+        ran.said()
+    );
+    let fb = rs.s.bash(
+        script(step(&wf["jobs"]["check"], "builds-fallback")),
+        &flake,
+        &[
+            ("BUILDS", &broken_builds_url),
+            ("LOG", temp.join("flake.log").to_str().unwrap()),
+        ],
+    );
+    assert_ne!(
+        fb.code,
+        0,
+        "broken build store did not trigger builds-fallback:\n{}",
+        read(&temp.join("flake.log"))
+    );
 }
 
 /// With a build store named (`BUILDS` set), every build the leg starts

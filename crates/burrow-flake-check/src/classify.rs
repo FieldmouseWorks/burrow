@@ -97,7 +97,7 @@ fn nix_timed_out(line: &str) -> bool {
         })
 }
 /// The text without its colours.
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

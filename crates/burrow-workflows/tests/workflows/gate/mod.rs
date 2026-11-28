@@ -488,7 +488,8 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
             "{TREE_SOURCE: '${{ inputs.gate-reuse }}', APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
              LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}', \
              TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check', \
-             BUILDS: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\"}"
+             BUILDS: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\", \
+             BUILDS_SUBSTITUTER: \"${{ inputs.install-nix && vars.BURROW_BUILDS_URL || '' }}\"}"
         )
     );
     assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);

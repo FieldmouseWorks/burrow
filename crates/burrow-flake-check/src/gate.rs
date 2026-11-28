@@ -271,10 +271,11 @@ fn whole(skip: &str, flaky: Option<&Flaky>) -> Result<bool> {
     }
     if skip.is_empty() {
         let ok = if built {
-            run(cmd(
-                "nix",
-                &locked(&["flake", "check", "-L", "--keep-going"]),
-            ))?
+            let args: Vec<String> = locked(&["flake", "check", "-L", "--keep-going"])
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            super::builds::run_nix(false, &args)?
         } else {
             build::slot(&locked(&["flake", "check", "-L", "--keep-going"]))?
         };
