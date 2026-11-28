@@ -454,21 +454,31 @@ class Actions:
         slots = self.rc.get("proofSlots")
         outs = P.outputs(self.repo, self.pr, checks, self.st) if slots or builds else None
         if builds and outs in (P.EVALUATING, P.EVAL_WAITING):
+            self.keep_overdue("eval")
             verb = "working out" if outs == P.EVALUATING else "waiting to work out"
             self.settle("pending", f"Settled; {verb} what {names} builds{ci_too}"[:140], stage=S.PROOF)
             return
         if builds and outs is None and P.untold(self.repo, self.pr, checks, self.st):
             # A status run's: it works no eval out, so has no failure of one
             # to count, only the live passes' (outputs).
+            self.keep_overdue("eval")
             self.settle("pending", f"Settled; what {names} builds is worked out on the steward's next pass"[:140], stage=S.PROOF)
             return
         if builds and outs is None:
             # Nothing to build without its derivations: tried again on a
-            # later pass (outputs).
-            self.strike("eval")
+            # later pass (outputs). Count one strike per failed eval, not
+            # every unrelated pass during its EVAL_RETRY cooldown.
+            failed_at = (self.st.get("proofOutputs") or {}).get("at")
+            if failed_at is None or self.st.get("evalStruckAt") != failed_at:
+                self.st["evalStruckAt"] = failed_at
+                self.strike("eval")
+            else:
+                self.keep_overdue("eval")
+                C.wake(self.repo, failed_at + P.EVAL_RETRY * C.MIN + 1)  # ends: the failed eval's EVAL_RETRY cooldown expires
             self.settle("pending", f"Settled, but what {names} builds can't be worked out here yet"[:140], stage=S.PROOF)
             return
         if builds:
+            self.st.pop("evalStruckAt", None)
             self.cleared("eval")
         free = False
         # One whose next step is failing the PR (again) needs no slot.

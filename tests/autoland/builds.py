@@ -313,8 +313,8 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
 # A status run (dry, with state of its own) works no eval out: it has what
 # the live passes worked out on the head, and reads their state without
 # writing it. Outputs of theirs all in the store are taken from there; a
-# failure of theirs still standing is theirs, one more in their run of
-# strikes and no more however often status runs; and a head they haven't
+# failure of theirs still standing is theirs, keeping their run of
+# strikes without adding more however often status runs; and a head they haven't
 # worked out yet is no failure at all, and no strike.
 AUTOLAND = os.path.dirname(P.__file__)
 
@@ -359,7 +359,7 @@ for t in (800, 900):
     status, st = dry(1, t)
     assert STORE in status and CANT not in status and "eval" not in st["strikes"], (status, st)
     status, st = dry(5, t)
-    assert CANT in status and st["strikes"] == {"eval": 2}, (status, st)
+    assert CANT in status and st["strikes"] == {"eval": 1}, (status, st)
     status, st = dry(6, t)
     assert UNTOLD in status and CANT not in status and st["strikes"] == {} and "proofOutputs" not in st, (status, st)
 assert evals() == [] and JOBS == [], (evals(), JOBS)

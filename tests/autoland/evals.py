@@ -258,6 +258,10 @@ P.begin("sam/r", {1, 2})
 st2_lost = line(2, 900)
 assert "can't be worked out here yet" in st2_lost and pr_state(2)["strikes"] == {"eval": 1}, (st2_lost, pr_state(2))
 assert "proofEval" not in pr_state(2) and pr_state(2)["proofOutputs"]["paths"] is None, pr_state(2)
+# Repeated passes during EVAL_RETRY cooldown must not increment the eval strike.
+P.begin("sam/r", {1, 2})
+st2_cooldown = line(2, 960)
+assert "can't be worked out here yet" in st2_cooldown and pr_state(2)["strikes"] == {"eval": 1}, (st2_cooldown, pr_state(2))
 # Past EVAL_RETRY, starts a fresh eval unit.
 P.begin("sam/r", {1, 2})
 st2_retry = line(2, 900 + P.EVAL_RETRY * 60)
@@ -366,6 +370,39 @@ def capture_timeout(cmd, *args, **kwargs):
 with C.pass_deadline(5), patch.object(C.subprocess, "run", side_effect=capture_timeout):
     P.unbuilt([X])
 assert seen_timeouts and seen_timeouts[0] <= 5, seen_timeouts
+
+# 7. Repeated eval failures preserve waits.overdue across EVAL_RETRY cooldown
+# and retry eval passes, and moving to a new head clears evalStruckAt.
+fresh_pr_state()
+STATES.clear()
+t_eval = 2000
+for attempt in range(1, 4):
+    P.begin("sam/r", {2})
+    line(2, t_eval)
+    STATES[pr_state(2)["proofEval"]["job"]] = "failed"
+    P.begin("sam/r", {2})
+    line(2, t_eval + 10)
+    assert pr_state(2)["strikes"] == {"eval": attempt}, (attempt, pr_state(2))
+    t_eval += 10 + P.EVAL_RETRY * 60
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Pass during EVAL_RETRY cooldown keeps waits.FAILING overdue without bumping strikes.
+waits.begin()
+P.begin("sam/r", {2})
+line(2, t_eval - P.EVAL_RETRY * 60 + 60)
+assert pr_state(2)["strikes"] == {"eval": 3}, pr_state(2)
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Pass past EVAL_RETRY when retry eval starts also keeps waits.FAILING overdue.
+waits.begin()
+P.begin("sam/r", {2})
+st2_retrying = line(2, t_eval)
+assert "working out what remi-proof builds" in st2_retrying, st2_retrying
+assert pr_state(2)["strikes"] == {"eval": 3}, pr_state(2)
+assert "sam/r#2" in waits.FAILING, waits.FAILING
+# Moving to a new head clears evalStruckAt.
+STATES[pr_state(2)["proofEval"]["job"]] = "done"
+P.begin("sam/r", {2})
+run(clean(checks=proof, number=2, sha=heads[3]), t_eval + 20)
+assert "evalStruckAt" not in pr_state(2), pr_state(2)
 
 # Restore harness globals.
 del S.CFG["repos"]["sam/r"]
