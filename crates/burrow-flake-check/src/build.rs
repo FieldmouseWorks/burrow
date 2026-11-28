@@ -79,7 +79,7 @@ pub fn cold_drvs(dry_run_stderr: &str) -> Vec<String> {
             building = true;
         } else if l.contains("will be fetched") || l.contains("don't know how to build") {
             building = false;
-        } else if building && l.starts_with("/nix/store/") {
+        } else if building && l.starts_with('/') && l.ends_with(".drv") {
             drvs.push(l.to_owned());
         }
     }
@@ -100,17 +100,17 @@ pub fn cold_names(dry_run_stderr: &str) -> Vec<String> {
 /// Say by name what this leg will compile because no cache has it, so a long
 /// quiet build isn't mistaken for a hang: those derivations. Informational:
 /// it never fails a leg.
-fn announce_cold(targets: &[String]) -> Vec<String> {
+fn announce_cold(targets: &[String]) {
     let mut c = cmd("nix-store", &["--realise", "--dry-run"]);
     c.args(targets.iter().map(|t| t.trim_end_matches("^*")));
-    let Ok(o) = output(c) else { return Vec::new() };
+    let Ok(o) = output(c) else { return };
     let said = String::from_utf8_lossy(&o.stderr);
-    let (drvs, names) = (cold_drvs(&said), cold_names(&said));
+    let names = cold_names(&said);
     if names.is_empty() {
-        return drvs;
+        return;
     }
     let mut msg = format!(
-        "cold build: {} derivations no cache has will be built here, not restored: {}",
+        "cold build: {} derivations no cache has will be built here: {}",
         names.len(),
         names
             .iter()
@@ -128,62 +128,12 @@ fn announce_cold(targets: &[String]) -> Vec<String> {
     {
         let _ = writeln!(f, "{msg}");
     }
-    drvs
-}
-pub fn plan(targets: &[String]) -> Result<()> {
-    let mut cold: Vec<String> = if targets.is_empty() {
-        Vec::new()
-    } else {
-        announce_cold(targets)
-            .iter()
-            .map(|d| super::builds::name(d))
-            .collect()
-    };
-    cold.sort();
-    cold.dedup();
-    fs::write(temp().join("cold.txt"), cold.join("\n"))?;
-    Ok(())
-}
-/// What the store has of the checks the whole-flake fallback builds by
-/// attribute (gate::whole), as [`checks`] says it of derivations: their
-/// derivations, from `nix path-info --derivation`. Only in a run that names
-/// a store, and never failing.
-pub fn shadow_attributes(attributes: &[String]) {
-    if !super::builds::writes() || attributes.is_empty() {
-        return;
-    }
-    let mut args = vec!["path-info", "--derivation"];
-    args.extend(attributes.iter().map(String::as_str));
-    let mut c = cmd("nix", &super::gate::locked(&args));
-    c.stdin(Stdio::null());
-    let drvs = match output(c) {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-        Ok(o) => {
-            println!(
-                "build store (shadow, nothing substituted): couldn't tell which derivations the checks are: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return;
-        }
-        Err(e) => {
-            println!(
-                "build store (shadow, nothing substituted): couldn't tell which derivations the checks are: {e}"
-            );
-            return;
-        }
-    };
-    super::builds::shadow(&announce_cold(&drvs));
 }
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     if targets.is_empty() {
         return Ok(true);
     }
-    // What the build store would have served of them, when the run names
-    // one: nothing is taken from it (builds.rs).
-    super::builds::shadow(&announce_cold(targets));
+    announce_cold(targets);
     built(link, targets, roots)
 }
 /// The gate's checks, with a second try for a flaky one (flaky.rs): the
@@ -310,5 +260,8 @@ mod tests {
         let out = "this derivation will be built:\n  /nix/store/aaa-codex-1.0.drv\nthese 2 derivations will be built:\n  /nix/store/bbb-x.drv\n  /nix/store/ccc-y.drv\nthese 3 paths will be fetched (1 MiB download):\n  /nix/store/ddd-z\n";
         assert_eq!(super::cold_names(out), ["codex-1.0", "x", "y"]);
         assert!(super::cold_names("this path will be fetched:\n  /nix/store/d-z\n").is_empty());
+        let custom = "this derivation will be built:\n  /tmp/alt-store/aaa-cold.drv\nthis path will be fetched:\n  /tmp/alt-store/bbb-cached\n";
+        assert_eq!(super::cold_drvs(custom), ["/tmp/alt-store/aaa-cold.drv"]);
+        assert_eq!(super::cold_names(custom), ["cold"]);
     }
 }

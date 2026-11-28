@@ -617,11 +617,6 @@ dependencies = [
 name = "burrow-flake-check"
 version = "0.0.0"
 dependencies = [
- "burrow-github",
- "burrow-keep",
- "burrow-test",
- "jiff 1.0.3",
- "serde_json",
  "tempfile",
 ]
 
@@ -758,7 +753,6 @@ version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
  "burrow-builds",
- "burrow-github",
  "burrow-test",
  "serde_json",
  "sha2",
@@ -878,6 +872,7 @@ dependencies = [
  "burrow-notify",
  "burrow-probe",
  "burrow-process",
+ "burrow-scratch",
  "burrow-settings",
  "burrow-test",
  "burrow-usage-reset",
@@ -968,6 +963,16 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-scratch"
+version = "0.0.0"
+dependencies = [
+ "burrow-test",
+ "rustix",
+ "sha2",
  "tempfile",
 ]
 

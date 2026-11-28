@@ -57,7 +57,7 @@ fn soft_steps_have_degradation_reporters() {
 }
 
 #[test]
-fn refuses_the_original_keep_builds_steps() {
+fn refuses_unreported_soft_steps() {
     let mut old = workflow(".github/workflows/flake-check.yml");
     for step in old["jobs"]["check"]["steps"].as_sequence_mut().unwrap() {
         if step["continue-on-error"] == true {
@@ -66,29 +66,32 @@ fn refuses_the_original_keep_builds_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    // The kept builds' seven, and the build store's two.
-    assert_eq!(unreported(&old).len(), 9);
+    // The build store's probe (`soft/builds`), upload (`soft/builds-write`),
+    // and mid-run fallback check (`soft/builds-fallback`).
+    assert_eq!(unreported(&old).len(), 3);
 }
 
 #[test]
-fn reporters_distinguish_soft_failure_cache_miss_and_extraction_failure() {
+fn reporters_fire_only_when_their_soft_step_fails() {
     use crate::expr::{Ctx, V, value};
     use crate::harness::{steps, text};
     let flow = workflow(".github/workflows/flake-check.yml");
-    let job = &flow["jobs"]["check"];
-    for (id, key) in [
-        ("builds-tool", "builds-tool"),
-        ("builds-write", "builds-write"),
-        ("keep-tool", "keep-tool"),
-        ("keep", "keep-builds"),
-        ("keep-save", "keep-save"),
-        ("keep-newer", "keep-newer"),
-        ("keep-prune", "keep-prune"),
+    for (job_name, id, key) in [
+        ("reuse", "builds", "builds"),
+        ("reuse", "lookup", "gate-reuse"),
+        ("check", "builds", "builds"),
+        ("check", "builds-write", "builds-write"),
+        ("check", "builds-fallback", "builds-fallback"),
+        ("docs", "builds", "builds"),
+        ("docs", "builds-fallback", "builds-fallback"),
+        ("negative", "builds", "builds"),
+        ("negative", "builds-fallback", "builds-fallback"),
     ] {
+        let job = &flow["jobs"][job_name];
         let reporter = steps(job)
             .iter()
             .find(|s| s["name"] == format!("degraded/{key}"))
-            .unwrap();
+            .unwrap_or_else(|| panic!("{job_name}: no degraded/{key}"));
         for (outcome, expected) in [("failure", true), ("success", false), ("skipped", false)] {
             let c: Ctx = [
                 ("always()".into(), true.into()),
@@ -96,81 +99,24 @@ fn reporters_distinguish_soft_failure_cache_miss_and_extraction_failure() {
             ]
             .into_iter()
             .collect();
-            assert_eq!(value(text(&reporter["if"]), &c).truthy(), expected);
+            assert_eq!(
+                value(text(&reporter["if"]), &c).truthy(),
+                expected,
+                "{job_name}/{key} {outcome}"
+            );
         }
     }
-    let reporter = steps(job)
-        .iter()
-        .find(|s| s["name"] == "degraded/kept-restore")
-        .unwrap();
-    for (lookup, restored, degraded) in [
-        ("", "", false),
-        ("false", "", true),
-        ("true", "", true),
-        ("false", "false", false),
-        ("true", "true", false),
+    // No kept-builds degradations remain anywhere in the workflow.
+    let raw = std::fs::read_to_string(crate::harness::repo_file(
+        ".github/workflows/flake-check.yml",
+    ))
+    .unwrap();
+    for gone in [
+        "degraded/kept-",
+        "degraded/keep-",
+        "soft/kept-",
+        "soft/keep-",
     ] {
-        let c: Ctx = [
-            ("always()".into(), true.into()),
-            (
-                "steps.kept-lookup.outputs.cache-hit".into(),
-                V::from(lookup),
-            ),
-            (
-                "steps.kept-restore.outputs.cache-hit".into(),
-                V::from(restored),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(value(text(&reporter["if"]), &c).truthy(), degraded);
+        assert!(!raw.contains(gone), "{gone} still in flake-check.yml");
     }
-    let lookup = crate::harness::step(job, "kept-lookup");
-    let restore = crate::harness::step(job, "kept-restore");
-    assert_eq!(lookup["if"], restore["if"]);
-    assert_eq!(lookup["with"]["lookup-only"], true);
-    for field in ["key", "restore-keys", "path"] {
-        assert_eq!(lookup["with"][field], restore["with"][field]);
-    }
-    let at = |id: &str| steps(job).iter().position(|s| s["id"] == id).unwrap();
-    assert!(at("kept-lookup") < at("kept-restore"));
-    assert!(at("keep-save") < at("saved-lookup"));
-}
-
-#[test]
-fn cache_save_warning_is_reported_when_no_entry_was_saved() {
-    use crate::expr::{Ctx, value};
-    use crate::harness::{steps, text};
-    let flow = workflow(".github/workflows/flake-check.yml");
-    let reporter = steps(&flow["jobs"]["check"])
-        .iter()
-        .find(|s| s["name"] == "degraded/keep-save-missing")
-        .unwrap();
-    for (outcome, hit, expected) in [
-        ("success", "", true),
-        ("success", "false", true),
-        ("success", "true", false),
-        ("skipped", "", false),
-    ] {
-        let c: Ctx = [
-            ("always()".into(), true.into()),
-            ("steps.saved-lookup.outcome".into(), outcome.into()),
-            ("steps.saved-lookup.outputs.cache-hit".into(), hit.into()),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(value(text(&reporter["if"]), &c).truthy(), expected);
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let summary = dir.path().join("summary");
-    let out = std::process::Command::new("bash")
-        .args(["-e", "-c", text(&reporter["run"])])
-        .env("GITHUB_STEP_SUMMARY", &summary)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert_eq!(
-        std::fs::read_to_string(summary).unwrap(),
-        "degraded/keep-save-missing\n"
-    );
 }

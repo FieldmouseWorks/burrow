@@ -21,10 +21,11 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::check::run_check;
+use crate::check::{Check, run_check};
 use crate::dispatch::{age, open, settled};
 use crate::memo::{Verdict, clean};
 use crate::run::{End, Run, Step};
+use crate::status::Outcome;
 use crate::{Broke, Config};
 
 /// How serious a known vulnerability is before taking it away lets an
@@ -171,13 +172,21 @@ impl Run<'_> {
     /// it looks before it waits for a slot, once it has one (`run_check`),
     /// and again when the test fails. A test that failed while main moved,
     /// before it started or as it ran, is no failure: the run starts over.
+    /// A `nix-daemon` disconnect ends the run without blaming the tree or
+    /// filing a flaky test.
     fn test(&self, c: &str, commit: &str, log: &Path) -> Result<bool, End> {
         self.still_main()?;
-        let passed = run_check(self.cfg, self.limit, c, commit, &self.main, log);
-        if !passed {
-            self.still_main()?;
+        match run_check(self.cfg, self.limit, c, commit, &self.main, log) {
+            Check::Pass => Ok(true),
+            Check::Fail => {
+                self.still_main()?;
+                Ok(false)
+            }
+            Check::DaemonLost => {
+                self.still_main()?;
+                Err(self.end(Outcome::Failed, "nix-daemon disconnected"))
+            }
         }
-        Ok(passed)
     }
 
     /// The VM test `c` on `head`'s tree, and once more when it fails: a

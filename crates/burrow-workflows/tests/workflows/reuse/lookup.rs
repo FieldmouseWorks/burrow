@@ -413,7 +413,7 @@ fn another_tree_workflow_or_input_misses() {
         ("LEGS", "1"),
         ("SKIP", ""),
         ("SKIP", "agents vm"),
-        ("KEEP", "false"),
+        ("FLAKY", "false"),
         ("WORKFLOW_FILE", ".github/workflows/other.yml"),
         ("WORKFLOW_REPOSITORY", "someone/burrow"),
     ] {
@@ -428,7 +428,23 @@ fn another_tree_workflow_or_input_misses() {
             },
         );
         assert!(a.miss(), "{over:?}: {}", a.said);
-    } // The workflow's files changed: another gate.
+    }
+    // A build store named changes the gate identity too, so a pass without
+    // one doesn't match.
+    let with_store = [
+        ("BUILDS", "https://builds.example/builds"),
+        ("BUILDS_KEY", "machine-1:K"),
+    ];
+    let a = l.ask(
+        &at,
+        &sha,
+        &Case {
+            evidence: Some(&key),
+            inputs: &with_store,
+            ..Case::default()
+        },
+    );
+    assert!(a.miss(), "store: {}", a.said); // The workflow's files changed: another gate.
     let changed = workflow_repo(&l.s, &at, "v2");
     let a = l.ask(
         &at,
