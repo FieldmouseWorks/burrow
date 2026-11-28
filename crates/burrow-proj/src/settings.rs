@@ -74,6 +74,11 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         view.file.clone(),
         view.setups,
     ));
+    readings.push(Reading::live(
+        "proj.enginePlugins",
+        view.file.clone(),
+        (!view.plugins.is_empty()).then(|| json!(view.plugins)),
+    ));
     let holds = usage::held_all(cfg)?;
     let holds = (!holds.is_empty()).then(|| {
         Value::Object(
@@ -135,11 +140,27 @@ pub fn command(cfg: &Config, args: &[String]) -> Result<String, String> {
                 .as_deref()
                 .ok_or("proj's config names no old config folder")?,
         ),
-        ["schema"] => Ok(
-            serde_json::to_string_pretty(&burrow_settings::schema::json_schema())
-                .expect("a schema is JSON")
-                + "\n",
-        ),
+        ["schema"] => {
+            let schema = match cfg.settings.as_ref() {
+                Some(settings) => settings.live_schema()?,
+                None => burrow_settings::schema::json_schema(),
+            };
+            Ok(serde_json::to_string_pretty(&schema).expect("a schema is JSON") + "\n")
+        }
+        ["picker"] | ["picker", "--json"] => {
+            let settings = cfg.settings.as_ref().ok_or("settings are not configured")?;
+            serde_json::to_string_pretty(&settings.picker()?)
+                .map(|s| s + "\n")
+                .map_err(|e| e.to_string())
+        }
+        ["plugin", "install" | "update" | "remove", ..] => {
+            let settings = cfg.settings.as_ref().ok_or("settings are not configured")?;
+            let auth = burrow_settings::plugins::authenticate_cli_owner(
+                &settings.owners,
+                settings.auth_gh.as_deref(),
+            )?;
+            settings.command_as(&auth, args)
+        }
         _ => cfg
             .settings
             .as_ref()

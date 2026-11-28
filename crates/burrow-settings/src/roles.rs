@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-mod store;
+pub(crate) mod store;
 pub use store::{Migration, View, legacy_file};
 
 /// Retired engines whose legacy records are never routed or re-offered.
@@ -202,6 +202,12 @@ pub struct InForce {
     pub roles: BTreeMap<String, Route>,
     pub models: BTreeMap<String, Tuning>,
     pub offers: BTreeMap<String, Offer>,
+    /// Per-model effort catalogs for installed plugins whose offers come
+    /// directly from their validated `describe` answer.
+    pub plugin_models: BTreeMap<String, Vec<crate::plugins::PluginModel>>,
+    /// Fallback engines recorded when installed plugins were removed, so
+    /// persisted job pins fall back cleanly instead of failing.
+    pub removed_fallbacks: BTreeMap<String, String>,
 }
 
 impl InForce {
@@ -225,6 +231,109 @@ impl InForce {
         .cloned()
         .unwrap_or_default()
     }
+
+    /// Validate `(model, effort)` for `engine`, preserving per-model effort
+    /// catalogs declared by installed plugins.
+    pub fn validate_choice(
+        &self,
+        engine: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<(), String> {
+        validate_choice_against(engine, model, effort, &self.offers, &self.plugin_models)
+    }
+
+    /// When `engine` is no longer active because its installed plugin was
+    /// removed, return the declared fallback engine recorded at removal.
+    pub fn fallback_for(&self, engine: &str) -> Option<&str> {
+        if self.offers.contains_key(engine) {
+            return None;
+        }
+        self.removed_fallbacks.get(engine).map(String::as_str)
+    }
+}
+
+/// Per-model catalogs for installed plugins whose offers were not manually
+/// overridden in `offers`.
+pub(crate) fn plugin_models_for(
+    offers: &BTreeMap<String, Offer>,
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
+) -> BTreeMap<String, Vec<crate::plugins::PluginModel>> {
+    plugins
+        .iter()
+        .filter(|(name, _)| !offers.contains_key(*name))
+        .map(|(name, plugin)| (name.clone(), plugin.models.clone()))
+        .collect()
+}
+
+/// Validate `(model, effort)` for `engine` against `offers` and any per-model
+/// effort catalog in `plugin_models`, matching `conary-plugin`'s
+/// `Offers::allows` and `burrow-proj`'s `resolve_model_effort`.
+pub(crate) fn validate_choice_against(
+    engine: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    offers: &BTreeMap<String, Offer>,
+    plugin_models: &BTreeMap<String, Vec<crate::plugins::PluginModel>>,
+) -> Result<(), String> {
+    known_engine(engine, offers)?;
+    if let Some(m) = model
+        && !plain(m)
+    {
+        return Err(format!("{engine} doesn't offer model {m:?}"));
+    }
+    if let Some(e) = effort
+        && !plain(e)
+    {
+        return Err(format!("{engine} doesn't offer effort {e}"));
+    }
+    if let Some(models) = plugin_models.get(engine) {
+        return match (model, effort) {
+            (None, None) => Ok(()),
+            (Some(m), None) => {
+                if models.iter().any(|pm| pm.id == m) {
+                    Ok(())
+                } else {
+                    Err(format!("{engine} doesn't offer that model ({m:?})"))
+                }
+            }
+            (Some(m), Some(e)) => {
+                let Some(pm) = models.iter().find(|pm| pm.id == m) else {
+                    return Err(format!("{engine} doesn't offer that model ({m:?})"));
+                };
+                if pm.efforts.iter().any(|ef| ef == e) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{engine} doesn't offer model {m:?} with effort {e:?}"
+                    ))
+                }
+            }
+            (None, Some(e)) => {
+                if models.len() == 1 {
+                    if models[0].efforts.iter().any(|ef| ef == e) {
+                        Ok(())
+                    } else {
+                        Err(format!("{engine} doesn't offer effort {e}"))
+                    }
+                } else {
+                    Err(format!("{engine} requires a model to select effort {e:?}"))
+                }
+            }
+        };
+    }
+    let offer = offers.get(engine).cloned().unwrap_or_default();
+    if let Some(m) = model
+        && !offer.models.iter().any(|x| x == m)
+    {
+        return Err(format!("{engine} doesn't offer that model"));
+    }
+    if let Some(e) = effort
+        && !offer.efforts.iter().any(|x| x == e)
+    {
+        return Err(format!("{engine} doesn't offer effort {e}"));
+    }
+    Ok(())
 }
 
 fn declared<T: serde::de::DeserializeOwned>(name: &str) -> T {
@@ -260,17 +369,22 @@ pub fn default_offers_for(configured: &[String]) -> BTreeMap<String, Offer> {
     offers
 }
 
-/// Merge persisted offers over the machine's default offers. Every persisted
-/// entry is checked for valid syntax and plain words; when `configured` is
-/// non-empty, only engines still present in `configured` remain routable in
-/// the merged offer map, so removing a plugin from machine config invalidates
-/// any route or tuning still targeting it while letting operators clear those
-/// references through the settings door.
-fn merge_offers(
+/// Merge persisted offers over the machine's default offers and any live
+/// installed engine plugins. Every persisted entry is checked for valid syntax
+/// and plain words; when `configured` is non-empty, only engines present in
+/// `configured` or `plugins` remain routable in the merged offer map, so
+/// removing a plugin invalidates any route or tuning still targeting it while
+/// letting operators clear those references through the settings door.
+pub(crate) fn merge_offers_with_plugins(
     offers: &BTreeMap<String, Offer>,
     configured: &[String],
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
 ) -> Result<BTreeMap<String, Offer>, String> {
     let mut offered = default_offers_for(configured);
+    for (name, plugin) in plugins {
+        engine_syntax(name)?;
+        offered.insert(name.clone(), plugin.offer());
+    }
     for (name, offer) in offers {
         engine_syntax(name)?;
         for word in offer.models.iter().chain(&offer.efforts) {
@@ -278,7 +392,7 @@ fn merge_offers(
                 return Err(format!("{name}: offers {word:?}, not a plain word"));
             }
         }
-        if offerable_engine(name, configured).is_ok() {
+        if offerable_engine(name, configured).is_ok() || plugins.contains_key(name) {
             offered.insert(name.clone(), offer.clone());
         }
     }
@@ -298,12 +412,30 @@ impl Roles {
         offers: &BTreeMap<String, Offer>,
         configured: &[String],
     ) -> Result<InForce, String> {
-        let offered = merge_offers(offers, configured)?;
-        self.check(&offered)?;
+        self.in_force_with_plugins(offers, configured, &BTreeMap::new(), &BTreeMap::new())
+    }
+
+    /// [`Self::in_force_for`], also seeding live installed engine plugins and
+    /// removed-plugin fallbacks.
+    pub(crate) fn in_force_with_plugins(
+        &self,
+        offers: &BTreeMap<String, Offer>,
+        configured: &[String],
+        plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
+        removed_fallbacks: &BTreeMap<String, String>,
+    ) -> Result<InForce, String> {
+        let offered = merge_offers_with_plugins(offers, configured, plugins)?;
+        let plugin_models = plugin_models_for(offers, plugins);
+        self.check_with_plugins(&offered, &plugin_models)?;
+        for (removed, fallback) in removed_fallbacks {
+            engine_syntax(removed)?;
+            known_engine(fallback, &offered)
+                .map_err(|e| format!("removed fallback {removed} -> {fallback}: {e}"))?;
+        }
         let mut roles = default_routes();
         roles.extend(self.roles.clone());
         let mut models = default_models();
-        for name in configured {
+        for name in configured.iter().chain(plugins.keys()) {
             if valid_engine_name(name) && !retired_engine(name) {
                 models.entry(format!("* {name}")).or_default();
             }
@@ -313,12 +445,23 @@ impl Roles {
             roles,
             models,
             offers: offered,
+            plugin_models,
+            removed_fallbacks: removed_fallbacks.clone(),
         })
     }
 
     /// Every key and value well formed, every engine known, every model and
     /// effort one its engine offers.
     pub fn check(&self, offers: &BTreeMap<String, Offer>) -> Result<(), String> {
+        self.check_with_plugins(offers, &BTreeMap::new())
+    }
+
+    /// [`Self::check`], enforcing per-model effort pairs for installed plugins.
+    pub(crate) fn check_with_plugins(
+        &self,
+        offers: &BTreeMap<String, Offer>,
+        plugin_models: &BTreeMap<String, Vec<crate::plugins::PluginModel>>,
+    ) -> Result<(), String> {
         for (key, route) in &self.roles {
             canonical(key)?;
             route
@@ -330,18 +473,14 @@ impl Roles {
                 return Err(format!("model {key}: expected ROLE ENGINE"));
             };
             canonical(role)?;
-            known_engine(on, offers).map_err(|e| format!("model {key}: {e}"))?;
-            let offer = offers.get(on).cloned().unwrap_or_default();
-            if let Some(model) = &tuning.model
-                && !offer.models.contains(model)
-            {
-                return Err(format!("model {key}: {on} doesn't offer that model"));
-            }
-            if let Some(effort) = &tuning.effort
-                && !offer.efforts.contains(effort)
-            {
-                return Err(format!("model {key}: {on} doesn't offer effort {effort}"));
-            }
+            validate_choice_against(
+                on,
+                tuning.model.as_deref(),
+                tuning.effort.as_deref(),
+                offers,
+                plugin_models,
+            )
+            .map_err(|e| format!("model {key}: {e}"))?;
         }
         Ok(())
     }
@@ -403,7 +542,7 @@ impl Route {
     }
 
     /// Every engine valid and named once, every percent from 0 to 100.
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn check(&self) -> Result<(), String> {
         let mut seen = Vec::new();
         for name in self.engines() {
             engine_syntax(name)?;
@@ -448,10 +587,13 @@ pub(crate) fn apply(
     offers: &mut BTreeMap<String, Offer>,
     setups: &mut Setups,
     configured_engines: &[String],
+    plugins: &BTreeMap<String, crate::plugins::InstalledPlugin>,
     args: &[&str],
 ) -> Result<String, String> {
     let before = active(roles, setups);
-    let offered = |offers: &BTreeMap<String, Offer>| merge_offers(offers, configured_engines);
+    let offered = |offers: &BTreeMap<String, Offer>| {
+        merge_offers_with_plugins(offers, configured_engines, plugins)
+    };
     match args {
         ["role", key, "unset"] => {
             roles.roles.remove(&Key::parse(key)?.canonical());
@@ -483,11 +625,16 @@ pub(crate) fn apply(
             let key = format!("{} {on}", Key::parse(key)?.canonical());
             let mut next = roles.clone();
             next.models.insert(key, tuning);
-            next.check(&all_offers)?;
+            let pm = plugin_models_for(offers, plugins);
+            next.check_with_plugins(&all_offers, &pm)?;
             *roles = next;
         }
         ["offer", on, what @ ("models" | "efforts"), words @ ..] => {
-            offerable_engine(on, configured_engines)?;
+            if !plugins.contains_key(*on) {
+                offerable_engine(on, configured_engines)?;
+            } else {
+                engine_syntax(on)?;
+            }
             if let Some(w) = words.iter().find(|w| !plain(w)) {
                 return Err(format!("{w:?} is not a plain word"));
             }
@@ -499,11 +646,12 @@ pub(crate) fn apply(
             } else {
                 offer.efforts = list;
             }
-            // Withdrawing what a role is set to would leave it on a model
-            // its engine doesn't have.
-            roles.check(&next)?;
             let mut stored = offers.clone();
             stored.insert((*on).to_owned(), next[*on].clone());
+            // Withdrawing what a role is set to would leave it on a model
+            // its engine doesn't have.
+            let pm = plugin_models_for(&stored, plugins);
+            roles.check_with_plugins(&next, &pm)?;
             *offers = stored;
         }
         ["engines", "save", name, rest @ ..] => {
@@ -530,7 +678,8 @@ pub(crate) fn apply(
                     .cloned()
                     .ok_or_else(|| format!("unknown setup: {name}"))?
             };
-            next.check(&offered(offers)?)?;
+            let pm = plugin_models_for(offers, plugins);
+            next.check_with_plugins(&offered(offers)?, &pm)?;
             let was = std::mem::replace(roles, next);
             if was != *roles {
                 setups.previous = Some(was);
